@@ -716,6 +716,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
 
   /healthz:
+    servers:
+      - url: https://api.example.com
     get:
       summary: 存活探针
       tags: [observability]
@@ -724,6 +726,8 @@ paths:
         "200":
           description: 进程存活
   /readyz:
+    servers:
+      - url: https://api.example.com
     get:
       summary: 就绪探针
       tags: [observability]
@@ -733,7 +737,7 @@ paths:
           description: DB 连接与存储可写
         "503":
           description: 依赖不可用
-  /v1/observability/quality-summary:
+  /observability/quality-summary:
     get:
       summary: 跨任务质量聚合观测（契约 6.10）
       tags: [observability]

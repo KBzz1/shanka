@@ -459,7 +459,7 @@ Scheduler(
 | --- | --- | --- | --- |
 | GET | `/v1/stats/dashboard?timezone=Asia/Shanghai&weekly_goal=50` | 当前自然周看板,返回 StatsDashboard;`weekly_goal` 为可选参数(客户端本地保存的目标,未传时 `weekly_goal` / `weekly_goal_progress` 返回 null) | - |
 
-## 6.9 质量观测(FR-10/11,AC-07;审核修复)
+### 6.9 质量观测(FR-10/11,AC-07;审核修复)
 
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |

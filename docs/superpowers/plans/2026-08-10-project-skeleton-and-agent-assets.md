@@ -274,15 +274,15 @@ git commit -m "feat(skeleton): main 空文件骨架 + pyproject/pre-commit 工�
 
 一张卡片 JSON，必须通过 `schemas/v1/card.schema.json`：
 
-- `type`: `question`（问答卡）或 `true_false`（判断题）
+- `type`: `QUESTION`（问答卡）或 `TRUE_FALSE`（判断题）
 - `front`: 卡片正面文本（题目）
 - `back`: 卡片背面文本（答案）
-- `question` + `answer`: 仅 `question` 卡必填
-- `statement` + `answer_boolean` + `explanation`: 仅 `true_false` 卡必填
+- `question` + `answer`: 仅 `QUESTION` 卡必填
+- `statement` + `answer_boolean` + `explanation`: 仅 `TRUE_FALSE` 卡必填
 
 ## 规则
 
-1. 卡片类型自动选择：概念对比/因果适合 `true_false` 时用判断题，其余用问答卡；判断题的 `statement` 表述必须无歧义。
+1. 卡片类型自动选择：概念对比/因果适合 `TRUE_FALSE` 时用判断题，其余用问答卡；判断题的 `statement` 表述必须无歧义。
 2. 难度匹配目标难度：BASIC 出事实/定义直问；UNDERSTANDING 出对比/推理；APPLICATION 组合多个知识点出场景应用。
 3. 内容严格依据原文分片，不得编造；原文不足以支撑时，用该知识点范围内公认事实表述。
 4. 只输出 JSON，不输出解释。
