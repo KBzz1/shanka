@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 F1 DONE 与证据位置>
+**结果**：F1 DONE（2026-08-11）。验收与证据见 docs/Progress.md 第 4 节 F1 行（14 commits c057bab..edc7fcc，分支 codex/f1）：81 用例全绿、四工具命令通过、干净安装复现、迁移往返、uvicorn 冒烟全端点正确、边界 23 用例顺序无关、无明文泄漏；R-10 RESOLVED、R-11 OPEN（V4 裁决）。全任务 checklist 勾选完成。
 
 **Goal:** 实现 12 张表的 ORM 与 Alembic 初始迁移、统一设备鉴权（X-Device-ID + 自动注册 + 探针豁免）、request_id + JSON 结构化日志、统一错误包装（VALIDATION_ERROR/INTERNAL_ERROR）、Idempotency-Key 幂等原语（并发占位/同事务/首次响应重放）、内存限流（5 维度 429 + Retry-After）、Prometheus /metrics 端点与 HTTP/限流指标，使 F1 依据真实验收证据标记 DONE。
 
@@ -43,7 +43,7 @@
 - Consumes: F0 `create_db_engine`（现有 WAL/外键 connect 事件）
 - Produces: `create_session_factory(engine) -> sessionmaker[Session]`；engine `begin` 事件 → `BEGIN IMMEDIATE`（写事务，database-design §0/3）；`get_db_session()` FastAPI dependency（yield session，服务退出不回滚——事务语义归 service，dependency 只提供 session 与 close）；`infra.db.session.TIME_FORMAT_RE` 不需导出
 
-- [ ] **Step 1: 更新 pyproject 依赖**
+- [x] **Step 1: 更新 pyproject 依赖**
 
 在 `main/pyproject.toml` 的 `dependencies` 中追加：
 
@@ -52,7 +52,7 @@
   "prometheus-client>=0.20",
 ```
 
-- [ ] **Step 2: 安装并再生成锁定文件**
+- [x] **Step 2: 安装并再生成锁定文件**
 
 Run:
 ```bash
@@ -62,7 +62,7 @@ conda run -n shanka-backend pip-compile pyproject.toml --extra dev --output-file
 ```
 Expected: 安装成功；lock 含 alembic 与 prometheus-client 钉版本
 
-- [ ] **Step 3: 写失败集成测试 `main/tests/integration/test_session_transaction.py`**
+- [x] **Step 3: 写失败集成测试 `main/tests/integration/test_session_transaction.py`**
 
 ```python
 """DB session 事务语义集成测试（database-design 0/3）：BEGIN IMMEDIATE + 回滚 + 请求级 session。"""
@@ -129,12 +129,12 @@ def test_session_get_db_dependency_yields_session() -> None:
     assert resp.json() == {"ok": 1}
 ```
 
-- [ ] **Step 4: 运行确认失败**
+- [x] **Step 4: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_session_transaction.py -v`
 Expected: FAIL（ImportError: create_session_factory / get_db_session 未定义）
 
-- [ ] **Step 5: 扩展 `main/infra/db/session.py`**
+- [x] **Step 5: 扩展 `main/infra/db/session.py`**
 
 在现有文件基础上追加（保留现有 `create_db_engine`/`format_utc` 原样）：
 
@@ -185,12 +185,12 @@ def get_db_session(request: Request) -> Iterator[Session]:
         session.close()
 ```
 
-- [ ] **Step 6: 运行确认通过 + 格式/静态检查**
+- [x] **Step 6: 运行确认通过 + 格式/静态检查**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_session_transaction.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/ infra/ tests/`
 Expected: PASS；注意 `create_app` 尚未把 `session_factory` 放进 state——`test_session_get_db_dependency_yields_session` 用自己的 probe app 设置 `app.state.session_factory`，不依赖 `create_app`；但 `create_app` 需要在本任务就补上 `app.state.session_factory = create_session_factory(engine)`（Task 6 的 device 中间件要消费它，先放进来无副作用）。若 mypy 报 `app.state` 类型，用 `cast` 或在 `create_app` 内赋值后 `assert hasattr` 模式（参考仓库现有写法）。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add main/pyproject.toml main/requirements-dev.lock main/infra/db/session.py main/app/main.py main/tests/integration/test_session_transaction.py
@@ -208,7 +208,7 @@ git commit -m "feat(db): 依赖（alembic/prometheus-client）+ BEGIN IMMEDIATE 
 - Consumes: SQLAlchemy 2.0（database-design 0 类型映射）
 - Produces: `Base`（`DeclarativeBase`）；12 表模型：`Device`、`ApiKey`、`PdfFile`、`Chapter`、`Task`、`KnowledgePoint`、`Batch`、`Deck`、`Card`、`ReviewState`、`ReviewEvent`、`IdempotencyKey`；表名与 database-design §2 完全一致（`devices/api_keys/pdf_files/chapters/tasks/knowledge_points/batches/decks/cards/review_states/review_events/idempotency_keys`）；Task 3 迁移与 Task 4 守卫消费
 
-- [ ] **Step 1: 实现 `main/infra/db/models.py`**
+- [x] **Step 1: 实现 `main/infra/db/models.py`**
 
 完整代码（database-design 2.1~2.12 逐表；注意：UUID/时间/JSON→TEXT、布尔→INTEGER、枚举→TEXT、小数→REAL；约束/索引/外键/FK 级联全部按表定义；**不要**用 SQLAlchemy Enum 类型，全部 String）：
 
@@ -512,12 +512,12 @@ class IdempotencyKey(Base):
 
 （注意：`Index` 部分唯一索引的 `sqlite_where` 在 SQLAlchemy 2.0 用 `sqlite_where=` 参数——该参数在迁移 DDL 中产生 `WHERE` 子句，Task 3 迁移里用 `op.create_index(..., sqlite_where=text(...))` 对应。）
 
-- [ ] **Step 2: 运行确认可导入**
+- [x] **Step 2: 运行确认可导入**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -c "from infra.db.models import Base; print(sorted(Base.metadata.tables.keys()))"`
 Expected: 12 个表名全部列出
 
-- [ ] **Step 3: 验证 schema 创建与约束（临时集成检查）**
+- [x] **Step 3: 验证 schema 创建与约束（临时集成检查）**
 
 Run:
 ```bash
@@ -538,12 +538,12 @@ PY
 ```
 Expected: 12 表（含 alembic 无、sqlite_sequence 无）
 
-- [ ] **Step 4: ruff/mypy**
+- [x] **Step 4: ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy infra/db/models.py`
 Expected: 全绿（`datetime` 导入若未使用会被 ruff F401 检出，请移除未使用导入）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/infra/db/models.py
@@ -563,7 +563,7 @@ git commit -m "feat(db): 12 张表 ORM 模型（database-design 2.1~2.12）"
 - Consumes: Task 2 `Base.metadata`
 - Produces: 初始迁移 0001_initial（12 表 + 索引 + 部分唯一索引 + CHECK + FK 级联，与 ORM 一致）；`alembic upgrade head` / `downgrade base` 可空库往返；conftest 的迁移 fixture（Task 5 起 integration 测试使用）
 
-- [ ] **Step 1: 写失败迁移测试 `main/tests/integration/test_alembic_migration.py`**
+- [x] **Step 1: 写失败迁移测试 `main/tests/integration/test_alembic_migration.py`**
 
 ```python
 """Alembic 迁移集成测试：空库 upgrade → 12 表 + 约束；downgrade → 空库；再 upgrade 恢复。"""
@@ -644,7 +644,7 @@ def test_alembic_foreign_keys_and_checks_active(alembic_env: tuple[object, Path]
     assert "uq_cards_deck_position" in indexes
 ```
 
-- [ ] **Step 2: 初始化 Alembic 骨架**
+- [x] **Step 2: 初始化 Alembic 骨架**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend alembic init migrations`
 Expected: 生成 `alembic.ini` 与 `migrations/` 骨架（env.py、script.py.mako、versions/ 空目录）
@@ -658,7 +658,7 @@ script_location = migrations
 sqlalchemy.url = sqlite:///./shanka.db
 ```
 
-- [ ] **Step 3: 重写 `main/migrations/env.py`**
+- [x] **Step 3: 重写 `main/migrations/env.py`**
 
 ```python
 """Alembic 迁移环境：URL 优先级 = 命令行 -x database_url=... > 环境变量 DATABASE_URL > alembic.ini 占位。
@@ -736,7 +736,7 @@ def run_migrations_online() -> None:
             context.run_migrations()
 ```
 
-- [ ] **Step 4: 生成初始迁移**
+- [x] **Step 4: 生成初始迁移**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend alembic -x database_url="sqlite:////tmp/f1-autogen.db" revision --autogenerate -m "initial 12 tables"`
 Expected: 生成 `migrations/versions/<hash>_initial_12_tables.py`；**审查自动生成内容**：
@@ -744,17 +744,17 @@ Expected: 生成 `migrations/versions/<hash>_initial_12_tables.py`；**审查自
 - `cards` 的部分唯一索引自动生成可能带 `sqlite_where=sa.text(...)`——核对 WHERE 子句为 `source = 'GENERATED' AND generation_item_id IS NOT NULL`
 - 若有差异，手工修正迁移文件（迁移文件是权威 DDL，与 ORM 一致性由 Task 4 守卫 + 迁移测试兜底）
 
-- [ ] **Step 5: 运行迁移测试确认通过**
+- [x] **Step 5: 运行迁移测试确认通过**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_alembic_migration.py -v`
 Expected: 4 passed；若 autogenerate 与 ORM 有偏差导致断言失败（如表缺失），修正迁移文件后重跑
 
-- [ ] **Step 6: 清理 autogen 临时库 + ruff/mypy**
+- [x] **Step 6: 清理 autogen 临时库 + ruff/mypy**
 
 Run: `rm -f /tmp/f1-autogen.db && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy migrations/ infra/db/ tests/integration/`
 Expected: 全绿（mypy 对 migrations/ 可加 `# type: ignore` 若 alembic 类型桩不足——尽量不忽略，先在 pyproject `[tool.mypy]` 无特殊配置前提下尝试）
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add main/alembic.ini main/migrations/ main/tests/integration/test_alembic_migration.py
@@ -773,7 +773,7 @@ git commit -m "feat(db): Alembic 初始迁移（12 表 + 约束/索引/级联）
 - Consumes: Task 2 `infra.db.models`；`tests.contract.support`
 - Produces: 守卫 2（project-structure 5）：表名/列名/类型映射/主键/外键/唯一约束/索引 ↔ database-design.md §2 全等校验；`parse_database_tables(md_text) -> dict[str, dict]` 解析函数（support.py 扩展）
 
-- [ ] **Step 1: 扩展 `main/tests/contract/support.py`**
+- [x] **Step 1: 扩展 `main/tests/contract/support.py`**
 
 在文件末尾追加（保持既有接口不变）：
 
@@ -807,7 +807,7 @@ def parse_database_tables(md_text: str) -> dict[str, dict[str, str]]:
 
 （注意：表定义中"组合列"行如 `created_at / started_at / ended_at / updated_at` 以 `| created_at / ...` 开头——`[a-z_]+` 只匹配 `created_at`；复合主键行如 `| device_id | TEXT | 复合主键 |` 正常匹配。`| 列 | 类型 | 约束 | 说明 |` 表头行含"列"被过滤。索引声明行 `索引:`/`唯一约束:` 不以 `|` 开头被忽略。`注:` 行 `| 注:weekly_goal...` 会匹配 `注`？不会——`[a-z_]+` 不含中文。）
 
-- [ ] **Step 2: 写守卫测试 `main/tests/contract/test_orm_database_guard.py`**
+- [x] **Step 2: 写守卫测试 `main/tests/contract/test_orm_database_guard.py`**
 
 ```python
 """契约守卫 2：infra/db ORM ↔ database-design.md（project-structure 5，红线 2）。
@@ -864,17 +864,17 @@ def test_orm_type_mapping_follows_convention() -> None:
 
 （注意：SQLAlchemy `String` 的 str() 是 `VARCHAR`——断言兼容两者；`answer_boolean` 是 `Integer` → `INTEGER`。若有断言与实际不符，以 database-design §0 为准修正测试或模型，并记录在报告中。）
 
-- [ ] **Step 3: 运行确认通过**
+- [x] **Step 3: 运行确认通过**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/contract/test_orm_database_guard.py -v`
 Expected: PASS（若失败，逐条修正：优先修模型对齐 database-design，其次修测试解析器）
 
-- [ ] **Step 4: ruff/mypy + 全量测试**
+- [x] **Step 4: ruff/mypy + 全量测试**
 
 Run: `conda run -n shanka-backend python -m pytest -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/tests/contract/support.py main/tests/contract/test_orm_database_guard.py
@@ -897,7 +897,7 @@ git commit -m "feat(guard): ORM↔database-design 契约守卫（守卫 2）"
 - Consumes: F0 `infra.clock`、`app/config.Settings`；Task 1 session（不消费）；`format_utc`（infra.db.session）
 - Produces: `infra.logging.JSONFormatter`（单行 JSON；字段 timestamp/level/request_id/device_id/task_id/batch_id/error_code/message + 附加 method/path/status/duration_ms）；`app.middleware.request_id.RequestIDMiddleware`（生成 `request.state.request_id`，响应头 `X-Request-ID`，contextvars 供日志）；`app.middleware.logging.LoggingMiddleware`（INFO 请求进出 + ERROR 异常）；Task 6/7/9 消费 request_id
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_json_logging.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_json_logging.py`**
 
 ```python
 """infra.logging JSON 结构化日志单元测试（structure-contract 8.1）。"""
@@ -951,7 +951,7 @@ def test_json_logging_extra_attributes_flat_keys() -> None:
 
 （说明：8 个契约字段为最小集；method/path/status/duration_ms 由中间件以 record 属性注入，Formatter 输出时扁平附加。）
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_request_logging.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_request_logging.py`**
 
 ```python
 """request_id + JSON 请求日志集成测试（structure-contract 8.1）。"""
@@ -1001,12 +1001,12 @@ def test_request_logging_emits_json_line(client: TestClient, captured_logs: list
     assert entry["message"]
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_json_logging.py tests/integration/test_request_logging.py -v`
 Expected: FAIL（ModuleNotFoundError: infra.logging / app.middleware.request_id）
 
-- [ ] **Step 4: 实现 `main/infra/logging.py`**
+- [x] **Step 4: 实现 `main/infra/logging.py`**
 
 ```python
 """JSON 结构化日志（structure-contract 8.1）：单行 JSON，字段固定。
@@ -1059,7 +1059,7 @@ def setup_logging(level: str = "INFO") -> None:
     root.setLevel(level.upper())
 ```
 
-- [ ] **Step 5: 实现 `main/app/middleware/request_id.py`**
+- [x] **Step 5: 实现 `main/app/middleware/request_id.py`**
 
 ```python
 """request_id 中间件（structure-contract 8.1）：每请求生成 UUID，贯穿日志与错误关联。
@@ -1090,7 +1090,7 @@ class RequestIDMiddleware:
         return response
 ```
 
-- [ ] **Step 6: 实现 `main/app/middleware/logging.py`**
+- [x] **Step 6: 实现 `main/app/middleware/logging.py`**
 
 ```python
 """请求日志中间件（structure-contract 8.1）：INFO 请求进出；不记录请求体（1.5 红线）。
@@ -1148,7 +1148,7 @@ class LoggingMiddleware:
         )
 ```
 
-- [ ] **Step 7: 装配进 `main/app/main.py`**
+- [x] **Step 7: 装配进 `main/app/main.py`**
 
 在 `create_app` 中（`app = FastAPI(...)` 之后、`register_exception_handlers(app)` 之后）追加中间件（顺序：Logging 最外 → RequestID → 后续 device/rate 等由各自 Task 追加）：
 
@@ -1163,12 +1163,12 @@ from app.middleware.request_id import RequestIDMiddleware
 
 并在文件头 import `from infra.db.session import create_db_engine, create_session_factory`。同时 `setup_logging(settings.log_level)` 在 `create_app` 开头调用一次（幂等：重复调用会清 root handlers——用模块级 flag 或只在模块加载时调用；简单方案：`create_app` 内调用，测试 app 各自 setup 无妨）。
 
-- [ ] **Step 8: 运行确认通过 + ruff/mypy**
+- [x] **Step 8: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_json_logging.py tests/integration/test_request_logging.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/ infra/ tests/`
 Expected: PASS 全绿（若 `test_request_logging_emits_json_line` 的 logger 名称与实际不符，调整测试 logger 名；中间件 logger 名为 `app.middleware.logging`）
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 git add main/infra/logging.py main/app/middleware/request_id.py main/app/middleware/logging.py main/app/main.py main/tests/unit/test_json_logging.py main/tests/integration/test_request_logging.py
@@ -1188,7 +1188,7 @@ git commit -m "feat(obs): request_id 中间件 + JSON 结构化日志（O-1）"
 - Consumes: Task 1 session_factory（devices 注册）；F0 `app.errors`（DEVICE_ID_REQUIRED/DEVICE_ID_INVALID）
 - Produces: `DeviceIDMiddleware`（校验 + 注册 + 豁免 `/healthz` `/readyz` `/metrics`）；`request.state.device_id`；Task 8 幂等与 Task 9 限流消费 `request.state.device_id`
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_device_auth.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_device_auth.py`**
 
 ```python
 """X-Device-ID 鉴权集成测试（structure-contract 1.1；database-design 2.1）。"""
@@ -1267,12 +1267,12 @@ def test_device_auth_probes_exempt(tmp_path: Path) -> None:
 
 （说明：`/v1/decks` 与 `/v1/not-exist` 均无业务路由——F1 不实现业务 handler。鉴权中间件在 404 前执行，故 401/404 语义可测。`test_device_auth_first_seen_registers_device_row` 用 `Base.metadata.create_all` 建表以验证注册逻辑（Task 5 起 conftest 提供迁移 schema fixture 后，本测试改用迁移 fixture——见 Task 5 后 conftest 扩展说明。若冲突，以迁移 fixture 为准。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_device_auth.py -v`
 Expected: FAIL（device 中间件未实现——401 未返回，行为为 404 或 500）
 
-- [ ] **Step 3: 实现 `main/app/middleware/device_id.py`**
+- [x] **Step 3: 实现 `main/app/middleware/device_id.py`**
 
 ```python
 """X-Device-ID 鉴权中间件（structure-contract 1.1；database-design 2.1；红线 3）。
@@ -1356,7 +1356,7 @@ class DeviceIDMiddleware:
 
 （说明：`_error` 中 `http_status` 探测是兜底写法——F0 的 `app.errors` 提供 `http_status(code)` 函数，直接 import 使用，不要用 hasattr 探测。若 F0 已提供则改为 `from app.errors import http_status` + `JSONResponse(status_code=http_status(code), ...)`。）
 
-- [ ] **Step 4: 装配进 `main/app/main.py`**
+- [x] **Step 4: 装配进 `main/app/main.py`**
 
 按中间件顺序约定（Global Constraints）：添加序（首=最内）Logging → DeviceID → RateLimit → RequestID → Metrics，最终运行序（外→内）Metrics → RequestID → RateLimit → DeviceID → Logging → 路由。当前栈为 [RequestID, Logging]（Task 5 已加），本任务追加 DeviceID：
 
@@ -1366,12 +1366,12 @@ from app.middleware.device_id import DeviceIDMiddleware
     app.add_middleware(DeviceIDMiddleware)  # 添加序在 Logging 之后 → DeviceID 位于 RequestID 内层（运行序 RequestID 先于 DeviceID）
 ```
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy**
+- [x] **Step 5: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_device_auth.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/middleware/ app/main.py`
 Expected: PASS（若 `test_device_auth_first_seen_registers_device_row` 因建表时机失败——TestClient lifespan 后 engine 已存在，Base.create_all 在其上执行即可；注意 `_new_client` 创建的 client 用 `create_app` 后 `app.state.engine` 可用）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/app/middleware/device_id.py main/app/main.py main/tests/integration/test_device_auth.py
@@ -1390,7 +1390,7 @@ git commit -m "feat(auth): X-Device-ID 鉴权中间件（自动注册 + 探针�
 - Consumes: F0 `app.errors`（ErrorCode/AppError/http_status）
 - Produces: `register_exception_handlers` 注册：`RequestValidationError` → 400 `VALIDATION_ERROR`（1.4 形状）；`AppError` → 已存在；`Exception` 兜底 → 500 `INTERNAL_ERROR`（日志 error_code，不泄露内部细节）；Task 8+ 全部 handler 消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_error_handler_extended.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_error_handler_extended.py`**
 
 ```python
 """统一错误包装扩展集成测试（structure-contract 1.4；VALIDATION_ERROR/INTERNAL_ERROR）。"""
@@ -1443,12 +1443,12 @@ def test_unexpected_exception_returns_500_internal_error() -> None:
     assert "secret-internals" not in str(body)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_error_handler_extended.py -v`
 Expected: FAIL（RequestValidationError 默认 422；RuntimeError 默认 500 HTML 或崩溃）
 
-- [ ] **Step 3: 扩展 `main/app/middleware/error_handler.py`**
+- [x] **Step 3: 扩展 `main/app/middleware/error_handler.py`**
 
 在现有文件基础上追加：
 
@@ -1496,7 +1496,7 @@ def register_exception_handlers(app: FastAPI) -> None:
 
 （注意：`Exception` handler 会吞掉 Starlette 的 HTTPException（如 404/405）——FastAPI 的 HTTPException 子类 handler 优先于 Exception？Starlette 的 HTTPException handler 是注册在 app 上的默认 handler，自定义 `Exception` handler 会覆盖所有。为避免破坏 404/405 语义，需保留 HTTPException 处理：在 `handle_unexpected` 中判断 `isinstance(exc, HTTPException)` 则按原样返回。完整实现见下一步。）
 
-- [ ] **Step 4: 修正 `handle_unexpected`（保留 HTTPException 语义）**
+- [x] **Step 4: 修正 `handle_unexpected`（保留 HTTPException 语义）**
 
 ```python
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -1535,12 +1535,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 （选择后者。`json` import 若未使用移除。）
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy**
+- [x] **Step 5: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_error_handler_extended.py tests/integration/test_error_handler.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/middleware/ tests/integration/`
 Expected: 全绿（原 error_handler 测试仍过：AppError → 404 形状不变）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/app/middleware/error_handler.py main/tests/integration/test_error_handler_extended.py
@@ -1564,7 +1564,7 @@ git commit -m "feat(errors): 统一错误包装扩展（VALIDATION_ERROR 400 / I
 - Consumes: Task 2 模型、Task 3 迁移、F0 errors（IDEMPOTENCY_CONFLICT）
 - Produces: `app.middleware.idempotency.execute_idempotent(session, *, device_id, path, idempotency_key, request_body_hash, fn) -> tuple[bool, int, dict]`（(是否重放, status, body)；同事务；并发唯一约束占位；冲突回滚后重读重放）；`app.middleware.idempotency.request_body_hash(data: bytes) -> str`（SHA-256 hex）；`app.middleware.idempotency.get_idempotency_key(request) -> str`（写接口头校验，缺/非法 → VALIDATION_ERROR 400——由 V1 handler 接线时调用，本任务提供并单测）；database-design §2.12 加 `request_body_hash` 列 + 规则说明
 
-- [ ] **Step 1: 契约更新 `docs/Architecture/database-design.md` §2.12**
+- [x] **Step 1: 契约更新 `docs/Architecture/database-design.md` §2.12**
 
 在 idempotency_keys 表定义中新增列（放在 response_body 之后）：
 
@@ -1578,7 +1578,7 @@ git commit -m "feat(errors): 统一错误包装扩展（VALIDATION_ERROR 400 / I
 - 请求体一致性:重复请求携带相同 `Idempotency-Key` 时,比对 `request_body_hash` 与首次记录;不一致 → `409 IDEMPOTENCY_CONFLICT`(契约 1.3)。
 ```
 
-- [ ] **Step 2: 更新 `main/infra/db/models.py` IdempotencyKey**
+- [x] **Step 2: 更新 `main/infra/db/models.py` IdempotencyKey**
 
 追加列：
 
@@ -1586,7 +1586,7 @@ git commit -m "feat(errors): 统一错误包装扩展（VALIDATION_ERROR 400 / I
     request_body_hash: Mapped[str] = mapped_column(String, nullable=False)
 ```
 
-- [ ] **Step 3: 写增量迁移 `main/migrations/versions/0002_idempotency_request_body_hash.py`**
+- [x] **Step 3: 写增量迁移 `main/migrations/versions/0002_idempotency_request_body_hash.py`**
 
 （先跑 `alembic revision --autogenerate -m "add idempotency request_body_hash"` 生成骨架，再按以下模板手工完善；注意 0002 必须只含本列变更，不得包含 0001 已建表：）
 
@@ -1622,7 +1622,7 @@ def downgrade() -> None:
     op.drop_column("idempotency_keys", "request_body_hash")
 ```
 
-- [ ] **Step 4: 更新迁移测试断言（Task 3 测试文件追加一个用例）**
+- [x] **Step 4: 更新迁移测试断言（Task 3 测试文件追加一个用例）**
 
 ```python
 def test_alembic_0002_adds_request_body_hash(alembic_env: tuple[object, Path]) -> None:
@@ -1634,7 +1634,7 @@ def test_alembic_0002_adds_request_body_hash(alembic_env: tuple[object, Path]) -
     assert "request_body_hash" in cols
 ```
 
-- [ ] **Step 5: 写失败单元测试 `main/tests/unit/test_idempotency.py`**
+- [x] **Step 5: 写失败单元测试 `main/tests/unit/test_idempotency.py`**
 
 ```python
 """幂等原语单元测试（structure-contract 1.3；database-design 2.12）。"""
@@ -1656,7 +1656,7 @@ def test_idempotency_request_body_hash_differs_for_diff_body() -> None:
     assert request_body_hash(b'{"a":1}') != request_body_hash(b'{"a":2}')
 ```
 
-- [ ] **Step 6: 写失败集成测试 `main/tests/integration/test_idempotency_primitive.py`**
+- [x] **Step 6: 写失败集成测试 `main/tests/integration/test_idempotency_primitive.py`**
 
 ```python
 """幂等原语集成测试（1.3/2.12）：重放、冲突、并发占位、回滚、同事务。"""
@@ -1828,12 +1828,12 @@ def test_idempotency_rollback_releases_claim(session_factory: Callable[[], Sessi
     assert calls == ["x", "y"]
 ```
 
-- [ ] **Step 7: 运行确认失败**
+- [x] **Step 7: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_idempotency.py tests/integration/test_idempotency_primitive.py -v`
 Expected: FAIL（ModuleNotFoundError: app.middleware.idempotency）
 
-- [ ] **Step 8: 实现 `main/app/middleware/idempotency.py`**
+- [x] **Step 8: 实现 `main/app/middleware/idempotency.py`**
 
 ```python
 """Idempotency-Key 幂等原语（structure-contract 1.3；database-design 2.12；红线 3 于 app/middleware 统一）。
@@ -1955,12 +1955,12 @@ def json_loads_safe(raw: str) -> dict[str, Any]:
 
 （`import json` 放模块顶层；`session.flush()` 触发 INSERT 立即暴露唯一约束冲突——IntegrityError 会标记事务回滚，`session.rollback()` 后重读。注意：flush 的 IntegrityError 在 rollback 后 session 可用。）
 
-- [ ] **Step 9: 运行确认通过 + ruff/mypy**
+- [x] **Step 9: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_idempotency.py tests/integration/test_idempotency_primitive.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/middleware/idempotency.py tests/unit/test_idempotency.py tests/integration/test_idempotency_primitive.py`
 Expected: 全绿（并发测试可能偶发——BEGIN IMMEDIATE 串行化后两线程必然一 fresh 一 replayed；若 flaky 说明事务隔离未生效，记录并调查）
 
-- [ ] **Step 10: 提交**
+- [x] **Step 10: 提交**
 
 ```bash
 git add docs/Architecture/database-design.md main/infra/db/models.py main/migrations/versions/0002_idempotency_request_body_hash.py main/app/middleware/idempotency.py main/tests/unit/test_idempotency.py main/tests/integration/test_idempotency_primitive.py
@@ -1982,7 +1982,7 @@ git commit -m "feat(idempotency): 幂等原语（并发占位/同事务/重放�
 - Consumes: F0 Settings/errors（RATE_LIMITED）；Task 5 request_id（日志）；Task 6 device_id（`request.state.device_id`）
 - Produces: `app.middleware.rate_limit.RateLimiter`（内存固定窗口；`check(scope, key) -> tuple[bool, int]` (允许, Retry-After 秒)）；`RateLimitMiddleware`（按 1.6 表维度检查，超限 429 + Retry-After + `rate_limit_hit_total` 指标（Task 10 接线））；Settings 字段：`rate_limit_write_per_minute: int = 60`、`rate_limit_ip_per_second: int = 5`、`rate_limit_api_key_per_hour: int = 10`、`rate_limit_samples_per_hour: int = 20`、`rate_limit_pdf_per_hour: int = 10`
 
-- [ ] **Step 1: Settings 扩展 `main/app/config.py`**
+- [x] **Step 1: Settings 扩展 `main/app/config.py`**
 
 追加字段：
 
@@ -2005,7 +2005,7 @@ git commit -m "feat(idempotency): 幂等原语（并发占位/同事务/重放�
     assert settings.rate_limit_pdf_per_hour == 10
 ```
 
-- [ ] **Step 2: 写失败单元测试 `main/tests/unit/test_rate_limiter.py`**
+- [x] **Step 2: 写失败单元测试 `main/tests/unit/test_rate_limiter.py`**
 
 ```python
 """限流器单元测试（structure-contract 1.6）：固定窗口计数 + Retry-After。"""
@@ -2061,7 +2061,7 @@ def test_rate_limiter_scopes_isolated() -> None:
     assert limiter.check("b") == (True, 0)
 ```
 
-- [ ] **Step 3: 写失败集成测试 `main/tests/integration/test_rate_limit.py`**
+- [x] **Step 3: 写失败集成测试 `main/tests/integration/test_rate_limit.py`**
 
 ```python
 """限流集成测试（structure-contract 1.6）：429 + Retry-After + 维度 + 探针行为。"""
@@ -2135,12 +2135,12 @@ def test_rate_limit_device_scope_isolated_per_device(tmp_path: Path) -> None:
 
 （说明：写维度 scope 判定 = 非豁免路径的 POST/PUT/PATCH/DELETE（`POST /samples`、`PUT /api-key`、`POST /pdfs` 有专门维度，判定顺序：专门维度 > 通用写维度 > IP。探针路径豁免 device/专门维度，但仍受 IP 维度约束——契约 1.6 IP 行"全部接口"。实现时在 plan Step 5 明确 scope 判定表。）
 
-- [ ] **Step 4: 运行确认失败**
+- [x] **Step 4: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_rate_limiter.py tests/integration/test_rate_limit.py -v`
 Expected: FAIL（ModuleNotFoundError: app.middleware.rate_limit）
 
-- [ ] **Step 5: 实现 `main/app/middleware/rate_limit.py`**
+- [x] **Step 5: 实现 `main/app/middleware/rate_limit.py`**
 
 ```python
 """限流中间件（structure-contract 1.6；红线 3）。
@@ -2269,7 +2269,7 @@ class RateLimitMiddleware:
         return response
 ```
 
-- [ ] **Step 6: 装配进 `main/app/main.py`**
+- [x] **Step 6: 装配进 `main/app/main.py`**
 
 按中间件顺序约定（Global Constraints）：RateLimit 添加序在 DeviceID 之后（运行序 RateLimit 先于 DeviceID）——设备维度键用**原始 X-Device-ID 请求头**（`request.headers.get("X-Device-ID") or ""`），不用 `request.state.device_id`（DeviceID 尚未运行）：
 
@@ -2287,12 +2287,12 @@ from app.middleware.rate_limit import RateLimitMiddleware
         allowed, retry_after = limiter.check(device_key)
 ```
 
-- [ ] **Step 7: 运行确认通过 + ruff/mypy**
+- [x] **Step 7: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_rate_limiter.py tests/integration/test_rate_limit.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/middleware/ tests/`
 Expected: 全绿（注意 `_prune` 修正后 mypy 通过；`time.monotonic` 默认 clock 与 `_FakeClock` 注入兼容——`clock` 参数类型 `Callable[[], float]`）
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add main/app/config.py main/app/middleware/rate_limit.py main/app/main.py main/tests/unit/test_rate_limiter.py main/tests/integration/test_rate_limit.py main/tests/unit/test_settings.py
@@ -2314,7 +2314,7 @@ git commit -m "feat(rate-limit): 限流中间件（5 维度 + 429 + Retry-After�
 - Consumes: prometheus-client（Task 1）；Task 9 的 `RATE_LIMIT_HIT_TOTAL`（rate_limit.py 已引用 `app.api.metrics`——本任务创建该模块）
 - Produces: `app.api.metrics.RATE_LIMIT_HIT_TOTAL`（Counter，labels: scope）；`HTTP_REQUESTS_TOTAL`（Counter，labels: method/path/status）；`HTTP_REQUEST_DURATION_SECONDS`（Histogram）；`router`（`GET /metrics` → `generate_latest(REGISTRY)`，`content-type: text/plain; version=0.0.4; charset=utf-8`，豁免鉴权（8.3））；llm/generation/batch 指标在 V3B/V5A 补充（本任务只建共享 registry 与 F1 范围指标）
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_metrics.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_metrics.py`**
 
 ```python
 """metrics 集成测试（structure-contract 8.3；R-04 不进业务 OpenAPI，直接测）。"""
@@ -2365,12 +2365,12 @@ def test_metrics_rate_limit_hit_recorded(tmp_path: Path) -> None:
 
 （注意：metrics 端点本身也会被 HTTP 指标中间件计入——`/metrics` 的请求会以 `path="/metrics"` 出现，不影响上述断言。限流中间件对 `/metrics` 豁免 device 维度，但 IP 维度可能触发——测试循环量小不触发。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_metrics.py -v`
 Expected: FAIL（ModuleNotFoundError: app.api.metrics / 404）
 
-- [ ] **Step 3: 实现 `main/app/api/metrics.py`**
+- [x] **Step 3: 实现 `main/app/api/metrics.py`**
 
 ```python
 """Prometheus 指标（structure-contract 8.3；R-04 有意不进业务 OpenAPI，F1/R1 直接测试）。
@@ -2408,7 +2408,7 @@ def metrics() -> Response:
 
 （说明：prometheus-client 的 Counter 对同 label 组合幂等累加；导出值浮点格式如 `2.0`，测试断言字符串匹配。llm/generation/batch 指标在 V3B/V5A 注册到同一 REGISTRY。）
 
-- [ ] **Step 4: 实现 `main/app/middleware/metrics_middleware.py`**
+- [x] **Step 4: 实现 `main/app/middleware/metrics_middleware.py`**
 
 ```python
 """HTTP 指标采集中间件（structure-contract 8.3）：http_requests_total + duration histogram。"""
@@ -2434,7 +2434,7 @@ class MetricsMiddleware:
         return response
 ```
 
-- [ ] **Step 5: 装配进 `main/app/main.py`**
+- [x] **Step 5: 装配进 `main/app/main.py`**
 
 按中间件顺序约定（Global Constraints）：Metrics 添加序在最后（运行序最外层，统计所有响应含 401/429）：
 
@@ -2448,12 +2448,12 @@ from app.middleware.metrics_middleware import MetricsMiddleware
 
 （最终运行序（外→内）：Metrics → RequestID → RateLimit → DeviceID → Logging → 路由。Metrics 统计包括被 RateLimit/DeviceID 拒绝的请求。）
 
-- [ ] **Step 6: 运行确认通过 + ruff/mypy + 全量测试**
+- [x] **Step 6: 运行确认通过 + ruff/mypy + 全量测试**
 
 Run: `conda run -n shanka-backend python -m pytest -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿（注意 `test_rate_limit.py` 与 `test_metrics.py` 的限流 app 在多次请求下可能互扰——测试各自用独立 Settings/app 实例，指标为进程级注册表：`http_requests_total` 跨测试累加不影响断言格式；`rate_limit_hit_total` 断言用 `in` 匹配特定 scope 行，跨测试累加仍匹配）
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add main/app/api/metrics.py main/app/middleware/metrics_middleware.py main/app/main.py main/tests/integration/test_metrics.py
@@ -2470,7 +2470,7 @@ git commit -m "feat(metrics): /metrics 端点 + HTTP/限流指标（O-3，R-04 �
 **Interfaces:**
 - Consumes: Task 1~10 全部产物
 
-- [ ] **Step 1: 四工具命令全绿**
+- [x] **Step 1: 四工具命令全绿**
 
 Run（均在 `main/`）:
 ```bash
@@ -2482,7 +2482,7 @@ conda run -n shanka-backend python -m mypy .
 ```
 Expected: 版本 3.12.x；四命令零失败
 
-- [ ] **Step 2: 干净环境安装 + 空库迁移往返**
+- [x] **Step 2: 干净环境安装 + 空库迁移往返**
 
 ```bash
 conda run -n shanka-backend python -m venv /tmp/f1-accept-venv
@@ -2502,7 +2502,7 @@ print('migration-roundtrip-ok')
 rm -rf /tmp/f1-accept-venv
 ```
 
-- [ ] **Step 3: 应用启动冒烟（真实 uvicorn + 鉴权 + metrics）**
+- [x] **Step 3: 应用启动冒烟（真实 uvicorn + 鉴权 + metrics）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -2518,17 +2518,17 @@ kill $UV_PID
 ```
 Expected: healthz-noauth=200、metrics-noauth=200、decks-no-device=401、decks-with-device=404（路由缺失）、X-Request-ID 响应头存在
 
-- [ ] **Step 4: 关键集成边界复核（收证据）**
+- [x] **Step 4: 关键集成边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_device_auth.py tests/integration/test_idempotency_primitive.py tests/integration/test_rate_limit.py tests/integration/test_alembic_migration.py tests/integration/test_metrics.py -v`
 Expected: 全绿；记录输出中关键用例名（429/Retry-After、并发单副作用、迁移往返、探针豁免）
 
-- [ ] **Step 5: 无明文泄漏抽查**
+- [x] **Step 5: 无明文泄漏抽查**
 
 Run: `grep -rn "sk-" main/app main/infra --include="*.py" || true`
 Expected: 无输出（实现代码不得出现 API Key 明文形态）
 
-- [ ] **Step 6: 中间件顺序与豁免最终确认**
+- [x] **Step 6: 中间件顺序与豁免最终确认**
 
 Run: `grep -n "add_middleware" /home/kbzz1/shanka_backend/main/app/main.py`
 Expected: 顺序 Metrics → Logging → RequestID → DeviceID → RateLimit（add_middleware 后加者在外层，最终确认实际调用顺序与注释一致）
@@ -2544,14 +2544,14 @@ Expected: 顺序 Metrics → Logging → RequestID → DeviceID → RateLimit（
 **Interfaces:**
 - Consumes: Task 11 验收证据
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 F1 行：`TODO` → `DONE`，当前证据填写：12 表 ORM+迁移（upgrade/downgrade/upgrade 往返）、ORM↔database-design 守卫、设备鉴权（401/豁免/自动注册）、request_id+JSON 日志、错误包装扩展（VALIDATION_ERROR 400/INTERNAL_ERROR 500）、幂等原语（并发占位/同事务/重放/冲突/回滚）、限流（429+Retry-After+维度隔离）、metrics 端点与指标、X-Request-ID。
 - 第 6 节：新增 R-10 → `RESOLVED`（database-design 2.12 缺 body 比对载体 → 新增 `request_body_hash` 列，兼容性契约更新，已在 F1 实现与守卫覆盖）。
 - 第 1 节状态基线：`可运行后端` 保持 DONE 并补 F1 证据；`自动化验证` 更新测试数。
 - 计划文件标题下「结果」注明 F1 DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-10-f1-data-and-http-foundation.md

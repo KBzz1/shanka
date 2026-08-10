@@ -19,8 +19,8 @@
 | agent 资产 v1 | `DONE`（初稿） | manifest 指向 prompt/schema/rubric v1；CHANGELOG 说明实现时仍需精修，不代表 LLM 链路完成 |
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
-| 可运行后端 | `DONE`（F0 基线） | create_app 装配（settings/engine/storage state + lifespan dispose）+ healthz/readyz 探针 + 统一错误 handler + LocalStorage 就绪探测；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（F0 首批） | 34 passed：unit（Settings/errors/format_utc/clock）+ integration（engine WAL/外键/空库、probes 200/503、error handler 1.4 形状）+ contract（四类守卫含负例）；四工具命令全绿 |
+| 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
+| 自动化验证 | `DONE`（F1 扩展） | 81 passed：F0 34 + F1 47（session 事务、迁移 5、ORM 守卫 5、日志/request_id、设备鉴权 5、错误包装 2、幂等 8、限流 7、metrics 3）；四工具命令全绿（mypy 90 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -76,11 +76,22 @@
 
 ### F1 — 数据与 HTTP 共享基础
 
-**`TODO`｜依赖：F0｜覆盖：structure-contract 1.1～1.7、database-design 0～3、O-1/O-3**
+**`DONE`｜依赖：F0｜覆盖：structure-contract 1.1～1.7、database-design 0～3、O-1/O-3**
 
 实现 12 张表、约束、索引、外键、WAL、Alembic 初始迁移；统一 X-Device-ID、Idempotency-Key 指纹/首次响应重放、错误包装、request_id、限流；提供请求级 session、幂等请求指纹、并发占位、唯一约束和首次响应存储原语，跨设备统一 404；JSON 日志与 HTTP/限流指标；metrics 返回 Prometheus 文本。
 
 验收：空库 upgrade/downgrade/upgrade；磁盘 SQLite 外键/WAL；幂等原语的并发占位与回滚、隔离、429 + Retry-After、探针豁免 integration 测试。业务副作用与首次响应的完整同事务验收在 V1 首个真实写接口完成。
+
+当前证据（2026-08-11，分支 codex/f1 合并回 main，14 commits c057bab..edc7fcc）：
+- 12 表 ORM + Alembic 迁移 0001（初始 12 表）+ 0002（request_body_hash 增量）：空库 upgrade/downgrade/upgrade 往返实测通过；磁盘 SQLite PRAGMA foreign_keys=1、journal_mode=wal；`alembic check` 零漂移。
+- 设备鉴权（1.1/2.1）：缺失/非法 → 401 DEVICE_ID_REQUIRED/INVALID（1.4 形状）；首次见自动注册 devices 行（first_seen_ip/user_agent/last_active_at）；/healthz /readyz /metrics 豁免；服务端校验口径 = 通用 UUID 格式（契约 v4 表述指客户端生成约定，apiKey scheme 无 format 约束）。
+- 幂等（1.3/2.12）：execute_idempotent 原语——先 SELECT 重放首次 2xx 响应、同键异 body → 409 IDEMPOTENCY_CONFLICT、非 2xx 不落库、BEGIN IMMEDIATE 串行化 + 唯一约束并发占位 + 冲突回滚重读重放（业务副作用仅一次）；request_body_hash 契约列（R-10）；flush 冲突兜底路径有确定性回归测试（20/20 稳定）。
+- 限流（1.6）：5 维度（写 60/min/device、IP 5/s 含探针、api-key 10/h、samples 20/h、pdf 10/h）+ 429 RATE_LIMITED + Retry-After；阈值进 Settings 可运维调整；设备维度键 = 原始 X-Device-ID 头。
+- 错误包装（1.4）：RequestValidationError → 400 VALIDATION_ERROR；未预期异常 → 500 INTERNAL_ERROR（内部细节只进日志）；Starlette HTTPException 404/405 语义保留。
+- O-1 JSON 日志：8 契约字段 + method/path/status/duration_ms；request_id 中间件（X-Request-ID 响应头 + contextvars 贯穿）；请求日志不记录请求体（天然满足 1.5 掩码红线）。
+- O-3 metrics：/metrics Prometheus 文本（豁免鉴权）；http_requests_total（method/path/status）、http_request_duration_seconds、rate_limit_hit_total（scope）；R-04 直测不进 OpenAPI；8.3 scope 值表与 1.6 命名一致（审核修正 device→write）。
+- 中间件运行序（外→内）：Metrics → RequestID → RateLimit → DeviceID → Logging → 路由（insert(0) 语义；main.py 注释固化）。
+- 验收实测：干净 venv 从 lock 安装 + 空库迁移往返 OK；真实 uvicorn 冒烟 healthz/readyz/metrics 200、decks 无设备 401/有设备 404、X-Request-Id 响应头；关键边界 23 用例两种文件顺序全绿；`grep -rn "sk-" main/app main/infra` 无输出。
 
 ### V1 — 牌组与卡片闭环
 
@@ -183,6 +194,8 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | R-07 | `RESOLVED` | 仓库仅有 Superpowers 历史产物约定，当前会话未安装 `writing-plans`/ `subagent-driven-development` skill | Superpowers 插件已安装：writing-plans、using-git-worktrees、subagent-driven-development、executing-plans、finishing-a-development-branch 均可用；F0 以 SDD 模式执行（9 commits + 每任务契约/质量审查 + 最终整支审查） |
 | R-08 | `RESOLVED` | `.env` 可被执行进程加载且 2026-08-10 真实直连 smoke 成功；执行 Agent 无视觉能力 | 不再重复凭据 smoke；后续 live 只能在 LOCAL-DONE 后走正式应用链路。PDF 只走已验证文本层/书签，未来无文本层样本按契约失败，不引入 OCR |
 | R-09 | `ACCEPTED` | 正式契约要求记录 model，但不冻结具体模型或 thinking 模式 | 产品配置保持单一可替换入口；R1 为可比性冻结 `deepseek-v4-flash` + thinking disabled，不能反向改写 PRD/Architecture |
+| R-10 | `RESOLVED` | 契约 1.3 要求"幂等键相同但请求体与首次不一致 → 409"，但 database-design 2.12 无 body 比对持久化载体 | F1 兼容性契约更新（AGENTS.md 版本管理规则）：database-design §2.12 新增 `request_body_hash` 列（首次请求体 SHA-256 hex）+ 规则段；ORM/增量迁移 0002/守卫三处同步（F1-T8） |
+| R-11 | `OPEN` | structure-contract 3.8 Deck.source 为 `MANUAL/IMPORTED/GENERATED`，database-design 2.8 只列 `MANUAL/IMPORTED`——字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明 | F1 建表用 TEXT 无 DB CHECK 不受影响（ORM docstring 注明）；V4 创建 GENERATED 归属牌组时裁决：更新 database-design 2.8 补 GENERATED 说明，或确认 GENERATED 牌组以其他 source 语义落地 |
 
 新增冲突先登记；解决后保留结论并改 `RESOLVED`。
 
