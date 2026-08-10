@@ -28,7 +28,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
     register_exception_handlers(app)
-    # 中间件顺序：Logging 最外 → RequestID → 后续 device/rate 等由各自 Task 追加
+    # 中间件运行序（外层→内层）：RequestID → Logging → 路由。
+    # Starlette add_middleware 为 insert(0) 语义（后加者在外层），故按目标运行序
+    # 倒序添加；最终约定（外层→内层）：Metrics → RequestID → DeviceID →
+    # RateLimit → Logging → 路由（Task 6/9/10 按目标序倒序追加）。
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(RequestIDMiddleware)
     app.include_router(probes.router)

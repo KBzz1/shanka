@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from infra.logging import JSONFormatter
@@ -49,7 +50,7 @@ def test_request_id_present_in_response_header(client: TestClient) -> None:
 def test_request_logging_emits_json_line(
     client: TestClient, captured_logs: list[dict[str, object]]
 ) -> None:
-    client.get("/healthz")
+    resp = client.get("/healthz")
     assert len(captured_logs) >= 1
     entry = captured_logs[0]
     assert set(entry) >= {
@@ -64,3 +65,25 @@ def test_request_logging_emits_json_line(
     }
     assert entry["level"] == "INFO"
     assert entry["message"]
+    # 日志 request_id 与响应头 X-Request-ID 一致（同一请求贯穿）
+    assert entry["request_id"]
+    assert entry["request_id"] == resp.headers.get("X-Request-ID")
+
+
+def test_request_logging_error_path_logs_internal_error(
+    app: FastAPI, captured_logs: list[dict[str, object]]
+) -> None:
+    def _boom() -> None:
+        raise RuntimeError("boom")
+
+    app.add_api_route("/boom", _boom, methods=["GET"])
+    # raise_server_exceptions=False：Starlette 对未处理异常先发 500 再重抛
+    # （ServerErrorMiddleware 语义），测试关注 500 与 ERROR 日志而非重抛。
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/boom")
+    assert resp.status_code == 500
+    assert len(captured_logs) >= 1
+    entry = captured_logs[0]
+    assert entry["level"] == "ERROR"
+    assert entry["error_code"] == "INTERNAL_ERROR"
+    assert "boom" in str(entry["message"])

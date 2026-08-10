@@ -61,3 +61,4 @@ def test_json_logging_extra_attributes_flat_keys() -> None:
     assert data["status"] == 429
     assert data["duration_ms"] == 12
     assert data["message"] == "rate limited"
+    assert data["level"] == "WARN"  # 契约 8.1 级别字样：WARNING → WARN

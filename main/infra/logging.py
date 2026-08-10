@@ -13,23 +13,15 @@ from typing import Any
 
 from infra.db.session import format_utc
 
-_CONTRACT_FIELDS = (
-    "timestamp",
-    "level",
-    "request_id",
-    "device_id",
-    "task_id",
-    "batch_id",
-    "error_code",
-    "message",
-)
+# 契约 8.1 级别字样为 INFO/WARN/ERROR：WARNING 映射为 WARN，其余透传。
+_LEVEL_ALIASES = {"WARNING": "WARN"}
 
 
 class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         data: dict[str, Any] = {
             "timestamp": format_utc(datetime.now(UTC)),
-            "level": record.levelname,
+            "level": _LEVEL_ALIASES.get(record.levelname, record.levelname),
             "request_id": getattr(record, "request_id", ""),
             "device_id": getattr(record, "device_id", ""),
             "task_id": getattr(record, "task_id", ""),
