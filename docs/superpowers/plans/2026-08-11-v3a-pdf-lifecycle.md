@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 V3A DONE 与证据位置>
+**结果**：V3A DONE（2026-08-11）。验收与证据见 docs/Progress.md 第 4 节 V3A 行（8 commits ae5a1a1..069e137 + fix bc396f1，分支 codex/v3a）：201 用例全绿、四工具通过、干净安装+迁移、uvicorn 冒烟（上传→后台扫描 PARSED→12 章节→PATCH 部分更新）、边界 67 用例全绿、AC-01/02 通过、rate_limit 专门维度修复。全任务 checklist 勾选完成。
 
 **Goal:** 实现 PDF 三重校验（魔数/扩展名/MIME）与大小/页数限制、受控存储（随机 UUID storage_key）、文本层与书签目录解析（pypdf，进程内 DB 驱动可重启扫描器）、轮询详情、章节 PATCH、最近列表、删除保护（409 TASK_IN_PROGRESS + 存储清理），使 V3A 依据真实验收证据标记 DONE 且 AC-01/02 及 AC-08 后端存储边界通过。
 
@@ -41,7 +41,7 @@
 - Consumes: pypdf（新依赖）
 - Produces: `services.pdf.parser.parse_pdf(path: Path) -> tuple[str, list[dict]]`（返回 (文本层抽样或空, 章节列表 [{"name", "start_page", "end_page"}]——outline 解析 + 页码归一化）；文本层不可提取 → AppError(PDF_PARSE_FAILED)；无目录 → AppError(PDF_TOC_MISSING)）；`services.pdf.parser.extract_text_ok(path: Path) -> bool`（文本层探测）；Task 2 scanner 消费
 
-- [ ] **Step 1: 安装 pypdf 并核对 API + 样书解析**
+- [x] **Step 1: 安装 pypdf 并核对 API + 样书解析**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend pip install "pypdf>=4.0"`
 然后核验（记录到报告）：
@@ -70,14 +70,14 @@ for t, p in items[:5]: print(' ', t, '->', p)
 ```
 Expected: pages>0、page0 文本非空、outline 有层级条目（书名/章节）。记录实际输出（书名/页码、顶层章节数）——plan 的章节断言按此校准。
 
-- [ ] **Step 2: 更新 pyproject 与 lock**
+- [x] **Step 2: 更新 pyproject 与 lock**
 
 ```toml
 dependencies 追加: "pypdf>=4.0",
 ```
 Run: `conda run -n shanka-backend pip-compile pyproject.toml --extra dev --output-file requirements-dev.lock`
 
-- [ ] **Step 3: 写失败集成测试 `main/tests/integration/test_pdf_parser.py`**
+- [x] **Step 3: 写失败集成测试 `main/tests/integration/test_pdf_parser.py`**
 
 ```python
 """services.pdf.parser 集成测试：样书解析 + 失败分支（真实 pypdf）。"""
@@ -146,7 +146,7 @@ def test_pdf_parser_no_toc_raises(tmp_path: Path) -> None:
 
 （说明：pypdf 的 `create_text` 不生成可提取文本层；构造"有文本层无 outline"的 PDF 需要带文本内容的 writer——pypdf 无直接 API。**方案**：a) 用样书构造——无法切 outline；b) 用文本内容构造——pypdf 的 add_blank_page + 内容流操作复杂。**决策**：`test_pdf_parser_no_toc_raises` 用样书解析的**逆验证**（样书有 outline → 不抛 TOC_MISSING）+ 一个手工构造的最小 outline 为空场景（若可行）；PDF_TOC_MISSING 主分支由 Task 2 scanner 测试用 stub parser 覆盖（scan 时 parser 抛 TOC_MISSING → FAILED + error_code）。实现者按实际可行性修正，报告记录。）
 
-- [ ] **Step 4: 实现 `main/services/pdf/parser.py`**
+- [x] **Step 4: 实现 `main/services/pdf/parser.py`**
 
 ```python
 """services.pdf.parser：PDF 文本层检测 + 书签目录解析（pypdf）。
@@ -238,12 +238,12 @@ def parse_pdf(path: Path) -> tuple[str, list[dict[str, object]]]:
 
 （说明：`_outline_items` 需返回 depth——实现时带 depth 参数；章节取 depth==1 的条目；end_page 归一化（下一条 start-1、最后一条 total_pages）；页数越界 clamp（start<=end）。**关键**：样书的 outline 结构（单层书名列表 or 多层）在 Step 1 核验后校准——若样书顶层是"书名"单条目而章节在第二层，章节取含页码的最深或第二层。以实际结构为准并在报告中记录规则。pypdf 页码归一化注意：`get_destination_page_number` 返回 0-based，+1 转 1-based。）
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy**
+- [x] **Step 5: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_pdf_parser.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/pdf/ tests/integration/test_pdf_parser.py`
 Expected: PASS（样书断言按 Step 1 实际输出校准；构造样本分支按说明处理）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/pyproject.toml main/requirements-dev.lock main/services/pdf/parser.py main/tests/integration/test_pdf_parser.py
@@ -263,7 +263,7 @@ git commit -m "feat(pdf): pypdf 解析器（文本层 + 书签目录，无 OCR �
 - Consumes: F0 LocalStorage（保留 check_writable）、F1 models（PdfFile/Chapter/Task）、V1 _owned 模式
 - Produces: `infra.storage.local.LocalStorage.save(device_id, filename, data: bytes) -> str`（返回 storage_key=随机 UUID hex）、`LocalStorage.open(storage_key) -> Path`、`LocalStorage.delete(storage_key) -> None`（路径穿越防护：storage_key 严格 UUID 校验 + 路径拼接校验）；`services.pdf.service.upload_pdf(session, *, device_id, filename, size_bytes, storage_key, now) -> PdfFile`（status=PENDING 或直接 PARSING——**决策**：扫描器接管解析，上传落 PENDING）、`services.pdf.service.list_pdfs(session, *, device_id) -> list[PdfFile]`（device+created DESC）、`services.pdf.service.get_pdf(session, *, device_id, file_id) -> PdfFile`（PDF_NOT_FOUND 404）、`services.pdf.service.delete_pdf(session, *, device_id, file_id, storage) -> None`（非终态任务引用 → TASK_IN_PROGRESS；删除元数据 + storage.delete + tasks.file_id SET NULL）、`services.pdf.service.update_chapter(session, *, device_id, file_id, chapter_id, name, start_page, end_page) -> Chapter`（校验归属/范围；PdfFile 必须 PARSED？——**决策**：PATCH 章节在 PARSED 后可用，FAILED/PARSING 返回 409 或 404——以契约 6.1 为准：PATCH 是章节确认流程（PARSED 后），非 PARSED 时 409 TASK_STATE_CONFLICT？契约未明确——**裁决**：非 PARSED 时 409 TASK_STATE_CONFLICT（状态冲突））；Task 3 handler 消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_pdf_service.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_pdf_service.py`**
 
 ```python
 """services.pdf.service 集成测试：上传/列表/详情/删除/章节（真实 SQLite + 临时存储）。"""
@@ -449,12 +449,12 @@ def test_pdf_service_update_chapter_not_parsed(session_factory: Callable[[], Ses
 
 （说明：devices FK 前置（V1 教训）——测试 `_seed_pdf` 前需 devices 行（INSERT OR IGNORE）；若 FK 违约则补 `_ensure_device`。`storage.open(storage_key)` 返回 Path——LocalStorage 扩展方法。删除清理的 obj_path 由测试手工创建（模拟扫描器存储的产物）。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_pdf_service.py -v`
 Expected: FAIL（ModuleNotFoundError / 方法缺失）
 
-- [ ] **Step 3: 扩展 `main/infra/storage/local.py`**
+- [x] **Step 3: 扩展 `main/infra/storage/local.py`**
 
 ```python
 """本地文件存储（infra/storage）。
@@ -507,7 +507,7 @@ class LocalStorage:
 
 （说明：`save` 不接收 device_id/filename（storage_key 随机 UUID 即可，1.7 禁止含用户输入）；目录按 storage_key 前缀分片。）
 
-- [ ] **Step 4: 实现 `main/services/pdf/service.py`**
+- [x] **Step 4: 实现 `main/services/pdf/service.py`**
 
 ```python
 """services.pdf.service：PDF 用例（上传/列表/详情/删除/章节 PATCH）。
@@ -597,12 +597,12 @@ def update_chapter(
     return chapter
 ```
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy**
+- [x] **Step 5: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_pdf_service.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/pdf/ infra/storage/ tests/integration/test_pdf_service.py`
 Expected: PASS
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/infra/storage/local.py main/services/pdf/service.py main/tests/integration/test_pdf_service.py
@@ -622,7 +622,7 @@ git commit -m "feat(pdf): 受控存储 + PDF 用例（上传/列表/详情/删�
 - Consumes: Task 1 parser、Task 2 service、F1 models、LocalStorage
 - Produces: `services.pdf.scanner.process_pending(session, *, storage) -> int`（处理一条 PENDING：置 PARSING → parse_pdf → 写 chapters → PARSED；失败 → FAILED + error_code；返回处理数）；`services.pdf.scanner.scan_once(session_factory, storage) -> int`（DB 驱动：查 PENDING/PARSING（PARSING 视为可重启恢复——**决策**：进程崩溃后 PARSING 残留，重启后重新入队处理——PARSING 超过阈值视为可重试，MVP：PARSING 直接视为可处理（单进程无并发））→ 逐个 process_pending）；`services.pdf.scanner.validate_upload(filename: str, content_type: str, magic: bytes, size_bytes: int, page_count_hint: int | None, settings) -> None`（三重校验 + 限制 → PDF_UPLOAD_INVALID）；Settings 字段：`pdf_max_size_bytes: int = 50 * 1024 * 1024`、`pdf_max_pages: int = 500`；Task 4 handler 消费
 
-- [ ] **Step 1: Settings 扩展 `main/app/config.py`**
+- [x] **Step 1: Settings 扩展 `main/app/config.py`**
 
 ```python
     # PDF 上传限制（structure-contract 6.1；可运维调整）
@@ -632,7 +632,7 @@ git commit -m "feat(pdf): 受控存储 + PDF 用例（上传/列表/详情/删�
 
 `test_settings.py` 追加默认值断言（50MB、500）。
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_pdf_scanner.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_pdf_scanner.py`**
 
 ```python
 """services.pdf.scanner 集成测试：状态机/章节落库/失败分支/恢复。"""
@@ -777,12 +777,12 @@ def test_scanner_validate_upload_triple_check(tmp_path: Path) -> None:
 
 （说明：PARSING 残留恢复的裁决（MVP 单进程）：scan_once 把 PENDING 与 PARSING 都视为可处理（重启后残留 PARSING 重新解析——重复解析无害：chapters 先删后插）。若扫描器在 lifespan 中运行（Task 4 装配），测试直接调 scan_once。**注意**：process_pending 内对已有 chapters 先清理再插入（重复解析幂等）。）
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_pdf_scanner.py -v`
 Expected: FAIL（ModuleNotFoundError: services.pdf.scanner）
 
-- [ ] **Step 4: 实现 `main/services/pdf/scanner.py`**
+- [x] **Step 4: 实现 `main/services/pdf/scanner.py`**
 
 ```python
 """services.pdf.scanner：进程内 DB 驱动 PDF 解析扫描器（契约 4.4 定式）。
@@ -872,12 +872,12 @@ def scan_once(session_factory: sessionmaker[Session], *, storage: Any) -> int:
 
 （说明：`text_sample` 仅用于确认文本层存在（parse_pdf 内已校验），不落库（AC-08：完整 PDF 内容不落日志/不落库）；若后续需要文本样例可加列——MVP 不存。`import uuid` 需在文件头。）
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy**
+- [x] **Step 5: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_pdf_scanner.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/pdf/ app/config.py tests/integration/test_pdf_scanner.py`
 Expected: PASS
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/app/config.py main/services/pdf/scanner.py main/tests/integration/test_pdf_scanner.py main/tests/unit/test_settings.py
@@ -898,7 +898,7 @@ git commit -m "feat(pdf): 扫描器（DB 驱动可重启恢复）+ 三重校验�
 - Consumes: Task 2/3 service/scanner、F1 幂等、V1 路由模式
 - Produces: 路由 `POST /pdfs`（multipart file；201 PdfFile；400/429）、`GET /pdfs`（200 {items}）、`GET /pdfs/{file_id}`（200 PdfFile；404）、`DELETE /pdfs/{file_id}`（204；404/409）、`PATCH /pdfs/{file_id}/chapters/{chapter_id}`（200 Chapter；400/404/409）；`app.schemas.pdfs.PdfFile`/`Chapter`/`ChapterUpdateRequest`；main.py 装配 + 扫描器后台循环（lifespan 内 threading 或 asyncio 任务——**决策**：lifespan 启动一个后台线程循环 scan_once（间隔可配 Settings `pdf_scan_interval_seconds: float = 1.0`），关闭时退出标志；测试不依赖后台循环（显式调 scan_once））
 
-- [ ] **Step 1: 实现 `main/app/schemas/pdfs.py`**
+- [x] **Step 1: 实现 `main/app/schemas/pdfs.py`**
 
 ```python
 """PDF schema（openapi PdfFile/Chapter/ChapterUpdateRequest；structure-contract 3.2/3.3）。"""
@@ -929,7 +929,7 @@ class ChapterUpdateRequest(BaseModel):
     end_page: int = Field(ge=1)
 ```
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_pdfs_api.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_pdfs_api.py`**
 
 ```python
 """PDF API 集成测试（迁移 schema + HTTP）：上传/列表/详情/删除/PATCH + 三重校验。"""
@@ -1045,7 +1045,7 @@ def test_pdfs_api_patch_chapter_requires_parsed(client: TestClient) -> None:
 
 （说明：PATCH 章节在非 PARSED 时 service 抛 TASK_STATE_CONFLICT 409（裁决）；若章节不存在 → PDF_NOT_FOUND 404——测试断言 in (404, 409) 容错。PARSED 后的 PATCH 成功路径由 Task 5 验收覆盖（扫描样书后 PATCH）。）
 
-- [ ] **Step 3: 实现 `main/app/api/pdfs.py`**
+- [x] **Step 3: 实现 `main/app/api/pdfs.py`**
 
 ```python
 """PDF 路由（structure-contract 6.1；openapi /pdfs）。handler 只做 HTTP 映射。"""
@@ -1124,7 +1124,7 @@ async def upload_pdf_endpoint(
 
 （说明：**multipart 上传的幂等与 body hash**——`await file.read()` 得到原始字节，hash 用文件内容；**注意**：execute_idempotent 的 fn 是同步的（Session 操作），文件读取在 handler 异步部分完成（读 bytes + 校验 + storage.save 在 execute_idempotent 之前）——**决策**：文件校验与存储写入在 handler 层（幂等外）完成；biz 只做 DB 元数据插入。**幂等语义**：同 key 重放时文件再次读+校验+save（重复存储）但 DB 不重复插入（execute_idempotent 重放）——**优化**：重放检测在 execute_idempotent 内部（先查后 fn），handler 的存储写入会先于重放判断发生（重复 save 产生孤儿文件）——**修正**：handler 先查幂等表？不——保持简单：重复上传（同 key）会重复 save（孤儿文件），MVP 接受（客户端重试场景，孤儿文件由存储清理兜底）。记录在报告。**另一个更优方案**：handler 内先 `execute_idempotent` 的查询阶段不可达（原语封装）——接受当前方案并记录。**DELETE/PATCH** 的 body hash：DELETE 无 body（b""）、PATCH 有 JSON body（BodyCaptureMiddleware 捕获）。）
 
-- [ ] **Step 4: 实现其余 handler + 装配 + 扫描器后台循环**
+- [x] **Step 4: 实现其余 handler + 装配 + 扫描器后台循环**
 
 ```python
 # GET /pdfs、GET /pdfs/{file_id}、DELETE /pdfs/{file_id}、PATCH /pdfs/{file_id}/chapters/{chapter_id}
@@ -1153,12 +1153,12 @@ def _pdf_scanner_loop(session_factory, storage, stop_event, interval: float) -> 
 
 （说明：Settings 加 `pdf_scan_interval_seconds: float = 1.0`。扫描循环在 lifespan 启动（生产 uvicorn 运行），测试不依赖（显式 scan_once）。daemon 线程 + stop_event 优雅退出。）
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 5: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_pdfs_api.py -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/app/schemas/pdfs.py main/app/api/pdfs.py main/app/main.py main/app/config.py main/tests/integration/test_pdfs_api.py
@@ -1177,7 +1177,7 @@ git commit -m "feat(pdf-api): PDF 路由（上传/列表/详情/删除/章节）
 - Consumes: Task 1-4 全部产物
 - Produces: AC-01（文本层+目录 → 章节确认流程；无目录 → 停止+错误）与 AC-02（章节修改）的验收映射；AC-08 后端存储边界（完整 PDF 内容不落日志/不落库）；守卫（PdfFile/Chapter ↔ openapi）
 
-- [ ] **Step 1: 守卫测试 `main/tests/contract/test_pdf_schemas_guard.py`**
+- [x] **Step 1: 守卫测试 `main/tests/contract/test_pdf_schemas_guard.py`**
 
 ```python
 """契约守卫：PdfFile/Chapter ↔ openapi（守卫 1 扩展）。"""
@@ -1198,7 +1198,7 @@ def test_chapter_schema_openapi_consistent() -> None:
 
 （注意：openapi PdfFile 的 `chapters: Chapter[] | null`（`type: [array, 'null']` + `items: $ref Chapter`）——守卫的 array-of-object 嵌套路径（F1 扩展支持）。PdfFile.status 是 `$ref PdfStatus`（enum）——str 不校验 enum 值集（既有口径）。）
 
-- [ ] **Step 2: 验收测试 `main/tests/acceptance/test_acceptance_ac01_ac02.py`**
+- [x] **Step 2: 验收测试 `main/tests/acceptance/test_acceptance_ac01_ac02.py`**
 
 ```python
 """验收测试：AC-01 PDF 解析 + AC-02 章节配置（PRD；迁移 schema + HTTP + 样书）。"""
@@ -1295,12 +1295,12 @@ def test_acceptance_ac02_chapter_patch(client: TestClient, tmp_path: Path) -> No
 
 （说明：AC-01-2 用损坏 PDF（魔数合法但内容损坏——pypdf 打开失败 → PDF_PARSE_FAILED）；PDF_TOC_MISSING 分支由构造样本（有文本无 outline）覆盖或在报告说明（解析器测试已覆盖）。AC-08 后端存储边界：上传/解析全流程不落完整 PDF 内容（日志只记录请求元数据）——由日志中间件（不记录 body）保证，验收中声明。）
 
-- [ ] **Step 3: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 3: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/contract/test_pdf_schemas_guard.py tests/acceptance/ -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add main/tests/contract/test_pdf_schemas_guard.py main/tests/acceptance/test_acceptance_ac01_ac02.py
@@ -1314,12 +1314,12 @@ git commit -m "test(acceptance): AC-01/02 验收映射 + PdfFile/Chapter 守卫"
 **Files:**
 - 验证：全部 V3A 产物；不新增代码
 
-- [ ] **Step 1: 四工具命令全绿**
+- [x] **Step 1: 四工具命令全绿**
 
 Run（均在 `main/`）: `python --version`、`python -m pytest`、`python -m ruff check .`、`python -m ruff format --check .`、`python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 2: 干净环境安装 + 迁移 + 样书解析冒烟（真实 uvicorn）**
+- [x] **Step 2: 干净环境安装 + 迁移 + 样书解析冒烟（真实 uvicorn）**
 
 ```bash
 conda run -n shanka-backend python -m venv /tmp/v3a-accept-venv
@@ -1337,7 +1337,7 @@ print('migration-ok')
 rm -rf /tmp/v3a-accept-venv
 ```
 
-- [ ] **Step 3: uvicorn 冒烟（上传样书 → 后台扫描 → 轮询 PARSED → 章节 PATCH）**
+- [x] **Step 3: uvicorn 冒烟（上传样书 → 后台扫描 → 轮询 PARSED → 章节 PATCH）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -1367,12 +1367,12 @@ kill %1
 ```
 Expected: upload PENDING → 轮询 PARSED + chapters>=3 → PATCH 200 修订名
 
-- [ ] **Step 4: 关键边界复核（收证据）**
+- [x] **Step 4: 关键边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_pdf_parser.py tests/integration/test_pdf_service.py tests/integration/test_pdf_scanner.py tests/integration/test_pdfs_api.py tests/acceptance/ tests/contract/ -v`
 Expected: 全绿；记录关键用例名（三重校验、状态机、恢复、删除保护、章节 PATCH、AC-01/02）
 
-- [ ] **Step 5: 无明文泄漏 + 无 PDF 内容泄漏抽查**
+- [x] **Step 5: 无明文泄漏 + 无 PDF 内容泄漏抽查**
 
 Run: `grep -rn "sk-" main/app main/services main/infra --include="*.py" || true`；`grep -rn "AI-Agents-in-Depth" main/ --include="*.py" || true`（实现不应引用样书路径——测试 fixture 除外，报告说明）
 Expected: 无真实泄漏
@@ -1385,13 +1385,13 @@ Expected: 无真实泄漏
 - Modify: `docs/Progress.md`
 - Modify: `docs/superpowers/plans/2026-08-11-v3a-pdf-lifecycle.md`（标题下「结果」）
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 V3A 行：`TODO` → `DONE`，证据填写：三重校验与限制、受控存储（随机 UUID）、pypdf 解析（文本层+目录）、扫描器（DB 驱动可重启恢复）、轮询/章节 PATCH/最近列表/删除保护、AC-01/02 通过、AC-08 存储边界。
 - 第 1 节状态基线：自动化验证测试数更新。
 - 计划文件标题下「结果」注明 V3A DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-11-v3a-pdf-lifecycle.md
