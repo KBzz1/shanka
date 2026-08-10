@@ -334,9 +334,9 @@ NEW → LEARNING → REVIEW →(AGAIN)→ RELEARNING →(GOOD/EASY)→ REVIEW
 
 ```python
 Scheduler(
-    parameters=FSRS6_DEFAULT_PARAMETERS,   # 21 参数,py-fsrs 默认权重
+    parameters=FSRS6_DEFAULT_PARAMETERS,   # 19 参数,py-fsrs 4.x 默认权重(R-13:固定 4.x 线,6.x 为 21 参数)
     desired_retention=0.9,
-    learning_steps=(10m, 1d),              # 已确认 C-01:新卡 10 分钟后复现,次日复现后毕业
+    learning_steps=(10m, 10m, 1d),         # R-13 裁决:py-fsrs 语义下 GOOD 间隔=steps[step+1],3 步配置复现 5.2 表并符合 C-01 意图(新卡 10 分钟后复现,次日复现后毕业)
     relearning_steps=(10m,),
     maximum_interval=36500,
     enable_fuzzing=False,                  # 已确认 C-02:关闭,保证同输入同输出
