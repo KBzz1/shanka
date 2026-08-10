@@ -68,7 +68,7 @@ main/
 └── tests/
     ├── unit/          # domain、schemas 纯逻辑
     ├── integration/   # services 编排、DB 事务边界
-    ├── contract/      # openapi.yaml ↔ app/schemas 一致性
+    ├── contract/      # 守卫四项（9.4）：schemas↔openapi、ORM↔database-design、错误码↔契约 7 章、localization_key↔文案
     └── acceptance/    # AC-01~AC-11 验收映射
 ```
 
@@ -99,11 +99,13 @@ agent_evolution/
 ```json
 {
   "prompts":   { "planner":   {"version": "v1", "path": "prompts/v1/planner.md" },
-                 "generator": {"version": "v2", "path": "prompts/v2/generator.md" } },
+                 "generator": {"version": "v1", "path": "prompts/v1/generator.md" } },
   "schemas":   { "card":      {"version": "v1", "path": "schemas/v1/card.schema.json" } },
   "rubrics":   { "main":      {"version": "v1", "path": "rubrics/v1/rubric.md" } }
 }
 ```
+
+> 上例为本期创建时形态（全部 version 指向 `v1`）。演进后形态示例见 5.1 目录树（`generator` 升级时新增 `v2/` 目录，manifest 中 version 改为 `v2`、path 改为 `prompts/v2/generator.md`）。
 
 ### 5.3 版本语义
 
@@ -142,7 +144,7 @@ Android 前端 ──HTTPS──▶ api.<domain>（Cloudflare 边缘，DNS + 自
 5. TLS：边缘到用户自动 HTTPS；边缘到本机回源走 Tunnel 内部加密，回源不暴露端口。
 6. 可选加固：WAF 自定义规则（限流）；`/metrics` 只走 dev 子域名或加 Access。
 
-> **实施时机**：Tunnel 实际接入（cloudflared 安装、隧道创建、DNS/路由配置）**推迟到最后阶段执行**（见第 10 节实施顺序与 Progress.md）；本期仅完成设计文档（deployment.md）。
+> **实施时机**：Tunnel 实际接入（cloudflared 安装、隧道创建、DNS/路由配置）**推迟到最后阶段执行**（见第 11 节实施顺序与 Progress.md）；本期仅完成设计文档（deployment.md）。
 
 ### 6.4 与现有契约衔接
 
