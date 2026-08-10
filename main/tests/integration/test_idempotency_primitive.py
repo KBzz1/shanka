@@ -3,9 +3,10 @@
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session
 
 from app.middleware.idempotency import execute_idempotent, request_body_hash
@@ -115,6 +116,49 @@ def test_idempotency_body_mismatch_raises_conflict(session_factory: Callable[[],
     assert excinfo.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
 
+def test_idempotency_non_2xx_not_recorded_and_retried(
+    session_factory: Callable[[], Session],
+) -> None:
+    """非 2xx 响应不落幂等记录；同键重试重新执行（1.3/2.12 仅记录成功）。"""
+    key = str(uuid.uuid4())
+    calls: list[str] = []
+
+    def biz(session: Session) -> tuple[int, dict[str, object]]:
+        calls.append("x")
+        return 422, {"detail": "invalid"}
+
+    with session_factory() as session:
+        replayed, status, body = execute_idempotent(
+            session,
+            device_id="dev-1",
+            path="/v1/decks",
+            idempotency_key=key,
+            request_body_hash=request_body_hash(b'{"name":"d"}'),
+            fn=biz,
+        )
+        session.commit()
+    assert replayed is False
+    assert status == 422
+    assert body == {"detail": "invalid"}
+    assert _side_effect_rows(session_factory) == 0  # 未落库
+    # 同键重试 → 重新执行（不重放错误响应）
+    with session_factory() as session:
+        replayed, status, body = execute_idempotent(
+            session,
+            device_id="dev-1",
+            path="/v1/decks",
+            idempotency_key=key,
+            request_body_hash=request_body_hash(b'{"name":"d"}'),
+            fn=biz,
+        )
+        session.commit()
+    assert replayed is False
+    assert status == 422
+    assert body == {"detail": "invalid"}
+    assert len(calls) == 2  # 业务重新执行
+    assert _side_effect_rows(session_factory) == 0
+
+
 def test_idempotency_concurrent_same_key_single_effect(
     session_factory: Callable[[], Session],
 ) -> None:
@@ -207,3 +251,93 @@ def test_idempotency_rollback_releases_claim(session_factory: Callable[[], Sessi
         session.commit()
     assert replayed is False
     assert calls == ["x", "y"]
+
+
+def test_idempotency_flush_conflict_backstop_replays(tmp_path: Path) -> None:
+    """flush 冲突兜底路径回归（review M-3，确定性构造）。
+
+    用无 BEGIN IMMEDIATE 的引擎 + WAL 读快照：A 未提交写占位 → B SELECT 读快照无 →
+    B fn → B flush 阻塞至 A commit → IntegrityError → rollback 重读重放。
+    事件链保证 B 的 flush 恒晚于 A 的 flush（b_started 由 B 的 fn 在 flush 前置位，
+    而 A 在 b_started 后才 commit），无时序竞争。
+    """
+    import threading
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'backstop.db'}",
+        connect_args={"check_same_thread": False},
+    )
+
+    @event.listens_for(engine, "connect")
+    def _configure_wal(dbapi_connection: Any, connection_record: Any) -> None:
+        # WAL：B 的 SELECT 可读 A 未提交写之前的快照（无 begin 事件 → 走 flush 冲突路径）
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA foreign_keys=ON;")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+    factory = create_session_factory(engine)
+
+    key = str(uuid.uuid4())
+    body = b'{"name":"d"}'
+    a_flushed = threading.Event()  # A 已 flush 占写锁（execute_idempotent 返回后置位）
+    b_started = threading.Event()  # B 已完成 fn（flush 即将阻塞）
+    calls: list[str] = []
+    results: list[tuple[bool, int, dict[str, object]]] = []
+    errors: list[BaseException] = []
+
+    def biz_a(session: Session) -> tuple[int, dict[str, object]]:
+        calls.append("a")
+        return 201, {"created": "a"}
+
+    def biz_b(session: Session) -> tuple[int, dict[str, object]]:
+        calls.append("b")
+        b_started.set()
+        return 201, {"created": "b"}
+
+    def worker_a() -> None:
+        with factory() as session:
+            try:
+                out = execute_idempotent(
+                    session,
+                    device_id="dev-1",
+                    path="/v1/decks",
+                    idempotency_key=key,
+                    request_body_hash=request_body_hash(body),
+                    fn=biz_a,
+                )
+                # execute_idempotent 返回 = flush 已执行、写锁在手 → 再通知主线程
+                a_flushed.set()
+                assert b_started.wait(timeout=10), "B 未在超时内进入 fn"
+                session.commit()
+                results.append(out)
+            except Exception as exc:
+                errors.append(exc)
+                raise
+
+    thread_a = threading.Thread(target=worker_a)
+    thread_a.start()
+    try:
+        assert a_flushed.wait(timeout=10), "A 未在超时内 flush"
+        with factory() as session:
+            replayed, status, body_out = execute_idempotent(
+                session,
+                device_id="dev-1",
+                path="/v1/decks",
+                idempotency_key=key,
+                request_body_hash=request_body_hash(body),
+                fn=biz_b,
+            )
+            session.commit()
+    finally:
+        thread_a.join(timeout=15)
+
+    assert errors == []
+    assert not thread_a.is_alive()
+    assert replayed is True
+    assert status == 201
+    assert body_out == {"created": "a"}  # 重放 A 的响应，而非 B 的
+    assert calls == ["a", "b"]  # 双方业务各执行一次
+    assert results == [(False, 201, {"created": "a"})]
+    assert _side_effect_rows(factory) == 1  # 幂等记录仅 A 一行

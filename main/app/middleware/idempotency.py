@@ -74,6 +74,9 @@ def execute_idempotent[F: Callable[[Session], tuple[int, dict[str, Any]]]](
         return True, existing.response_status, json_loads_safe(existing.response_body)
 
     status, body = fn(session)
+    if not 200 <= status < 300:
+        # 仅记录成功(2xx)响应：非 2xx 不落幂等记录，同键重试重新执行（契约 1.3/2.12）
+        return False, status, body
 
     record = IdempotencyKey(
         device_id=device_id,
