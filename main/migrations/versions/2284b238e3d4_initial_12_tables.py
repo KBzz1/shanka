@@ -38,7 +38,7 @@ def upgrade() -> None:
         sa.Column("response_status", sa.Integer(), nullable=False),
         sa.Column("response_body", sa.Text(), nullable=False),
         sa.Column("created_at", sa.String(), nullable=False),
-        sa.PrimaryKeyConstraint("idempotency_key", "device_id", "path"),
+        sa.PrimaryKeyConstraint("device_id", "path", "idempotency_key"),
     )
     op.create_table(
         "api_keys",

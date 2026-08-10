@@ -284,9 +284,11 @@ class IdempotencyKey(Base):
 
     __tablename__ = "idempotency_keys"
 
-    idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
+    # 复合主键列序对齐 database-design 2.12 `PRIMARY KEY (device_id, path, idempotency_key)`：
+    # SQLite 复合主键前导列为 device_id，device_id 过滤查询可命中 rowid 索引。
     device_id: Mapped[str] = mapped_column(String, primary_key=True)
     path: Mapped[str] = mapped_column(String, primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
     response_status: Mapped[int] = mapped_column(Integer, nullable=False)
     response_body: Mapped[str] = mapped_column(Text, nullable=False)  # JSON 快照
     created_at: Mapped[str] = mapped_column(String, nullable=False)

@@ -135,3 +135,42 @@ def extract_version_declarations(md_text: str) -> dict[str, str]:
             result[key] = match.group(1)
             break
     return result
+
+
+DATABASE_DESIGN_PATH = REPO_ROOT / "docs" / "Architecture" / "database-design.md"
+
+
+def parse_database_tables(md_text: str) -> dict[str, dict[str, str]]:
+    """解析 database-design §2 表定义 → {表名: {列名: 声明行原文}}。
+
+    覆盖：表头行 `### 2.N 表名`；列行 `| 列名 | 类型 | 约束 | 说明 |`；
+    组合列行 `| a / b / c | 类型 | 约束 | 说明 |` 展开为多列（每列共享声明行原文）；
+    仅解析 §2 内的表定义，`## 3.` 起的其他章节表格（级联/映射）不进入结果。
+    忽略 `---` 分隔行、索引/约束注释行、`注:` 行（首格为中文或非 `[a-z_]` 不匹配）。
+    返回只读事实（表名/列名/是否 NOT NULL/是否 PK），类型与约束细节由守卫按需断言。
+    """
+    tables: dict[str, dict[str, str]] = {}
+    current: str | None = None
+    for line in md_text.splitlines():
+        m = re.match(r"^### 2\.\d+ ([a-z_]+)$", line.strip())
+        if m:
+            current = m.group(1)
+            tables[current] = {}
+            continue
+        if current is None:
+            continue
+        if re.match(r"^##\s", line):
+            # 离开 §2：`## 3. 级联与并发` 等章节的表格不是表定义
+            current = None
+            continue
+        if not line.startswith("|"):
+            continue
+        cells = line.strip().split("|")
+        if len(cells) < 2:
+            continue
+        first_cell = cells[1].strip()
+        cols = [c.strip() for c in first_cell.split("/")]
+        if cols and all(re.fullmatch(r"[a-z_]+", c) for c in cols):
+            for col in cols:
+                tables[current][col] = line
+    return tables
