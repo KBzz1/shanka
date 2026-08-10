@@ -281,3 +281,21 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 | review_events | 3.11 ReviewEvent |
 | (聚合计算) | 3.12 StatsDashboard |
 | idempotency_keys | 总则 1.3 幂等约定 |
+
+## 7. 演进路径
+
+### 7.1 账号体系（未来）
+
+- 新增 `users` 表;`devices` 增加可空外键列 `user_id`(先 NULL 后回填)。**不重构 devices 主键**,匿名设备 ID 体系维持为兼容层。
+- 数据迁移:按绑定关系批量回填 `user_id` 后加 NOT NULL;业务表隔离键仍为 `device_id`。
+
+### 7.2 新卡类型（未来）
+
+- 沿用 D-01 模式:专用列 + `front`/`back` 通用渲染。
+- 类型数可控(≤5)时继续用专用列;字段高度异构或继续膨胀时,评估 JSON 扩展列方案。
+- 所有结构变更走迁移工具。
+
+### 7.3 迁移工具选型
+
+- 选型:**Alembic**(SQLAlchemy 官方迁移工具);P0-2 引入并生成首个迁移。
+- 迁移纪律:与 ORM 模型同 PR 提交;破坏性变更需同步更新 database-design 与契约。
