@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 V1 DONE 与证据位置>
+**结果**：V1 DONE（2026-08-11）。验收与证据见 docs/Progress.md 第 4 节 V1 行（8 commits b78d560..cc040e8，分支 codex/v1）：121 用例全绿、四工具通过、干净安装+迁移、uvicorn 冒烟创建/重放/列表正确、边界 32+守卫 20 全绿、AC-09 三条通过、无明文泄漏。全任务 checklist 勾选完成。
 
 **Goal:** 实现牌组列表/创建/详情/删除、自由刷题列表、手动新增、原子批量导入；统一 Card/position/source；真实进度查询（card_count/due_count/mastered/review_count/mastery_ratio）；删除保护（409 TASK_IN_PROGRESS）、级联及历史任务 deck_id 置空；幂等键在首个真实写接口上完整接线（业务副作用与首次响应同事务、重放、冲突、并发不双写），使 V1 依据真实验收证据标记 DONE 且 AC-09 通过。
 
