@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 V4 DONE 与证据位置>
+**结果**：V4 DONE（2026-08-11）。验收与证据见 docs/Progress.md 第 4 节 V4 行（9 commits 89c0390..656c17b + fix 5842898，分支 codex/v4）：289 用例全绿、四工具通过、干净安装+迁移、uvicorn 冒烟（样卡 3 张/任务 RUNNING→COMPLETED 12 卡）、边界 70 用例全绿、AC-03 通过、R-11 RESOLVED。全任务 checklist 勾选完成。
 
 **Goal:** 实现按 manifest 加载/校验 agent 资产、Prompt 稳定前缀与动态后缀分离、固定构成 3 张样卡（不入库）、任务创建/查询/取消/resume（持久化配置与章节、DB 条件更新抢占执行、状态机 PENDING→RUNNING→终态）、KnowledgePoint 规划（COMPACT ≤ BALANCED ≤ EXTENSIVE 可测口径）、任务执行用 deterministic fake 生成器（V5A 换真实分批），使 V4 依据真实验收证据标记 DONE 且 AC-03 通过。
 
@@ -39,7 +39,7 @@
 - Consumes: agent_evolution/manifest.json（只读）、F0 errors
 - Produces: `infra.llm.prompts.load_manifest() -> dict`（读取+基础校验，失败抛 AppError(INTERNAL_ERROR)）；`infra.llm.prompts.load_asset(section, name) -> str`（按 manifest 路径读取文本）；`infra.llm.prompts.asset_versions() -> dict`（prompt/schema/rubric 版本——V5A 观测用）；`infra.llm.prompts.build_generation_prompt(prompt_asset: str, *, topic: str, chapter_name: str, difficulty: str, custom_requirements: str | None, card_schema: str) -> str`（稳定前缀（资产）+ 动态后缀（topic/chapter/difficulty/custom/JSON schema 提示）——返回完整 prompt；不落日志）；Task 2 样卡与 Task 3 规划消费
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_prompts.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_prompts.py`**
 
 ```python
 """infra.llm.prompts 单元测试：manifest 加载/Prompt 组装。"""
@@ -95,12 +95,12 @@ def test_prompts_build_without_custom() -> None:
     assert "PREFIX" in prompt and "t" in prompt and "custom" not in prompt.lower()
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_prompts.py -v`
 Expected: FAIL（ModuleNotFoundError: infra.llm.prompts）
 
-- [ ] **Step 3: 实现 `main/infra/llm/prompts.py`**
+- [x] **Step 3: 实现 `main/infra/llm/prompts.py`**
 
 ```python
 """agent 资产加载与 Prompt 组装（Architecture AGENTS.md 6/红线 5）。
@@ -160,12 +160,12 @@ def build_generation_prompt(
     return "\n".join(parts)
 ```
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_prompts.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy infra/llm/prompts.py tests/unit/test_prompts.py`
 Expected: PASS（`_REPO_ROOT` parents 层级核对：main/infra/llm/prompts.py → parents[4] = 仓库根）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/infra/llm/prompts.py main/tests/unit/test_prompts.py
@@ -186,7 +186,7 @@ git commit -m "feat(prompts): manifest 加载 + Prompt 稳定前缀/动态后缀
 - Consumes: F1 models、V1 cards service（review_state 初始化模式）、prompts（build_generation_prompt）
 - Produces: `services.generation.fake.generate_card(topic, chapter_name, difficulty, custom_requirements) -> dict`（deterministic：同输入同输出——用 hashlib 派生 card_id/generation_item_id；构造 Card 视图（card_type 按难度/序号轮换？——**决策**：fake 生成器按 difficulty 生成固定结构：BASIC→QUESTION（front=topic 定义问）、UNDERSTANDING→QUESTION、APPLICATION→TRUE_FALSE——样卡构成 2 问答+1 判断天然满足）；`services.generation.samples.generate_samples(session, *, device_id, file_id, chapter_ids, config) -> list[dict]`（校验 file/chapters 归属 → 3 张样卡（1 基础+1 理解+1 应用；2 问答+1 判断）→ 不入库）；`services.generation.validate_config(config) -> None`（difficulty_ratio 和=1 且各>0；quantity_tendency 枚举 → VALIDATION_ERROR 400）；Task 3 任务执行与 Task 4 handler 消费
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_generation_fake.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_generation_fake.py`**
 
 ```python
 """services.generation.fake 确定性单元测试。"""
@@ -221,7 +221,7 @@ def test_fake_card_ids_stable_and_unique() -> None:
     assert a["generation_item_id"] != b["generation_item_id"]
 ```
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_generation_samples.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_generation_samples.py`**
 
 ```python
 """样卡 service 集成测试：构成/不入库/校验（真实 SQLite）。"""
@@ -319,7 +319,7 @@ def test_samples_validate_config() -> None:
     assert excinfo.value.code is ErrorCode.VALIDATION_ERROR
 ```
 
-- [ ] **Step 3: 实现 fake.py + samples.py + validate.py**
+- [x] **Step 3: 实现 fake.py + samples.py + validate.py**
 
 ```python
 """fake.py：deterministic fake 生成器（V4 任务执行用；V5A 换真实 adapter，红线：fake 不代替生产）。"""
@@ -416,12 +416,12 @@ def generate_samples(session: Session, *, device_id: str, file_id: str, chapter_
     ]
 ```
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_generation_fake.py tests/integration/test_generation_samples.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/generation/ tests/unit/test_generation_fake.py tests/integration/test_generation_samples.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/services/generation/fake.py main/services/generation/samples.py main/services/generation/validate.py main/tests/unit/test_generation_fake.py main/tests/integration/test_generation_samples.py
@@ -442,7 +442,7 @@ git commit -m "feat(generation): fake 生成器 + GenerationConfig 校验 + 样�
 - Consumes: Task 2 validate/fake、V1/V3A service 模式、F1 models（Task/KnowledgePoint/Batch）
 - Produces: `services.generation.planning.plan_knowledge_points(session, *, task_id, chapter_ids, quantity_tendency) -> list[KnowledgePoint]`（每章分块（章节文本——**决策**：V4 无真实章节文本（PDF 解析只存章节元数据）——规划用确定性分块：每章生成 chunk_count 个知识点，chunk_count = 基础 3 × 密度系数（COMPACT=1/BALANCED=2/EXTENSIVE=3）——topic 用"第X章-知识点N"确定性命名；**R-13 注释**：真实分块（文本抽取）在 V5A 或后续接入，V4 规划结构正确）；`services.tasks.service.create_task(session, *, device_id, file_id, deck_id, chapter_ids, config, now) -> Task`（校验归属/配置/已保存 Key（无 → API_KEY_NOT_SET 422）→ 建 Task（PENDING + selected_chapters/generation_config JSON 快照）→ 规划知识点 → 置 RUNNING + stage=PLANNING→GENERATING → 返回 Task 视图）；`services.tasks.service.get_task(session, *, device_id, task_id) -> Task`（404）、`cancel_task`（RUNNING/PENDING → CANCELLED；条件更新）、`resume_task`（PAUSED AND resumable=1 → RUNNING；否则 409 TASK_STATE_CONFLICT）；`services.tasks.service.task_view(task) -> dict`；Task 4 executor 与 handler 消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_planning.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_planning.py`**
 
 ```python
 """KnowledgePoint 规划集成测试（3.5/5.4.1 可测口径）。"""
@@ -519,7 +519,7 @@ def test_planning_knowledge_point_fields(session_factory: Callable[[], Session])
         assert kp.status == "PENDING"
 ```
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_tasks_service.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_tasks_service.py`**
 
 ```python
 """任务 service 集成测试：创建/状态机/取消/resume/校验（真实 SQLite + fake 执行）。"""
@@ -661,7 +661,7 @@ def test_tasks_resume_paused(session_factory: Callable[[], Session]) -> None:
 
 （说明：`create_task` 的"置 RUNNING + stage"——**决策**：创建即 RUNNING（后台循环立即处理）；stage=PLANNING 在 create_task 内完成规划后置 GENERATING（同步规划，异步生成）。KnowledgePoint 与 Task 同事务。ApiKey 校验：查 api_keys 表 status=AVAILABLE 且可解密？——**决策**：只查 status=AVAILABLE 行存在（不解密——V5A 生成时才解密调用）。）
 
-- [ ] **Step 3: 运行确认失败 → 实现 planning.py + tasks/service.py**
+- [x] **Step 3: 运行确认失败 → 实现 planning.py + tasks/service.py**
 
 ```python
 """planning.py：KnowledgePoint 规划（5.4.1/3.6；COMPACT≤BALANCED≤EXTENSIVE 可测口径）。"""
@@ -797,12 +797,12 @@ def resume_task(session: Session, *, device_id: str, task_id: str, now: str) -> 
     return task
 ```
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_planning.py tests/integration/test_tasks_service.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/generation/ services/tasks/ tests/integration/test_planning.py tests/integration/test_tasks_service.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/services/generation/planning.py main/services/tasks/service.py main/tests/integration/test_planning.py main/tests/integration/test_tasks_service.py
@@ -825,7 +825,7 @@ git commit -m "feat(tasks): 任务创建/状态机/查询/取消/resume + Knowle
 - Consumes: Task 2/3、V1 cards（入库模式）、F1 幂等
 - Produces: `services.tasks.executor.process_running_tasks(session, *, storage=None) -> int`（扫描 RUNNING 任务 → 逐知识点 fake 生成 → 入库（cards + review_state 初始，V1 模式；generation_item_id 部分唯一索引防重）→ generated_card_count 更新 → 全部完成 → COMPLETED；fake 失败（不应发生）→ FAILED）；`executor.scan_once(session_factory) -> int`；路由 `POST /samples`（200 {sample_cards: [3]}；豁免幂等）、`POST /tasks`（201 Task；幂等）、`GET /tasks/{task_id}`、`POST /tasks/{task_id}/resume`、`POST /tasks/{task_id}/cancel`；`app.schemas.samples.SampleRequest`、`app.schemas.tasks.TaskCreateRequest`；main.py 装配 + 后台循环（V3A 模式）
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_tasks_executor.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_tasks_executor.py`**
 
 ```python
 """任务执行器集成测试：fake 生成入库/状态机/防重。"""
@@ -914,7 +914,7 @@ def test_executor_no_duplicate_generation_items(session_factory: Callable[[], Se
     assert len(item_ids) == len(set(item_ids))  # 无重复
 ```
 
-- [ ] **Step 2: 实现 executor.py + schemas + 路由 + 装配**
+- [x] **Step 2: 实现 executor.py + schemas + 路由 + 装配**
 
 ```python
 """executor.py：任务执行器（4.4 定式：进程内 DB 驱动；V4 用 deterministic fake，V5A 换真实分批）。"""
@@ -975,13 +975,13 @@ def _execute_task(session: Session, task: Task) -> None:
 # main.py：include_router(samples.router, tasks.router) + 后台循环（task_scan_interval_seconds=1.0，V3A 模式）
 ```
 
-- [ ] **Step 3: 写 API 集成测试（samples/tasks）+ 运行确认 + ruff/mypy + 全量**
+- [x] **Step 3: 写 API 集成测试（samples/tasks）+ 运行确认 + ruff/mypy + 全量**
 
 `test_samples_api.py`：POST /samples（合法 200 + 3 张构成；跨设备 404；非法比例 400；无幂等键豁免——不带 Idempotency-Key 成功）
 `test_tasks_api.py`：POST /tasks（201 + RUNNING；无 Key 422；幂等重放；GET 轮询；cancel 200；resume 409/200）
 Expected: 全绿
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add main/services/tasks/executor.py main/app/config.py main/app/schemas/samples.py main/app/schemas/tasks.py main/app/api/samples.py main/app/api/tasks.py main/app/main.py main/tests/integration/test_tasks_executor.py main/tests/integration/test_samples_api.py main/tests/integration/test_tasks_api.py
@@ -1000,7 +1000,7 @@ git commit -m "feat(tasks-api): 任务执行器（fake 入库/防重）+ samples
 - Consumes: Task 1-4 全部产物
 - Produces: AC-03 验收映射；守卫（Task/KnowledgePoint/SampleRequest/TaskCreateRequest ↔ openapi）
 
-- [ ] **Step 1: 守卫测试 `main/tests/contract/test_generation_schemas_guard.py`**
+- [x] **Step 1: 守卫测试 `main/tests/contract/test_generation_schemas_guard.py`**
 
 ```python
 """契约守卫：Task/KnowledgePoint ↔ openapi（守卫 1 扩展）。"""
@@ -1016,7 +1016,7 @@ def test_task_schema_openapi_consistent() -> None:
 
 （说明：Task openapi schema 的 selected_chapters 是 Chapter[]（object 数组）、generation_config 是 $ref GenerationConfig（object）——守卫需支持 object 属性递归（F1 已支持）。若 TaskView 模型字段与实际 openapi 结构有出入（selected_chapters 存 JSON 字符串 vs 数组），**修正**：视图模型 selected_chapters 用 `list[dict] | None`（handler 从 service 视图 dict 直接构造——service task_view 已 json.loads）。以守卫事实为准修正模型。）
 
-- [ ] **Step 2: 验收测试 `main/tests/acceptance/test_acceptance_ac03.py`**
+- [x] **Step 2: 验收测试 `main/tests/acceptance/test_acceptance_ac03.py`**
 
 ```python
 """验收测试：AC-03 样卡（PRD；迁移 schema + HTTP）。"""
@@ -1055,12 +1055,12 @@ def _make_pdf_context(client: TestClient, device: dict[str, str]) -> tuple[str, 
 
 （说明：AC-03 验收的 PDF 上下文——用种 DB 行（PdfFile PARSED + Chapters）避免样书依赖；或上传样书走全链路。**决策**：种 DB 行（迁移 schema 后 INSERT）——AC-03 聚焦样卡构成。实现者按此。）
 
-- [ ] **Step 3: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 3: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/contract/test_generation_schemas_guard.py tests/acceptance/ -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add main/tests/contract/test_generation_schemas_guard.py main/tests/acceptance/test_acceptance_ac03.py
@@ -1074,16 +1074,16 @@ git commit -m "test(acceptance): AC-03 样卡验收映射 + Task/KnowledgePoint 
 **Files:**
 - 验证：全部 V4 产物；不新增代码
 
-- [ ] **Step 1: 四工具命令全绿**
+- [x] **Step 1: 四工具命令全绿**
 
 Run（均在 `main/`）: `python --version`、`python -m pytest`、`python -m ruff check .`、`python -m ruff format --check .`、`python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 2: 干净环境安装 + 迁移**
+- [x] **Step 2: 干净环境安装 + 迁移**
 
 （V3A/V3B 同款 venv + alembic upgrade 验证）
 
-- [ ] **Step 3: uvicorn 冒烟（样卡 → 任务创建 → 后台执行 → 轮询 COMPLETED → 卡片入库）**
+- [x] **Step 3: uvicorn 冒烟（样卡 → 任务创建 → 后台执行 → 轮询 COMPLETED → 卡片入库）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -1106,12 +1106,12 @@ kill %1
 ```
 Expected: 样卡 3 张构成正确、任务 COMPLETED、卡片入库（GET /decks/{id}/cards 可见）
 
-- [ ] **Step 4: 关键边界复核（收证据）**
+- [x] **Step 4: 关键边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_planning.py tests/integration/test_tasks_service.py tests/integration/test_tasks_executor.py tests/integration/test_samples_api.py tests/integration/test_tasks_api.py tests/acceptance/ tests/contract/ -v`
 Expected: 全绿
 
-- [ ] **Step 5: 无明文泄漏抽查**
+- [x] **Step 5: 无明文泄漏抽查**
 
 Run: `grep -rn "sk-" main/app main/services main/infra --include="*.py" || true`
 Expected: 无真实泄漏（测试假值除外）
@@ -1124,14 +1124,14 @@ Expected: 无真实泄漏（测试假值除外）
 - Modify: `docs/Progress.md`
 - Modify: `docs/superpowers/plans/2026-08-11-v4-samples-tasks-planning.md`（标题下「结果」）
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 V4 行：`TODO` → `DONE`，证据填写：manifest 加载/Prompt 组装、样卡构成（3 张不入库）、GenerationConfig 校验、任务创建/状态机/查询/取消/resume、KnowledgePoint 规划（可测口径）、fake 执行入库防重、AC-03 通过。
 - 第 6 节：R-11 → `RESOLVED`（V4 收口：任务创建走用户指定 deck_id，GENERATED 来源未实现，契约枚举保留）。
 - 第 1 节状态基线：自动化验证测试数更新。
 - 计划文件标题下「结果」注明 V4 DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-11-v4-samples-tasks-planning.md
