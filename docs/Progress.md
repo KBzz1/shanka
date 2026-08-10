@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（F1 扩展） | 81 passed：F0 34 + F1 47（session 事务、迁移 5、ORM 守卫 5、日志/request_id、设备鉴权 5、错误包装 2、幂等 8、限流 7、metrics 3）；四工具命令全绿（mypy 90 files） |
+| 自动化验证 | `DONE`（V1 扩展） | 121 passed：F0 34 + F1 47 + V1 40（schema 守卫 7、decks service 5、cards service 6、API 14、幂等补覆盖、AC-09 8）；四工具命令全绿（mypy 101 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -95,11 +95,22 @@
 
 ### V1 — 牌组与卡片闭环
 
-**`TODO`｜依赖：F1｜覆盖：FR-03/14/18、接口 6.5、AC-09**
+**`DONE`｜依赖：F1｜覆盖：FR-03/14/18、接口 6.5、AC-09**
 
 实现牌组列表/创建/详情/删除、自由刷题列表、手动新增、原子批量导入；统一 Card/position/source；真实进度查询；删除保护、级联及历史任务 deck_id 置空。
 
 验收：对应操作走真实 DB；追加不覆盖、导入全成或全败、逐张结果、稳定 position、重复删除和任务保护；同设备同 key 同请求单副作用并重放原响应，同 key 异请求冲突，失败时业务与幂等记录共同回滚，新 app/session 可重放，并发不双写；AC-09 通过。
+
+当前证据（2026-08-11，分支 codex/v1 合并回 main，7 commits b78d560..0be69a4）：
+- 牌组闭环：GET/POST /decks、GET/DELETE /decks/{deck_id} 走真实 DB；跨设备统一 404 DECK_NOT_FOUND；删除级联（cards→review_states/review_events CASCADE）+ 历史任务 tasks.deck_id SET NULL；删除保护（非终态 PENDING/RUNNING/PAUSED 任务引用 → 409 TASK_IN_PROGRESS）；不同 key 重复删除 404、同 key 由幂等层重放 204。
+- 卡片闭环：手动新增（position=max+1 追加不覆盖、source=MANUAL、card_type=QUESTION、同事务插初始 ReviewState state=NEW/difficulty=1.0/due=now）；自由刷题列表按 position 稳定排序；批量导入同事务原子（全成或全败，逐张 results CREATED+card_id；空列表/空 front/back → 422 IMPORT_PARSE_ERROR）。
+- 真实进度聚合：card_count/due_count（due<=now 服务端时钟）/mastered_card_count（C-03：REVIEW 且 stability>=21）/review_count/mastery_ratio（0 时 0）——service 层 SQL 聚合，非本地演示数据。
+- 幂等首个真实写接口完整验收（F1 原语 + V1 接线）：同 (device, path, key) 重放首次 2xx 原响应体（POST 创建/import/DELETE 204）、同 key 异 body → 409 IDEMPOTENCY_CONFLICT、失败不落库（404 重试重新执行）、新 app/session 跨会话重放、handler 级并发同 key 一 fresh 一 replay 单副作用（2 线程 Barrier 实测 5/5 轮稳定）、幂等记录与业务副作用同事务。
+- BodyCaptureMiddleware：写方法 raw body → request.state.raw_body 供幂等 hash；GET 不读；请求日志不记录 body（红线 4）；运行序 Metrics → RequestID → RateLimit → DeviceID → Logging → BodyCapture → 路由。
+- Deck/Card schema ↔ openapi 守卫扩展（array/null 联合/嵌套 $ref）；AC-09 三条验收映射 + 5 补覆盖用例（8 用例）。
+- 验收实测：四工具全绿（121 passed、mypy 101 files）；干净 venv 从 lock 安装 + 空库迁移 OK；真实 uvicorn（先 alembic upgrade 再启动）POST /decks 201 完整派生字段 + 同 key 重放响应体逐字一致 + 列表正确；边界 32 用例 + 守卫 20 用例全绿；`grep -rn "sk-" main/app main/services main/infra` 无输出。
+- 部署纪律（冒烟暴露）：未迁移空库上业务请求 500 INTERNAL_ERROR——启动前必须 `alembic upgrade head`（readyz 只 SELECT 1 不校验 schema；R1 验收覆盖干净环境迁移启动）。
+- 登记（V1 收口）：structure-contract 3.10 ReviewState difficulty 描述 "0~10" 与 database-design 2.10/ORM CHECK "1~10" 漂移——实现按 database-design（py-fsrs 口径 1~10），契约文本待同步（随 V4 或 R1 文档修订）。
 
 ### V2 — FSRS 复习与看板闭环
 
