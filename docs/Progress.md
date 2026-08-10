@@ -39,7 +39,7 @@ Phase 0 基础设施 ──→ Phase 1 牌组/复习/看板 ──→ Phase 2 PD
 
 | ID | 任务 | 依据 | 依赖 | 状态 | 验收要点 |
 | --- | --- | --- | --- | --- | --- |
-| P0-0 | 项目骨架:目录与模块空文件编排(对齐 project-structure.md,含 tests/ 四层目录) | project-structure 3 / 设计规格 6422765 | - | ⬜ | 结构与契约逐项可追溯 |
+| P0-0 | 项目骨架:目录与模块空文件编排(对齐 project-structure.md,含 tests/ 四层目录、pyproject/pre-commit 工具链) | project-structure 3 / 设计规格 6422765 | - | ✅ | 结构与契约逐项可追溯 |
 | P0-1 | 项目脚手架:FastAPI 应用、配置、日志、错误码与本地化 key 定义 | 契约 7 / project-structure | P0-0 | ⬜ | 统一错误响应结构可跑通 |
 | P0-2 | 数据库:SQLite(WAL)+ SQLAlchemy ORM 模型(12 张表,含 version/Rubric 列、风控列、复合主键) | database-design 2.x | P0-1 | ⬜ | 迁移可执行,唯一约束/部分索引生效,外键开启 |
 | P0-3 | 中间件:X-Device-ID 鉴权、Idempotency-Key 幂等(与副作用同事务)、统一错误响应、全局限流(1.6) | 契约 1.1 / 1.3 / 1.4 / 1.6 | P0-1 | ⬜ | 幂等重放返回首次结果;429 + Retry-After |
@@ -83,6 +83,7 @@ Phase 0 基础设施 ──→ Phase 1 牌组/复习/看板 ──→ Phase 2 PD
 | 多角度文档审核(5 agent:契约一致性 / OpenAPI / 数据库 / 产品逻辑 / 安全) | ✅ | 2026-08-10 并行完成 |
 | 文档问题修复(4 P0 / 19 P1 / 27 P2) | ✅ | 已修复回填:章节 PATCH、Error 包装、限流 1.6、设备风险声明、Rubric 字段、观测接口 6.9、删除保护、幂等同事务、Card.version、429 补全、403→404 统一等 |
 | 契约待补充项 | ✅ | 任务列表接口、weekly_goal 上报、重试上限(2 次)、FSRS 断言样例均已落文档 |
+| 契约文档更新(project-structure/structure-contract/database-design/openapi/deployment/README) | ✅ | 2026-08-10 实施完成(P0-0 产物) |
 
 注:章节修改接口已入 P2-2;限流已入 P0-3;观测接口已入 P2-7;删除保护(409 TASK_IN_PROGRESS)在 P1-1 / P2-2 验收要点中体现。
 

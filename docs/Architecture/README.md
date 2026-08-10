@@ -10,6 +10,8 @@
 | [structure-contract.md](structure-contract.md) | 结构契约:总则(鉴权/幂等/时间/错误码)、资源模型、状态机、FSRS-6 排程、接口清单 | 前后端 |
 | [openapi.yaml](openapi.yaml) | OpenAPI 3.1 接口机器契约:路径、请求/响应 schema | 前后端(代码生成与校验) |
 | [database-design.md](database-design.md) | 数据库表设计:表、列、索引、唯一约束、幂等键 | 后端 |
+| [deployment.md](deployment.md) | 部署设计:Cloudflare Tunnel 接入与迁移阶梯 | 部署(P3-4) |
+| `agent_evolution/`(仓库根目录) | agent 版本化资产(prompt/schema/rubric),manifest 为运行时加载入口 | 后端 infra/llm |
 
 ## 单一事实来源(防漂移规则)
 
@@ -18,6 +20,7 @@
 3. **接口机器权威**:`openapi.yaml`(路径、请求/响应结构)。`structure-contract.md` 负责行为契约(状态机、幂等、排程、错误码)。
 4. **持久化权威**:`database-design.md`,每个表必须能回溯到资源模型中的对应资源。
 5. 修改任一文档时,检查其下游文档是否需要同步(资源模型变更 → openapi schema + 数据库表)。
+6. **资产权威**:`agent_evolution/manifest.json` 为 prompt/schema/rubric 唯一版本入口;`structure-contract.md` 中的 `prompt_version` / `schema_version` / `rubric_version` 必须与 manifest 一致。
 
 ## 版本管理
 
