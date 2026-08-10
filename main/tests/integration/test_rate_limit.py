@@ -41,6 +41,31 @@ def test_rate_limit_write_dimension_429_with_retry_after(tmp_path: Path) -> None
     assert resp.json()["error"]["code"] == "RATE_LIMITED"
 
 
+def test_rate_limit_pdf_dimension_hits_429(tmp_path: Path) -> None:
+    """1.6 专门维度回归（fix round 1）：POST /pdfs 10 次/时/device 须生效。
+
+    F-2 修复前 _scope 按 /v1/pdfs 判定（路由无前缀）→ 落入通用 write 维度；
+    修复后走 pdf 维度——低阈值构造 app 验证 429。
+    """
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'rl_pdf.db'}",
+        storage_path=tmp_path / "storage",
+        rate_limit_pdf_per_hour=2,
+    )
+    with TestClient(create_app(settings)) as client:
+        headers = {**_device_headers(), "Idempotency-Key": str(uuid.uuid4())}
+        codes = []
+        for _ in range(4):
+            resp = client.post(
+                "/pdfs",
+                files={"file": ("a.pdf", b"x", "application/pdf")},
+                headers=headers,
+            )
+            codes.append(resp.status_code)
+    assert codes[:2] == [400, 400]  # 限流通过 → 上传三重校验失败 400
+    assert codes[2] == 429 and codes[3] == 429  # pdf 维度限流
+
+
 def test_rate_limit_ip_dimension_blocks(tmp_path: Path) -> None:
     """IP 5 req/s（全部接口）：用低阈值 app 验证。"""
     settings = Settings(

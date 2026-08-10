@@ -39,6 +39,40 @@ def _pdf_bytes() -> bytes:
     return b"%PDF-1.4 fake pdf content for upload validation"
 
 
+def _seed_parsed_pdf(db_path: Path, device_id: str) -> tuple[str, str]:
+    """直接种 PARSED PDF + 章节（PATCH 部分更新成功路径；完整解析链路由 Task 5 验收覆盖）。
+
+    前置：设备行须已注册（FK），调用前先发一次带 X-Device-ID 的请求。
+    """
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from infra.db.models import Chapter, PdfFile
+    from infra.db.session import create_db_engine
+
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    pdf_id, chapter_id = str(uuid.uuid4()), str(uuid.uuid4())
+    with factory() as session:
+        session.add(
+            PdfFile(
+                file_id=pdf_id,
+                device_id=device_id,
+                filename="seeded.pdf",
+                storage_key="a" * 32,
+                size_bytes=100,
+                status="PARSED",
+                created_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()  # 无 relationship 时 UoW 不保证插入顺序——先落 pdf_files 行再插章节
+        session.add(
+            Chapter(chapter_id=chapter_id, file_id=pdf_id, name="旧名", start_page=1, end_page=10)
+        )
+        session.commit()
+    engine.dispose()
+    return pdf_id, chapter_id
+
+
 def test_pdfs_api_upload_invalid_magic_400(client: TestClient) -> None:
     resp = client.post(
         "/pdfs",
@@ -122,3 +156,52 @@ def test_pdfs_api_patch_chapter_requires_parsed(client: TestClient) -> None:
         headers={**device, **_idem()},
     )
     assert resp.status_code in (404, 409)
+
+
+def test_pdfs_api_patch_chapter_partial_name_only(client: TestClient, tmp_path: Path) -> None:
+    """部分更新（fix round 1）：只传 name → 200，start/end 保持。"""
+    device = _device()
+    assert client.get("/pdfs", headers=device).status_code == 200  # 注册设备行（FK 前置）
+    pdf_id, chapter_id = _seed_parsed_pdf(tmp_path / "pdf_api.db", device["X-Device-ID"])
+    resp = client.patch(
+        f"/pdfs/{pdf_id}/chapters/{chapter_id}",
+        json={"name": "改名"},
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "改名"
+    assert body["start_page"] == 1 and body["end_page"] == 10
+
+
+def test_pdfs_api_patch_chapter_partial_start_page_only(client: TestClient, tmp_path: Path) -> None:
+    """部分更新（fix round 1）：只传 start_page → 200，end/name 保持。"""
+    device = _device()
+    assert client.get("/pdfs", headers=device).status_code == 200  # 注册设备行（FK 前置）
+    pdf_id, chapter_id = _seed_parsed_pdf(tmp_path / "pdf_api.db", device["X-Device-ID"])
+    resp = client.patch(
+        f"/pdfs/{pdf_id}/chapters/{chapter_id}",
+        json={"start_page": 3},
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["start_page"] == 3 and body["end_page"] == 10
+    assert body["name"] == "旧名"
+
+
+def test_pdfs_api_patch_chapter_all_none_400(client: TestClient) -> None:
+    """部分更新（fix round 1）：全 None → 400 VALIDATION_ERROR（先于状态裁决）。"""
+    device = _device()
+    file_id = client.post(
+        "/pdfs",
+        files={"file": ("e.pdf", _pdf_bytes(), "application/pdf")},
+        headers={**device, **_idem()},
+    ).json()["file_id"]
+    resp = client.patch(
+        f"/pdfs/{file_id}/chapters/{uuid.uuid4()}",
+        json={},
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"

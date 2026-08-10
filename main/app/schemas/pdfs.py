@@ -21,6 +21,8 @@ class PdfFile(BaseModel):
 
 
 class ChapterUpdateRequest(BaseModel):
-    name: str = Field(min_length=1)
-    start_page: int = Field(ge=1)
-    end_page: int = Field(ge=1)
+    """部分更新（openapi：「至少提供一个字段;未提供的字段保持不变」）。"""
+
+    name: str | None = Field(default=None, min_length=1)
+    start_page: int | None = Field(default=None, ge=1)
+    end_page: int | None = Field(default=None, ge=1)

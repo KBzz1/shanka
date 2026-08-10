@@ -92,21 +92,34 @@ def update_chapter(
     device_id: str,
     file_id: str,
     chapter_id: str,
-    name: str,
-    start_page: int,
-    end_page: int,
+    name: str | None,
+    start_page: int | None,
+    end_page: int | None,
     now: str,
 ) -> Chapter:
-    """章节 PATCH（章节确认流程，仅 PARSED 后可用；非 PARSED → 409 TASK_STATE_CONFLICT）。"""
+    """章节 PATCH（章节确认流程，仅 PARSED 后可用；非 PARSED → 409 TASK_STATE_CONFLICT）。
+
+    部分更新（fix round 1，openapi「至少提供一个字段;未提供的字段保持不变」）：
+    全 None → VALIDATION_ERROR；仅更新非 None 字段；应用后校验 start <= end。
+    """
+    if name is None and start_page is None and end_page is None:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "至少提供一个字段")
+    if start_page is not None and start_page < 1:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "起始页码非法")
+    if end_page is not None and end_page < 1:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "结束页码非法")
     pdf = _owned_pdf(session, device_id=device_id, file_id=file_id)
     if pdf.status != "PARSED":
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "PDF 尚未解析完成")
     chapter = session.get(Chapter, chapter_id)
     if chapter is None or chapter.file_id != file_id:
         raise AppError(ErrorCode.PDF_NOT_FOUND, "章节不存在")
-    if start_page < 1 or end_page < start_page:
+    if name is not None:
+        chapter.name = name
+    if start_page is not None:
+        chapter.start_page = start_page
+    if end_page is not None:
+        chapter.end_page = end_page
+    if chapter.start_page > chapter.end_page:
         raise AppError(ErrorCode.VALIDATION_ERROR, "章节页码范围非法")
-    chapter.name = name
-    chapter.start_page = start_page
-    chapter.end_page = end_page
     return chapter

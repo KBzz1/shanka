@@ -110,16 +110,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     def _scope(self, request: Request) -> str | None:
-        """1.6 维度判定：None = 仅 IP 维度。"""
+        """1.6 维度判定：None = 仅 IP 维度。
+
+        fix round 1（契约 1.6 专门维度生效）：实际路由无 /v1 前缀（servers url 承担 /v1），
+        专门维度改按无前缀路径匹配，同时兼容带前缀（防御反代剥前缀场景）。
+        """
         if request.url.path in _EXEMPT_DEVICE_PATHS:
             return None
         method = request.method
         path = request.url.path
-        if method == "POST" and path == "/v1/samples":
+        if method == "POST" and path in ("/samples", "/v1/samples"):
             return "samples"
-        if method == "PUT" and path == "/v1/api-key":
+        if method == "PUT" and path in ("/api-key", "/v1/api-key"):
             return "api_key"
-        if method == "POST" and path == "/v1/pdfs":
+        if method == "POST" and path in ("/pdfs", "/v1/pdfs"):
             return "pdf"
         if method in ("POST", "PUT", "PATCH", "DELETE"):
             return "write"
