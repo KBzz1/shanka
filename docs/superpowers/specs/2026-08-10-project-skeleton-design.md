@@ -24,6 +24,10 @@
 | Cloudflare | Tunnel 方案（无公网 IP、无开放端口、无备案）；域名已在 Cloudflare 管理 |
 | 可观测性补齐 | 入契约：本次只写设计/契约文档，不写实现代码 |
 | 并行目录命名 | `agent_evolution/` |
+| 后台任务架构 | 进程内调度器 + DB 即状态；不引外部任务队列（Celery/RQ） |
+| 数据演进路径 | 账号：`users` 表 + `devices.user_id` 可空外键；新卡类型：专用列模式（D-01） |
+| 工具链 | 骨架含 `pyproject.toml`（ruff/mypy）+ pre-commit；CI 待远端仓库后补 |
+| 守卫范围 | contract 测试覆盖四项一致性（schemas↔openapi / ORM↔database-design / 错误码↔契约 7 章 / localization_key↔文案） |
 
 ## 3. 仓库布局
 
@@ -178,26 +182,62 @@ Android 前端 ──HTTPS──▶ api.<domain>（Cloudflare 边缘，DNS + 自
 
 | 文档 | 更新内容 |
 | --- | --- |
-| `docs/Architecture/project-structure.md` | 仓库总览加 `agent_evolution/`；新增"测试策略"章节（四层职责、命名规范、契约测试验证四条红线、幂等/并发/级联行为必须进 integration 层）；`tests/` 目录说明 |
-| `docs/Architecture/structure-contract.md` | 新增"运行可观测性"章节（O-1/O-2/O-3）；新增 6.10 聚合观测接口（O-4）；评估骨架说明（O-5） |
+| `docs/Architecture/project-structure.md` | 仓库总览加 `agent_evolution/`；新增"测试策略"章节（四层职责、命名规范、契约测试验证守卫四项、幂等/并发/级联行为必须进 integration 层）；新增"开发工具链"小节（9.3）；`tests/` 目录说明 |
+| `docs/Architecture/structure-contract.md` | 新增"运行可观测性"章节（O-1/O-2/O-3）；新增 6.10 聚合观测接口（O-4）；评估骨架说明（O-5）；后台任务执行架构定式（9.1） |
+| `docs/Architecture/database-design.md` | 新增"演进路径"章节（9.2 账号体系 / 新卡类型原则）；迁移工具选型（Alembic） |
 | `docs/Architecture/openapi.yaml` | 新增 `/healthz`、`/readyz`、`/v1/observability/quality-summary` |
 | `docs/Architecture/deployment.md` | **新增文档**：Cloudflare Tunnel 接入（第 6 节）+ 灰云迁移阶梯 |
 | `docs/Architecture/README.md` | 文档清单更新（新增 deployment.md、引用 agent_evolution/） |
-| `docs/Progress.md` | 任务表更新：P0-1 覆盖骨架（含空文件编排）；新增可观测性契约任务 |
+| `docs/Progress.md` | 任务表更新：P0-0 骨架（含 pyproject/pre-commit）、P0-4 可观测性、P3-4 Tunnel 实操最后实施 |
 
-## 9. 明确不做（YAGNI）
+## 9. 演进性设计补全（防屎山）
+
+### 9.1 后台任务执行架构
+
+- **MVP 定式**：API 进程内调度器——进程内后台循环扫描 PENDING 任务/批次执行（PDF 解析、规划、分批生成）；任务/批次状态 + 游标存 DB，**DB 即状态**，不引入外部任务队列（Celery/RQ/Redis）。
+- **演进路径**：现有契约已隐含多实例兼容——孤儿 RUNNING 心跳恢复（30 分钟）+ DB 条件更新抢占天然适配多 worker；未来灰云多实例只需加 DB 轮询调度，业务代码不动。
+- 明确禁止"为性能提前引队列"；P2-2 / P2-4 实现时必须遵循此定式。
+
+### 9.2 数据模型演进路径（写入 database-design.md 新增"演进路径"章节）
+
+- **账号体系**：未来引入 `users` 表 + `devices.user_id` 可空外键（先 NULL 后回填），**不重构 devices 主键**；匿名设备 ID 体系维持为兼容层。
+- **新卡类型**：沿用 D-01 模式（专用列 + `front`/`back` 通用渲染）。类型数可控（≤5）时用专用列；字段高度异构或继续膨胀时再评估 JSON 扩展列；所有结构变更走迁移工具（Alembic）。
+
+### 9.3 依赖与工具链
+
+- 骨架阶段创建 `pyproject.toml`：依赖声明 + 工具配置（ruff format/lint、mypy type-check）；依赖锁定文件。
+- `pre-commit` 本地钩子：format → lint → type-check。
+- CI 等远端仓库就绪后再补（GitHub Actions 等）；本期不建。
+
+### 9.4 自动化守卫范围（contract 测试覆盖四项）
+
+1. `app/schemas` ↔ `openapi.yaml`
+2. `infra/db` ORM ↔ `database-design.md`
+3. 错误码清单 ↔ 结构契约第 7 章
+4. `localization_key` ↔ 文案资产清单
+
+写入 project-structure.md 测试策略章节，作为四条一致性红线的验证手段。
+
+### 9.5 配置分层
+
+- pydantic-settings 单层配置类；默认值进代码；密钥/令牌（API Key 加密密钥等）走环境变量；敏感项清单文档化；禁止散落硬编码。
+- 写入 P0-1 实现要求。
+
+## 10. 明确不做（YAGNI）
 
 - 不写任何可运行代码（本期为纯骨架 + 契约）。
+- 不引入外部任务队列（Celery/RQ/Redis）——MVP 用 DB 即状态 + 进程内调度（9.1）。
 - 不引入 OpenTelemetry / 追踪系统（MVP 用 request_id + 结构化日志 + 已观测字段，满足即可；P3-3 后按实测再评估）。
 - 不做跨设备聚合观测接口（数据出口合法性优先）。
 - 不做多模型厂商 API 观测适配（观测范围仅 DeepSeek）。
 - 不实现 CF 边缘 WAF 规则细节（入 deployment.md 为可选项）。
 - 不建测试用例（本期只建目录 + 策略契约）。
+- 不建 CI（远端仓库就绪后补）。
 
-## 10. 后续实施顺序（writing-plans 输入）
+## 11. 后续实施顺序（writing-plans 输入）
 
-1. 建 `main/` 空文件骨架（含 tests/ 四层目录）。
+1. 建 `main/` 空文件骨架（含 tests/ 四层目录、`pyproject.toml` + pre-commit 配置）。
 2. 建 `agent_evolution/`（manifest + CHANGELOG + 各资产 v1 首版，资产内容由契约/PRD 推导）。
-3. 更新契约文档（第 8 节清单；含 O-6 成本观测与 DeepSeek 范围限定）。
+3. 更新契约文档（第 8 节清单；含 O-6 成本观测、9.1 任务架构、9.2 演进路径）。
 4. 写 deployment.md（Tunnel 设计定稿；实际接入为**最后阶段**任务，见 Progress.md P3-4）。
 5. 提交。
