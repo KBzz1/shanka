@@ -114,11 +114,20 @@
 
 ### V2 — FSRS 复习与看板闭环
 
-**`TODO`｜依赖：V1｜覆盖：FR-15/16、weekly_goal 边界、接口 5/6.6/6.8、AC-10**
+**`DONE`｜依赖：V1｜覆盖：FR-15/16、weekly_goal 边界、接口 5/6.6/6.8、AC-10**
 
 以单一适配封装 py-fsrs 契约参数；实现到期队列、四档评级、client_event_id 去重、ReviewState 快照、牌组进度和 IANA 时区周看板。
 
 验收：契约 5.1 确定性断言；事务回滚；重复/冲突事件；排序；周一分桶、DST/跨周、连续天数、首次/非首次、零分母 null、weekly_goal 缺省及 AC-10。
+
+当前证据（2026-08-11，分支 codex/v2 合并回 main，11 commits 0b3ab91..970a45c + 契约修订 6a74422/8a7a41e）：
+- py-fsrs 单一适配（services/scheduling）：固定 fsrs 4.1.2（R-13：任何 py-fsrs 版本无法逐字满足原 5.2 表——3.x 有 State.New 但无学习步配置；4.x/6.x 无 New 且步进语义偏移）；R-13 裁决采用 3 步 learning_steps=(10m, 10m, 1d)（py-fsrs 语义下 GOOD 间隔=steps[step+1]，5/5 行独立复现 5.2 表，符合 C-01 意图）；structure-contract 5.1/C-01/AGENTS.md 三处契约同步修订（2 步→3 步 + 参数数注释修正 21→19）。
+- 评级闭环（services/review + /decks/{id}/review + /review-events）：到期队列（due<=now 按 due、position 排序）；四档评级事务（review_event INSERT + review_state 全量快照 UPDATE 同事务；回滚无部分写入）；state 落库统一大写（契约 3.10 枚举，V1 deck_progress mastered 口径自动对齐）；Learning step 由 due-last_review 间隔推导 + last_rating 消歧（AGAIN/HARD→step0、GOOD→step1、1d→step2——二次 GOOD +1d、三次毕业、AGAIN 后 GOOD +10m 均实证）；reps/lapses 自计数（py-fsrs 4.x Card 无该属性）。
+- 双幂等（1.3）：Idempotency-Key 优先（execute_idempotent 全快照重放）；client_event_id 兜底（UNIQUE(device_id, client_event_id) 冲突 → 比对 card_id+rating → 一致重放不重复计数/不一致 409 REVIEW_EVENT_CONFLICT）；R-12 口径：key 层重放=完整快照、client_event_id 兜底重放=当前 review_state 视图。
+- 看板（/stats/dashboard）：IANA 时区周一 bucket（zoneinfo，DST 周界实测偏差 0）；weekly_activity[7]/weekly_total/week_change（上周 0→None）/weekly_goal_progress=min(周总数/goal,1)（缺省→None）/recall=周内 GOOD/全部/first_answer=每卡历史首个 GOOD 累计/retention=周内非首次 GOOD/非首次/streak=本地当天向前连续自然日/mastered=全量 C-03/分母 0→None/has_data；R-12 口径登记。
+- 确定性断言（C-02 fuzzing 关闭）：同输入同输出；5.2 表 5 行全复现。
+- 验收实测：四工具全绿（162 passed、mypy 111 files）；干净 venv 安装 + 迁移 OK；真实 uvicorn 复习闭环冒烟（建卡→队列 1→评级 LEARNING/reps=1→队列 0→看板 weekly_total=1/has_data=True/recall=1.0）；边界 60 用例全绿；泄漏 grep 仅 docstring "task-1-report" 的 "sk-" 子串误报（无真实密钥）。
+- 登记：R-12 RESOLVED（看板口径裁决 + client_event_id 兜底重放口径）；R-13 RESOLVED（py-fsrs 版本/学习步配置裁决 + 契约同步）；structure-contract 3.10 difficulty 范围漂移（V1 登记，保持待同步）。
 
 ### V3A — PDF 生命周期闭环
 
