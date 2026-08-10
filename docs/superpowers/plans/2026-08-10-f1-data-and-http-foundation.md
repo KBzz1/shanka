@@ -26,6 +26,7 @@
 - 提交只 `git add` 本任务文件，禁止卷入工作区既有未提交改动。
 - 工作包边界：F1 不含业务路由（V1+）、PDF 存储管理（V3A）、Key 加密与 DeepSeek（V3B）、llm/generation/batch 指标（V3B/V5A）、看板聚合（V2）。`app/api/` 下业务占位模块（decks.py 等）不得改动。
 - 幂等/限流/设备中间件的实现在 `app/middleware/` 统一（红线 3），禁止散落各处。
+- **中间件顺序约定（主 Agent 裁决，2026-08-10）**：Starlette `add_middleware` 为 insert(0) 语义（后加者在外层）。最终运行序（外→内）= **Metrics → RequestID → RateLimit → DeviceID → Logging → 路由**；对应添加序（首=最内）= Logging → DeviceID → RateLimit → RequestID → Metrics。RateLimit 设备维度键用**原始 X-Device-ID 请求头**（DeviceID 在内层运行，原始头即匿名体系下的设备身份，限流键一致即可）；DeviceID 自身告警日志经 contextvar 取 request_id（RequestID 在其外层）。
 - Task 1~10 由实现 subagent 完成；Task 11/12 仅主 Agent 执行（验收 + Progress 更新），subagent 不得触碰 Progress。
 
 ---
@@ -70,7 +71,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -116,7 +117,7 @@ def test_session_get_db_dependency_yields_session() -> None:
         app.state.session_factory = factory
 
         @app.get("/ping-db")
-        def ping_db(session: Session = get_db_session()) -> dict[str, int]:
+        def ping_db(session: Session = Depends(get_db_session)) -> dict[str, int]:
             assert session.execute(text("SELECT 1")).scalar() == 1
             return {"ok": 1}
 
@@ -1357,10 +1358,12 @@ class DeviceIDMiddleware:
 
 - [ ] **Step 4: 装配进 `main/app/main.py`**
 
+按中间件顺序约定（Global Constraints）：添加序（首=最内）Logging → DeviceID → RateLimit → RequestID → Metrics，最终运行序（外→内）Metrics → RequestID → RateLimit → DeviceID → Logging → 路由。当前栈为 [RequestID, Logging]（Task 5 已加），本任务追加 DeviceID：
+
 ```python
 from app.middleware.device_id import DeviceIDMiddleware
 
-    app.add_middleware(DeviceIDMiddleware)  # 在 Logging/RequestID 之后、业务路由之前（顺序：Logging → RequestID → DeviceID → RateLimit）
+    app.add_middleware(DeviceIDMiddleware)  # 添加序在 Logging 之后 → DeviceID 位于 RequestID 内层（运行序 RequestID 先于 DeviceID）
 ```
 
 - [ ] **Step 5: 运行确认通过 + ruff/mypy**
@@ -1394,7 +1397,7 @@ git commit -m "feat(auth): X-Device-ID 鉴权中间件（自动注册 + 探针�
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.middleware.error_handler import register_exception_handlers
@@ -2180,10 +2183,10 @@ class RateLimiter:
     def check(self, key: str) -> tuple[bool, int]:
         now = self.clock()
         window_id = int(now // self.window_seconds)
-        # 惰性清理已过期窗口，防止无界增长（单设备窗口数有限，清理即足够）
-        expired = [wid for wid, _ in self._counts if wid < window_id]
-        for wid in expired:
-            del self._counts[wid]
+        # 惰性清理已过期窗口，防止无界增长（键为 (window_id, key) 元组，删除须按完整键）
+        expired = [(wid, k) for wid, k in self._counts if wid < window_id]
+        for wid_k in expired:
+            del self._counts[wid_k]
         entry = self._counts.get((window_id, key))
         if entry is None:
             self._counts[(window_id, key)] = (now, 1)
@@ -2268,10 +2271,20 @@ class RateLimitMiddleware:
 
 - [ ] **Step 6: 装配进 `main/app/main.py`**
 
+按中间件顺序约定（Global Constraints）：RateLimit 添加序在 DeviceID 之后（运行序 RateLimit 先于 DeviceID）——设备维度键用**原始 X-Device-ID 请求头**（`request.headers.get("X-Device-ID") or ""`），不用 `request.state.device_id`（DeviceID 尚未运行）：
+
 ```python
 from app.middleware.rate_limit import RateLimitMiddleware
 
-    app.add_middleware(RateLimitMiddleware, settings=settings)  # 在 DeviceID 之后
+    app.add_middleware(RateLimitMiddleware, settings=settings)  # 添加序在 DeviceID 之后 → 运行序 RateLimit 先于 DeviceID
+```
+
+对应 `_scope` 判定中设备键获取改为：
+
+```python
+        device_key = request.headers.get("X-Device-ID") or ""
+        limiter = {...}[scope]
+        allowed, retry_after = limiter.check(device_key)
 ```
 
 - [ ] **Step 7: 运行确认通过 + ruff/mypy**
@@ -2423,15 +2436,17 @@ class MetricsMiddleware:
 
 - [ ] **Step 5: 装配进 `main/app/main.py`**
 
+按中间件顺序约定（Global Constraints）：Metrics 添加序在最后（运行序最外层，统计所有响应含 401/429）：
+
 ```python
 from app.api import metrics
 from app.middleware.metrics_middleware import MetricsMiddleware
 
     app.include_router(metrics.router)
-    app.add_middleware(MetricsMiddleware)  # 最外层（先于 Logging）
+    app.add_middleware(MetricsMiddleware)  # 添加序最后 → 运行序最外层（先于 RequestID）
 ```
 
-（中间件顺序：Metrics → Logging → RequestID → DeviceID → RateLimit。FastAPI `add_middleware` 后加的在最外层——按此顺序调用使其符合：先 `add_middleware(MetricsMiddleware)`，再 Logging，再 RequestID，再 DeviceID，再 RateLimit。）
+（最终运行序（外→内）：Metrics → RequestID → RateLimit → DeviceID → Logging → 路由。Metrics 统计包括被 RateLimit/DeviceID 拒绝的请求。）
 
 - [ ] **Step 6: 运行确认通过 + ruff/mypy + 全量测试**
 
