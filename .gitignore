@@ -1,2 +1,4 @@
 /res/*.pdf
 /.env
+# SDD 工作区（git-ignored scratch，ledger/brief/report/review-package）
+/.superpowers/
