@@ -17,6 +17,10 @@ anyio==4.14.2
     #   watchfiles
 ast-serialize==0.8.0
     # via mypy
+attrs==26.1.0
+    # via
+    #   jsonschema
+    #   referencing
 certifi==2026.7.22
     # via
     #   httpcore
@@ -59,6 +63,10 @@ idna==3.18
     #   httpx
 iniconfig==2.3.0
     # via pytest
+jsonschema==4.26.0
+    # via shanka-backend (pyproject.toml)
+jsonschema-specifications==2025.9.1
+    # via jsonschema
 librt==0.15.0
     # via mypy
 mako==1.4.1
@@ -113,6 +121,14 @@ pyyaml==6.0.3
     #   pre-commit
     #   shanka-backend (pyproject.toml)
     #   uvicorn
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
+rpds-py==2026.6.3
+    # via
+    #   jsonschema
+    #   referencing
 ruff==0.16.2
     # via shanka-backend (pyproject.toml)
 sqlalchemy==2.0.51
@@ -131,6 +147,7 @@ typing-extensions==4.16.0
     #   mypy
     #   pydantic
     #   pydantic-core
+    #   referencing
     #   sqlalchemy
     #   starlette
     #   typing-inspection
