@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 V3B DONE 与证据位置>
+**结果**：V3B DONE（2026-08-11）。验收与证据见 docs/Progress.md 第 4 节 V3B 行（7 commits 792bfb2..d8b7be6，分支 codex/v3b）：242 用例全绿、四工具通过、干净安装+迁移、uvicorn 冒烟（UNKNOWN 空态/缺密钥 500）、边界 64 用例全绿、AC-11 通过、全 mock 不触网。全任务 checklist 勾选完成。
 
 **Goal:** 实现 API Key 的 AES-256-GCM 环境密钥加密保存与覆盖规则（仅 infra/llm 解密）、正式 DeepSeek adapter（鉴权/thinking 开关/JSON 输出/超时/解析/usage 映射/错误映射与脱敏，mock HTTP transport 验证不访问外网）、Key 状态映射（AVAILABLE/INVALID/INSUFFICIENT_BALANCE/UNKNOWN）与 PUT/GET 路由，使 V3B 依据真实验收证据标记 DONE 且 AC-08/11 后端本机部分通过。
 
@@ -44,11 +44,11 @@
 - Consumes: cryptography（新依赖）、Settings
 - Produces: `app.config.Settings` 新字段：`api_key_encryption_key: str | None = None`（repr=False，env API_KEY_ENCRYPTION_KEY）、`deepseek_model: str = "deepseek-v4-flash"`、`deepseek_thinking: bool = False`、`deepseek_timeout_seconds: float = 60.0`；`infra.llm.crypto.encrypt_key(plaintext: str, key: bytes) -> str`（返回 base64(iv+ciphertext)）、`infra.llm.crypto.decrypt_key(payload: str, key: bytes) -> str`、`infra.llm.crypto.key_from_settings(settings) -> bytes | None`（hex 解析；非法/缺失 → None）；Task 2 adapter 与 Task 3 service 消费
 
-- [ ] **Step 1: 安装 cryptography + 更新 pyproject/lock**
+- [x] **Step 1: 安装 cryptography + 更新 pyproject/lock**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend pip install "cryptography>=42.0" && conda run -n shanka-backend pip-compile pyproject.toml --extra dev --output-file requirements-dev.lock`
 
-- [ ] **Step 2: Settings 扩展 `main/app/config.py`**
+- [x] **Step 2: Settings 扩展 `main/app/config.py`**
 
 ```python
     # API Key 加密密钥（database-design 2.2：环境变量，32 字节 hex；缺失时 PUT /api-key 不可用）
@@ -61,7 +61,7 @@ Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend pip inst
 
 `test_settings.py` 追加断言（model/thinking/timeout 默认；encryption key 默认 None 且 repr 不含）。
 
-- [ ] **Step 3: 写失败单元测试 `main/tests/unit/test_crypto.py`**
+- [x] **Step 3: 写失败单元测试 `main/tests/unit/test_crypto.py`**
 
 ```python
 """infra.llm.crypto AES-256-GCM 加密单元测试（database-design 2.2）。"""
@@ -116,7 +116,7 @@ def test_crypto_key_from_settings_invalid_returns_none() -> None:
     assert key_from_settings(Settings()) is None
 ```
 
-- [ ] **Step 4: 实现 `main/infra/llm/crypto.py`**
+- [x] **Step 4: 实现 `main/infra/llm/crypto.py`**
 
 ```python
 """API Key 加密（database-design 2.2；红线 4：仅 infra/llm 调用路径可解密）。
@@ -162,12 +162,12 @@ def decrypt_key(payload: str, key: bytes) -> str:
     return plaintext.decode("utf-8")
 ```
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy**
+- [x] **Step 5: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_crypto.py tests/unit/test_settings.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy infra/llm/crypto.py app/config.py tests/unit/test_crypto.py`
 Expected: PASS
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/pyproject.toml main/requirements-dev.lock main/app/config.py main/infra/llm/crypto.py main/tests/unit/test_crypto.py main/tests/unit/test_settings.py
@@ -186,7 +186,7 @@ git commit -m "feat(crypto): AES-256-GCM Key 加密（随机 IV 随密文）+ Se
 - Consumes: Settings（model/thinking/timeout/api_key_encryption_key）、httpx、crypto
 - Produces: `infra.llm.deepseek.DeepSeekClient`（`__init__(settings, transport=None)`——transport 可注入 mock；`validate_key(api_key: str) -> str`（返回 AVAILABLE/INVALID/INSUFFICIENT_BALANCE；上游不可用抛 AppError(API_KEY_UNAVAILABLE)）；`chat(prompt: str, api_key: str) -> dict`（请求构造（thinking 开关/JSON output/超时）→ 响应解析（usage 映射、content 提取）→ 错误映射）；`_masked_key(api_key: str) -> str`（sk-****后4位））；Task 3 service 与 V4 生成消费
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_deepseek_adapter.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_deepseek_adapter.py`**
 
 ```python
 """infra.llm.deepseek adapter 单元测试：mock HTTP transport（不访问外网）。"""
@@ -323,12 +323,12 @@ def test_adapter_masked_key() -> None:
 
 （说明：thinking 参数名以 DeepSeek 官方 API 为准（"thinking" 或 "reasoning"）——mock 测试断言请求含该键（两者兼容），实现时固定实际参数名并记录；R1 live 核对。validate 用 balance 端点；上游 401 → INVALID、200 is_available=false/余额 0 → INSUFFICIENT_BALANCE、429/5xx/网络 → API_KEY_UNAVAILABLE。chat 的 JSON output 用 response_format json_object。usage 映射含 cache hit/miss（Prompt Cache FR-11）。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_deepseek_adapter.py -v`
 Expected: FAIL（ModuleNotFoundError: infra.llm.deepseek）
 
-- [ ] **Step 3: 实现 `main/infra/llm/deepseek.py`**
+- [x] **Step 3: 实现 `main/infra/llm/deepseek.py`**
 
 ```python
 """DeepSeek 正式 adapter（红线 4：Key 明文只在本模块调用路径；异常脱敏）。
@@ -430,12 +430,12 @@ class DeepSeekClient:
 
 （说明：mock transport 测试断言请求形状；生产构造无 transport（默认 httpx 网络）。validate_key 的 401 在 chat 中映射为 API_KEY_UNAVAILABLE（chat 时 Key 已保存但可能失效——契约 1.5：llm 层异常统一 API_KEY_* / GENERATION_FAILED）。）
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_deepseek_adapter.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy infra/llm/deepseek.py tests/unit/test_deepseek_adapter.py`
 Expected: PASS（thinking 参数名与 401 映射按测试断言校准）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/infra/llm/deepseek.py main/tests/unit/test_deepseek_adapter.py
@@ -454,7 +454,7 @@ git commit -m "feat(llm): DeepSeek adapter（鉴权/thinking/JSON output/超时/
 - Consumes: Task 1 crypto、Task 2 adapter、F1 models（ApiKey）、errors
 - Produces: `services.api_key.save_key(session, *, device_id, api_key, encryption_key, client) -> dict`（validate_key → AVAILABLE 才加密落库（密文+masked_key+status+updated_at）；INVALID/INSUFFICIENT 不落库不覆盖返回状态；API_KEY_UNAVAILABLE 抛 AppError 502）；`services.api_key.get_status(session, *, device_id, encryption_key) -> dict`（未保存 → status=UNKNOWN + masked_key="";已保存 → 解密验证？——**决策**：get_status 只返回 DB 存的 status/masked_key/updated_at（不解密不重校验——校验是写路径动作；V4 生成时若 Key 失效 chat 抛 API_KEY_UNAVAILABLE）；`services.api_key.masked(api_key) -> str`（复用 adapter._masked_key）；Task 4 handler 消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_api_key_service.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_api_key_service.py`**
 
 ```python
 """services.api_key 集成测试：保存/状态/覆盖规则/脱敏（真实 SQLite + mock transport）。"""
@@ -618,12 +618,12 @@ def test_api_key_save_upstream_unavailable_raises(session_factory: Callable[[], 
 
 （说明：覆盖规则（6.2）：INVALID/INSUFFICIENT 不落库不覆盖；AVAILABLE 落库覆盖。get_status 不解密不重校验。`sk-****lid1` 的 masked 计算（后 4 位 "lid1"）。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_api_key_service.py -v`
 Expected: FAIL（ModuleNotFoundError: services.api_key.service）
 
-- [ ] **Step 3: 实现 `main/services/api_key/service.py`**
+- [x] **Step 3: 实现 `main/services/api_key/service.py`**
 
 ```python
 """services.api_key：Key 保存/状态/覆盖规则/脱敏（structure-contract 6.2；database-design 2.2）。
@@ -674,12 +674,12 @@ def get_status(session: Session, *, device_id: str, encryption_key: bytes) -> di
 
 （说明：`encryption_key` 参数为解密/加密密钥——get_status 虽不解密，签名保留 encryption_key 参数（语义一致性，Task 4 handler 传 settings 密钥）。`decrypt_key` 导入未使用会被 ruff F401——移除或留作 V4 使用（**决策**：本文件不导入 decrypt_key（V4 生成时在 infra/llm 内部解密），保持 imports 干净。）
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_api_key_service.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/api_key/ tests/integration/test_api_key_service.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/services/api_key/service.py main/tests/integration/test_api_key_service.py
@@ -700,7 +700,7 @@ git commit -m "feat(api-key): Key 保存/状态/覆盖规则/脱敏（仅 AVAILA
 - Consumes: Task 3 service、Task 1/2、F1 幂等
 - Produces: 路由 `PUT /api-key`（200 ApiKey；400 缺 api_key；502 API_KEY_UNAVAILABLE；幂等）、`GET /api-key/status`（200 ApiKey）；`app.schemas.api_key.ApiKey`（status/masked_key/updated_at）；main.py include_router
 
-- [ ] **Step 1: 实现 `main/app/schemas/api_key.py`**
+- [x] **Step 1: 实现 `main/app/schemas/api_key.py`**
 
 ```python
 """API Key schema（openapi ApiKey；structure-contract 3.1）。"""
@@ -720,7 +720,7 @@ class ApiKey(BaseModel):
 
 （说明：ApiKeyPutRequest 的 api_key 校验（非空）由 Pydantic（str 必填）；长度不限（Key 长度多变）。openapi ApiKey required=[status, masked_key, updated_at]——updated_at 必填？openapi 3.1 ApiKey required 含 updated_at ✓——但 UNKNOWN 时 updated_at 无值。**裁决**：UNKNOWN 时 updated_at 返回 null（openapi 无 nullable 标注——守卫 required 校验模型字段存在即可，null 值可接受；或 UNKNOWN 时返回空串。**决策**：updated_at 返回 null（JSON null），模型 `str | None = None`——守卫 required 通过（字段存在）。与守卫一致性在 Task 5 核对。）
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_api_key_api.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_api_key_api.py`**
 
 ```python
 """API Key API 集成测试（迁移 schema + HTTP + mock transport 注入）。"""
@@ -757,7 +757,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 （说明：**测试注入策略**——handler 内构造 DeepSeekClient（用 app.state.settings 的 transport=None 生产默认）。测试需要注入 mock：**决策**：a) monkeypatch `infra.llm.deepseek.DeepSeekClient` 为 FakeClient（validate_key 返回可控状态）——最简单可靠，测试覆盖 handler/service 逻辑（adapter 本身已单测）；b) Settings 加 transport 字段——污染生产配置。**采用 a**。FakeClient 在测试文件内定义。）
 
-- [ ] **Step 3: 实现 handler + 装配**
+- [x] **Step 3: 实现 handler + 装配**
 
 ```python
 """api_key.py：Key 保存/状态路由（structure-contract 6.2；openapi /api-key）。"""
@@ -831,12 +831,12 @@ def api_key_status_endpoint(request: Request, session: Session = Depends(get_db_
 
 （说明：PUT /api-key 中 DeepSeekClient 在 handler 构造（request 级），finally close（biz 抛异常时也要 close——**修正**：try/finally 包裹 execute_idempotent + close。GET status 不解密（get_status 签名保留 encryption_key 但未用）。幂等：同 key 同 body 重放（校验会重复调 balance——**优化**：execute_idempotent 先查后 fn，重放时 fn 不执行 → 校验不重复 ✓）。）
 
-- [ ] **Step 4: main.py 装配 + 测试通过 + ruff/mypy + 全量**
+- [x] **Step 4: main.py 装配 + 测试通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_api_key_api.py -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/app/schemas/api_key.py main/app/api/api_key.py main/app/main.py main/tests/integration/test_api_key_api.py
@@ -855,7 +855,7 @@ git commit -m "feat(api-key-api): PUT /api-key + GET status 路由（幂等 + mo
 - Consumes: Task 1-4 全部产物
 - Produces: AC-11 验收映射；守卫（ApiKey ↔ openapi）；脱敏全链路断言（PUT 响应/日志/DB 无明文）
 
-- [ ] **Step 1: 守卫测试 `main/tests/contract/test_api_key_schemas_guard.py`**
+- [x] **Step 1: 守卫测试 `main/tests/contract/test_api_key_schemas_guard.py`**
 
 ```python
 """契约守卫：ApiKey ↔ openapi（守卫 1 扩展）。"""
@@ -871,7 +871,7 @@ def test_api_key_schema_openapi_consistent() -> None:
 
 （说明：openapi ApiKey required=[status, masked_key, updated_at]；status 是 $ref ApiKeyStatus（enum——str 不校验值集）。updated_at 是 format: date-time string——模型 str | None；**守卫的 required 检查**：`field.is_required()` 对 `str | None = None` 是 False → 守卫报"openapi 必填但模型可选"！**修正**：模型 updated_at 必填（`updated_at: str` 无默认）？但 UNKNOWN 时无值……**裁决**：openapi required 含 updated_at（字段权威）——模型 `updated_at: str | None`（无默认值，构造时必传）→ `is_required()` True（无默认）→ 守卫通过；UNKNOWN 时 handler 传 None（JSON null）。**实现**：`updated_at: str | None`（无 = None 默认）。守卫的 required 检查基于 is_required（无默认值即必填）✓。）
 
-- [ ] **Step 2: 验收测试 `main/tests/acceptance/test_acceptance_ac11.py`**
+- [x] **Step 2: 验收测试 `main/tests/acceptance/test_acceptance_ac11.py`**
 
 ```python
 """验收测试：AC-11 API Key 联调（PRD；迁移 schema + HTTP + FakeClient 注入）。"""
@@ -965,12 +965,12 @@ def test_acceptance_ac11_no_plaintext_in_logs(client: TestClient, caplog: pytest
 
 （说明：FakeClient 的 monkeypatch 注入（Task 4 决策 a）；响应/日志无明文断言。DB 无明文由 service 测试覆盖（encrypted_key 不含明文）。）
 
-- [ ] **Step 3: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 3: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/contract/test_api_key_schemas_guard.py tests/acceptance/ -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add main/tests/contract/test_api_key_schemas_guard.py main/tests/acceptance/test_acceptance_ac11.py
@@ -984,12 +984,12 @@ git commit -m "test(acceptance): AC-11 验收映射 + ApiKey 守卫 + 脱敏全�
 **Files:**
 - 验证：全部 V3B 产物；不新增代码
 
-- [ ] **Step 1: 四工具命令全绿**
+- [x] **Step 1: 四工具命令全绿**
 
 Run（均在 `main/`）: `python --version`、`python -m pytest`、`python -m ruff check .`、`python -m ruff format --check .`、`python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 2: 干净环境安装 + 迁移**
+- [x] **Step 2: 干净环境安装 + 迁移**
 
 ```bash
 conda run -n shanka-backend python -m venv /tmp/v3b-accept-venv
@@ -1007,7 +1007,7 @@ print('migration-ok')
 rm -rf /tmp/v3b-accept-venv
 ```
 
-- [ ] **Step 3: uvicorn 冒烟（无加密密钥 → PUT 500；有密钥 → 需要真实校验？——本机无真实调用——**决策**：冒烟只验证路由可达与错误分支（缺密钥 500、GET status UNKNOWN——不触网路径）；PUT 校验链路由 mock 测试覆盖（本机不发起真实 DeepSeek 请求——LOCAL-DONE 前红线）。冒烟：启动 + GET status UNKNOWN + 缺密钥 PUT → 500（或配置假密钥 → PUT 走真实网络？禁止——用无密钥配置验证 500 分支）**
+- [x] **Step 3: uvicorn 冒烟（无加密密钥 → PUT 500；有密钥 → 需要真实校验？——本机无真实调用——**决策**：冒烟只验证路由可达与错误分支（缺密钥 500、GET status UNKNOWN——不触网路径）；PUT 校验链路由 mock 测试覆盖（本机不发起真实 DeepSeek 请求——LOCAL-DONE 前红线）。冒烟：启动 + GET status UNKNOWN + 缺密钥 PUT → 500（或配置假密钥 → PUT 走真实网络？禁止——用无密钥配置验证 500 分支）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -1023,12 +1023,12 @@ kill %1
 ```
 Expected: healthz 200、api-key-status UNKNOWN + masked_key ""、put-no-encryption-key=500（INTERNAL_ERROR——加密密钥未配置）
 
-- [ ] **Step 4: 关键边界复核（收证据）**
+- [x] **Step 4: 关键边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_crypto.py tests/unit/test_deepseek_adapter.py tests/integration/test_api_key_service.py tests/integration/test_api_key_api.py tests/acceptance/test_acceptance_ac11.py -v`
 Expected: 全绿；记录关键用例名（加密往返、adapter 错误映射、覆盖规则、脱敏、AC-11）
 
-- [ ] **Step 5: 无明文泄漏抽查**
+- [x] **Step 5: 无明文泄漏抽查**
 
 Run: `grep -rn "sk-" main/app main/services main/infra --include="*.py" | grep -v 'sk-\*\*\*\*' | grep -v 'sk-test\|sk-bad\|sk-x\|sk-same\|sk-secret\|sk-valid\|sk-first\|sk-second\|sk-status\|sk-ac11\|sk-low\|sk-.*[0-9]\{4\}' || echo "no-plaintext-key"`——**修正**：直接 `grep -rn "sk-" main/app main/services main/infra --include="*.py" || true` 人工核对（测试文件含假值属预期；实现代码不得有真 Key 形态）。
 Expected: 实现无明文 Key 形态（测试假值除外）
@@ -1041,13 +1041,13 @@ Expected: 实现无明文 Key 形态（测试假值除外）
 - Modify: `docs/Progress.md`
 - Modify: `docs/superpowers/plans/2026-08-11-v3b-api-key-and-deepseek.md`（标题下「结果」）
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 V3B 行：`TODO` → `DONE`，证据填写：AES-256-GCM 加密（随机 IV、仅 infra/llm 解密）、覆盖规则（仅 AVAILABLE 落库/旧 Key 保护）、状态映射、DeepSeek adapter（mock transport：鉴权/thinking/JSON output/超时/usage/错误映射/脱敏）、PUT/GET 路由、AC-11 通过。
 - 第 1 节状态基线：自动化验证测试数更新。
 - 计划文件标题下「结果」注明 V3B DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-11-v3b-api-key-and-deepseek.md
