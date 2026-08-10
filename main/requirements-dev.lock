@@ -33,6 +33,8 @@ filelock==3.32.2
     # via
     #   python-discovery
     #   virtualenv
+fsrs==6.3.2
+    # via shanka-backend (pyproject.toml)
 greenlet==3.5.4
     # via sqlalchemy
 h11==0.16.0
@@ -116,6 +118,7 @@ typing-extensions==4.16.0
     #   alembic
     #   anyio
     #   fastapi
+    #   fsrs
     #   mypy
     #   pydantic
     #   pydantic-core

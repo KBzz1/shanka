@@ -18,6 +18,7 @@ dependencies = [
   "sqlalchemy>=2.0",
   "alembic>=1.13",
   "prometheus-client>=0.20",
+  "fsrs>=4.0",  # py-fsrs 项目（open-spaced-repetition/py-fsrs），PyPI 发行名 fsrs；FSRS-6
 ]
 
 [project.optional-dependencies]
