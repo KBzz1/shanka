@@ -93,6 +93,20 @@ def test_pdfs_api_upload_invalid_extension_400(client: TestClient) -> None:
     assert resp.json()["error"]["code"] == "PDF_UPLOAD_INVALID"
 
 
+def test_pdfs_api_upload_content_length_precheck_400(client: TestClient) -> None:
+    """final review I-1：伪造超大 Content-Length 头（61MB）+ 合法小 body → 400
+    PDF_UPLOAD_INVALID；BodyCaptureMiddleware 在读 body 前按头预检拒绝（不读 body）。"""
+    resp = client.post(
+        "/pdfs",
+        files={"file": ("big.pdf", _pdf_bytes(), "application/pdf")},
+        headers={**_device(), **_idem(), "Content-Length": "60000000"},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "PDF_UPLOAD_INVALID"
+    assert body["error"]["localization_key"] == "error.pdf_upload_invalid"
+
+
 def test_pdfs_api_upload_accepts_and_lists(client: TestClient) -> None:
     device = _device()
     resp = client.post(
