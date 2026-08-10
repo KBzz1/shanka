@@ -19,6 +19,8 @@ def test_settings_defaults() -> None:
     assert settings.rate_limit_api_key_per_hour == 10
     assert settings.rate_limit_samples_per_hour == 20
     assert settings.rate_limit_pdf_per_hour == 10
+    assert settings.pdf_max_size_bytes == 50 * 1024 * 1024
+    assert settings.pdf_max_pages == 500
     assert settings.deepseek_api_key is None
 
 

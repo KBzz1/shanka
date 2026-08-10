@@ -30,5 +30,8 @@ class Settings(BaseSettings):
     rate_limit_api_key_per_hour: int = 10
     rate_limit_samples_per_hour: int = 20
     rate_limit_pdf_per_hour: int = 10
+    # PDF 上传限制（structure-contract 6.1；可运维调整）
+    pdf_max_size_bytes: int = 50 * 1024 * 1024
+    pdf_max_pages: int = 500
     # 敏感项：禁止打印、复制、写入日志/响应/任务明细；`repr=False` 防意外入日志
     deepseek_api_key: str | None = Field(default=None, repr=False)
