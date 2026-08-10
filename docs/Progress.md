@@ -1,6 +1,6 @@
 # 后端开发进度与排期(v2.1)
 
-后端整体进度跟踪。设计契约见 [docs/Architecture/](Architecture/README.md),需求见 [docs/PRD/V2.1/prd_v2_1.md](PRD/V2.1/prd_v2_1.md)。更新日期:2026-08-10。
+后端整体进度跟踪。设计契约见 [docs/Architecture/](Architecture/AGENTS.md),需求见 [docs/PRD/V2.1/prd_v2_1.md](PRD/V2.1/prd_v2_1.md)。更新日期:2026-08-10。
 
 ## 状态图例
 

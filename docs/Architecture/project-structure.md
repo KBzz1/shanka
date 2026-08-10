@@ -7,7 +7,7 @@ shanka_backend/
 ├── docs/                    # 文档(需求 + 设计契约)
 │   ├── PRD/
 │   │   └── V2.1/prd_v2_1.md
-│   └── Architecture/        # 本目录:设计契约(见 README.md)
+│   └── Architecture/        # 本目录:设计契约(见 AGENTS.md)
 ├── main/                    # 后端实现(按本编排落地)
 └── agent_evolution/         # agent 版本化资产:prompt/schema/rubric(目录快照 + manifest)
 ```
