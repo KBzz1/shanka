@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import cards, decks, metrics, probes, review
+from app.api import cards, decks, metrics, probes, review, stats
 from app.config import Settings
 from app.middleware.body_capture import BodyCaptureMiddleware
 from app.middleware.device_id import DeviceIDMiddleware
@@ -49,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(decks.router)
     app.include_router(cards.router)
     app.include_router(review.router)
+    app.include_router(stats.router)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)

@@ -100,10 +100,9 @@ def test_review_api_idempotency_key_replays(client: TestClient) -> None:
     assert resp2.json()["reps"] == 1  # 未重复执行
 
 
-def test_review_api_client_event_id_dedup_without_idem_key(client: TestClient) -> None:
-    """无 Idempotency-Key？契约要求评级带幂等键（openapi IdempotencyKey 参数）——
-    本用例验证带 key 时 client_event_id 兜底仍生效：同 key 异 body 会 409（key 层），
-    故用 client_event_id 相同但 key 不同 → 事件不重复。"""
+def test_review_api_client_event_id_dedup_key_differs(client: TestClient) -> None:
+    """实际场景带 Idempotency-Key 且仅 key 不同：键层不介入（key 不同），
+    client_event_id 兜底生效 → 事件不重复；重放响应 = 当前 review_state 视图（R-12 完整口径）。"""
     device = _device()
     _, card_id = _make_deck_card(client, device)
     client_event = str(uuid.uuid4())
@@ -116,6 +115,7 @@ def test_review_api_client_event_id_dedup_without_idem_key(client: TestClient) -
     r1 = client.post("/review-events", json=payload, headers={**device, **_idem()})
     r2 = client.post("/review-events", json=payload, headers={**device, **_idem()})
     assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json() == r2.json()  # R-12 兜底重放完整口径：响应 = 当前 review_state 视图
     assert r2.json()["reps"] == 1  # client_event_id 兜底重放当前视图，不重复计数
 
 
@@ -129,7 +129,8 @@ def test_review_api_client_event_conflict(client: TestClient) -> None:
         "client_event_id": client_event,
         "device_timezone": "Asia/Shanghai",
     }
-    client.post("/review-events", json=payload_good, headers={**device, **_idem()})
+    r1 = client.post("/review-events", json=payload_good, headers={**device, **_idem()})
+    assert r1.status_code == 200  # 首 POST 正常成功，冲突来自第二 POST 的 client_event_id 复用
     payload_again = {**payload_good, "rating": "AGAIN"}
     resp = client.post("/review-events", json=payload_again, headers={**device, **_idem()})
     assert resp.status_code == 409

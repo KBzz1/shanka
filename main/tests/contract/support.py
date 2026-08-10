@@ -56,12 +56,14 @@ def check_schema_consistency(
     """递归比较 pydantic 模型与 openapi schema，返回违约列表（空 = 一致）。
 
     F0 覆盖：object 属性名与必填、string（含 enum）、integer/number/boolean/array 类型映射、
-    $ref 解析；anyOf/oneOf/allOf 契约暂无，纵向包按需扩展。
+    $ref 解析；anyOf/oneOf 契约暂无，纵向包按需扩展。
     V1（守卫 1 扩展）：openapi 3.1 type 数组（[X, 'null'] 联合）、array items 递归（嵌套
     $ref 与 list[annotation]）、注解 X | None 与 null 联合对应。
+    V2（守卫 1 扩展）：allOf 展平合并（如 ReviewQueueItem = Card + review_state 平铺模型）。
     """
     violations: list[str] = []
     schema = resolve_ref(schema, openapi)
+    schema = _merge_allof(schema, openapi)
     model_fields: dict[str, FieldInfo] = model.model_fields
     props: dict[str, Any] = schema.get("properties", {})
     for name in props:
@@ -119,6 +121,24 @@ def check_schema_consistency(
                 if member_values != set(resolved["enum"]):
                     violations.append(f"{path}.{name}: openapi enum 与模型枚举不一致")
     return violations
+
+
+def _merge_allof(schema: dict[str, Any], openapi: dict[str, Any]) -> dict[str, Any]:
+    """展平 allOf：逐分量解析 $ref 后合并 properties 并集与 required 并集。
+
+    无 allOf 时原样返回。用于 ReviewQueueItem（allOf: Card + {review_state}）等平铺模型
+    ——合并后与 Pydantic 继承模型（model_fields 含父类字段）口径一致。
+    """
+    all_of = schema.get("allOf")
+    if not all_of:
+        return schema
+    merged: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+    for part in all_of:
+        part = resolve_ref(part, openapi)
+        merged["properties"].update(part.get("properties", {}))
+        merged["required"].extend(part.get("required", []))
+    merged["required"] = list(dict.fromkeys(merged["required"]))
+    return merged
 
 
 def _is_enum(annotation: Any) -> bool:
