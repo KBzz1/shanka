@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（V3A 扩展） | 201 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 39；四工具命令全绿（mypy 120 files） |
+| 自动化验证 | `DONE`（V3A 扩展） | 202 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40；四工具命令全绿（mypy 120 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -137,7 +137,7 @@
 
 验收：有效/无目录/扫描件/损坏/伪 MIME/超限、路径穿越、隔离；以磁盘 DB 和文件存储启动新 app/worker 验证恢复；章节范围、删除清理及 AC-01/02 的本机后端行为通过。
 
-当前证据（2026-08-11，分支 codex/v3a 合并回 main，9 commits ae5a1a1..119166c）：
+当前证据（2026-08-11，分支 codex/v3a 合并回 main，10 commits ae5a1a1..b7dab5b）：
 - 三重校验与限制（6.1）：魔数 %PDF + 扩展名 .pdf + MIME application/pdf + ≤50MB + ≤500 页（Settings pdf_max_size_bytes/pdf_max_pages）→ 400 PDF_UPLOAD_INVALID；页数 hint 由 handler 用 PdfReader 读取（损坏文件 hint=None 由扫描器 FAILED 兜底）。
 - 受控存储（1.7/2.3）：storage_key=随机 UUID hex、分目录（[:2]/[2:4]）、32 位 hex 严格校验（路径穿越防护）；删除元数据同步清理存储对象（失败 WARN 不阻断）。
 - pypdf 解析（5.1/5.2/AC-01）：文本层抽样（前 5 页）+ outline 顶层条目为章节（样书 318 页、12 章节：引言/第1-10章/后记，页码 1-based 归一化 + clamp）；不可提取 → PDF_PARSE_FAILED、无目录 → PDF_TOC_MISSING（FAILED 终态 + error_code，不重试不删原始文件）；不 OCR/不猜测/不兜底。
