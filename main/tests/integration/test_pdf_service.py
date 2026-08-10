@@ -116,7 +116,22 @@ def test_pdf_service_delete_removes_and_cleans_storage(
     storage_key = uuid.uuid4().hex  # storage.open 严格校验 32 位 hex（草稿瑕疵修正）
     with session_factory() as session:
         file_id = _seed_pdf(session, device_id=device, storage_key=storage_key)
+        # 终态任务引用：删除后应保留任务、file_id SET NULL（database-design §3）
+        task = Task(
+            task_id=_uuid(),
+            device_id=device,
+            file_id=file_id,
+            status="COMPLETED",
+            selected_chapters="[]",
+            generation_config="{}",
+            generated_card_count=0,
+            resumable=0,
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+        session.add(task)
         session.commit()
+        task_id = task.task_id
     # 写存储对象（模拟扫描器/上传产物；storage.open 前需先建父目录）
     obj_path = storage.open(storage_key)
     obj_path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,6 +142,9 @@ def test_pdf_service_delete_removes_and_cleans_storage(
         session.commit()
     with session_factory() as session:
         assert session.get(PdfFile, file_id) is None
+        task_row = session.get(Task, task_id)
+        assert task_row is not None  # 终态任务保留
+        assert task_row.file_id is None  # SET NULL
     assert not obj_path.exists()  # 存储清理
 
 
