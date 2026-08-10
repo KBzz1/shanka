@@ -10,7 +10,10 @@ py-fsrs 4.1.2 事实（R-13 落地，Task 1 校准）：
 - Card 无 reps/lapses 属性——本模块自计数（每次评级 reps +1；AGAIN 时 lapses +1）；
 - state 落库用 State 枚举 .name 大写（LEARNING/REVIEW/RELEARNING，契约 3.10 枚举值域），
   构造时由大写反映射回 fsrs State（裁决 1）；
-- 契约 3.10 无 step 字段——Learning 卡重建时由 due - last_review 间隔推导（裁决 2）。
+- 契约 3.10 无 step 字段——Learning 卡重建时由 due - last_review 间隔 + last_rating 推导（裁决 2 + I-1）。
+
+now 入参格式契约（M-3）：必须为 `infra.db.session.format_utc` 输出
+（`%Y-%m-%dT%H:%M:%S.%fZ`，UTC、恒 3 位毫秒，database-design §0），`_parse_utc` 按此解析。
 """
 
 import uuid
@@ -65,19 +68,21 @@ def _get_review_state(session: Session, *, card_id: str, now: str) -> ReviewStat
 
 
 def _derive_learning_step(rs: ReviewState) -> int:
-    """Learning 卡重建时由 due - last_review 间隔推导 step（裁决 2；契约 3.10 无 step 字段）。
+    """Learning 卡重建时由 due - last_review 间隔 + last_rating 推导 step（裁决 2 + I-1）。
 
-    匹配 learning_steps=[10m, 10m, 1d]（R-13 3 步配置）：实证首 GOOD 后 step=1、间隔 10m，
-    二次 GOOD 后 step=2、间隔 1d → 1d 映射 step 2、10m 映射 step 1（核心目标：二次 GOOD +1d，
-    5.2 表第 2 行）。10m 间隔在 AGAIN/HARD 路径亦有 step 0 歧义——按裁决统一取 step 1
-    （偏差：AGAIN 后 GOOD 得 1d 而非 10m，登记见 task-2-report fix round 1）。
-    last_review 为空（不应出现于 LEARNING 行）→ 兜底 step 0。
+    匹配 learning_steps=[10m, 10m, 1d]（R-13 3 步配置），实证：首 GOOD 后 step=1、间隔 10m；
+    二次 GOOD 后 step=2、间隔 1d。10m 间隔歧义（AGAIN/HARD 亦产 10m 间隔、step 0）由
+    last_rating 消歧（I-1）：AGAIN/HARD → step 0（重学步起点）；GOOD → step 1。
+    1d → step 2。last_review 为空（不应出现于 LEARNING 行）→ 兜底 step 0。
+    残余歧义：HARD 保步（step 1 时亦 10m 间隔）重建为 step 0——学习节奏略收紧，登记见报告。
     """
     if rs.last_review is None:
         return 0
     interval = _parse_utc(rs.due) - _parse_utc(rs.last_review)
     if interval == timedelta(days=1):
         return 2
+    if rs.last_rating in ("AGAIN", "HARD"):
+        return 0
     return 1
 
 

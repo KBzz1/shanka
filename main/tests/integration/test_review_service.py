@@ -11,6 +11,7 @@
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy import select
@@ -97,6 +98,46 @@ def test_review_queue_cross_device_404(
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         review_queue(session, device_id=_uuid(), deck_id=deck_id, now="2026-08-11T01:00:00.000Z")
     assert excinfo.value.code is ErrorCode.DECK_NOT_FOUND
+
+
+def test_review_queue_sorts_by_due_then_position(
+    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+) -> None:
+    """排序（5.15/6.6，I-2）：due 不同先到期者在前；同 due 按 position 升序。"""
+    deck_id, _ = deck_and_card  # 已含 00:00 创建的卡（pos 1、due 00:00）
+    with session_factory() as session:
+        create_card(
+            session,
+            device_id=device,
+            deck_id=deck_id,
+            front="f2",
+            back="b2",
+            now="2026-08-11T00:00:00.000Z",
+        )  # pos 2、due 00:00 同前卡
+        create_card(
+            session,
+            device_id=device,
+            deck_id=deck_id,
+            front="f3",
+            back="b3",
+            now="2026-08-11T00:30:00.000Z",
+        )  # pos 3、due 00:30
+        session.commit()
+    with session_factory() as session:
+        items = review_queue(
+            session, device_id=device, deck_id=deck_id, now="2026-08-11T01:00:00.000Z"
+        )
+    assert len(items) == 3
+    ordered: list[tuple[str, int]] = []
+    for item in items:
+        rs = item["review_state"]
+        assert isinstance(rs, dict)
+        ordered.append((str(rs["due"]), cast(int, item["position"])))
+    assert ordered == [
+        ("2026-08-11T00:00:00.000Z", 1),
+        ("2026-08-11T00:00:00.000Z", 2),
+        ("2026-08-11T00:30:00.000Z", 3),
+    ]
 
 
 def test_submit_review_updates_state_and_creates_event(
@@ -231,6 +272,9 @@ def test_submit_review_rollback_on_failure(
         session.rollback()
     with session_factory() as session:
         assert len(session.scalars(select(ReviewEvent)).all()) == 0
+        rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
+        assert rs is not None
+        assert rs.reps == 0  # 状态快照亦未变更（同事务回滚，M-4）
 
 
 def test_submit_review_learning_second_good_plus_1d(
@@ -301,3 +345,51 @@ def test_submit_review_learning_graduates_and_relearning_rebuild(
     assert results[3]["due"] == "2026-08-19T01:20:00.000Z"  # +10m（relearning_steps[0]）
     assert results[4]["state"] == "REVIEW"  # RELEARNING 重建 GOOD → Review
     assert str(results[4]["due"]) > "2026-08-19T01:20:00.000Z"
+
+
+def test_submit_review_learning_againthen_good_plus_10m(
+    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+) -> None:
+    """AGAIN 后 Learning 卡（last_rating=AGAIN、间隔 10m）重建 GOOD → +10m（I-1 消歧，不跳巩固步）。"""
+    _, card_id = deck_and_card
+    with session_factory() as session:
+        submit_review(
+            session,
+            device_id=device,
+            card_id=card_id,
+            rating="GOOD",
+            client_event_id=_uuid(),
+            device_timezone="Asia/Shanghai",
+            now="2026-08-11T01:00:00.000Z",
+        )
+        session.commit()
+    with session_factory() as session:
+        again = submit_review(
+            session,
+            device_id=device,
+            card_id=card_id,
+            rating="AGAIN",
+            client_event_id=_uuid(),
+            device_timezone="Asia/Shanghai",
+            now="2026-08-11T01:10:00.000Z",
+        )
+        session.commit()
+    assert again["state"] == "LEARNING"
+    assert again["due"] == "2026-08-11T01:20:00.000Z"  # AGAIN → step 0、+10m
+    with session_factory() as session:
+        third = submit_review(
+            session,
+            device_id=device,
+            card_id=card_id,
+            rating="GOOD",
+            client_event_id=_uuid(),
+            device_timezone="Asia/Shanghai",
+            now="2026-08-11T01:20:00.000Z",
+        )
+        session.commit()
+    assert third["state"] == "LEARNING"
+    assert (
+        third["due"] == "2026-08-11T01:30:00.000Z"
+    )  # last_rating=AGAIN → step 0 → GOOD +10m（非 +1d）
+    assert third["reps"] == 3
+    assert third["lapses"] == 1
