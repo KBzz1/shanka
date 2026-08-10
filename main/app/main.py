@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api import api_key, cards, decks, metrics, pdfs, probes, review, stats
+from app.api import api_key, cards, decks, metrics, pdfs, probes, review, samples, stats, tasks
 from app.config import Settings
 from app.middleware.body_capture import BodyCaptureMiddleware
 from app.middleware.device_id import DeviceIDMiddleware
@@ -20,7 +20,8 @@ from app.middleware.request_id import RequestIDMiddleware
 from infra.db.session import create_db_engine, create_session_factory
 from infra.logging import setup_logging
 from infra.storage.local import LocalStorage
-from services.pdf.scanner import scan_once
+from services.pdf.scanner import scan_once as scan_pdfs
+from services.tasks.executor import scan_once as scan_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +42,29 @@ def _pdf_scanner_loop(
         if stop_event.is_set():
             return
         try:
-            scan_once(session_factory, storage=storage)
+            scan_pdfs(session_factory, storage=storage)
         except Exception:  # 扫描失败不中断循环（scan_once 内部已记录解析失败）
             logger.warning("pdf scanner loop iteration failed", exc_info=True)
+
+
+def _task_executor_loop(
+    session_factory: sessionmaker[Session],
+    stop_event: threading.Event,
+    interval: float,
+) -> None:
+    """任务执行器后台循环（Task 4）：逐间隔 scan_once；单轮失败不中断循环。
+
+    wait-first：首个间隔为启动宽限期（与 PDF 扫描器同款，避免与启动期 DDL 竞争
+    BEGIN IMMEDIATE 写锁——executor 走 engine 级 begin 事件，读也走写事务）。
+    """
+    while not stop_event.is_set():
+        stop_event.wait(interval)
+        if stop_event.is_set():
+            return
+        try:
+            scan_tasks(session_factory)
+        except Exception:  # 扫描失败不中断循环（executor 内部已记录任务失败）
+            logger.warning("task executor loop iteration failed", exc_info=True)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -68,11 +89,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             daemon=True,
         )
         thread.start()
+        task_stop_event = threading.Event()
+        task_thread = threading.Thread(
+            target=_task_executor_loop,
+            args=(app.state.session_factory, task_stop_event, settings.task_scan_interval_seconds),
+            daemon=True,
+        )
+        task_thread.start()
         try:
             yield
         finally:
             stop_event.set()
+            task_stop_event.set()
             thread.join(timeout=5)
+            task_thread.join(timeout=5)
             engine.dispose()
 
     app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
@@ -97,6 +127,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(stats.router)
     app.include_router(pdfs.router)
     app.include_router(api_key.router)
+    app.include_router(samples.router)
+    app.include_router(tasks.router)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)

@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     pdf_max_pages: int = 500
     # PDF 扫描器后台循环间隔（lifespan daemon 线程轮询；测试不依赖，显式 scan_once）
     pdf_scan_interval_seconds: float = 1.0
+    # 任务执行器后台循环间隔（lifespan daemon 线程轮询；测试不依赖，显式 scan_once）
+    task_scan_interval_seconds: float = 1.0
     # 敏感项：禁止打印、复制、写入日志/响应/任务明细；`repr=False` 防意外入日志
     deepseek_api_key: str | None = Field(default=None, repr=False)
     # API Key 加密密钥（database-design 2.2：环境变量，32 字节 hex；缺失时 PUT /api-key 不可用）
