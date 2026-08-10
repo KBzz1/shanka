@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api import cards, decks, metrics, pdfs, probes, review, stats
+from app.api import api_key, cards, decks, metrics, pdfs, probes, review, stats
 from app.config import Settings
 from app.middleware.body_capture import BodyCaptureMiddleware
 from app.middleware.device_id import DeviceIDMiddleware
@@ -96,6 +96,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(review.router)
     app.include_router(stats.router)
     app.include_router(pdfs.router)
+    app.include_router(api_key.router)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
