@@ -1,14 +1,24 @@
 """Prometheus 指标（structure-contract 8.3；R-04 有意不进业务 OpenAPI，F1/R1 直接测试）。
 
-F1 范围：HTTP 请求与限流指标 + 共享 registry；llm/generation/batch 指标在
-V3B（llm_requests_total/llm_request_duration_seconds/llm_tokens_total）与
-V5A（generation_tasks_total/generation_tasks_duration_seconds/batch_retry_total）
-补充，全部注册到同一 REGISTRY。
+F1 范围：HTTP 请求与限流指标 + 共享 registry；llm/generation/batch 指标
+（llm_requests_total/llm_request_duration_seconds/llm_tokens_total/
+generation_tasks_total/generation_tasks_duration_seconds/batch_retry_total）定义在
+infra/metrics.py（上报点在 services，分层依赖不允许 services 反向依赖 app），
+全部注册到同一 prometheus_client REGISTRY；本模块导入保证装配期注册。
 """
 
 from fastapi import APIRouter
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, REGISTRY, Counter, Histogram, generate_latest
+
+from infra.metrics import (  # noqa: F401 —— 导入即注册 llm/generation/batch 指标到共享 REGISTRY
+    BATCH_RETRY_TOTAL,
+    GENERATION_TASKS_DURATION_SECONDS,
+    GENERATION_TASKS_TOTAL,
+    LLM_REQUEST_DURATION_SECONDS,
+    LLM_REQUESTS_TOTAL,
+    LLM_TOKENS_TOTAL,
+)
 
 router = APIRouter(tags=["observability"])
 

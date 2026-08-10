@@ -10,6 +10,7 @@ process_next_batch 直至无待处理批次 → 全部批次终态 → 任务 CO
 
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -20,6 +21,7 @@ from app.errors import AppError, ErrorCode
 from infra.db.models import ApiKey, KnowledgePoint, Task
 from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
+from infra.metrics import GENERATION_TASKS_DURATION_SECONDS, GENERATION_TASKS_TOTAL
 from services.generation.batches import plan_batches, process_next_batch
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,25 @@ def _require_str(value: str | None, message: str) -> str:
     if value is None:
         raise AppError(ErrorCode.GENERATION_FAILED, message)
     return value
+
+
+def _observe_task_result(task: Task, result: str) -> None:
+    """8.3 generation_tasks_total(result) + generation_tasks_duration_seconds（started_at→ended_at）。"""
+    GENERATION_TASKS_TOTAL.labels(result=result).inc()
+    seconds = _duration_seconds(task.started_at, task.ended_at)
+    if seconds is not None:
+        GENERATION_TASKS_DURATION_SECONDS.observe(seconds)
+
+
+def _duration_seconds(start: str | None, end: str | None) -> float | None:
+    """UTC ISO 字符串（format_utc 格式）耗时秒数；解析失败/缺失 → None（不观测）。"""
+    if not start or not end:
+        return None
+    try:
+        delta = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+    except ValueError:
+        return None
+    return max(delta.total_seconds(), 0.0)
 
 
 def _decrypt_api_key(session: Session, *, task: Task, settings: Settings) -> str:
@@ -88,6 +109,7 @@ def _fail_task(task: Task, *, error_code: str) -> None:
     task.error_code = error_code
     task.ended_at = task.updated_at
     task.resumable = 0
+    _observe_task_result(task, "FAILED")  # 8.3：系统级失败也计数
 
 
 def _execute_task(
@@ -129,6 +151,7 @@ def _execute_task(
     task.status = "COMPLETED"
     task.ended_at = now
     task.resumable = 0
+    _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
 
 
 def scan_once(
