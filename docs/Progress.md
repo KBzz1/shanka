@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（V3A 扩展） | 202 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40；四工具命令全绿（mypy 120 files） |
+| 自动化验证 | `DONE`（V4 扩展） | 289 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 47；四工具命令全绿（mypy 148 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -169,11 +169,21 @@
 
 ### V4 — 样卡、任务与知识点规划
 
-**`TODO`｜依赖：V1 + V3A + V3B｜覆盖：FR-04/05/06/18、接口 3.5/4.1/4.2/6.3/6.4、AC-03**
+**`DONE`｜依赖：V1 + V3A + V3B｜覆盖：FR-04/05/06/18、接口 3.5/4.1/4.2/6.3/6.4、AC-03**
 
 按 manifest 加载/校验资产；Prompt 稳定前缀与动态后缀分离；固定构成 3 张样卡且不入库；创建/查询/取消任务，持久化配置/章节，规划 KnowledgePoint，以 DB 条件更新抢占执行。
 
 验收：样卡构成；无 Key/章节/牌组、非法比例；COMPACT ≤ BALANCED ≤ EXTENSIVE；自定义要求不继承；同 key 单任务；状态转移和 AC-03。
+
+当前证据（2026-08-11，分支 codex/v4 合并回 main，9 commits 89c0390..656c17b + fix 5842898）：
+- manifest 加载与 Prompt 组装（infra/llm/prompts.py）：按 agent_evolution/manifest.json 加载（R-03 只读）；稳定前缀（资产）+ 动态后缀（topic/chapter/difficulty/custom/JSON schema）；完整 Prompt 不落日志（红线 4/AC-08）。
+- 样卡（6.3/AC-03）：POST /samples 豁免幂等键；固定 3 张（1 基础+1 理解+1 应用；2 问答+1 判断——fake 按难度定类型）；不入库不统计；GenerationConfig 校验（difficulty_ratio 三值>0 和=1、quantity_tendency 枚举 → 400）。
+- 任务（6.4/4.1）：POST /tasks（幂等 + 校验归属/配置/已保存 Key（无 → 422 API_KEY_NOT_SET）→ RUNNING + stage=GENERATING + selected_chapters/generation_config JSON 快照（**对象数组**——契约 3.4/3.6 名称还原）→ 规划同事务）；GET 轮询；cancel（PENDING/RUNNING/PAUSED → CANCELLED）；resume（DB 条件更新 PAUSED AND resumable=1 → RUNNING，否则 409 TASK_STATE_CONFLICT）。
+- KnowledgePoint 规划（5.4.1 可测口径）：每章 3×密度（COMPACT=1/BALANCED=2/EXTENSIVE=3）——2 章实测 6/12/18；字段完整 + PENDING。
+- 任务执行（V4 fake，红线不代替生产）：进程内 DB 驱动后台循环（4.4 定式）；deterministic fake 生成（sha256 派生 ID，seed 含 task 维度——跨任务不冲突）；入库 V1 模式 + generation_item_id 部分唯一索引防重（AC-05）+ 难度按 priority 轮换三档；COMPLETED/FAILED 状态机。
+- 验收实测：四工具全绿（289 passed、mypy 148 files）；干净 venv 安装 + 迁移 OK；uvicorn 冒烟（样卡 3 张 QUESTION+TRUE_FALSE、任务 RUNNING→COMPLETED 12 卡入库）；边界 70 用例全绿；无明文泄漏。
+- 登记：R-14 OPEN（openapi /samples 响应 items 引用 Card 但样卡无 deck_id/position——V4 过渡 handler 合成占位 + R1 定义 SampleCard 轻量组件）；fake 跨设备防重已由 task 维度修复；4.4 表述 PENDING vs RUNNING 观察（V5A 同步契约文本）。
+- 流程记录：V4-T4 fix 中 implementer 越权修改 Progress.md（登记 R-14）——内容正确保留，后续已重申禁令。
 
 ### V5A — 分批生成与质量观测闭环
 
@@ -237,7 +247,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | R-08 | `RESOLVED` | `.env` 可被执行进程加载且 2026-08-10 真实直连 smoke 成功；执行 Agent 无视觉能力 | 不再重复凭据 smoke；后续 live 只能在 LOCAL-DONE 后走正式应用链路。PDF 只走已验证文本层/书签，未来无文本层样本按契约失败，不引入 OCR |
 | R-09 | `ACCEPTED` | 正式契约要求记录 model，但不冻结具体模型或 thinking 模式 | 产品配置保持单一可替换入口；R1 为可比性冻结 `deepseek-v4-flash` + thinking disabled，不能反向改写 PRD/Architecture |
 | R-10 | `RESOLVED` | 契约 1.3 要求"幂等键相同但请求体与首次不一致 → 409"，但 database-design 2.12 无 body 比对持久化载体 | F1 兼容性契约更新（AGENTS.md 版本管理规则）：database-design §2.12 新增 `request_body_hash` 列（首次请求体 SHA-256 hex）+ 规则段；ORM/增量迁移 0002/守卫三处同步（F1-T8） |
-| R-11 | `OPEN` | structure-contract 3.8 Deck.source 为 `MANUAL/IMPORTED/GENERATED`，database-design 2.8 只列 `MANUAL/IMPORTED`——字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明 | F1 建表用 TEXT 无 DB CHECK 不受影响（ORM docstring 注明）；V4 创建 GENERATED 归属牌组时裁决：更新 database-design 2.8 补 GENERATED 说明，或确认 GENERATED 牌组以其他 source 语义落地 |
+| R-11 | `RESOLVED` | structure-contract 3.8 Deck.source 为 `MANUAL/IMPORTED/GENERATED`，database-design 2.8 只列 `MANUAL/IMPORTED`——字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明 | V4 收口：任务创建走用户指定 deck_id（TaskCreateRequest），本期无 GENERATED 牌组创建路径；契约 3.8 枚举保留（未来自动归属牌组使用），database-design 2.8 派生遗漏说明已核对（V4-T7） |
 | R-14 | `OPEN` | openapi /samples 响应 items `$ref Card`（required 含 deck_id/position/created_at/updated_at），但样卡不入库、无这些字段 | V4 过渡（V4-T4 fix F-2）：handler 合成占位字段返回（deck_id=""/position=0/created_at/updated_at=请求时刻）；R1 契约修订定义轻量 `SampleCard` 组件（structure-contract 3.6/6.3）消除占位 |
 
 新增冲突先登记；解决后保留结论并改 `RESOLVED`。
