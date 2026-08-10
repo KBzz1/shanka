@@ -8,11 +8,11 @@ from app.config import Settings
 from app.main import create_app
 
 
-def _counter_value(text: str, line_prefix: str) -> float:
-    """解析文本格式中某指标行的数值；进程级注册表跨测试累加，未出现该行视为 0。"""
+def _metric_value(text: str, metric_line: str) -> float:
+    """从 Prometheus 文本提取指定 metric 行的数值；不存在返回 0。"""
     for line in text.splitlines():
-        if line.startswith(line_prefix):
-            return float(line.rsplit(" ", 1)[1])
+        if line.startswith(metric_line):
+            return float(line.split()[-1])
     return 0.0
 
 
@@ -39,7 +39,7 @@ def test_metrics_tracks_http_requests(tmp_path: Path) -> None:
         client.get("/healthz")
         after = client.get("/metrics").text
     # 指标为进程级注册表（跨测试累加，如 test_device_auth 的 /healthz）：断言差值而非绝对值
-    assert _counter_value(after, healthz_line) - _counter_value(before, healthz_line) == 2.0
+    assert _metric_value(after, healthz_line) - _metric_value(before, healthz_line) == 2.0
 
 
 def test_metrics_rate_limit_hit_recorded(tmp_path: Path) -> None:
@@ -48,11 +48,14 @@ def test_metrics_rate_limit_hit_recorded(tmp_path: Path) -> None:
         storage_path=tmp_path / "storage",
         rate_limit_write_per_minute=1,
     )
+    write_line = 'rate_limit_hit_total{scope="write"}'
     with TestClient(create_app(settings)) as client:
         import uuid
 
         headers = {"X-Device-ID": str(uuid.uuid4())}
+        before = _metric_value(client.get("/metrics").text, write_line)
         client.post("/v1/decks", json={}, headers=headers)  # 首次（404，路由缺失）
         client.post("/v1/decks", json={}, headers=headers)  # 超限 → 429 → 指标 +1
-        resp = client.get("/metrics")
-    assert 'rate_limit_hit_total{scope="write"} 1.0' in resp.text
+        after = _metric_value(client.get("/metrics").text, write_line)
+    # 进程级注册表跨测试累加：断言差值而非绝对值（rate_limit 测试先执行时 count ≥2 亦不受影响）
+    assert after - before == 1.0
