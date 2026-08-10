@@ -11,9 +11,14 @@ def _stable_uuid(seed: str) -> str:
 
 
 def generate_card(
-    topic: str, chapter_name: str, difficulty: str, custom_requirements: str | None
+    topic: str,
+    chapter_name: str,
+    difficulty: str,
+    custom_requirements: str | None,
+    task_id: str,
 ) -> dict[str, object]:
-    seed = f"{topic}|{chapter_name}|{difficulty}|{custom_requirements or ''}"
+    # task_id 纳入 seed（F-1 修复）：generation_item_id 带任务维度，同设备多任务同章节不互相去重
+    seed = f"{topic}|{chapter_name}|{difficulty}|{custom_requirements or ''}|{task_id}"
     card_id = _stable_uuid(f"card|{seed}")
     gen_item = _stable_uuid(f"gen|{seed}")
     label = _DIFFICULTY_LABEL.get(difficulty, difficulty)

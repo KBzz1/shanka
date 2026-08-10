@@ -76,12 +76,20 @@ def _execute_task(session: Session, task: Task) -> None:
         .where(KnowledgePoint.task_id == task.task_id)
         .order_by(KnowledgePoint.priority)
     ).all()
-    # 章节名映射：fake 的 front/back 展示章节名（kp.topic 已含章节名前缀，直接用）
-    chapter_names = {c.chapter_id: c.name for c in session.scalars(select(Chapter)).all()}
+    # 章节名映射（按任务 file_id 过滤，不扫全表——M-3 fix）：fake 的 front/back 展示章节名
+    chapter_names: dict[str, str] = {}
+    if task.file_id is not None:
+        chapter_names = {
+            c.chapter_id: c.name
+            for c in session.scalars(select(Chapter).where(Chapter.file_id == task.file_id)).all()
+        }
     generated = 0
     for kp in kps:
         difficulty = _DIFFICULTY_ROTATION[(kp.priority - 1) % len(_DIFFICULTY_ROTATION)]
-        card = generate_card(kp.topic, chapter_names.get(kp.chapter_id or "", ""), difficulty, None)
+        # task_id 纳入 fake seed（F-1）：同设备同章节二次任务不互相去重
+        card = generate_card(
+            kp.topic, chapter_names.get(kp.chapter_id or "", ""), difficulty, None, task.task_id
+        )
         # 防重（generation_item_id 部分唯一索引，先查后插；同 seed 已入库则跳过）
         existing = session.scalar(
             select(Card).where(Card.generation_item_id == card["generation_item_id"])

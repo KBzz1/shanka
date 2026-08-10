@@ -11,10 +11,15 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.schemas.samples import SampleRequest
-from infra.db.session import get_db_session
+from infra.clock import SystemClock
+from infra.db.session import format_utc, get_db_session
 from services.generation.samples import generate_samples
 
 router = APIRouter(prefix="/samples", tags=["samples"])
+
+
+def _now() -> str:
+    return format_utc(SystemClock().now_utc())
 
 
 @router.post("")
@@ -23,7 +28,13 @@ def generate_samples_endpoint(
     payload: SampleRequest,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    """生成 3 张样卡（1 基础 + 1 理解 + 1 应用；2 问答 + 1 判断），不入库。"""
+    """生成 3 张样卡（1 基础 + 1 理解 + 1 应用；2 问答 + 1 判断），不入库。
+
+    F-2 fix（R-14 登记）：openapi /samples 响应 items $ref Card（required 含
+    deck_id/position/created_at/updated_at），样卡不入库无真实值——V4 过渡由 handler
+    合成占位字段（deck_id=""/position=0/created_at/updated_at=请求时刻）；轻量 SampleCard
+    组件由 R1 契约修订落地。
+    """
     cards = generate_samples(
         session,
         device_id=request.state.device_id,
@@ -31,4 +42,9 @@ def generate_samples_endpoint(
         chapter_ids=payload.chapter_ids,
         config=payload.generation_config.model_dump(),
     )
-    return JSONResponse(content={"sample_cards": cards})
+    now = _now()
+    sample_cards = [
+        {**card, "deck_id": "", "position": 0, "created_at": now, "updated_at": now}
+        for card in cards
+    ]
+    return JSONResponse(content={"sample_cards": sample_cards})
