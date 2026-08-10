@@ -33,5 +33,7 @@ class Settings(BaseSettings):
     # PDF 上传限制（structure-contract 6.1；可运维调整）
     pdf_max_size_bytes: int = 50 * 1024 * 1024
     pdf_max_pages: int = 500
+    # PDF 扫描器后台循环间隔（lifespan daemon 线程轮询；测试不依赖，显式 scan_once）
+    pdf_scan_interval_seconds: float = 1.0
     # 敏感项：禁止打印、复制、写入日志/响应/任务明细；`repr=False` 防意外入日志
     deepseek_api_key: str | None = Field(default=None, repr=False)
