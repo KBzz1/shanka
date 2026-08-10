@@ -41,7 +41,7 @@
 - Consumes: F0 `tests.contract.support`（check_schema_consistency、openapi_schema、resolve_ref）
 - Produces: `app.schemas.decks.Deck`（响应模型：deck_id/name/source/card_count/due_count/mastered_card_count/review_count/mastery_ratio/created_at/updated_at/version）、`DeckCreate`（name: str = Field(min_length=1, max_length=64)）；`app.schemas.cards.Card`（响应模型：card_id/deck_id/source/position/front/back/card_type/version/created_at/updated_at + 可选 code/question/answer/statement/answer_boolean/explanation/generation_item_id/target_difficulty/knowledge_point_ids/evidence_score/correctness_score/difficulty_score/learning_value_score/rubric_total_score）、`CardCreate`（front/back min_length=1）、`ImportCard`（front/back min_length=1）、`ImportResult`（index/status: Literal[CREATED, FAILED]/card_id?/error?）、`ImportResponse`（results: list[ImportResult]）；Task 4 handler 与 Task 2/3 service 消费
 
-- [ ] **Step 1: 写失败守卫测试 `main/tests/contract/test_deck_card_schemas_guard.py`**
+- [x] **Step 1: 写失败守卫测试 `main/tests/contract/test_deck_card_schemas_guard.py`**
 
 ```python
 """契约守卫：app/schemas decks/cards ↔ openapi.yaml（红线 1，守卫 1 扩展）。"""
@@ -91,7 +91,7 @@ def test_import_response_shape() -> None:
 
 （说明：`DeckCreate`/`CardCreate` 为请求模型，openapi 中无对应命名 schema（请求体内联）——守卫只校验响应模型 Deck/Card。若 `check_schema_consistency` 对 Card 的可选字段（`type: [string, 'null']` 等）报 unsupported，属预期——Task 1 Step 3 扩展守卫支持。）
 
-- [ ] **Step 2: 写失败单元测试 `main/tests/unit/test_schemas_decks_cards.py`**
+- [x] **Step 2: 写失败单元测试 `main/tests/unit/test_schemas_decks_cards.py`**
 
 ```python
 """schemas decks/cards 纯校验单元测试。"""
@@ -115,7 +115,7 @@ def test_deck_response_model_optional_fields() -> None:
 
 （说明：响应模型字段全部必填——由守卫的 required 校验兜底，此处仅验证模型存在与构造行为。）
 
-- [ ] **Step 3: 实现 `main/app/schemas/decks.py` 与 `main/app/schemas/cards.py`**
+- [x] **Step 3: 实现 `main/app/schemas/decks.py` 与 `main/app/schemas/cards.py`**
 
 ```python
 """decks.py：牌组请求/响应模型（openapi Deck；structure-contract 3.8 派生进度）。"""
@@ -199,7 +199,7 @@ class ImportResponse(BaseModel):
 
 （注意：Card 的 `source`/`card_type` 用 str 而非枚举——domain/enums 是纯领域枚举（V2+ 充实），schema 层保持 str 与 openapi 的 string enum 兼容；守卫校验 enum 值集合时若报错可扩展 `_is_enum` 处理。`answer_boolean` 为 `bool | None`（openapi `type: [boolean, 'null']`），而 ORM 列是 INTEGER——schema/ORM 转换由 service 负责。）
 
-- [ ] **Step 4: 扩展 `main/tests/contract/support.py` 守卫**
+- [x] **Step 4: 扩展 `main/tests/contract/support.py` 守卫**
 
 在 `check_schema_consistency` 中支持（最小扩展，保持既有接口）：
 
@@ -234,12 +234,12 @@ class ImportResponse(BaseModel):
 
 （结构调整：原实现 `prop_type == "object"` 递归分支保留；`expected is None` 的 unsupported 分支改为上述显式处理。`Any` 已在文件导入。修改后 F0 守卫测试（Error 模型）必须仍过。）
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy**
+- [x] **Step 5: 运行确认通过 + ruff/mypy**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/contract/ tests/unit/test_schemas_decks_cards.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/schemas/ tests/contract/ tests/unit/`
 Expected: 全绿（若守卫对 Deck 的 source 枚举（openapi `$ref: DeckSource` enum）报不一致——`source` 字段是 str 非 Enum，`_is_enum(str)` False → 不校验 enum 集合，直接通过；Card 的 `card_type` 同理）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/app/schemas/decks.py main/app/schemas/cards.py main/tests/contract/support.py main/tests/contract/test_deck_card_schemas_guard.py main/tests/unit/test_schemas_decks_cards.py
@@ -259,13 +259,13 @@ git commit -m "feat(schemas): Deck/Card 请求响应模型 + 守卫 1 扩展（a
 - Consumes: F1 `infra.db.session`（format_utc）、`infra.clock`、`infra.db.models`（Deck/Card/ReviewState/ReviewEvent/Task）、F0 `app.errors`
 - Produces: `services.decks.create_deck(session, *, device_id, name, now) -> Deck`（ORM 对象，含 version=format_utc(now)）、`services.decks.list_decks(session, *, device_id) -> list[Deck]`（含派生进度）、`services.decks.get_deck(session, *, device_id, deck_id) -> Deck`（无结果抛 AppError(DECK_NOT_FOUND)）、`services.decks.delete_deck(session, *, device_id, deck_id) -> None`（删除保护：非终态任务引用 → AppError(TASK_IN_PROGRESS)；级联 + tasks.deck_id SET NULL）；`services.decks.deck_progress(session, *, device_id, deck_id) -> dict`（card_count/due_count/mastered_card_count/review_count/mastery_ratio）；Task 3 cards service 与 Task 4 handler 消费
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_decks_position_progress.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_decks_position_progress.py`**
 
 （position 分配与进度聚合的纯规则——需要 DB 的放 integration；本文件放可无 DB 的纯逻辑测试：无）
 
 本任务纯规则在 service 内嵌 SQL 聚合，单元测试无法无 DB 验证——**跳过独立 unit 文件，进度/位置规则由 Task 2/3 的 integration 测试覆盖**（删除本文件的创建，改为在 Step 2 的 integration 测试中覆盖）。
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_decks_service.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_decks_service.py`**
 
 ```python
 """services.decks 集成测试：创建/列表/详情/删除/进度/删除保护（真实 SQLite）。"""
@@ -416,12 +416,12 @@ def test_decks_delete_blocked_by_non_terminal_task(session_factory: Callable[[],
     assert excinfo.value.code is ErrorCode.TASK_IN_PROGRESS
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_decks_service.py -v`
 Expected: FAIL（ModuleNotFoundError: services.decks.service / 函数缺失）
 
-- [ ] **Step 4: 实现 `main/services/decks/service.py`**
+- [x] **Step 4: 实现 `main/services/decks/service.py`**
 
 ```python
 """services.decks：牌组用例（创建/列表/详情/删除/进度聚合/删除保护）。
@@ -550,12 +550,12 @@ def delete_deck(session: Session, *, device_id: str, deck_id: str) -> None:
 
 （说明：`now` 参数由调用方（handler）传入服务端时钟格式化串；list 排序按 updated_at DESC（database-design 2.8 索引）。删除时 cards 级联依赖 `PRAGMA foreign_keys=ON`（F1 engine 事件已配置）。`session.delete(deck)` 触发级联。）
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy**
+- [x] **Step 5: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_decks_service.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/decks/ tests/integration/test_decks_service.py`
 Expected: PASS 全绿（`session.get(ReviewState, card_id)` 断言依赖 ReviewState 主键为 review_state_id——测试里我传了 card_id 作为 review_state_id？**注意**：ReviewState 主键是 review_state_id 而非 card_id（card_id 是 UNIQUE 列）。测试应改为 `session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))` 或先记 review_state_id。以实际 ORM 为准修正测试断言。）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/services/decks/service.py main/tests/integration/test_decks_service.py
@@ -574,7 +574,7 @@ git commit -m "feat(decks): 牌组用例（创建/列表/详情/删除/进度聚
 - Consumes: Task 2 `services.decks`（get_deck/_owned 语义）、F1 models
 - Produces: `services.cards.create_card(session, *, device_id, deck_id, front, back, now) -> Card`（position=max+1、source=MANUAL、card_type=QUESTION、同事务插 review_states 初始行）、`services.cards.list_cards(session, *, device_id, deck_id) -> list[Card]`（按 position 排序）、`services.cards.import_cards(session, *, device_id, deck_id, cards: list[tuple[str, str]], now) -> list[dict]`（逐张 results，原子：任何失败整体回滚抛 AppError(IMPORT_PARSE_ERROR 由 handler 层校验先拦截；写入异常整体回滚）；cards 空列表由 handler 层 422 拦截）；`services.cards.card_view(card) -> dict`（ORM → schema 视图）；Task 4 handler 消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_cards_service.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_cards_service.py`**
 
 ```python
 """services.cards 集成测试：position/创建/列表/导入原子/初始 review_state。"""
@@ -710,12 +710,12 @@ def test_cards_import_position_continues_after_existing(
 
 （说明：`test_cards_import_rolls_back_on_write_failure` 的 monkeypatch 方案依赖 `import_cards` 内部调用模块级 `_card_id()`——实现时确保该函数存在。`first_card_id` 在 fake_uuid 中引用的是闭包外变量——实现时修正为正确闭包写法（用可变容器或在 fake_uuid 内直接引用之前生成的 id）。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_cards_service.py -v`
 Expected: FAIL（ModuleNotFoundError: services.cards.service）
 
-- [ ] **Step 3: 实现 `main/services/cards/service.py`**
+- [x] **Step 3: 实现 `main/services/cards/service.py`**
 
 ```python
 """services.cards：卡片用例（position 分配/创建/列表/导入原子/初始排程状态）。
@@ -834,12 +834,12 @@ def import_cards(
 
 （说明：`_insert_card` 内 `session.flush()` 使 UNIQUE 冲突在循环内尽早暴露——IntegrityError 标记事务回滚，调用方 rollback 后整体无残留（原子性）。handler 层在调用前已完成 front/back 非空校验（422 拦截），故 service 内不再重复校验。position 并发冲突重试：F1 幂等原语在 handler 层保证同键串行；跨键并发 position 冲突由 UNIQUE 约束使后者失败回滚——MVP 接受（单写者 BEGIN IMMEDIATE 下实际串行）。）
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_cards_service.py tests/integration/test_decks_service.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/ tests/integration/`
 Expected: PASS（`_owned` 从 services.decks.service 导入——跨 service 引用属同层协作，允许；若 lint 报 circular import 则把 `_owned` 提为共享 helper `services/_ownership.py`，由 decks/cards 共用）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/services/cards/service.py main/tests/integration/test_cards_service.py
@@ -862,7 +862,7 @@ git commit -m "feat(cards): 卡片用例（position/创建/列表/导入原子/�
 - Consumes: Task 2/3 services、F1 idempotency 原语、F0/1 中间件与 errors
 - Produces: 路由 `/decks`（GET/POST）、`/decks/{deck_id}`（GET/DELETE）、`/decks/{deck_id}/cards`（GET/POST）、`/decks/{deck_id}/cards/import`（POST）；`BodyCaptureMiddleware`（写操作读 body → `request.state.raw_body`）；conftest `db_engine`/`migrated_app` fixtures（alembic upgrade 建 schema）；handler 内 `execute_idempotent` 接线（首个真实写接口完整同事务验收）
 
-- [ ] **Step 1: 扩展 `main/tests/conftest.py`（迁移 schema fixture）**
+- [x] **Step 1: 扩展 `main/tests/conftest.py`（迁移 schema fixture）**
 
 在现有 conftest 追加（保持既有 fixture 不变）：
 
@@ -884,7 +884,7 @@ def db_engine(tmp_path: Path):
 
 （REPO_ROOT 需在 conftest 顶部定义：`REPO_ROOT = Path(__file__).resolve().parents[2]`——tests/conftest.py 的 parents[2] = 仓库根。V1 起 integration 测试 fixture 改用 db_engine；既有测试（F1）仍用各自 tmp 库不影响。）
 
-- [ ] **Step 2: 实现 `main/app/middleware/body_capture.py`**
+- [x] **Step 2: 实现 `main/app/middleware/body_capture.py`**
 
 ```python
 """写操作 raw body 捕获中间件（幂等 body 比对载体，F1 幂等原语消费）。
@@ -910,7 +910,7 @@ class BodyCaptureMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 ```
 
-- [ ] **Step 3: 装配进 `main/app/main.py`**
+- [x] **Step 3: 装配进 `main/app/main.py`**
 
 ```python
 from app.middleware.body_capture import BodyCaptureMiddleware
@@ -920,7 +920,7 @@ from app.middleware.body_capture import BodyCaptureMiddleware
 
 （添加序在最后 → 运行序最内——当前添加序 Logging→DeviceID→RateLimit→RequestID→Metrics，BodyCapture 追加在最后即最内（先于路由执行），符合"路由前"目标。main.py 注释更新全序为：Metrics → RequestID → RateLimit → DeviceID → Logging → BodyCapture → 路由。）
 
-- [ ] **Step 4: 写失败集成测试 `main/tests/integration/test_decks_api.py`**
+- [x] **Step 4: 写失败集成测试 `main/tests/integration/test_decks_api.py`**
 
 ```python
 """牌组 API 集成测试（HTTP 层 + 幂等接线 + 跨设备 404 + 删除保护）。"""
@@ -949,7 +949,7 @@ def client(db_engine, tmp_path: Path) -> TestClient:
 
 （说明：`db_engine` fixture 与 settings 的库路径要一致——**修正**：让 `client` fixture 直接用 `db_engine` 的 path。实现时改为 `db_path = tmp_path / "api.db"; alembic upgrade` 后 `Settings(database_url=f"sqlite:///{db_path}")`。conftest 的 db_engine fixture 返回 engine——为简化，V1 的 API 测试用独立 helper（在测试文件内做 alembic upgrade）或 conftest 提供 `migrated_db_path` fixture。以最终实现为准，原则：**API 测试必须在迁移后 schema 上跑**。）
 
-- [ ] **Step 5: 实现 `main/app/api/decks.py`**
+- [x] **Step 5: 实现 `main/app/api/decks.py`**
 
 ```python
 """牌组路由（structure-contract 6.5；openapi /decks）。handler 只做 HTTP 映射。"""
@@ -1043,7 +1043,7 @@ def delete_deck_endpoint(request: Request, deck_id: str, session: Session = Depe
 
 （说明：`session.commit()` 在 execute_idempotent 之后由 handler 显式调用——幂等记录与业务副作用同事务。`get_db_session` 的 finally close 不 commit——handler commit 后 session 关闭。重放时 biz 不执行，直接返回快照。DELETE 204 的幂等记录 response_body 存 `{}`，重放返回 204 空响应。）
 
-- [ ] **Step 6: 实现 `main/app/api/cards.py`**
+- [x] **Step 6: 实现 `main/app/api/cards.py`**
 
 ```python
 """卡片路由（structure-contract 6.5；openapi /decks/{deck_id}/cards）。"""
@@ -1123,7 +1123,7 @@ def import_cards_endpoint(request: Request, deck_id: str, payload: dict[str, lis
 
 （说明：`import_cards_endpoint` 的 payload 类型用 `dict[str, list[dict[str, str]]]` 而非 Pydantic 模型——openapi 的 import 请求体是内联 schema（无命名组件），直接 dict 解析 + 手动校验（IMPORT_PARSE_ERROR 422）。`ImportResponse` schema 用于类型对照（守卫校验响应结构），handler 直接用 dict 返回——**修正**：统一用 `ImportResponse` Pydantic 模型构造响应（`ImportResponse(results=[...])`），响应内容不变。）
 
-- [ ] **Step 7: 写失败集成测试 `main/tests/integration/test_cards_api.py`**
+- [x] **Step 7: 写失败集成测试 `main/tests/integration/test_cards_api.py`**
 
 ```python
 """卡片 API 集成测试（HTTP 层：创建/列表/导入/幂等/跨设备 404）。"""
@@ -1214,13 +1214,13 @@ def test_cards_api_cross_device_404(client: TestClient) -> None:
 
 （说明：API 测试路径用 `/v1/...`——服务器 URL 前缀 v1 在真实部署由反向代理剥除；TestClient 直接请求 `create_app` 需路径含 /v1？**关键决策**：路由 prefix 用 `/decks`（openapi 路径）还是 `/v1/decks`？openapi servers url 是 `https://api.example.com/v1`，路径 `/decks` → 完整 URL `/v1/decks`。本地 app 路由注册 `/decks`，TestClient 请求 `/decks` 即可（无 /v1 前缀层）。**修正**：测试路径用 `/decks`（无 v1 前缀）——除非实现选择在路由统一加 /v1 前缀。**决策**：V1 路由 prefix 直接 `/decks`（openapi 路径即路由路径；/v1 由部署层 servers url 语义承担——与 probes `/healthz` 同理。契约守卫校验 openapi 路径与注册路由的对应在 R1 做路径级校验）。以 `/decks` 为准修正测试。）
 
-- [ ] **Step 8: 运行确认失败 → 实现 → 通过**
+- [x] **Step 8: 运行确认失败 → 实现 → 通过**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_decks_api.py tests/integration/test_cards_api.py -v`
 Expected: FAIL（路由不存在）→ 装配 decks/cards router 进 main.py → PASS
 （main.py 装配：`app.include_router(decks.router)` + `app.include_router(cards.router)`）
 
-- [ ] **Step 9: 幂等接线集成验证（首个真实写接口完整同事务验收）**
+- [x] **Step 9: 幂等接线集成验证（首个真实写接口完整同事务验收）**
 
 在 `test_decks_api.py` 追加幂等专项测试：
 
@@ -1277,7 +1277,7 @@ def test_decks_api_idempotency_rollback_on_failure(client: TestClient) -> None:
 
 （说明：`test_decks_api_idempotency_rollback_on_failure` 演示"失败回滚后同键可重试"——biz 抛异常时 execute_idempotent 不落记录，handler 不 commit → 事务回滚（get_db_session finally close 不提交 → session 关闭时未提交事务自动回滚）。幂等记录与业务副作用共同回滚。注意：delete 404 时幂等记录也不落（仅记录成功）——重试同键成功。**更正**：同 key 先用于失败 DELETE 再用于成功 POST——幂等表无记录，POST fresh。但 DELETE 的 path 是 `/decks/{uuid}` 而 POST 是 `/decks`——path 不同本就不冲突；为演示"同键同 path 失败后重试"，改为两次同 path：先 DELETE `/decks/{无效id}` 404，再 DELETE 同 path 仍 404（无副作用可观察）——或以 POST 重复两次为例。**以真实语义为准**：幂等键是 (device, path, key) 三元组，失败不落库 → 同三元组重试重新执行。测试设计用"先失败后成功"的同 path 场景：POST /decks 首次 404 不可能（name 校验在 handler 层 400）——改用先成功删除再验证重复删除重放：DELETE 204 → 重复 DELETE 同 key → 204 重放（不报 404）。**
 
-- [ ] **Step 10: 全量验证 + 提交**
+- [x] **Step 10: 全量验证 + 提交**
 
 Run: `conda run -n shanka-backend python -m pytest -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
@@ -1297,7 +1297,7 @@ git commit -m "feat(api): 牌组/卡片路由接线（幂等同事务 + body 捕
 - Consumes: Task 1-4 全部产物（迁移 schema + 路由）
 - Produces: AC-09 三条映射验收测试
 
-- [ ] **Step 1: 写验收测试 `main/tests/acceptance/test_acceptance_ac09.py`**
+- [x] **Step 1: 写验收测试 `main/tests/acceptance/test_acceptance_ac09.py`**
 
 ```python
 """验收测试：AC-09 牌组与卡片联调（PRD AC-09；走真实迁移 schema + HTTP）。"""
@@ -1393,12 +1393,12 @@ def test_acceptance_ac09_delete_removes_from_reads(client: TestClient) -> None:
 
 （说明：测试中的 `_last_key()` 与 resp.headers 引用是草稿瑕疵——**修正**：重复提交测试应显式持有同一 (device, key) 头变量并复用。`due_count == 2` 依赖服务端时钟 now 与卡片 due=now 的边界——`due <= now` 恒真（同值），断言成立。若时钟边界 flaky（毫秒级），due_count 断言改为 >= 1 或固定 clock——**决策**：服务端时钟真实 SystemClock，`due=now` 与 `due<=now` 同值比较恒真，断言稳定。快速连续两次创建卡片 due 均为各自 now（毫秒差）——`due <= 查询时刻 now` 恒真。）
 
-- [ ] **Step 2: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 2: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/acceptance/ -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add main/tests/acceptance/test_acceptance_ac09.py
@@ -1412,7 +1412,7 @@ git commit -m "test(acceptance): AC-09 牌组与卡片联调验收映射"
 **Files:**
 - 验证：全部 V1 产物；不新增代码
 
-- [ ] **Step 1: 四工具命令全绿**
+- [x] **Step 1: 四工具命令全绿**
 
 Run（均在 `main/`）:
 ```bash
@@ -1424,7 +1424,7 @@ conda run -n shanka-backend python -m mypy .
 ```
 Expected: 版本 3.12.x；四命令零失败
 
-- [ ] **Step 2: 干净环境安装 + 空库迁移 + API 冒烟**
+- [x] **Step 2: 干净环境安装 + 空库迁移 + API 冒烟**
 
 ```bash
 conda run -n shanka-backend python -m venv /tmp/v1-accept-venv
@@ -1442,7 +1442,7 @@ print('migration-ok')
 rm -rf /tmp/v1-accept-venv
 ```
 
-- [ ] **Step 3: uvicorn 冒烟（真实 HTTP 走牌组闭环）**
+- [x] **Step 3: uvicorn 冒烟（真实 HTTP 走牌组闭环）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -1457,17 +1457,17 @@ kill %1
 ```
 Expected: 首次 201 + deck_id；重放 201 同 body；列表 GET 展示 card_count=0
 
-- [ ] **Step 4: 关键边界复核（收证据）**
+- [x] **Step 4: 关键边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_decks_api.py tests/integration/test_cards_api.py tests/integration/test_decks_service.py tests/integration/test_cards_service.py tests/acceptance/ -v`
 Expected: 全绿；记录关键用例名（幂等重放/冲突、导入原子、删除保护、跨设备 404、AC-09）
 
-- [ ] **Step 5: 无明文泄漏抽查**
+- [x] **Step 5: 无明文泄漏抽查**
 
 Run: `grep -rn "sk-" main/app main/services main/infra --include="*.py" || true`
 Expected: 无输出
 
-- [ ] **Step 6: 契约守卫全量复核**
+- [x] **Step 6: 契约守卫全量复核**
 
 Run: `conda run -n shanka-backend python -m pytest tests/contract/ -v`
 Expected: 全绿（含新增 Deck/Card schema 守卫）
@@ -1480,13 +1480,13 @@ Expected: 全绿（含新增 Deck/Card schema 守卫）
 - Modify: `docs/Progress.md`
 - Modify: `docs/superpowers/plans/2026-08-11-v1-decks-and-cards.md`（标题下「结果」）
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 V1 行：`TODO` → `DONE`，证据填写：牌组 CRUD/列表/详情/删除保护/级联 SET NULL、卡片 position/创建/自由刷题/原子导入/初始排程、真实进度聚合、幂等首个真实写接口完整验收（重放/冲突/回滚/跨 session）、AC-09 通过、Deck/Card schema 守卫。
 - 第 1 节状态基线：自动化验证测试数更新。
 - 计划文件标题下「结果」注明 V1 DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-11-v1-decks-and-cards.md
