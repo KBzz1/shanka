@@ -5,11 +5,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import probes
+from app.api import metrics, probes
 from app.config import Settings
 from app.middleware.device_id import DeviceIDMiddleware
 from app.middleware.error_handler import register_exception_handlers
 from app.middleware.logging import LoggingMiddleware
+from app.middleware.metrics_middleware import MetricsMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_id import RequestIDMiddleware
 from infra.db.session import create_db_engine, create_session_factory
@@ -39,7 +40,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(DeviceIDMiddleware)
     app.add_middleware(RateLimitMiddleware, settings=settings)  # 在 DeviceID 与 RequestID 之间
     app.add_middleware(RequestIDMiddleware)
+    app.add_middleware(MetricsMiddleware)  # 添加序最后 → 运行序最外层（统计所有响应含 401/429）
     app.include_router(probes.router)
+    app.include_router(metrics.router)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)

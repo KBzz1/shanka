@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from app.api.metrics import RATE_LIMIT_HIT_TOTAL
 from app.config import Settings
 from app.errors import AppError, ErrorCode, http_status
 
@@ -134,13 +135,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 "path": request.url.path,
             },
         )
-        # rate_limit_hit_total 指标（Task 10 接线；metrics.py 创建后移除 type: ignore）
-        try:
-            from app.api.metrics import RATE_LIMIT_HIT_TOTAL  # type: ignore[import-untyped]
-
-            RATE_LIMIT_HIT_TOTAL.labels(scope=scope).inc()
-        except ImportError:
-            pass
+        # rate_limit_hit_total 指标（structure-contract 8.3；Task 10 接线）
+        RATE_LIMIT_HIT_TOTAL.labels(scope=scope).inc()
         response = JSONResponse(
             status_code=http_status(ErrorCode.RATE_LIMITED),
             content=AppError(ErrorCode.RATE_LIMITED, "请求过于频繁，请稍后重试").to_response(),
