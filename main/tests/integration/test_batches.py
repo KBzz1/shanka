@@ -158,16 +158,19 @@ def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[]
         Settings(api_key_encryption_key="aa" * 32), transport=httpx.MockTransport(bad_handler)
     )
     with session_factory() as session:
-        for _ in range(6):  # 多轮（每批最多 3 次尝试）
+        attempts = 0
+        while True:  # 无待处理批次（返回 0）时终止——验证 break 路径
             if process_next_batch(session, task_id=task_id, client=client) == 0:
                 break
+            attempts += 1
             session.commit()
     with session_factory() as session:
         batches = session.scalars(select(Batch).where(Batch.task_id == task_id)).all()
         task = session.get(Task, task_id)
     assert task is not None
+    assert attempts == 3  # 契约 3.7：最多 2 次重试共 3 次尝试（每批）
     assert all(b.status == "SKIPPED" for b in batches)
-    assert all(b.retry_count == 2 for b in batches)  # 重试上限
+    assert all(b.retry_count == 2 for b in batches)  # 重试计数 = 2（3 次尝试）
     assert task.completed_batch_count == len(batches)  # SKIPPED 也推进游标
 
 

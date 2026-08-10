@@ -1,10 +1,11 @@
 """services.generation.batches：分批执行核心（4.2 批次状态机/重试/游标原子推进）。
 
 - plan_batches：知识点按 batch_size 分组建 Batch（PENDING，batch_index 从 1 起）+ 游标初始化；
-- process_next_batch：取下一个可处理批次（PENDING 或 FAILED 且 retry<limit）→ PROCESSING →
+- process_next_batch：取下一个可处理批次（PENDING 或 FAILED，FAILED 必未达重试上限）→ PROCESSING →
   adapter.chat（Prompt 组装）→ 响应 JSON 解析 → 逐卡 Schema 校验 → 合法卡入库（V1 模式 +
-  generation_item_id 防重）→ SUCCEEDED（≥1 合法卡）/ FAILED（0 合法卡，retry+1；retry≥limit →
-  SKIPPED）→ 游标 completed_batch_count 与批次状态/计数同事务原子推进 → 返回处理批次数（0 = 无）。
+  generation_item_id 防重）→ SUCCEEDED（≥1 合法卡）/ FAILED（0 合法卡，retry+1）/ 重试达上限
+  （retry_count >= limit，共 3 次尝试）→ SKIPPED → 游标 completed_batch_count 与批次状态/计数
+  同事务原子推进 → 返回处理批次数（0 = 无）。
 - Schema 是唯一入库门槛；Rubric 只观测（Task 3 接入）。
 - Key 解密在 executor（仅 infra/llm 路径）：本模块接收已构造带 Key 的 DeepSeekClient。
 """
@@ -62,14 +63,13 @@ def plan_batches(
         task.completed_batch_count = 0
 
 
-def _next_processable(session: Session, *, task_id: str, retry_limit: int) -> Batch | None:
-    """取下一个可处理批次：PENDING 或 FAILED 且 retry<limit（FAILED 且 retry≥limit 已置 SKIPPED）。"""
+def _next_processable(session: Session, *, task_id: str) -> Batch | None:
+    """取下一个可处理批次：PENDING 或 FAILED（FAILED 必未达重试上限——达上限当次已置 SKIPPED）。"""
     return session.scalar(
         select(Batch)
         .where(
             Batch.task_id == task_id,
             (Batch.status == "PENDING") | (Batch.status == "FAILED"),
-            Batch.retry_count < retry_limit,
         )
         .order_by(Batch.batch_index)
         .limit(1)
@@ -87,7 +87,7 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         settings.generation_retry_limit if isinstance(settings, Settings) else _DEFAULT_RETRY_LIMIT
     )
     batch_size = settings.batch_size if isinstance(settings, Settings) else _DEFAULT_BATCH_SIZE
-    batch = _next_processable(session, task_id=task_id, retry_limit=retry_limit)
+    batch = _next_processable(session, task_id=task_id)
     if batch is None:
         return 0
     task = session.get(Task, task_id)
@@ -139,12 +139,13 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         for kp in kps:
             kp.status = "PROCESSED"
     else:
-        batch.retry_count += 1
+        # 契约 3.7：最多 2 次重试共 3 次尝试——达上限（retry_count >= limit，即第 3 次失败）才 SKIPPED
         if batch.retry_count >= retry_limit:
             batch.status = "SKIPPED"
             for kp in kps:
                 kp.status = "SKIPPED"
         else:
+            batch.retry_count += 1  # 还有重试预算 → FAILED（下次尝试为重试）
             batch.status = "FAILED"
     if batch.status in _TERMINAL_STATUSES:
         task.completed_batch_count = (task.completed_batch_count or 0) + 1  # 游标原子推进

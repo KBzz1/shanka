@@ -40,7 +40,9 @@ class Settings(BaseSettings):
     task_scan_interval_seconds: float = 1.0
     # 分批生成（V5A 4.2/5.7：可运维调整，客户端不得硬编码）
     batch_size: int = 3  # 每批知识点数
-    generation_retry_limit: int = 2  # 批次 Schema 校验失败重试上限（共 3 次尝试）
+    generation_retry_limit: int = (
+        2  # 批次 Schema 校验失败重试上限（重试 2 次，共 3 次尝试；达上限批次 SKIPPED）
+    )
     # 敏感项：禁止打印、复制、写入日志/响应/任务明细；`repr=False` 防意外入日志
     deepseek_api_key: str | None = Field(default=None, repr=False)
     # API Key 加密密钥（database-design 2.2：环境变量，32 字节 hex；缺失时 PUT /api-key 不可用）
