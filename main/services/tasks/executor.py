@@ -1,25 +1,31 @@
-"""executor.py：任务执行器（4.4 定式：进程内 DB 驱动；V4 用 deterministic fake，V5A 换真实分批）。
+"""executor.py：任务执行器（4.4 定式：进程内 DB 驱动；V5A adapter 分批执行）。
 
-V4 同步执行：扫描 RUNNING 任务 → 逐知识点 fake 生成 → 入库（cards + review_state
-初始，V1 模式；generation_item_id 部分唯一索引防重——先查后插）→ generated_card_count
-更新 → 全部完成 → COMPLETED。fake 失败（不应发生）→ FAILED。
+V5A 同步执行：扫描 RUNNING 任务 → plan_batches（若任务无批次）→ 解密 API Key（仅 infra/llm
+路径）→ 构造带 Key 的 DeepSeekClient（client_factory 注入，测试 mock transport）→ 循环
+process_next_batch 直至无待处理批次 → 全部批次终态 → 任务 COMPLETED。
+系统级错误（adapter 抛 API_KEY_UNAVAILABLE/GENERATION_FAILED）→ 任务 FAILED（4.1）；
+批次级失败（Schema 重试达上限）→ 批次 SKIPPED，任务继续（4.2）。V4 fake 不再用于任务执行
+（样卡仍用 fake）。
 """
 
 import logging
-import uuid
-from typing import Any, cast
+from collections.abc import Callable
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.db.models import Card, Chapter, KnowledgePoint, ReviewState, Task
-from services.generation.fake import generate_card
+from infra.db.models import ApiKey, KnowledgePoint, Task
+from infra.llm.crypto import decrypt_key, key_from_settings
+from infra.llm.deepseek import DeepSeekClient
+from services.generation.batches import plan_batches, process_next_batch
 
 logger = logging.getLogger(__name__)
 
-# 难度轮换（决策：按 kp priority 轮换三档，BASIC/UNDERSTANDING/APPLICATION；V5A 按 ratio 分配）
-_DIFFICULTY_ROTATION = ("BASIC", "UNDERSTANDING", "APPLICATION")
+# client_factory(decrypted_api_key) -> DeepSeekClient：测试注入 mock transport；生产缺省
+ClientFactory = Callable[[str], DeepSeekClient]
 
 
 def _require_str(value: str | None, message: str) -> str:
@@ -29,25 +35,42 @@ def _require_str(value: str | None, message: str) -> str:
     return value
 
 
-def _next_position(session: Session, *, deck_id: str) -> int:
-    max_pos = session.scalar(select(func.max(Card.position)).where(Card.deck_id == deck_id))
-    return (max_pos or 0) + 1
+def _decrypt_api_key(session: Session, *, task: Task, settings: Settings) -> str:
+    """从 api_keys 表取 encrypted_key 解密（红线 4：仅 infra/llm 路径；明文不落日志/响应）。"""
+    key = key_from_settings(settings)
+    row = session.scalar(
+        select(ApiKey).where(ApiKey.device_id == task.device_id, ApiKey.status == "AVAILABLE")
+    )
+    if key is None or row is None:
+        raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 不可用（加密配置缺失或未保存 Key）")
+    try:
+        return decrypt_key(row.encrypted_key, key)
+    except Exception:  # noqa: BLE001 —— 解密失败（畸形 payload/密钥不符）统一 API_KEY_UNAVAILABLE
+        raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 解密失败") from None
 
 
-def process_running_tasks(session: Session, *, storage: Any = None) -> int:
-    """处理全部 RUNNING 任务（V4 同步执行：逐知识点 fake 生成入库）。返回处理任务数。
+def process_running_tasks(
+    session: Session,
+    *,
+    storage: Any = None,
+    settings: Settings | None = None,
+    client_factory: ClientFactory | None = None,
+) -> int:
+    """处理全部 RUNNING 任务（V5A adapter 分批生成入库）。返回处理任务数。
 
-    storage 预留：V5A 真实 adapter 读取批次内容时使用；V4 fake 生成不触碰存储。
+    storage 预留：V5A 真实 adapter 读取批次内容时使用（当前批次 prompt 仅用知识点 topic）；
     事务归调用方（scan_once / handler）：本函数不 commit，失败由调用方回滚。
+    settings/client_factory 测试注入；缺省 settings 取环境配置，client_factory 构造生产客户端。
     """
+    settings = settings or Settings()
     tasks = session.scalars(
         select(Task).where(Task.status == "RUNNING").order_by(Task.created_at)
     ).all()
     for task in tasks:
         try:
-            _execute_task(session, task)
+            _execute_task(session, task, settings=settings, client_factory=client_factory)
         except AppError as exc:
-            # fake 失败（不应发生）→ FAILED；已入库卡片保留（取消语义同 6.4）
+            # 系统级错误（API Key 失效/上游持续不可用）→ FAILED；已入库卡片保留（4.1）
             _fail_task(task, error_code=exc.code.value)
             logger.warning(
                 "task execution failed",
@@ -67,79 +90,61 @@ def _fail_task(task: Task, *, error_code: str) -> None:
     task.resumable = 0
 
 
-def _execute_task(session: Session, task: Task) -> None:
-    """执行单个任务：逐知识点 fake 生成 → 入库（防重）→ kp PROCESSED → 任务 COMPLETED。"""
+def _execute_task(
+    session: Session,
+    task: Task,
+    *,
+    settings: Settings,
+    client_factory: ClientFactory | None,
+) -> None:
+    """执行单个任务：plan_batches（若未建）→ 解密 Key 构造 client → 循环 process_next_batch → COMPLETED。"""
     now = _require_str(task.updated_at, "任务数据不完整（缺少时间戳）")
-    deck_id = _require_str(task.deck_id, "任务数据不完整（缺少牌组）")
+    _require_str(task.deck_id, "任务数据不完整（缺少牌组）")
+    session.info["settings"] = settings  # batches.py 消费（batch_size/retry_limit）
     kps = session.scalars(
         select(KnowledgePoint)
         .where(KnowledgePoint.task_id == task.task_id)
         .order_by(KnowledgePoint.priority)
     ).all()
-    # 章节名映射（按任务 file_id 过滤，不扫全表——M-3 fix）：fake 的 front/back 展示章节名
-    chapter_names: dict[str, str] = {}
-    if task.file_id is not None:
-        chapter_names = {
-            c.chapter_id: c.name
-            for c in session.scalars(select(Chapter).where(Chapter.file_id == task.file_id)).all()
-        }
-    generated = 0
-    for kp in kps:
-        difficulty = _DIFFICULTY_ROTATION[(kp.priority - 1) % len(_DIFFICULTY_ROTATION)]
-        # task_id 纳入 fake seed（F-1）：同设备同章节二次任务不互相去重
-        card = generate_card(
-            kp.topic, chapter_names.get(kp.chapter_id or "", ""), difficulty, None, task.task_id
+    if task.total_batch_count is None and kps:
+        plan_batches(
+            session,
+            task_id=task.task_id,
+            knowledge_points=kps,
+            batch_size=settings.batch_size,
         )
-        # 防重（generation_item_id 部分唯一索引，先查后插；同 seed 已入库则跳过）
-        existing = session.scalar(
-            select(Card).where(Card.generation_item_id == card["generation_item_id"])
-        )
-        if existing is not None:
-            continue
-        c = Card(
-            card_id=cast(str, card["card_id"]),
-            deck_id=deck_id,
-            device_id=task.device_id,
-            source="GENERATED",
-            position=_next_position(session, deck_id=deck_id),
-            front=cast(str, card["front"]),
-            back=cast(str, card["back"]),
-            card_type=cast(str, card["card_type"]),
-            statement=cast("str | None", card.get("statement")),
-            answer_boolean=cast("int | None", card.get("answer_boolean")),
-            explanation=cast("str | None", card.get("explanation")),
-            generation_item_id=cast(str, card["generation_item_id"]),
-            target_difficulty=cast(str, card["target_difficulty"]),
-            version=cast(str, card["version"]),
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(c)
-        session.flush()  # 立即暴露 UNIQUE(deck_id, position) / 部分唯一索引冲突
-        session.add(
-            ReviewState(
-                review_state_id=str(uuid.uuid4()),
-                card_id=c.card_id,
-                state="NEW",
-                stability=0.0,
-                difficulty=1.0,
-                due=now,
-                reps=0,
-                lapses=0,
-                updated_at=now,
-            )
-        )
-        kp.status = "PROCESSED"
-        generated += 1
-    task.generated_card_count += generated
+        session.flush()
+    api_key = _decrypt_api_key(session, task=task, settings=settings)
+    client = (
+        client_factory(api_key)
+        if client_factory is not None
+        else DeepSeekClient(settings, api_key=api_key)
+    )
+    try:
+        # 批次级失败（Schema 重试达上限 → SKIPPED）不中断；adapter 系统错误抛 AppError 上抛
+        while process_next_batch(session, task_id=task.task_id, client=client) > 0:
+            pass
+    finally:
+        client.close()
     task.status = "COMPLETED"
     task.ended_at = now
     task.resumable = 0
 
 
-def scan_once(session_factory: sessionmaker[Session], *, storage: Any = None) -> int:
+def scan_once(
+    session_factory: sessionmaker[Session],
+    *,
+    storage: Any = None,
+    settings: Settings | None = None,
+    client_factory: ClientFactory | None = None,
+) -> int:
     """扫描一轮：处理全部 RUNNING 任务（V3A 同款 session_factory 循环）。返回处理任务数。"""
     with session_factory() as session:
-        n = process_running_tasks(session, storage=storage)
+        n = process_running_tasks(
+            session,
+            storage=storage,
+            settings=settings,
+            client_factory=client_factory,
+        )
         session.commit()
     return n

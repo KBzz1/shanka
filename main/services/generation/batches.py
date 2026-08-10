@@ -1,0 +1,296 @@
+"""services.generation.batches：分批执行核心（4.2 批次状态机/重试/游标原子推进）。
+
+- plan_batches：知识点按 batch_size 分组建 Batch（PENDING，batch_index 从 1 起）+ 游标初始化；
+- process_next_batch：取下一个可处理批次（PENDING 或 FAILED 且 retry<limit）→ PROCESSING →
+  adapter.chat（Prompt 组装）→ 响应 JSON 解析 → 逐卡 Schema 校验 → 合法卡入库（V1 模式 +
+  generation_item_id 防重）→ SUCCEEDED（≥1 合法卡）/ FAILED（0 合法卡，retry+1；retry≥limit →
+  SKIPPED）→ 游标 completed_batch_count 与批次状态/计数同事务原子推进 → 返回处理批次数（0 = 无）。
+- Schema 是唯一入库门槛；Rubric 只观测（Task 3 接入）。
+- Key 解密在 executor（仅 infra/llm 路径）：本模块接收已构造带 Key 的 DeepSeekClient。
+"""
+
+import hashlib
+import json
+import logging
+import uuid
+from collections.abc import Sequence
+from typing import Any, cast
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.config import Settings
+from app.errors import AppError, ErrorCode
+from infra.db.models import Batch, Card, KnowledgePoint, ReviewState, Task
+from infra.llm.deepseek import DeepSeekClient
+from infra.llm.prompts import asset_versions, load_asset
+from services.generation.schema_validator import load_card_schema, validate_card
+
+logger = logging.getLogger(__name__)
+
+# process_next_batch 直接调用（无 executor session.info 注入）时的兜底默认，与 Settings 默认一致
+_DEFAULT_BATCH_SIZE = 3
+_DEFAULT_RETRY_LIMIT = 2
+
+_TERMINAL_STATUSES = ("SUCCEEDED", "SKIPPED")
+
+
+def plan_batches(
+    session: Session,
+    *,
+    task_id: str,
+    knowledge_points: Sequence[KnowledgePoint],
+    batch_size: int = 3,
+) -> None:
+    """按 batch_size 分组建 Batch（PENDING）→ 任务游标 total/completed 初始化（同事务）。"""
+    task = session.get(Task, task_id)
+    total = (len(knowledge_points) + batch_size - 1) // batch_size
+    for i in range(0, len(knowledge_points), batch_size):
+        session.add(
+            Batch(
+                batch_id=str(uuid.uuid4()),
+                task_id=task_id,
+                batch_index=i // batch_size + 1,
+                status="PENDING",
+                generated_item_ids="[]",
+                retry_count=0,
+                created_at=task.updated_at if task is not None else None,
+            )
+        )
+    if task is not None:
+        task.total_batch_count = total
+        task.completed_batch_count = 0
+
+
+def _next_processable(session: Session, *, task_id: str, retry_limit: int) -> Batch | None:
+    """取下一个可处理批次：PENDING 或 FAILED 且 retry<limit（FAILED 且 retry≥limit 已置 SKIPPED）。"""
+    return session.scalar(
+        select(Batch)
+        .where(
+            Batch.task_id == task_id,
+            (Batch.status == "PENDING") | (Batch.status == "FAILED"),
+            Batch.retry_count < retry_limit,
+        )
+        .order_by(Batch.batch_index)
+        .limit(1)
+    )
+
+
+def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient) -> int:
+    """处理下一个可执行批次（每批一次 chat 调用）。返回处理批次数（0 = 无待处理批次）。
+
+    批次状态 + 卡入库 + 游标/计数更新同事务（调用方 commit；失败由调用方回滚）。
+    batch_size/retry_limit 从 session.info["settings"] 取（executor 注入），缺省用默认值。
+    """
+    settings = session.info.get("settings")
+    retry_limit = (
+        settings.generation_retry_limit if isinstance(settings, Settings) else _DEFAULT_RETRY_LIMIT
+    )
+    batch_size = settings.batch_size if isinstance(settings, Settings) else _DEFAULT_BATCH_SIZE
+    batch = _next_processable(session, task_id=task_id, retry_limit=retry_limit)
+    if batch is None:
+        return 0
+    task = session.get(Task, task_id)
+    if task is None:
+        raise AppError(ErrorCode.GENERATION_FAILED, "任务不存在")
+    now = task.updated_at
+    deck_id = task.deck_id
+    if now is None or deck_id is None:
+        raise AppError(ErrorCode.GENERATION_FAILED, "任务数据不完整（缺少时间戳/牌组）")
+    batch.status = "PROCESSING"
+    session.flush()
+    kps = session.scalars(
+        select(KnowledgePoint)
+        .where(KnowledgePoint.task_id == task_id)
+        .order_by(KnowledgePoint.priority)
+        .offset((batch.batch_index - 1) * batch_size)
+        .limit(batch_size)
+    ).all()
+    # Prompt 组装（稳定前缀 + 动态后缀；完整 Prompt 不落日志——红线 4/AC-08）
+    prompt_asset = load_asset("prompts", "generator")
+    card_schema = json.dumps(load_card_schema(), ensure_ascii=False)
+    topic_list = "\n".join(f"- {kp.topic}" for kp in kps)
+    prompt = f"{prompt_asset}\n本次批次知识点：\n{topic_list}\n请按 schema 输出：\n{card_schema}"
+    result = client.chat(prompt, api_key="")  # 明文 Key 在 client 构造时注入（executor 解密）
+    inserted = _insert_valid_cards(
+        session,
+        task=task,
+        deck_id=deck_id,
+        now=now,
+        batch=batch,
+        cards=_parse_cards(result["content"]),
+    )
+    # usage/版本观测（structure-contract 3.7；rubric_version Task 3 接入）
+    usage = result["usage"]
+    versions = asset_versions()
+    batch.cache_hit_tokens = usage.get("prompt_cache_hit_tokens")
+    batch.cache_miss_tokens = usage.get("prompt_cache_miss_tokens")
+    batch.output_tokens = usage.get("completion_tokens")
+    batch.model = result.get("model")
+    batch.http_status = result.get("http_status")
+    batch.duration_ms = result.get("duration_ms")
+    batch.prompt_version = versions["prompt_version"]
+    batch.schema_version = versions["schema_version"]
+    # 状态机（4.2）：SUCCEEDED（≥1 合法卡）/ FAILED（0 合法卡，retry+1）/ 重试达上限 → SKIPPED
+    task.generated_card_count += len(inserted)
+    if inserted:
+        batch.status = "SUCCEEDED"
+        batch.generated_item_ids = json.dumps([card.generation_item_id for card in inserted])
+        for kp in kps:
+            kp.status = "PROCESSED"
+    else:
+        batch.retry_count += 1
+        if batch.retry_count >= retry_limit:
+            batch.status = "SKIPPED"
+            for kp in kps:
+                kp.status = "SKIPPED"
+        else:
+            batch.status = "FAILED"
+    if batch.status in _TERMINAL_STATUSES:
+        task.completed_batch_count = (task.completed_batch_count or 0) + 1  # 游标原子推进
+        batch.ended_at = now
+    session.flush()
+    return 1
+
+
+def _parse_cards(content: str) -> list[dict[str, Any]]:
+    """响应 content JSON → 卡片列表。非 JSON / 无 cards 列表 → []（0 合法卡 → FAILED/重试）。"""
+    try:
+        data = json.loads(content)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    cards = data.get("cards")
+    if not isinstance(cards, list):
+        return []
+    return [c for c in cards if isinstance(c, dict)]
+
+
+def _to_internal_card(card: dict[str, Any]) -> dict[str, Any]:
+    """响应卡片 → 内部卡 dict（T1 carry-forward：必须产出 front/back，否则 Schema 违约）。
+
+    - QUESTION：front/back 缺失时从 question/answer 派生（生成输出允许不带 front/back）；
+    - TRUE_FALSE：front/back 缺失时从 statement/explanation 派生；
+    - 派生后仍缺失 → 对应键为 None → Schema 校验违约，不入库（唯一门槛）。
+    """
+    ctype = card.get("type")
+    if ctype == "QUESTION":
+        return {
+            "type": "QUESTION",
+            "front": card.get("front") or card.get("question"),
+            "back": card.get("back") or card.get("answer"),
+            "question": card.get("question"),
+            "answer": card.get("answer"),
+        }
+    if ctype == "TRUE_FALSE":
+        return {
+            "type": "TRUE_FALSE",
+            "front": card.get("front") or card.get("statement"),
+            "back": card.get("back") or card.get("explanation"),
+            "statement": card.get("statement"),
+            "answer_boolean": card.get("answer_boolean"),
+            "explanation": card.get("explanation"),
+        }
+    return dict(card)
+
+
+def _insert_valid_cards(
+    session: Session,
+    *,
+    task: Task,
+    deck_id: str,
+    now: str,
+    batch: Batch,
+    cards: list[dict[str, Any]],
+) -> list[Card]:
+    """逐卡 Schema 校验 → 合法卡入库（V1 模式 + generation_item_id 防重）。返回插入的卡列表。"""
+    schema = load_card_schema()
+    inserted: list[Card] = []
+    rejected = 0
+    for raw in cards:
+        internal = _to_internal_card(raw)
+        if validate_card(internal, schema):
+            rejected += 1
+            continue
+        card = _insert_card(
+            session, task=task, deck_id=deck_id, now=now, batch=batch, internal=internal
+        )
+        if card is not None:
+            inserted.append(card)
+    if rejected:
+        logger.info(
+            "batch cards rejected by schema",
+            extra={"task_id": task.task_id, "batch_index": batch.batch_index, "rejected": rejected},
+        )
+    return inserted
+
+
+def _insert_card(
+    session: Session,
+    *,
+    task: Task,
+    deck_id: str,
+    now: str,
+    batch: Batch,
+    internal: dict[str, Any],
+) -> Card | None:
+    """单卡入库（V1 模式：Card + ReviewState 初始 NEW；generation_item_id 先查后插防重）。"""
+    gen_item = _stable_uuid(
+        f"gen|{task.task_id}|{batch.batch_index}|{internal.get('type')}|{internal.get('front')}|{internal.get('back')}"
+    )
+    existing = session.scalar(select(Card).where(Card.generation_item_id == gen_item))
+    if existing is not None:
+        return None  # 同 seed 已入库（批次内重复内容）→ 跳过
+    card_id = str(uuid.uuid4())
+    card = Card(
+        card_id=card_id,
+        deck_id=deck_id,
+        device_id=task.device_id,
+        source="GENERATED",
+        position=_next_position(session, deck_id=deck_id),
+        front=cast(str, internal["front"]),
+        back=cast(str, internal["back"]),
+        card_type=cast(str, internal["type"]),
+        question=internal.get("question"),
+        answer=internal.get("answer"),
+        statement=internal.get("statement"),
+        answer_boolean=_bool_to_int(internal.get("answer_boolean")),
+        explanation=internal.get("explanation"),
+        generation_item_id=gen_item,
+        target_difficulty=None,  # 难度分布/偏差 Task 3 rubric 填
+        version="v1",
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(card)
+    session.flush()  # 立即暴露 UNIQUE(deck_id, position) / 部分唯一索引冲突
+    session.add(
+        ReviewState(
+            review_state_id=str(uuid.uuid4()),
+            card_id=card_id,
+            state="NEW",
+            stability=0.0,
+            difficulty=1.0,
+            due=now,
+            reps=0,
+            lapses=0,
+            updated_at=now,
+        )
+    )
+    session.flush()
+    return card
+
+
+def _bool_to_int(value: object) -> int | None:
+    """answer_boolean（JSON bool）→ DB Integer（0/1）；非 bool（缺失/非法）→ None。"""
+    return int(value) if isinstance(value, bool) else None
+
+
+def _stable_uuid(seed: str) -> str:
+    return str(uuid.UUID(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]))
+
+
+def _next_position(session: Session, *, deck_id: str) -> int:
+    max_pos = session.scalar(select(func.max(Card.position)).where(Card.deck_id == deck_id))
+    return (max_pos or 0) + 1

@@ -1,17 +1,31 @@
-"""任务执行器集成测试：fake 生成入库/状态机/防重。"""
+"""任务执行器集成测试：V5A adapter 分批生成入库/状态机/防重（mock transport，不触网）。
 
+种子写入真实加密 Key（executor 解密路径）；scan_once/process_running_tasks 注入
+settings + client_factory（mock transport），生产缺省路径不在此验证。
+"""
+
+import json
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from infra.db.models import Base, Card, KnowledgePoint, Task
 from infra.db.session import create_db_engine, create_session_factory
+from infra.llm.crypto import encrypt_key, key_from_settings
+from infra.llm.deepseek import DeepSeekClient
 from services.tasks.executor import process_running_tasks
 from services.tasks.service import create_task
+
+_SETTINGS = Settings(api_key_encryption_key="aa" * 32)
+_TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
+assert _TEST_ENCRYPTION_KEY is not None
+_ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
 
 @pytest.fixture
@@ -53,7 +67,7 @@ def _seed_task(session: Session, *, device_id: str) -> str:
         session.add(
             ApiKey(
                 device_id=device_id,
-                encrypted_key="enc",
+                encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
                 updated_at="2026-08-11T00:00:00.000Z",
@@ -76,12 +90,37 @@ def _seed_task(session: Session, *, device_id: str) -> str:
     return task.task_id
 
 
+def _valid_cards_json(n: int = 3) -> str:
+    """每批 3 张合法卡（= batch_size 默认值）：3 知识点任务 → 1 批 → 3 卡（每知识点一张）。"""
+    cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(n)]
+    return json.dumps({"cards": cards}, ensure_ascii=False)
+
+
+def _client_factory(api_key: str) -> DeepSeekClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": _valid_cards_json()}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_cache_hit_tokens": 2,
+                    "prompt_cache_miss_tokens": 8,
+                },
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+    return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+
+
 def test_executor_completes_task_and_inserts_cards(session_factory: Callable[[], Session]) -> None:
     device = _uuid()
     with session_factory() as session:
         task_id = _seed_task(session, device_id=device)
     with session_factory() as session:
-        n = process_running_tasks(session)
+        n = process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
         task = session.get(Task, task_id)
         assert task is not None and task.deck_id is not None
@@ -100,11 +139,11 @@ def test_executor_no_duplicate_generation_items(session_factory: Callable[[], Se
     with session_factory() as session:
         task_id = _seed_task(session, device_id=device)
     with session_factory() as session:
-        process_running_tasks(session)
+        process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
     # 已完成任务不再处理
     with session_factory() as session:
-        n = process_running_tasks(session)
+        n = process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
     assert n == 0
     with session_factory() as session:
@@ -118,13 +157,13 @@ def test_executor_no_duplicate_generation_items(session_factory: Callable[[], Se
 def test_executor_same_chapter_second_task_still_generates(
     session_factory: Callable[[], Session],
 ) -> None:
-    """F-1 防回退：fake seed 含 task 维度——同设备同章节二次任务不互相去重。"""
+    """F-1 防回退：generation_item_id seed 含任务维度——同设备同章节二次任务不互相去重。"""
     device = _uuid()
     with session_factory() as session:
         task1 = _seed_task(session, device_id=device)
         task2 = _seed_task(session, device_id=device)  # 同章节二次任务（新 task_id）
     with session_factory() as session:
-        process_running_tasks(session)
+        process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
     with session_factory() as session:
         for task_id in (task1, task2):

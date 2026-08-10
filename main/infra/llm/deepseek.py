@@ -9,6 +9,7 @@
 """
 
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -25,8 +26,15 @@ _UPSTREAM_DOWN = "DeepSeek 上游不可用"
 
 
 class DeepSeekClient:
-    def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        transport: httpx.BaseTransport | None = None,
+        api_key: str | None = None,
+    ) -> None:
         self.settings = settings
+        # V5A：executor 解密后构造带 Key 的 client（红线 4——明文仅存在于本模块实例）
+        self.api_key = api_key
         self._client = httpx.Client(
             base_url=_BASE_URL,
             timeout=settings.deepseek_timeout_seconds,
@@ -62,8 +70,14 @@ class DeepSeekClient:
             return "INSUFFICIENT_BALANCE"
         return "AVAILABLE"
 
-    def chat(self, prompt: str, api_key: str) -> dict[str, Any]:
-        """chat 请求：thinking 开关 + JSON output + usage 映射。返回 {"content", "usage"}。"""
+    def chat(self, prompt: str, api_key: str = "") -> dict[str, Any]:
+        """chat 请求：thinking 开关 + JSON output + usage 映射。
+
+        V5A 返回结构扩展：{"content", "usage", "model", "http_status", "duration_ms"}
+        （Batch 观测列，structure-contract 3.7；model 响应缺失时回退 settings）。
+        api_key 为空时回退构造时注入的 Key（executor 解密后构造带 Key 的 client）。
+        """
+        auth_key = api_key or self.api_key or ""
         body: dict[str, Any] = {
             "model": self.settings.deepseek_model,
             "messages": [{"role": "user", "content": prompt}],
@@ -71,15 +85,17 @@ class DeepSeekClient:
         }
         if self.settings.deepseek_thinking:
             body["thinking"] = {"type": "enabled"}
+        start = time.monotonic()
         try:
             resp = self._client.post(
                 _CHAT_PATH,
                 json=body,
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers={"Authorization": f"Bearer {auth_key}"},
             )
         except httpx.HTTPError as exc:
             logger.warning("deepseek chat request error type=%s", type(exc).__name__)
             raise AppError(ErrorCode.GENERATION_FAILED, "DeepSeek 请求失败") from None
+        duration_ms = round((time.monotonic() - start) * 1000)
         if resp.status_code == 401:
             raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 无效或不可用")
         if resp.status_code in (429, 500, 502, 503):
@@ -99,4 +115,7 @@ class DeepSeekClient:
                 "prompt_cache_hit_tokens": usage.get("prompt_cache_hit_tokens"),
                 "prompt_cache_miss_tokens": usage.get("prompt_cache_miss_tokens"),
             },
+            "model": data.get("model") or self.settings.deepseek_model,
+            "http_status": resp.status_code,
+            "duration_ms": duration_ms,
         }

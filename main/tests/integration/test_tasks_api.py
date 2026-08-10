@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -17,10 +18,39 @@ from app.config import Settings
 from app.main import create_app
 from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task
 from infra.db.session import create_db_engine, create_session_factory
+from infra.llm.crypto import encrypt_key, key_from_settings
+from infra.llm.deepseek import DeepSeekClient
 from services.decks.service import create_deck
 from services.tasks.executor import scan_once as scan_tasks
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
+
+# V5A executor 解密路径：种子写入真实加密 Key；scan_tasks 注入 mock transport（不触网）
+_SETTINGS = Settings(api_key_encryption_key="aa" * 32)
+_TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
+assert _TEST_ENCRYPTION_KEY is not None
+_ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
+
+
+def _client_factory(api_key: str) -> DeepSeekClient:
+    """mock transport：每批 3 张合法卡（= batch_size 默认）；COMPACT 2 章 = 6 知识点 → 2 批 → 6 卡。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+
+        cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(3)]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps({"cards": cards}, ensure_ascii=False)}}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+    return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
 
 
 @pytest.fixture
@@ -89,7 +119,7 @@ def _seed_context(db_path: Path, *, device_id: str, with_key: bool = True) -> di
             session.add(
                 ApiKey(
                     device_id=device_id,
-                    encrypted_key="enc",
+                    encrypted_key=_ENCRYPTED_TEST_KEY,
                     status="AVAILABLE",
                     masked_key="sk-****",
                     updated_at="2026-08-11T00:00:00.000Z",
@@ -191,14 +221,14 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
     task_factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     final: dict[str, object] = {}
     for _ in range(10):
-        scan_tasks(task_factory)
+        scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
         resp = client.get(f"/tasks/{task_id}", headers=device)
         assert resp.status_code == 200
         final = resp.json()
         if final["status"] == "COMPLETED":
             break
     assert final["status"] == "COMPLETED"
-    assert final["generated_card_count"] == 6  # 2 章 × 3 知识点，每知识点一张卡
+    assert final["generated_card_count"] == 6  # 2 章 × 3 知识点 = 2 批 × 每批 3 卡
     assert final["ended_at"] is not None
     assert final["resumable"] is False
 
