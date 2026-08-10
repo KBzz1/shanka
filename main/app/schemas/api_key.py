@@ -1,10 +1,10 @@
 """API Key schema（openapi ApiKey；structure-contract 3.1/6.2）。"""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ApiKeyPutRequest(BaseModel):
-    api_key: str
+    api_key: str = Field(min_length=1)
 
 
 class ApiKey(BaseModel):

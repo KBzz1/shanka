@@ -1,7 +1,8 @@
 """infra.llm.deepseek adapter 单元测试：mock HTTP transport（不访问外网）。
 
 - validate_key：GET /user/balance，401→INVALID、200+is_available→AVAILABLE、200+is_available=false→
-  INSUFFICIENT_BALANCE、429/5xx/网络→AppError(API_KEY_UNAVAILABLE)；
+  INSUFFICIENT_BALANCE、429/5xx/网络→AppError(API_KEY_UNAVAILABLE)；200 畸形 body（非 JSON/数组）→
+  API_KEY_UNAVAILABLE（上游异常口径，不逃逸为 500）；
 - chat：POST /chat/completions（thinking 开关/JSON output/usage 映射/错误映射）；
 - thinking 参数以 DeepSeek 官方 API 为准：启用时 `body["thinking"] = {"type": "enabled"}`，禁用时不带该键。
 """
@@ -15,7 +16,7 @@ import pytest
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.llm.deepseek import DeepSeekClient, _masked_key
+from infra.llm.deepseek import DeepSeekClient
 
 
 def _settings(**kw: Any) -> Settings:
@@ -73,6 +74,30 @@ def test_adapter_validate_key_upstream_unavailable() -> None:
 def test_adapter_validate_key_network_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("network down")
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(AppError) as excinfo:
+        client.validate_key("sk-x")
+    assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
+
+
+def test_adapter_validate_key_200_non_json_body_maps_unavailable() -> None:
+    """200 + 非 JSON body → JSONDecodeError；按上游异常映射 API_KEY_UNAVAILABLE（不逃逸为 500）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json")
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(AppError) as excinfo:
+        client.validate_key("sk-x")
+    assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
+
+
+def test_adapter_validate_key_200_non_object_json_maps_unavailable() -> None:
+    """200 + JSON 非 object（数组）→ data.get AttributeError；按上游异常映射 API_KEY_UNAVAILABLE。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[1, 2, 3])
 
     client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
     with pytest.raises(AppError) as excinfo:
@@ -143,6 +168,18 @@ def test_adapter_chat_malformed_response() -> None:
     assert excinfo.value.code is ErrorCode.GENERATION_FAILED
 
 
+def test_adapter_chat_empty_choices_maps_generation_failed() -> None:
+    """200 + choices=[] → IndexError；解析失败统一 GENERATION_FAILED（不逃逸为 500）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": []})
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(AppError) as excinfo:
+        client.chat("p", "sk-test")
+    assert excinfo.value.code is ErrorCode.GENERATION_FAILED
+
+
 def test_adapter_chat_upstream_error_maps() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={})
@@ -152,9 +189,3 @@ def test_adapter_chat_upstream_error_maps() -> None:
         client.chat("p", "sk-test")
     # chat 时 Key 已保存但可能失效：401 → API_KEY_UNAVAILABLE（非 NOT_SET）
     assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
-
-
-def test_adapter_masked_key() -> None:
-    assert _masked_key("sk-abcdefghijkl1234") == "sk-****1234"
-    assert _masked_key("short") == "sk-****hort"  # len>4 → 显示后 4 位
-    assert _masked_key("abc") == "sk-****"  # 短于 4 → 全掩码

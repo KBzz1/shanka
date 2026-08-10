@@ -141,7 +141,7 @@ def test_api_key_put_invalid_returns_status_and_not_saved(
     resp = client.put("/api-key", json={"api_key": "sk-bad"}, headers={**device, **_idem()})
     assert resp.status_code == 200
     assert resp.json()["status"] == "INVALID"
-    assert resp.json()["masked_key"] == "sk-****-bad"  # _masked_key: sk-**** + 末 4 位
+    assert resp.json()["masked_key"] == "sk-****-bad"  # masked(): sk-**** + 末 4 位
     assert _api_key_rows(tmp_path / "api.db") == []  # 不落库
 
     resp = client.get("/api-key/status", headers=device)
@@ -189,6 +189,14 @@ def test_api_key_put_missing_api_key_field_400(client: TestClient) -> None:
     resp = client.put("/api-key", json={}, headers={**_device(), **_idem()})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_api_key_put_empty_api_key_400(client: TestClient) -> None:
+    """请求体 api_key 为空串（min_length=1）→ 400 VALIDATION_ERROR，不触达校验/落库。"""
+    resp = client.put("/api-key", json={"api_key": ""}, headers={**_device(), **_idem()})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert FakeClient.validate_calls == 0
 
 
 def test_api_key_put_idempotent_replay_does_not_revalidate(

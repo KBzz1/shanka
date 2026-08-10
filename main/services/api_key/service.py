@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from infra.db.models import ApiKey
 from infra.llm.crypto import encrypt_key
-from infra.llm.deepseek import DeepSeekClient, _masked_key
+from infra.llm.deepseek import DeepSeekClient
 
 
 def save_key(
@@ -27,7 +27,7 @@ def save_key(
     status = client.validate_key(api_key)
     if status != "AVAILABLE":
         # 校验失败不落库不覆盖（6.2）；返回状态供前端展示
-        return {"status": status, "masked_key": _masked_key(api_key), "updated_at": now}
+        return {"status": status, "masked_key": masked(api_key), "updated_at": now}
     encrypted = encrypt_key(api_key, encryption_key)
     row = session.scalar(select(ApiKey).where(ApiKey.device_id == device_id))
     if row is None:
@@ -35,16 +35,16 @@ def save_key(
             device_id=device_id,
             encrypted_key=encrypted,
             status=status,
-            masked_key=_masked_key(api_key),
+            masked_key=masked(api_key),
             updated_at=now,
         )
         session.add(row)
     else:
         row.encrypted_key = encrypted
         row.status = status
-        row.masked_key = _masked_key(api_key)
+        row.masked_key = masked(api_key)
         row.updated_at = now
-    return {"status": status, "masked_key": _masked_key(api_key), "updated_at": now}
+    return {"status": status, "masked_key": masked(api_key), "updated_at": now}
 
 
 def get_status(session: Session, *, device_id: str, encryption_key: bytes) -> dict[str, Any]:
@@ -55,5 +55,7 @@ def get_status(session: Session, *, device_id: str, encryption_key: bytes) -> di
 
 
 def masked(api_key: str) -> str:
-    """脱敏展示（复用 adapter._masked_key，规则唯一）。"""
-    return _masked_key(api_key)
+    """脱敏展示（规则唯一：sk-**** + 末 4 位；len<=4 全掩码）。"""
+    if len(api_key) <= 4:
+        return "sk-****"
+    return f"sk-****{api_key[-4:]}"

@@ -19,7 +19,7 @@ from app.errors import AppError, ErrorCode
 from infra.db.models import ApiKey, Base, Device
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.deepseek import DeepSeekClient
-from services.api_key.service import get_status, save_key
+from services.api_key.service import get_status, masked, save_key
 
 _TEST_KEY_HEX = "aa" * 32
 
@@ -192,6 +192,13 @@ def test_api_key_save_available_overwrites(session_factory: Callable[[], Session
         row = session.scalar(select(ApiKey).where(ApiKey.device_id == device))
         assert row is not None
         assert row.masked_key == "sk-****cond"
+
+
+def test_api_key_masked_rule() -> None:
+    """脱敏规则唯一入口（services.api_key.masked）：sk-**** + 末 4 位；len<=4 全掩码。"""
+    assert masked("sk-abcdefghijkl1234") == "sk-****1234"
+    assert masked("short") == "sk-****hort"  # len>4 → 显示后 4 位
+    assert masked("abc") == "sk-****"  # 短于 4 → 全掩码
 
 
 def test_api_key_status_unknown_when_not_saved(session_factory: Callable[[], Session]) -> None:

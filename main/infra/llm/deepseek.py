@@ -1,6 +1,6 @@
 """DeepSeek 正式 adapter（红线 4：Key 明文只在本模块调用路径；异常脱敏）。
 
-- validate_key：GET /user/balance → AVAILABLE/INVALID/INSUFFICIENT_BALANCE；上游不可用抛 API_KEY_UNAVAILABLE；
+- validate_key：GET /user/balance → AVAILABLE/INVALID/INSUFFICIENT_BALANCE；上游不可用（含 200 畸形 body）抛 API_KEY_UNAVAILABLE；
 - chat：POST /chat/completions（thinking 开关 + JSON output + 超时）→ usage 映射；
 - 错误映射：validate 401→INVALID、chat 401→API_KEY_UNAVAILABLE（Key 已保存但可能失效）、429/5xx→API_KEY_UNAVAILABLE、
   解析失败→GENERATION_FAILED；日志仅上游状态码/异常类型（不记录异常链、不引用 Key 明文）。
@@ -22,12 +22,6 @@ _BASE_URL = "https://api.deepseek.com"
 _VALIDATE_PATH = "/user/balance"
 _CHAT_PATH = "/chat/completions"
 _UPSTREAM_DOWN = "DeepSeek 上游不可用"
-
-
-def _masked_key(api_key: str) -> str:
-    if len(api_key) <= 4:
-        return "sk-****"
-    return f"sk-****{api_key[-4:]}"
 
 
 class DeepSeekClient:
@@ -57,8 +51,14 @@ class DeepSeekClient:
         if resp.status_code != 200:
             logger.warning("deepseek validate_key upstream status=%s", resp.status_code)
             raise AppError(ErrorCode.API_KEY_UNAVAILABLE, _UPSTREAM_DOWN)
-        data = resp.json()
-        if not data.get("is_available", False):
+        try:
+            data = resp.json()
+            is_available = data.get("is_available", False)
+        except (ValueError, AttributeError, TypeError) as exc:
+            # 200 但 body 非 JSON / 非 object（数组、null）→ 视为上游异常，统一 API_KEY_UNAVAILABLE
+            logger.warning("deepseek validate_key malformed 200 body type=%s", type(exc).__name__)
+            raise AppError(ErrorCode.API_KEY_UNAVAILABLE, _UPSTREAM_DOWN) from None
+        if not is_available:
             return "INSUFFICIENT_BALANCE"
         return "AVAILABLE"
 
@@ -89,7 +89,7 @@ class DeepSeekClient:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             usage = data.get("usage", {})
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, IndexError):
             raise AppError(ErrorCode.GENERATION_FAILED, "DeepSeek 响应解析失败") from None
         return {
             "content": content,
