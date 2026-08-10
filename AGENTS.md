@@ -24,10 +24,13 @@
 
 ## 工具链
 
+- Python 环境统一使用 Conda 环境 `shanka-backend`（Python 3.12）；交互会话先 `conda activate shanka-backend`，Agent/脚本优先使用 `conda run -n shanka-backend ...`，禁止把项目依赖安装到 base 或系统 Python。
+- Conda 只负责解释器与环境隔离；Python 依赖及 lint 配置仍以 `main/pyproject.toml` 为唯一事实源，不另建重复依赖清单。
 - 依赖与 lint 配置唯一事实源：`main/pyproject.toml`（ruff line-length 100、mypy strict）。
-- 测试：`cd main && python -m pytest`。四层职责见 `main/tests/*/AGENTS.md`；命名规范 `test_<模块>_<行为>`。
+- 测试：`cd main && conda run -n shanka-backend python -m pytest`。四层职责见 `main/tests/*/AGENTS.md`；命名规范 `test_<模块>_<行为>`。
 - pre-commit：ruff-format → ruff → mypy（`main/.pre-commit-config.yaml`）。
 - 配置：pydantic-settings 单层配置类，默认值进代码，密钥/令牌走环境变量，禁止散落硬编码。
+- 本机实施/验收从仓库根目录、权限为 `600` 且被 Git 忽略的 `.env` 加载 `DEEPSEEK_API_KEY`，并作为运行时输入走正式 Key/API 流程；禁止提交 `.env`，或把明文凭据写入 Conda env config、plan、fixture、命令参数、日志与测试报告。
 
 ## 约定
 
