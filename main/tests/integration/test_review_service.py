@@ -1,9 +1,11 @@
 """services.review 集成测试：到期队列/评级事务/client_event_id 兜底（真实 SQLite）。
 
 与 brief 草稿的修正（校准说明）：
-- result["state"] / rs.state 用 "Learning"（py-fsrs 4.1.2 State 枚举 .name，R-13 落地后落库口径）；
+- result["state"] / rs.state 用大写（契约 3.10 枚举，裁决 1：fsrs State .name.upper() 落库）；
 - fixture 补 devices 行（FK 强制，carry-forward：test_cards_service 已实证违约）；
-- 初始难度断言 1.0（ORM CHECK 1~10 的 V1 占位值）。
+- 初始难度断言 1.0（ORM CHECK 1~10 的 V1 占位值）；
+- fix round 1：Learning 卡重建 step 由 due-last_review 间隔推导（裁决 2），
+  覆盖二次 GOOD +1d / 三次 GOOD 毕业 / RELEARNING 重建 GOOD → REVIEW。
 """
 
 import uuid
@@ -114,7 +116,7 @@ def test_submit_review_updates_state_and_creates_event(
             now="2026-08-11T01:00:00.000Z",
         )
         session.commit()
-    assert result["state"] == "Learning"
+    assert result["state"] == "LEARNING"
     assert result["due"] == "2026-08-11T01:10:00.000Z"
     assert result["reps"] == 1
     assert result["lapses"] == 0
@@ -127,7 +129,7 @@ def test_submit_review_updates_state_and_creates_event(
         rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
         assert rs is not None
         assert rs.reps == 1
-        assert rs.state == "Learning"
+        assert rs.state == "LEARNING"
         assert rs.due == "2026-08-11T01:10:00.000Z"
 
 
@@ -229,3 +231,73 @@ def test_submit_review_rollback_on_failure(
         session.rollback()
     with session_factory() as session:
         assert len(session.scalars(select(ReviewEvent)).all()) == 0
+
+
+def test_submit_review_learning_second_good_plus_1d(
+    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+) -> None:
+    """Learning 卡重建（step 由 due-last_review 推导，裁决 2）：二次 GOOD → +1d（5.2 表第 2 行）。"""
+    _, card_id = deck_and_card
+    with session_factory() as session:
+        first = submit_review(
+            session,
+            device_id=device,
+            card_id=card_id,
+            rating="GOOD",
+            client_event_id=_uuid(),
+            device_timezone="Asia/Shanghai",
+            now="2026-08-11T01:00:00.000Z",
+        )
+        session.commit()
+    assert first["state"] == "LEARNING"
+    assert first["due"] == "2026-08-11T01:10:00.000Z"  # 首 GOOD → +10m（step 1，实证）
+    with session_factory() as session:
+        second = submit_review(
+            session,
+            device_id=device,
+            card_id=card_id,
+            rating="GOOD",
+            client_event_id=_uuid(),
+            device_timezone="Asia/Shanghai",
+            now="2026-08-11T01:10:00.000Z",
+        )
+        session.commit()
+    assert second["state"] == "LEARNING"
+    assert second["due"] == "2026-08-12T01:10:00.000Z"  # 重建 step=1 → 二次 GOOD +1d
+    assert second["reps"] == 2
+
+
+def test_submit_review_learning_graduates_and_relearning_rebuild(
+    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+) -> None:
+    """Learning 三次 GOOD 毕业 REVIEW（5.2 表第 3 行）；REVIEW+AGAIN → RELEARNING(+10m)；
+    RELEARNING 重建（step=0）GOOD → REVIEW。"""
+    _, card_id = deck_and_card
+    steps = [
+        ("GOOD", "2026-08-11T01:00:00.000Z"),
+        ("GOOD", "2026-08-11T01:10:00.000Z"),
+        ("GOOD", "2026-08-12T01:10:00.000Z"),
+        ("AGAIN", "2026-08-19T01:10:00.000Z"),
+        ("GOOD", "2026-08-19T01:20:00.000Z"),
+    ]
+    results: list[dict[str, object]] = []
+    with session_factory() as session:
+        for rating, now in steps:
+            result = submit_review(
+                session,
+                device_id=device,
+                card_id=card_id,
+                rating=rating,
+                client_event_id=_uuid(),
+                device_timezone="Asia/Shanghai",
+                now=now,
+            )
+            results.append(result)
+        session.commit()
+    assert results[0]["state"] == "LEARNING"  # +10m（首 GOOD）
+    assert results[1]["state"] == "LEARNING"  # +1d（二次 GOOD，step 推导）
+    assert results[2]["state"] == "REVIEW"  # 三次 GOOD 毕业（5.2 表第 3 行）
+    assert results[3]["state"] == "RELEARNING"  # REVIEW+AGAIN
+    assert results[3]["due"] == "2026-08-19T01:20:00.000Z"  # +10m（relearning_steps[0]）
+    assert results[4]["state"] == "REVIEW"  # RELEARNING 重建 GOOD → Review
+    assert str(results[4]["due"]) > "2026-08-19T01:20:00.000Z"

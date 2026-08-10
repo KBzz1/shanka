@@ -8,11 +8,13 @@
 py-fsrs 4.1.2 事实（R-13 落地，Task 1 校准）：
 - Card() = Learning step 0 新卡；无 State.New——ORM "NEW" 初始行（V1）等价 Learning step 0 卡；
 - Card 无 reps/lapses 属性——本模块自计数（每次评级 reps +1；AGAIN 时 lapses +1）；
-- state 落库用 State 枚举 .name（Learning/Review/Relearning）。
+- state 落库用 State 枚举 .name 大写（LEARNING/REVIEW/RELEARNING，契约 3.10 枚举值域），
+  构造时由大写反映射回 fsrs State（裁决 1）；
+- 契约 3.10 无 step 字段——Learning 卡重建时由 due - last_review 间隔推导（裁决 2）。
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fsrs import Card as FsrsCard
 from fsrs import Rating, State
@@ -62,25 +64,47 @@ def _get_review_state(session: Session, *, card_id: str, now: str) -> ReviewStat
     return rs
 
 
+def _derive_learning_step(rs: ReviewState) -> int:
+    """Learning 卡重建时由 due - last_review 间隔推导 step（裁决 2；契约 3.10 无 step 字段）。
+
+    匹配 learning_steps=[10m, 10m, 1d]（R-13 3 步配置）：实证首 GOOD 后 step=1、间隔 10m，
+    二次 GOOD 后 step=2、间隔 1d → 1d 映射 step 2、10m 映射 step 1（核心目标：二次 GOOD +1d，
+    5.2 表第 2 行）。10m 间隔在 AGAIN/HARD 路径亦有 step 0 歧义——按裁决统一取 step 1
+    （偏差：AGAIN 后 GOOD 得 1d 而非 10m，登记见 task-2-report fix round 1）。
+    last_review 为空（不应出现于 LEARNING 行）→ 兜底 step 0。
+    """
+    if rs.last_review is None:
+        return 0
+    interval = _parse_utc(rs.due) - _parse_utc(rs.last_review)
+    if interval == timedelta(days=1):
+        return 2
+    return 1
+
+
 def _to_fsrs_card(rs: ReviewState) -> FsrsCard:
     """ReviewState 快照 → py-fsrs Card（构造口径见模块 docstring）。
 
-    NEW：stability/difficulty 传 None 走 fsrs 首评初始化——快照占位值 0.0/1.0 不可直接输入
+    NEW：stability/difficulty 传 None 走 fsrs 首评初始化（裁决 3）——快照占位值 0.0/1.0 不可直接输入
     （stability=0.0 + last_review=None → retrievability=0 → _next_stability log(0) ValueError）。
-    Relearning：relearning_steps 单步（10m）step 恒为 0，须显式传——fsrs 仅对 Learning 默认
+    LEARNING：由 _derive_learning_step 重建 step（裁决 2）。
+    RELEARNING：relearning_steps 单步（10m）step 恒为 0，须显式传——fsrs 仅对 Learning 默认
     step=0，Relearning step=None 会在 review_card 断言失败。
-    Learning：step 不落库（快照无 step 列），重建按 step 0 处理——已知缺口（见 task-2-report）。
     """
     if rs.state == "NEW":
         return FsrsCard(state=State.Learning, due=_parse_utc(rs.due), last_review=None)
     kwargs: dict[str, object] = {
-        "state": State[rs.state],
         "stability": rs.stability,
         "difficulty": rs.difficulty,
         "due": _parse_utc(rs.due),
         "last_review": _parse_utc(rs.last_review) if rs.last_review else None,
     }
-    if rs.state == "Relearning":
+    if rs.state == "LEARNING":
+        kwargs["state"] = State.Learning
+        kwargs["step"] = _derive_learning_step(rs)
+    elif rs.state == "REVIEW":
+        kwargs["state"] = State.Review
+    else:  # RELEARNING
+        kwargs["state"] = State.Relearning
         kwargs["step"] = 0
     return FsrsCard(**kwargs)
 
@@ -150,7 +174,8 @@ def _submit_review_inner(
     )
 
     # 更新 ReviewState 全量快照（database-design 2.10）；reps/lapses 自计数（4.x Card 无此属性）
-    rs.state = new_card.state.name
+    # state 落库大写（契约 3.10 枚举 NEW/LEARNING/REVIEW/RELEARNING，裁决 1）
+    rs.state = new_card.state.name.upper()
     rs.stability = float(new_card.stability)
     rs.difficulty = float(new_card.difficulty)
     rs.due = format_utc(new_card.due)
