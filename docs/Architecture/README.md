@@ -33,3 +33,5 @@
 | C-03 | 掌握判定阈值 | `state == REVIEW` 且 `stability >= 21` 天(Anki 成熟口径) | 牌组进度与看板 |
 | C-04 | 幂等重放响应 | 重复请求返回首次成功结果(200/201 + 原响应体),不返回 409 | 全写操作 |
 | C-05 | 单卡重写替换方式 | 原地替换(同 `card_id`),复习状态重置,新 `generation_item_id` | 单卡重写(FR-13) |
+| C-06 | 未到期评级宽容 | 评级接口允许对任意状态卡片提交,服务端按 FSRS 正常排程 | 复习(FR-15) |
+| C-07 | FSRS 其余参数 | `desired_retention=0.9`、`relearning_steps=(10m,)`、`maximum_interval=36500`,取自 FSRS-6 默认/Anki 惯例 | 复习(FR-15) |

@@ -5,7 +5,10 @@ info:
   description: >
     闪卡 App v2.1 接口契约(机器可读版)。行为契约(状态机、幂等、FSRS 排程、
     错误码语义)见 structure-contract.md;需求依据 PRD v2.1。
-    所有接口需携带 X-Device-ID;写操作需携带 Idempotency-Key。
+    所有接口需携带 X-Device-ID;写操作需携带 Idempotency-Key(POST /samples 豁免)。
+    限流:写接口 60 req/min/device、IP 5 req/s,超限返回 429 + Retry-After(详见 structure-contract.md 1.6)。
+    5xx(INTERNAL_ERROR / GENERATION_FAILED)由全局中间件统一处理,未逐操作声明。
+    列表接口 MVP 暂不分页;幂等重放返回首次成功结果(2xx,含 204)。
 
 servers:
   - url: https://api.example.com/v1
@@ -103,7 +106,7 @@ paths:
           $ref: '#/components/responses/NotFound'
     delete:
       tags: [pdf]
-      summary: 删除 PDF 元数据,此后不可用于创建任务
+      summary: 删除 PDF 元数据;存在非终态任务引用时返回 409 TASK_IN_PROGRESS
       operationId: deletePdf
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -114,6 +117,42 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /pdfs/{file_id}/chapters/{chapter_id}:
+    parameters:
+      - $ref: '#/components/parameters/FileId'
+      - $ref: '#/components/parameters/ChapterId'
+    patch:
+      tags: [pdf]
+      summary: 修改章节名称 / 起始页 / 结束页(PRD 4.1 第 3 步、AC-02)
+      operationId: updateChapter
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChapterUpdateRequest'
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chapter'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ---------- API Key ----------
   /api-key:
@@ -145,6 +184,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '502':
           description: 上游校验不可用(API_KEY_UNAVAILABLE),可重试
           content:
@@ -159,7 +200,7 @@ paths:
       operationId: getApiKeyStatus
       responses:
         '200':
-          description: OK
+          description: OK;未保存 Key 时返回 status=UNKNOWN 且 masked_key 为空串
           content:
             application/json:
               schema:
@@ -236,6 +277,8 @@ paths:
           $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /tasks/{task_id}:
     parameters:
@@ -277,6 +320,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /tasks/{task_id}/cancel:
     post:
@@ -299,6 +344,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ---------- 牌组与卡片 ----------
   /decks:
@@ -350,6 +397,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /decks/{deck_id}:
     parameters:
@@ -367,13 +416,11 @@ paths:
                 $ref: '#/components/schemas/Deck'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
       tags: [decks]
-      summary: 删除牌组及其卡片、复习状态与统计(重复提交安全返回)
+      summary: 删除牌组及其卡片、复习状态与统计(重复提交安全返回;存在非终态任务引用时 409 TASK_IN_PROGRESS)
       operationId: deleteDeck
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -382,10 +429,12 @@ paths:
           description: 已删除
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /decks/{deck_id}/cards:
     parameters:
@@ -409,8 +458,6 @@ paths:
                       $ref: '#/components/schemas/Card'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
     post:
@@ -444,10 +491,10 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /decks/{deck_id}/cards/import:
     post:
@@ -508,10 +555,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ---------- 复习 ----------
   /decks/{deck_id}/review:
@@ -536,8 +585,6 @@ paths:
                       $ref: '#/components/schemas/ReviewQueueItem'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -569,6 +616,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ---------- 单卡重写 ----------
   /cards/{card_id}/rewrite:
@@ -580,6 +629,7 @@ paths:
         - $ref: '#/components/parameters/CardId'
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
+        required: true
         content:
           application/json:
             schema:
@@ -597,14 +647,40 @@ paths:
                 $ref: '#/components/schemas/Card'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  # ---------- 质量观测 ----------
+  /tasks/{task_id}/batches:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: 批次列表,含单卡 Rubric 汇总、质量分布与 Prompt Cache 记录(AC-07 观测,契约 6.9)
+      operationId: listTaskBatches
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Batch'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   # ---------- 数据看板 ----------
   /stats/dashboard:
@@ -620,6 +696,13 @@ paths:
             type: string
             example: Asia/Shanghai
             description: IANA 时区名称
+        - name: weekly_goal
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+          description: 客户端本地保存的周目标,随请求上报;未传时 weekly_goal/weekly_goal_progress 返回 null
       responses:
         '200':
           description: OK
@@ -651,6 +734,13 @@ components:
       description: 幂等键,客户端生成;重复请求返回首次成功结果(见 structure-contract.md 1.3)
     FileId:
       name: file_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    ChapterId:
+      name: chapter_id
       in: path
       required: true
       schema:
@@ -706,7 +796,8 @@ components:
       enum: [PENDING, PROCESSING, SUCCEEDED, FAILED, SKIPPED]
     DeckSource:
       type: string
-      enum: [MANUAL, IMPORTED]
+      enum: [MANUAL, IMPORTED, GENERATED]
+      description: GENERATED 为 PDF 制卡新建的归属牌组
     CardSource:
       type: string
       enum: [GENERATED, MANUAL, IMPORTED]
@@ -722,19 +813,26 @@ components:
     ApiKeyStatus:
       type: string
       enum: [AVAILABLE, INVALID, INSUFFICIENT_BALANCE, UNKNOWN]
+      description: 校验结果经 200 + status 返回,不产生错误响应;未保存 Key 时 UNKNOWN(契约 6.2)
 
     # ---- 资源模型(与 structure-contract.md 第 3 章一致)----
     Error:
       type: object
-      required: [code, message, localization_key]
+      required: [error]
+      description: 统一错误响应,外层 error 包装(契约 1.4)
       properties:
-        code:
-          type: string
-          description: 稳定错误码(见 structure-contract.md 第 7 章)
-        message:
-          type: string
-        localization_key:
-          type: string
+        error:
+          type: object
+          required: [code, message, localization_key]
+          properties:
+            code:
+              type: string
+              description: 稳定错误码(见 structure-contract.md 第 7 章)
+            message:
+              type: string
+              description: 面向用户的补充信息,不含内部细节
+            localization_key:
+              type: string
 
     ApiKey:
       type: object
@@ -764,6 +862,21 @@ components:
         end_page:
           type: integer
           minimum: 1
+
+    ChapterUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: 章节名称,可修改
+        start_page:
+          type: integer
+          minimum: 1
+        end_page:
+          type: integer
+          minimum: 1
+      description: 至少提供一个字段;未提供的字段保持不变(PRD 5.2)
 
     PdfFile:
       type: object
@@ -839,11 +952,13 @@ components:
           type: string
           format: uuid
         file_id:
-          type: string
+          type: [string, 'null']
           format: uuid
+          description: 创建时必填;删除 PDF 后置 null(任务保留)
         deck_id:
-          type: string
+          type: [string, 'null']
           format: uuid
+          description: 创建时必填;删除牌组后置 null(任务保留)
         status:
           $ref: '#/components/schemas/TaskStatus'
         stage:
@@ -919,6 +1034,7 @@ components:
 
     KnowledgePoint:
       type: object
+      description: 内部资源(契约 3.6);本期无独立接口,经任务详情与批次观测间接呈现
       required:
         - knowledge_point_id
         - task_id
@@ -948,6 +1064,7 @@ components:
 
     Batch:
       type: object
+      description: 内部资源(契约 3.7);经 GET /v1/tasks/{task_id}/batches 观测返回(契约 6.9)
       required: [batch_id, task_id, batch_index, status, retry_count]
       properties:
         batch_id:
@@ -1042,6 +1159,7 @@ components:
         - front
         - back
         - card_type
+        - version
         - created_at
         - updated_at
       properties:
@@ -1081,6 +1199,34 @@ components:
         generation_item_id:
           type: [string, 'null']
           description: 仅 GENERATED 卡;同一值最多对应一张有效卡片
+        target_difficulty:
+          type: [string, 'null']
+          enum: [BASIC, UNDERSTANDING, APPLICATION]
+          description: 仅 GENERATED 卡;生成时目标难度
+        knowledge_point_ids:
+          type: [array, 'null']
+          items:
+            type: string
+            format: uuid
+          description: 仅 GENERATED 卡;关联知识点,综合应用卡可多个(PRD 5.6)
+        evidence_score:
+          type: [integer, 'null']
+          description: Rubric 原文依据 0~3,仅 GENERATED 卡
+        correctness_score:
+          type: [integer, 'null']
+          description: Rubric 答案正确性 0~3,仅 GENERATED 卡
+        difficulty_score:
+          type: [integer, 'null']
+          description: Rubric 难度匹配 0~3,仅 GENERATED 卡
+        learning_value_score:
+          type: [integer, 'null']
+          description: Rubric 学习价值 0~3,仅 GENERATED 卡
+        rubric_total_score:
+          type: [integer, 'null']
+          description: Rubric 总分 0~12,仅 GENERATED 卡
+        version:
+          type: string
+          description: 变更版本,客户端缓存刷新用(重写时递增,决策 C-05)
         created_at:
           type: string
           format: date-time
@@ -1132,6 +1278,33 @@ components:
           type: string
           format: date-time
 
+    ReviewEvent:
+      type: object
+      required: [review_event_id, client_event_id, card_id, rating, reviewed_at, device_timezone, created_at]
+      properties:
+        review_event_id:
+          type: string
+          format: uuid
+        client_event_id:
+          type: string
+          format: uuid
+          description: 客户端生成,设备内唯一,离线重试幂等
+        card_id:
+          type: string
+          format: uuid
+        rating:
+          $ref: '#/components/schemas/Rating'
+        reviewed_at:
+          type: string
+          format: date-time
+          description: 服务端时间
+        device_timezone:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      description: 不可变记录(契约 3.11);本期无查询接口,评级提交时服务端内部使用
+
     ReviewEventRequest:
       type: object
       required: [card_id, rating, client_event_id, device_timezone]
@@ -1154,6 +1327,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/Card'
         - type: object
+          required: [review_state]
           properties:
             review_state:
               $ref: '#/components/schemas/ReviewState'
@@ -1173,6 +1347,7 @@ components:
         - retention_rate
         - streak_days
         - mastered_card_count
+        - updated_at
         - has_data
       properties:
         period:
@@ -1203,9 +1378,14 @@ components:
           description: 上周为 0 时返回 null(客户端显示"暂无对比")
         weekly_goal:
           type: [integer, 'null']
+          description: 客户端随请求上报(见 /stats/dashboard 查询参数),未上报时 null
         weekly_goal_progress:
           type: [number, 'null']
-          description: min(weekly_total / weekly_goal, 1),goal 未配置时 null
+          description: min(weekly_total / weekly_goal, 1),goal 未上报时 null
+        updated_at:
+          type: string
+          format: date-time
+          description: 聚合快照生成时间(PRD 6.6,客户端据此判断缓存过期)
         recall_accuracy:
           type: [number, 'null']
           description: 周期内 GOOD 事件 / 全部事件,分母为 0 时 null
@@ -1217,7 +1397,7 @@ components:
           description: 非首次事件中 GOOD 数 / 非首次事件数,分母为 0 时 null
         streak_days:
           type: integer
-          description: 截至用户本地当天连续有复习事件的自然日数
+          description: 截至用户本地当天连续有复习事件的自然日数;按本次请求 timezone 分桶,不按各事件 device_timezone
         mastered_card_count:
           type: integer
           description: 掌握卡片数(state=REVIEW 且 stability>=21 天)
@@ -1234,12 +1414,6 @@ components:
             $ref: '#/components/schemas/Error'
     Unauthorized:
       description: 缺少或非法 X-Device-ID
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/Error'
-    Forbidden:
-      description: 资源不属于当前设备
       content:
         application/json:
           schema:

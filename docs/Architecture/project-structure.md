@@ -70,4 +70,4 @@ main/
 1. `app/schemas/` 字段 ↔ `openapi.yaml` ↔ `structure-contract.md` 资源模型,三处一致。
 2. `infra/db/` ORM ↔ `database-design.md` 表结构一致。
 3. 幂等键、设备 ID 头、错误码格式的实现在 `app/middleware/` 统一,禁止散落各处。
-4. API Key 只出现在 `infra/llm/` 的调用路径中,任何日志、响应、任务明细不得引用其明文。
+4. API Key 只出现在 `infra/llm/` 的调用路径中,任何日志、响应、任务明细不得引用其明文;通用请求日志对 `PUT /api-key` 请求体强制掩码;llm 层异常统一脱敏为 `API_KEY_*` / `GENERATION_FAILED` 错误码,日志仅记录 request_id、上游状态码、异常类型(审核修复)。
