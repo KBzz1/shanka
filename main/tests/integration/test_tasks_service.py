@@ -5,6 +5,7 @@ pdf/deck/task/api_keys 均 FK → devices——fixture 先建设备行
 （HTTP 流中由 F1 设备中间件自动建立，本层显式补种）；tasks 校验 Key 需 ApiKey 种子。
 """
 
+import json
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -50,6 +51,7 @@ def _seed_context(session: Session, *, device_id: str, with_key: bool = True) ->
     deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
     session.flush()
     chapter_ids = []
+    chapters = []
     for i in range(2):
         ch = Chapter(
             chapter_id=_uuid(),
@@ -61,6 +63,7 @@ def _seed_context(session: Session, *, device_id: str, with_key: bool = True) ->
         session.add(ch)
         session.flush()
         chapter_ids.append(ch.chapter_id)
+        chapters.append(ch)
     if with_key:
         session.add(
             ApiKey(
@@ -72,7 +75,20 @@ def _seed_context(session: Session, *, device_id: str, with_key: bool = True) ->
             )
         )
     session.flush()
-    return {"file_id": pdf.file_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
+    return {
+        "file_id": pdf.file_id,
+        "deck_id": deck.deck_id,
+        "chapter_ids": chapter_ids,
+        "chapters": [
+            {
+                "chapter_id": ch.chapter_id,
+                "name": ch.name,
+                "start_page": ch.start_page,
+                "end_page": ch.end_page,
+            }
+            for ch in chapters
+        ],
+    }
 
 
 def _config(tendency: str = "BALANCED") -> dict[str, str | dict[str, float]]:
@@ -107,6 +123,9 @@ def test_tasks_create_runs_and_plans(session_factory: Callable[[], Session]) -> 
         row = session.get(Task, task_id)
         assert row is not None
         assert row.generation_config  # JSON 快照持久化
+        # selected_chapters 快照存完整 Chapter 对象（契约 3.4 Chapter[]；3.6 名称可还原）
+        snapshot = json.loads(row.selected_chapters)
+        assert snapshot == ctx["chapters"]
 
 
 def test_tasks_create_without_key_422(session_factory: Callable[[], Session]) -> None:
@@ -139,6 +158,42 @@ def test_tasks_create_cross_device_404(session_factory: Callable[[], Session]) -
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
+            config=_config(),
+            now="2026-08-11T00:00:00.000Z",
+        )
+    assert excinfo.value.code is ErrorCode.PDF_NOT_FOUND
+
+
+def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]) -> None:
+    """章节归属校验：chapter_ids 含不属于该 PDF 的章节 → PDF_NOT_FOUND（与 samples 一致）。"""
+    device = _uuid()
+    with session_factory() as session:
+        ctx = _seed_context(session, device_id=device)
+        other_pdf = PdfFile(
+            file_id=_uuid(),
+            device_id=device,
+            filename="c.pdf",
+            storage_key=_uuid(),
+            size_bytes=1,
+            status="PARSED",
+            created_at="2026-08-11T00:00:00.000Z",
+        )
+        session.add(other_pdf)
+        session.flush()
+        other_ch = Chapter(
+            chapter_id=_uuid(), file_id=other_pdf.file_id, name="他章", start_page=1, end_page=2
+        )
+        session.add(other_ch)
+        session.flush()
+        foreign_id = other_ch.chapter_id
+        session.commit()
+    with session_factory() as session, pytest.raises(AppError) as excinfo:
+        create_task(
+            session,
+            device_id=device,
+            file_id=ctx["file_id"],
+            deck_id=ctx["deck_id"],
+            chapter_ids=[ctx["chapter_ids"][0], foreign_id],
             config=_config(),
             now="2026-08-11T00:00:00.000Z",
         )

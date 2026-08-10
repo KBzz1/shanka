@@ -13,7 +13,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import ApiKey, PdfFile, Task
+from infra.db.models import ApiKey, Chapter, PdfFile, Task
 from services.decks.service import _owned as _owned_deck
 from services.generation.planning import plan_knowledge_points
 from services.generation.validate import validate_config
@@ -71,6 +71,23 @@ def create_task(
     pdf = session.get(PdfFile, file_id)
     if pdf is None or pdf.device_id != device_id:
         raise AppError(ErrorCode.PDF_NOT_FOUND, "PDF 不存在")
+    # 章节归属校验：chapter_ids 全部属于 file_id，缺失/他属 → PDF_NOT_FOUND（与 samples 一致）
+    chapters = session.scalars(
+        select(Chapter).where(Chapter.chapter_id.in_(chapter_ids), Chapter.file_id == file_id)
+    ).all()
+    by_id = {ch.chapter_id: ch for ch in chapters}
+    if any(cid not in by_id for cid in chapter_ids):
+        raise AppError(ErrorCode.PDF_NOT_FOUND, "章节不属于该 PDF")
+    # selected_chapters 快照存完整 Chapter 对象（契约 3.4 Chapter[]；3.6 章节删除后名称从快照还原）
+    chapter_snapshot = [
+        {
+            "chapter_id": cid,
+            "name": by_id[cid].name,
+            "start_page": by_id[cid].start_page,
+            "end_page": by_id[cid].end_page,
+        }
+        for cid in chapter_ids
+    ]
     _owned_deck(session, device_id=device_id, deck_id=deck_id)
     # 已保存 Key 校验（6.2：无 Key → API_KEY_NOT_SET）；只查 status=AVAILABLE 行存在，
     # 不解密（V5A 生成时才解密调用）
@@ -87,7 +104,7 @@ def create_task(
         deck_id=deck_id,
         status="RUNNING",
         stage="GENERATING",
-        selected_chapters=json.dumps(chapter_ids, ensure_ascii=False),
+        selected_chapters=json.dumps(chapter_snapshot, ensure_ascii=False),
         generation_config=json.dumps(config, ensure_ascii=False),
         generated_card_count=0,
         resumable=0,
