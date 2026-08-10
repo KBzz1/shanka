@@ -150,11 +150,22 @@
 
 ### V3B — API Key 安全与 DeepSeek 适配边界
 
-**`TODO`｜依赖：F1｜可与 V1/V2/V3A 并行｜覆盖：FR-17/18、接口 1.5/6.2、AC-08/11 的后端本机部分**
+**`DONE`｜依赖：F1｜可与 V1/V2/V3A 并行｜覆盖：FR-17/18、接口 1.5/6.2、AC-08/11 的后端本机部分**
 
 实现 Key 状态映射、AES-256-GCM 环境密钥加密与覆盖规则，仅 infra/llm 解密；完成正式 DeepSeek adapter。模型与 thinking 模式通过单一配置入口注入并记录实际值，不在领域/业务层硬编码；应用服务使用 deterministic fake，正式 adapter 使用 mock HTTP transport，不访问外网。
 
 验收：AVAILABLE/INVALID/余额不足/上游不可用、旧有效 Key 保护；adapter 请求鉴权、thinking 开关、JSON 输出约束、超时、畸形响应、错误码和脱敏；数据库、响应、日志、异常、任务与分析数据均无明文。真实 Key/余额与客户端存储不在本机完成声明内；本次直连 smoke 不计为 adapter 验收。
+
+当前证据（2026-08-11，分支 codex/v3b 合并回 main，7 commits 792bfb2..d8b7be6）：
+- AES-256-GCM 加密（infra/llm/crypto.py）：随机 12B IV 随密文（base64(iv+ct+tag)），解密密钥来自环境变量（Settings api_key_encryption_key，repr=False，32 字节 hex）；模块位于 infra/llm/（红线 4：仅该路径可解密）；service 不导入 decrypt_key。
+- 覆盖规则（6.2）：仅 AVAILABLE 落库/覆盖；INVALID/INSUFFICIENT_BALANCE 不保存不覆盖（旧有效 Key 保护实测：`sk-****lid1` 保留）；API_KEY_UNAVAILABLE 502。
+- 状态映射（3.1）：AVAILABLE（balance 端点 200+is_available）/INVALID（401）/INSUFFICIENT_BALANCE（200+is_available=false）/UNKNOWN（未保存，masked_key=""）；上游 429/5xx/网络 → API_KEY_UNAVAILABLE。
+- DeepSeek adapter（infra/llm/deepseek.py）：validate_key（/user/balance）+ chat（/chat/completions，thinking 开关 `{"type": "enabled"}`、JSON output `response_format={"type":"json_object"}`、超时 Settings.deepseek_timeout_seconds、usage 四键映射 prompt/completion/cache hit/miss）；错误映射（401→INVALID/API_KEY_UNAVAILABLE、429/5xx→API_KEY_UNAVAILABLE、解析失败→GENERATION_FAILED）；`raise ... from None` 切断异常链；日志仅状态码/异常类型（1.5 红线）；transport 可注入（httpx.MockTransport 全 mock 验证，不访问外网）。
+- 模型/thinking 单一配置入口（R-09）：Settings deepseek_model="deepseek-v4-flash"、deepseek_thinking=False（冻结默认可替换）。
+- 路由：PUT /api-key（200 ApiKey；幂等 execute_idempotent——重放不重复校验实测 validate_calls==1；加密密钥缺失 → 500 INTERNAL_ERROR；client try/finally close）+ GET /api-key/status（200；UNKNOWN 空态）。
+- 脱敏（AC-08/11）：响应仅 status/masked_key（sk-****后4位）/updated_at；DB 密文断言无明文；caplog 日志断言无明文（含 alembic fileConfig 禁用 logger 的测试坑处理）；请求日志不记 body。
+- 验收实测：四工具全绿（242 passed、mypy 130 files）；干净 venv 安装 + 迁移 OK；uvicorn 冒烟（GET status UNKNOWN 空态、缺密钥 PUT 500——LOCAL-DONE 前不触网）；边界 64 用例全绿；泄漏 grep 仅 "task-1-report" 误报。
+- 登记：thinking 参数名/模型 id/balance 响应结构需 R1 live 核对（mock 契约已验证）；migrations/env.py fileConfig disable_existing_loggers 仓库性测试坑（R1 统一修）。
 
 ### V4 — 样卡、任务与知识点规划
 
