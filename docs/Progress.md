@@ -187,11 +187,22 @@
 
 ### V5A — 分批生成与质量观测闭环
 
-**`TODO`｜依赖：V4｜覆盖：FR-07～11/18、接口 4/6.4/6.9/6.10/8、AC-04/07**
+**`DONE`｜依赖：V4｜覆盖：FR-07～11/18、接口 4/6.4/6.9/6.10/8、AC-04/07**
 
 按知识点分批，每批最多 2 次重试；Schema 是唯一入库门槛，Rubric 只观测。合法卡、generation_item_id、知识点/批次状态、游标、计数原子推进；失败批次 SKIPPED 后继续。记录实际 model/system_fingerprint、prompt/cache-miss/cache-hit/output token、Prompt/Schema/Rubric 版本、Rubric 与质量；提供批次/质量聚合/指标/按生效日期配置的成本估算。
 
 验收：低 Rubric 合法卡入库；非法输出三次后跳过；已完成批次和 generation_item_id 不重复；provider usage 原样字段与内部统一字段映射受测，价格调整不改历史 token 数据；版本/缓存/质量/成本可核验；AC-04/07。
+
+当前证据（2026-08-11，分支 codex/v5a 合并回 main，10 commits 9bc4301..ae3f498 + fix 7c223a5 + 契约同步 89c3aa8）：
+- Schema 校验器（services/generation/schema_validator.py）：card.schema.json（Draft 2020-12，顶层 required=[type, front, back] + allOf 类型条件）经 manifest 资产加载；**Schema 是唯一入库门槛**（Rubric 不影响）。
+- 分批执行核心（services/generation/batches.py）：知识点按 batch_size=3 分组；批次状态机 PENDING→PROCESSING→SUCCEEDED（≥1 合法卡）/FAILED（0 合法卡）→重试 2 次共 3 次尝试→SKIPPED（**重试预算对齐契约 3.7**——fix 连带修复 _next_processable 假 COMPLETED 风险 + attempts==3 守卫）；游标 completed_batch_count/计数/批次状态同事务原子推进；已完成批次不重复；SKIPPED 后任务继续。
+- 生成链路（LOCAL-DONE 红线）：正式 adapter（DeepSeekClient）+ mock HTTP transport（不触网）；executor 解密 Key 构造 client；响应→内部卡映射（front/back 产出 + QUESTION/TRUE_FALSE 分支）→逐卡 Schema 校验→合法卡入库（V1 模式 + generation_item_id 防重）；系统级错误→任务 FAILED（已入库卡保留）；V4 fake 退役（样卡仍用 fake）。
+- Rubric 观测（5.9/8.5）：deterministic fake judge（4 维度 0-3 分总分 0-12，本地规则）；分数落 Card 5 字段 + 批次质量 6 字段（coverage/duplicate/难度/章节/类型分布/difficulty_deviation——V5A 简化恒 0）；rubric_version 记录；Rubric 不影响入库。
+- usage/版本观测（3.7/8.4）：cache_hit/miss/output tokens、model、http_status、duration_ms、prompt/schema/rubric_version 落 Batch；provider usage 原样字段与内部统一字段映射受测；request_id 待上游透传（R1）。
+- 观测出口：GET /tasks/{id}/batches（Batch 视图含质量/usage/版本/cost_estimate）；GET /observability/quality-summary（group_by model|pdf|difficulty、days=30、device 隔离：Rubric 均分/覆盖/重复率/任务完成率/成本汇总）；6 个 8.3 指标（llm_requests_total/llm_request_duration_seconds/llm_tokens_total/generation_tasks_total/generation_tasks_duration_seconds/batch_retry_total——infra/metrics.py 共享 REGISTRY + 上报点）；cost.py 价格常量（2026-08-11 起 hit 0.5/miss 2/output 8 元每百万 token，生效日期取档，历史 token 不变）。
+- 契约同步（R-16 RESOLVED）：openapi Batch schema 补齐 9 观测字段（structure-contract 3.7 派生）。
+- 验收实测：四工具全绿（313 passed、mypy 161 files）；干净 venv 安装 + 迁移 OK；uvicorn 冒烟（quality-summary 空态、metrics 9 指标行——LOCAL-DONE 不触网）；边界 61 用例全绿；无明文泄漏。
+- 登记：AC-04（低分合法卡照常入库/非法 SKIPPED/不自动修复）与 AC-07（Rubric+Cache 记录且不影响入库）验收通过；difficulty 分组语义未契约化（structure-contract 6.10 补分组键定义——R1 契约修订）；FAILED 任务批次滞留 PROCESSING（V5B 恢复闭环）。
 
 ### V5B — 任务恢复、取消与并发闭环
 
