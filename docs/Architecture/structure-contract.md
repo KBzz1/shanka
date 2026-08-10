@@ -319,6 +319,12 @@ NEW → LEARNING → REVIEW →(AGAIN)→ RELEARNING →(GOOD/EASY)→ REVIEW
 
 转移规则由 FSRS-6 算法决定,服务端存储快照即可,客户端无需理解。
 
+### 4.4 任务执行架构定式
+
+- **进程内调度器**：PDF 解析、知识点规划、分批生成由 API 进程内后台循环扫描 PENDING 任务/批次执行；任务/批次状态与游标存 DB（**DB 即状态**），不引入外部任务队列（Celery/RQ/Redis）。
+- **多实例演进**：孤儿 RUNNING 心跳恢复（30 分钟）+ DB 条件更新抢占已支持多 worker；未来多实例仅增加 DB 轮询调度，业务逻辑不变。
+- 禁止以性能为由提前引入任务队列。
+
 ## 5. 复习排程(FSRS-6)
 
 ### 5.1 引擎与配置
@@ -461,6 +467,16 @@ Scheduler(
 
 MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字段,3.9)核验。
 
+### 6.10 质量聚合观测（O-4，审核设计补全）
+
+| 方法 | 路径 | 说明 | 幂等 |
+| --- | --- | --- | --- |
+| GET | `/v1/observability/quality-summary?group_by=model\|pdf\|difficulty&days=30` | 跨任务质量聚合:Rubric 各维平均分、覆盖/重复率均值、任务完成率、成本汇总;按 group_by 分组 | - |
+
+- 隔离口径：按当前 `device_id` 聚合（与业务数据同隔离）；跨设备聚合留给未来运营后台。
+- 成本汇总（O-6）：按"价格配置常量"换算 `cache_hit_tokens` / `cache_miss_tokens` / `output_tokens` 为估算金额，hit/miss/output 分开计价；价格常量取 DeepSeek 官方定价、标注生效日期，不固化进 DB。
+- `/healthz`（存活）、`/readyz`（就绪:DB 连接 + 存储可写，失败 503）、`/metrics`（Prometheus 文本）为运行观测基础端点，**豁免 X-Device-ID 鉴权**（探针/采集器无设备上下文）。
+
 ## 7. 错误码表
 
 | 分组 | 错误码 | HTTP | 说明 |
@@ -491,7 +507,48 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 
 注:API Key 校验结果(`INVALID` / `INSUFFICIENT_BALANCE`)经 `200 + ApiKey.status` 返回,不产生错误响应(见 6.2)。跨设备资源访问一律返回 404,不暴露资源存在性(1.1)。
 
-## 8. 与 PRD 的对照
+## 8. 运行可观测性（观测范围仅 DeepSeek API）
+
+### 8.1 结构化日志（O-1）
+
+- JSON 单行格式；字段:`timestamp`(ISO 8601 UTC) / `level` / `request_id` / `device_id` / `task_id` / `batch_id` / `error_code` / `message`。
+- 级别规范:INFO(请求进出、批处理完成)、WARN(重试、限流触发)、ERROR(异常 + error_code)。
+- 贯穿机制:中间件生成 `request_id` 贯穿全链路;后台批处理以 `task_id` + `batch_id` 关联。
+- 红线保留:1.5/7.1 的 API Key、完整 PDF 内容、完整 Prompt 不落日志。
+
+### 8.2 健康检查（O-2）
+
+`GET /healthz` 存活探针;`GET /readyz` 就绪探针(DB 连接 + 存储可写,失败 503);豁免 X-Device-ID 鉴权。
+
+### 8.3 指标（O-3）
+
+`GET /metrics`(Prometheus 文本格式),豁免 X-Device-ID 鉴权,生产子域名默认不暴露:
+
+| 指标 | 类型 | labels |
+| --- | --- | --- |
+| `generation_tasks_total` | counter | result(COMPLETED/FAILED/CANCELLED) |
+| `generation_tasks_duration_seconds` | histogram | - |
+| `batch_retry_total` | counter | - |
+| `rate_limit_hit_total` | counter | scope(device/ip/api_key/samples/pdf) |
+| `llm_requests_total` | counter | model(DeepSeek 模型族)/http_status |
+| `llm_request_duration_seconds` | histogram | model |
+| `llm_tokens_total` | counter | kind(cache_hit/cache_miss/output) |
+| `http_requests_total` | counter | method/path/status |
+| `http_request_duration_seconds` | histogram | - |
+
+### 8.4 成本观测（O-6）
+
+- 原始 token 数据(`cache_hit_tokens` / `cache_miss_tokens` / `output_tokens`)落 Batch 表,不变。
+- 估算成本在聚合时按"价格配置常量"换算;常量取 DeepSeek 官方定价、标注生效日期;价格调整只改配置,不动历史数据。
+- 出口:8.3 `llm_tokens_total` 与 6.10 聚合接口的成本汇总。
+
+### 8.5 评估骨架（O-5）
+
+- Rubric 评分执行者:LLM-as-judge;评分 prompt 资产: `agent_evolution/rubrics/v1/scoring-prompt.md`。
+- `rubric_version` / `prompt_version` / `schema_version` 字段值 = `agent_evolution/manifest.json` 中对应 version。
+- 评分请求记录:prompt 版本 + 输入摘要 + 输出分;不落完整 prompt。
+
+## 9. 与 PRD 的对照
 
 | 契约章节 | PRD 章节 | 状态 |
 | --- | --- | --- |
@@ -505,3 +562,4 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | 6.1 章节修改与上传限制 | 4.1 第 3 步 / FR-02 / AC-02 | 新增(审核修复) |
 | 6.9 质量观测 | FR-10 / FR-11 / AC-07 | 新增(审核修复) |
 | 3.9 Rubric 与关联字段 | 5.9 / 5.6 / 6.3 / AC-07 | 修复(审核) |
+| 8 运行可观测性 / 6.10 聚合观测 | PRD 8 核心指标 / FR-10 / FR-11 | 新增(设计规格 6422765) |
