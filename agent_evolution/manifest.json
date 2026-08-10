@@ -1,0 +1,12 @@
+{
+  "prompts": {
+    "planner": { "version": "v1", "path": "prompts/v1/planner.md" },
+    "generator": { "version": "v1", "path": "prompts/v1/generator.md" }
+  },
+  "schemas": {
+    "card": { "version": "v1", "path": "schemas/v1/card.schema.json" }
+  },
+  "rubrics": {
+    "main": { "version": "v1", "path": "rubrics/v1/rubric.md" }
+  }
+}

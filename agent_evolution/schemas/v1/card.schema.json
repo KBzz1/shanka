@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Card",
+  "type": "object",
+  "required": ["type", "front", "back"],
+  "properties": {
+    "type": { "enum": ["QUESTION", "TRUE_FALSE"] },
+    "front": { "type": "string", "minLength": 1 },
+    "back": { "type": "string", "minLength": 1 },
+    "question": { "type": "string", "minLength": 1 },
+    "answer": { "type": "string", "minLength": 1 },
+    "statement": { "type": "string", "minLength": 1 },
+    "answer_boolean": { "type": "boolean" },
+    "explanation": { "type": "string", "minLength": 1 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "QUESTION" } }, "required": ["type"] },
+      "then": { "required": ["question", "answer"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "TRUE_FALSE" } }, "required": ["type"] },
+      "then": { "required": ["statement", "answer_boolean", "explanation"] }
+    }
+  ]
+}
