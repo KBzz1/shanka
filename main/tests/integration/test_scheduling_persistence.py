@@ -1,8 +1,8 @@
 """排程结果持久化映射集成测试：py-fsrs Card ↔ review_states 表字段（database-design 2.10）。
 
-校准说明（py-fsrs 6.3.2）：Card 无 reps/lapses 属性（ORM 对应列由 Task 2 review
-service 计数）；State 为 IntEnum，.name 与 ORM state 字符串列（NEW/LEARNING/REVIEW/
-RELEARNING，见 infra/db/models.py ReviewState）对应。
+校准说明（py-fsrs 4.1.2，V2 fix round 1 固定 4.x 线）：Card 无 reps/lapses 属性
+（ORM 对应列由 Task 2 review service 计数）；State 为 IntEnum，.name 与 ORM state
+字符串列（NEW/LEARNING/REVIEW/RELEARNING，见 infra/db/models.py ReviewState）对应。
 """
 
 from datetime import datetime

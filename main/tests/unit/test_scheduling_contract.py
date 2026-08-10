@@ -1,10 +1,11 @@
 """services.scheduling 排程契约确定性断言（structure-contract 5.1 表，fuzzing 关闭）。
 
-校准说明（py-fsrs 6.3.2 实际 API，见 task-1-report）：
-- Card() 即"新卡"：State.Learning、step=0、due=now（v6 已无 State.New）；
+校准说明（py-fsrs 4.1.2 实际 API，V2 fix round 1 固定 4.x 线，见 task-1-report）：
+- Card() 即"新卡"：State.Learning、step=0、due=now（4.x/6.x 均无 State.New，仅 3.x 有）；
 - learning_steps/relearning_steps 以 timedelta 表达（5.1：10m、1d）；
-- v6 语义下首个学习间隔（10m）是 step 0 卡的当前步：GOOD 从 step 0 进到 step 1（1d），
-  再次 GOOD 毕业 REVIEW；10m 步体现在 AGAIN/HARD 路径（本文件断言按实际行为校准）；
+- v4/v6 语义下首个学习间隔（10m）是 step 0 卡的当前步：GOOD 从 step 0 进到 step 1（1d），
+  再次 GOOD 毕业 REVIEW；10m 步体现在 AGAIN/HARD 路径（本文件断言按实际行为校准；
+  与 5.2 表前两行的差异登记 R-13）；
 - State 为 IntEnum，断言统一用 .name（str() 输出数字）。
 """
 
