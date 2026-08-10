@@ -23,7 +23,6 @@ from app.schemas.tasks import TaskCreateRequest
 from infra.clock import SystemClock
 from infra.db.models import Batch
 from infra.db.session import format_utc, get_db_session
-from infra.metrics import GENERATION_TASKS_TOTAL
 from services.generation.cost import estimate_cost
 from services.tasks.service import (
     cancel_task,
@@ -215,9 +214,5 @@ def cancel_task_endpoint(
         request_body_hash=body_hash,
         fn=biz,
     )
-    if not _replayed and body.get("status") == "CANCELLED":
-        GENERATION_TASKS_TOTAL.labels(
-            result="CANCELLED"
-        ).inc()  # 8.3：取消结果计数（幂等重放不重复）
     session.commit()
     return JSONResponse(status_code=status, content=body)

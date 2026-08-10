@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from infra.db.models import ApiKey, Chapter, PdfFile, Task
+from infra.metrics import GENERATION_TASKS_TOTAL
 from services.decks.service import _owned as _owned_deck
 from services.generation.planning import plan_knowledge_points
 from services.generation.validate import validate_config
@@ -129,12 +130,18 @@ def get_task(session: Session, *, device_id: str, task_id: str) -> Task:
 
 
 def cancel_task(session: Session, *, device_id: str, task_id: str, now: str) -> Task:
-    """取消：PENDING/RUNNING/PAUSED → CANCELLED（终态任务保持不变）。"""
+    """取消：PENDING/RUNNING/PAUSED → CANCELLED；终态任务早返回不转移。
+
+    8.3 generation_tasks_total CANCELLED 只在实际状态转移时计数（不同幂等键重复
+    取消不再重复 inc；同键重放走 execute_idempotent 快照，不重跑本函数）。
+    """
     task = _owned_task(session, device_id=device_id, task_id=task_id)
-    if task.status in ("PENDING", "RUNNING", "PAUSED"):
-        task.status = "CANCELLED"
-        task.ended_at = now
-        task.updated_at = now
+    if task.status in ("COMPLETED", "FAILED", "CANCELLED"):
+        return task  # 已终态：不转移不计数
+    task.status = "CANCELLED"
+    task.ended_at = now
+    task.updated_at = now
+    GENERATION_TASKS_TOTAL.labels(result="CANCELLED").inc()
     return task
 
 

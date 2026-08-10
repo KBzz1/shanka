@@ -73,6 +73,7 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path]]:
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环，显式 scan_tasks
+        rate_limit_ip_per_second=100,  # IP 限流隔离（本文件单测多次快速请求）
     )
     with TestClient(create_app(settings)) as client:
         yield client, db_path
@@ -322,3 +323,31 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
     assert (
         _plain_value(after, "batch_retry_total") - _plain_value(before, "batch_retry_total")
     ) == 0.0
+
+
+def test_cancel_metric_counts_transition_once(ctx: tuple[TestClient, Path]) -> None:
+    """F-1 回归：generation_tasks_total CANCELLED 只在实际状态转移时计数。
+
+    同任务不同幂等键重复取消（任务已终态 → service 早返回不转移）与同键重放
+    （execute_idempotent 快照，不重跑 biz）均不重复 inc（差值断言）。
+    """
+    client, db_path = ctx
+    device = _device()
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    assert resp.status_code == 201  # 任务创建即 RUNNING（未跑 executor）
+    task_id = resp.json()["task_id"]
+    labels = ['result="CANCELLED"']
+    before = _labeled_value(client.get("/metrics").text, "generation_tasks_total", labels)
+    key_a = _idem()
+    # 首次取消（RUNNING → CANCELLED）：计数 +1
+    r1 = client.post(f"/tasks/{task_id}/cancel", headers={**device, **key_a})
+    assert r1.status_code == 200 and r1.json()["status"] == "CANCELLED"
+    # 不同幂等键重复取消（任务已终态）：service 早返回，不转移不计数
+    r2 = client.post(f"/tasks/{task_id}/cancel", headers={**device, **_idem()})
+    assert r2.status_code == 200 and r2.json()["status"] == "CANCELLED"
+    # 同键重放：走 execute_idempotent 快照，不重跑 biz
+    r3 = client.post(f"/tasks/{task_id}/cancel", headers={**device, **key_a})
+    assert r3.status_code == 200 and r3.json() == r1.json()
+    after = _labeled_value(client.get("/metrics").text, "generation_tasks_total", labels)
+    assert after - before == 1.0
