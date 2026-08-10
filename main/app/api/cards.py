@@ -101,7 +101,8 @@ def import_cards_endpoint(
             now=_now(),
         )
         response = ImportResponse(results=[ImportResult.model_validate(r) for r in results])
-        return 201, response.model_dump()
+        # exclude_none：CREATED result 的 error 为 None，openapi error 非 nullable，不得输出 null
+        return 201, response.model_dump(exclude_none=True)
 
     _replayed, status, body = execute_idempotent(
         session,

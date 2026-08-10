@@ -81,6 +81,8 @@ def test_cards_api_import_atomic_and_per_item_results(client: TestClient) -> Non
     assert [r["status"] for r in results] == ["CREATED", "CREATED"]
     assert [r["index"] for r in results] == [0, 1]
     assert all(r["card_id"] for r in results)
+    # final review fix：error 字段 openapi 非 nullable，成功 result 不得输出 null 键
+    assert all("error" not in r for r in results)
     resp = client.get(f"/decks/{deck_id}/cards", headers=device)
     assert len(resp.json()["items"]) == 2
 
