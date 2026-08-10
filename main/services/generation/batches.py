@@ -1,7 +1,8 @@
 """services.generation.batches：分批执行核心（4.2 批次状态机/重试/游标原子推进）。
 
 - plan_batches：知识点按 batch_size 分组建 Batch（PENDING，batch_index 从 1 起）+ 游标初始化；
-- process_next_batch：取下一个可处理批次（PENDING 或 FAILED，FAILED 必未达重试上限）→ PROCESSING →
+- process_next_batch：条件更新抢占下一个可处理批次（PENDING 或 FAILED，FAILED 必未达重试上限，
+  WHERE status=候选状态 原子转 PROCESSING，rowcount=0 → 下一条/0 → 并发单执行者）→
   adapter.chat（Prompt 组装）→ 响应 JSON 解析 → 逐卡 Schema 校验 → 合法卡入库（V1 模式 +
   generation_item_id 防重）→ SUCCEEDED（≥1 合法卡）/ FAILED（0 合法卡，retry+1）/ 重试达上限
   （retry_count >= limit，共 3 次尝试）→ SKIPPED → 游标 completed_batch_count 与批次状态/计数
@@ -18,7 +19,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -74,17 +75,37 @@ def plan_batches(
         task.completed_batch_count = 0
 
 
-def _next_processable(session: Session, *, task_id: str) -> Batch | None:
-    """取下一个可处理批次：PENDING 或 FAILED（FAILED 必未达重试上限——达上限当次已置 SKIPPED）。"""
-    return session.scalar(
-        select(Batch)
-        .where(
-            Batch.task_id == task_id,
-            (Batch.status == "PENDING") | (Batch.status == "FAILED"),
+def _claim_next_batch(session: Session, *, task_id: str) -> Batch | None:
+    """条件更新抢占：PENDING/FAILED → PROCESSING（原子转移，并发 worker 单执行者）。
+
+    V5B：select 取候选后改条件更新（WHERE status = 候选状态）；rowcount=0 → 已被其他
+    worker 抢占 → 继续取下一条（循环内）；全 0/无候选 → None（调用方返回 0）。
+    FAILED 必未达重试上限（达上限当次已置 SKIPPED）。
+    """
+    while True:
+        candidate = session.scalar(
+            select(Batch)
+            .where(
+                Batch.task_id == task_id,
+                Batch.status.in_(["PENDING", "FAILED"]),
+            )
+            .order_by(Batch.batch_index)
+            .limit(1)
         )
-        .order_by(Batch.batch_index)
-        .limit(1)
-    )
+        if candidate is None:
+            return None
+        result = cast(
+            CursorResult[Any],
+            session.execute(
+                update(Batch)
+                .where(Batch.batch_id == candidate.batch_id, Batch.status == candidate.status)
+                .values(status="PROCESSING")
+            ),
+        )
+        if result.rowcount == 1:
+            session.refresh(candidate)
+            return candidate
+        # 被其他 worker 抢占 → 取下一条（continue 循环）
 
 
 def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient) -> int:
@@ -98,7 +119,7 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         settings.generation_retry_limit if isinstance(settings, Settings) else _DEFAULT_RETRY_LIMIT
     )
     batch_size = settings.batch_size if isinstance(settings, Settings) else _DEFAULT_BATCH_SIZE
-    batch = _next_processable(session, task_id=task_id)
+    batch = _claim_next_batch(session, task_id=task_id)  # 条件更新抢占（并发单执行者）
     if batch is None:
         return 0
     task = session.get(Task, task_id)
@@ -108,8 +129,7 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     deck_id = task.deck_id
     if now is None or deck_id is None:
         raise AppError(ErrorCode.GENERATION_FAILED, "任务数据不完整（缺少时间戳/牌组）")
-    batch.status = "PROCESSING"
-    session.flush()
+    # 批次状态已在 _claim_next_batch 原子置为 PROCESSING
     kps = session.scalars(
         select(KnowledgePoint)
         .where(KnowledgePoint.task_id == task_id)

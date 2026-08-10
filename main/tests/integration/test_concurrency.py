@@ -1,0 +1,160 @@
+"""V5B 并发/心跳集成测试：批次抢占单执行者/心跳刷新（真实 SQLite + mock transport）。
+
+种子写入真实加密 Key（executor 解密路径）；process_running_tasks 注入
+settings + client_factory（mock transport），生产缺省路径不在此验证。
+"""
+
+import json
+import uuid
+from collections.abc import Callable
+from pathlib import Path
+
+import httpx
+import pytest
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.config import Settings
+from infra.db.models import Base, KnowledgePoint, Task
+from infra.db.session import create_db_engine, create_session_factory
+from infra.llm.crypto import encrypt_key, key_from_settings
+from infra.llm.deepseek import DeepSeekClient
+from services.generation.batches import plan_batches, process_next_batch
+from services.tasks.executor import process_running_tasks
+
+_SETTINGS = Settings(api_key_encryption_key="aa" * 32)
+_TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
+assert _TEST_ENCRYPTION_KEY is not None
+_ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
+
+
+@pytest.fixture
+def session_factory(tmp_path: Path) -> Callable[[], Session]:
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'concurrency.db'}")
+    Base.metadata.create_all(engine)
+    return create_session_factory(engine)
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
+def _seed_task(session: Session, *, device_id: str) -> str:
+    from infra.db.models import ApiKey, Chapter, Device, PdfFile
+    from services.decks.service import create_deck
+    from services.tasks.service import create_task
+
+    # FK 前置守卫：devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
+    if session.get(Device, device_id) is None:
+        session.add(Device(device_id=device_id, created_at="2026-08-10T00:00:00.000Z"))
+        session.flush()
+    pdf = PdfFile(
+        file_id=_uuid(),
+        device_id=device_id,
+        filename="b.pdf",
+        storage_key=_uuid(),
+        size_bytes=1,
+        status="PARSED",
+        created_at="2026-08-10T00:00:00.000Z",
+    )
+    session.add(pdf)
+    session.flush()
+    deck = create_deck(session, device_id=device_id, name="D", now="2026-08-10T00:00:00.000Z")
+    session.flush()
+    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    session.add(ch)
+    session.flush()
+    if (
+        session.scalar(
+            select(ApiKey).where(ApiKey.device_id == device_id, ApiKey.status == "AVAILABLE")
+        )
+        is None
+    ):
+        session.add(
+            ApiKey(
+                device_id=device_id,
+                encrypted_key=_ENCRYPTED_TEST_KEY,
+                status="AVAILABLE",
+                masked_key="sk-****",
+                updated_at="2026-08-10T00:00:00.000Z",
+            )
+        )
+        session.flush()
+    task = create_task(
+        session,
+        device_id=device_id,
+        file_id=pdf.file_id,
+        deck_id=deck.deck_id,
+        chapter_ids=[ch.chapter_id],
+        config={
+            "quantity_tendency": "COMPACT",
+            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+        },
+        now="2026-08-10T00:00:00.000Z",
+    )
+    # 预建批次（test 1 直接调 process_next_batch，不经过 executor 的 plan 路径）
+    kps = session.scalars(
+        select(KnowledgePoint).where(KnowledgePoint.task_id == task.task_id)
+    ).all()
+    plan_batches(session, task_id=task.task_id, knowledge_points=kps)
+    session.commit()
+    return task.task_id
+
+
+def _valid_cards_json(n: int = 3) -> str:
+    """每批 3 张合法卡（= batch_size 默认值）：3 知识点任务 → 1 批 → 3 卡（每知识点一张）。"""
+    cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(n)]
+    return json.dumps({"cards": cards}, ensure_ascii=False)
+
+
+def _client() -> DeepSeekClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": _valid_cards_json()}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+
+
+def _client_factory(api_key: str) -> DeepSeekClient:
+    return _client()
+
+
+def test_concurrency_two_workers_single_effect(session_factory: Callable[[], Session]) -> None:
+    """两 worker 并发处理同任务：批次条件更新抢占 → 单执行者（无双处理）。"""
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_task(session, device_id=device)
+    client = _client()
+    with session_factory() as session:
+        # worker A 取批次（PENDING→PROCESSING）
+        n1 = process_next_batch(session, task_id=task_id, client=client)
+        session.commit()
+        # worker B 再取（同一批次已 PROCESSING → 不可取；取下一个或 0）
+        n2 = process_next_batch(session, task_id=task_id, client=client)
+        session.commit()
+    assert n1 == 1
+    assert n2 == 0  # 同批次被 A 抢占，B 无批次可取
+
+
+def test_concurrency_heartbeat_updates_updated_at(session_factory: Callable[[], Session]) -> None:
+    """心跳：每批完成后 task.updated_at 刷新（seed 时间取安全过去值——与真实服务端时钟可观测比较）。"""
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_task(session, device_id=device)
+        seeded = session.get(Task, task_id)
+        assert seeded is not None
+        created_at = seeded.created_at
+    with session_factory() as session:
+        process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
+        session.commit()
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+    assert task is not None
+    assert task.updated_at is not None and created_at is not None
+    assert task.updated_at > created_at  # 心跳刷新（批处理后时间推进）
+    assert task.status == "COMPLETED"

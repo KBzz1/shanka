@@ -2,7 +2,8 @@
 
 V5A 同步执行：扫描 RUNNING 任务 → plan_batches（若任务无批次）→ 解密 API Key（仅 infra/llm
 路径）→ 构造带 Key 的 DeepSeekClient（client_factory 注入，测试 mock transport）→ 循环
-process_next_batch 直至无待处理批次 → 全部批次终态 → 任务 COMPLETED。
+process_next_batch 直至无待处理批次（每批完成后心跳刷新 task.updated_at，服务端时钟——
+V5B 孤儿恢复判据）→ 全部批次终态 → 任务 COMPLETED。
 系统级错误（adapter 抛 API_KEY_UNAVAILABLE/GENERATION_FAILED）→ 任务 FAILED（4.1）；
 批次级失败（Schema 重试达上限）→ 批次 SKIPPED，任务继续（4.2）。V4 fake 不再用于任务执行
 （样卡仍用 fake）。
@@ -18,7 +19,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
+from infra.clock import SystemClock
 from infra.db.models import ApiKey, KnowledgePoint, Task
+from infra.db.session import format_utc
 from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from infra.metrics import GENERATION_TASKS_DURATION_SECONDS, GENERATION_TASKS_TOTAL
@@ -144,8 +147,9 @@ def _execute_task(
     )
     try:
         # 批次级失败（Schema 重试达上限 → SKIPPED）不中断；adapter 系统错误抛 AppError 上抛
+        # V5B 心跳：每批完成后刷新 task.updated_at（服务端时钟 format_utc）——孤儿恢复判据（Task 2）
         while process_next_batch(session, task_id=task.task_id, client=client) > 0:
-            pass
+            task.updated_at = format_utc(SystemClock().now_utc())
     finally:
         client.close()
     task.status = "COMPLETED"
