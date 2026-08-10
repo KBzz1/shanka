@@ -8,10 +8,13 @@ shanka_backend/
 │   ├── PRD/
 │   │   └── V2.1/prd_v2_1.md
 │   └── Architecture/        # 本目录:设计契约(见 README.md)
-└── main/                    # 后端实现(当前为空,按本编排落地)
+├── main/                    # 后端实现(按本编排落地)
+└── agent_evolution/         # agent 版本化资产:prompt/schema/rubric(目录快照 + manifest)
 ```
 
 **依赖方向**:`docs/PRD → docs/Architecture → main/`,单向向下。实现不得反向驱动契约;契约变更必须走评审。
+
+`agent_evolution/` 是 `main/infra/llm/` 的实现资产源（按 manifest 加载），与 `main/` 并行、不反向依赖；资产演进（新版本目录 + 更新 manifest + CHANGELOG）视为技术评审级变更。
 
 ## 2. 文档层级
 
@@ -57,6 +60,10 @@ main/
 │   ├── storage/                 # PDF 文件存储
 │   └── llm/                     # DeepSeek 调用、Prompt 组装、Prompt Cache 记录(不落 Key)
 └── tests/
+    ├── unit/          # domain、schemas 纯逻辑
+    ├── integration/   # services 编排、DB 事务边界
+    ├── contract/      # 守卫四项:schemas↔openapi、ORM↔database-design、错误码↔契约 7 章、localization_key↔文案
+    └── acceptance/    # AC-01~AC-11 验收映射
 ```
 
 ## 4. 分层依赖规则
@@ -65,7 +72,26 @@ main/
 - `app/`、`services/`、`infra/` 可依赖 `domain/`,但相互之间按 `app → services → infra` 单向依赖。
 - `app/schemas/`(接口模型)与 `domain/`(领域模型)允许结构相同但职责分离:前者是契约视图,后者是业务对象;禁止在 handler 中直接暴露 ORM 对象。
 
-## 5. 一致性红线(评审检查点)
+## 5. 测试策略
+
+- 四层职责：unit（domain/schemas 纯逻辑）、integration（services 编排与 DB 事务边界）、contract（守卫四项）、acceptance（AC-01~AC-11 映射）。
+- 命名规范：`test_<模块>_<行为>`。
+- 守卫四项（自动化校验一致性红线的验证手段）：
+  1. `app/schemas` ↔ `openapi.yaml`
+  2. `infra/db` ORM ↔ `database-design.md`
+  3. 错误码清单 ↔ `structure-contract.md` 第 7 章
+  4. `localization_key` ↔ 文案资产清单
+- 幂等同事务、级联删除、resume 并发等易碎行为必须出现在 integration 层（对应 database-design 3 的事务边界）。
+- 验收回归（P3-2）：每条 AC-01~AC-11 有对应 acceptance 用例。
+
+## 6. 开发工具链
+
+- 依赖唯一事实源：`main/pyproject.toml`（声明 + ruff/mypy 配置）；依赖锁定文件在 P0-1 首次安装时生成。
+- pre-commit 本地钩子：format（ruff-format）→ lint（ruff）→ type-check（mypy strict）。
+- CI 在远端仓库就绪后补建；本期不建。
+- 配置分层（P0-1 要求）：pydantic-settings 单层配置类；默认值进代码；密钥/令牌走环境变量；敏感项清单文档化；禁止散落硬编码。
+
+## 7. 一致性红线(评审检查点)
 
 1. `app/schemas/` 字段 ↔ `openapi.yaml` ↔ `structure-contract.md` 资源模型,三处一致。
 2. `infra/db/` ORM ↔ `database-design.md` 表结构一致。
