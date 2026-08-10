@@ -11,10 +11,13 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine
 
 from app.config import Settings
 from app.main import create_app
 from infra.clock import FrozenClock
+
+REPO_ROOT = Path(__file__).resolve().parents[2]  # tests/conftest.py → 仓库根
 
 
 @pytest.fixture
@@ -38,3 +41,22 @@ def client(app: FastAPI) -> Iterator[TestClient]:
 @pytest.fixture
 def clock() -> FrozenClock:
     return FrozenClock(datetime(2026, 8, 10, 9, 0, 0, tzinfo=UTC))
+
+
+@pytest.fixture
+def db_engine(tmp_path: Path) -> Engine:
+    """迁移后的真实 schema（alembic upgrade head），供 V1+ integration 测试使用。
+
+    API 测试须在迁移后 schema 上跑：HTTP 测试文件内的 client fixture 各自
+    alembic upgrade 到独立临时库（同一 REPO_ROOT 路径来源）。
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    from infra.db.session import create_db_engine
+
+    db_path = tmp_path / "migrated.db"
+    cfg = Config(str(REPO_ROOT / "main" / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+    command.upgrade(cfg, "head")
+    return create_db_engine(f"sqlite:///{db_path}")
