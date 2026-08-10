@@ -1,8 +1,8 @@
 # V2 FSRS 复习与看板闭环 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 V2 DONE 与证据位置>
+**结果**：V2 DONE（2026-08-11）。验收与证据见 docs/Progress.md 第 4 节 V2 行（11 commits 0b3ab91..970a45c + 契约修订，分支 codex/v2）：162 用例全绿、四工具通过、干净安装+迁移、uvicorn 复习闭环冒烟全链路正确、边界 60 用例全绿、AC-10 通过、R-12/R-13 RESOLVED。全任务 checklist 勾选完成。
 
 **Goal:** 以单一适配封装 py-fsrs 契约参数；实现到期队列、四档评级（client_event_id 去重 + 双幂等键优先级）、ReviewState 全量快照落库、牌组进度联动和 IANA 时区周看板（周一、DST/跨周、连续天数、分母 0 null、weekly_goal 缺省），使 V2 依据真实验收证据标记 DONE 且 AC-10 通过。
 
@@ -41,7 +41,7 @@
 - Consumes: py-fsrs（新依赖）、F0 format_utc
 - Produces: `services.scheduling.scheduler.create_scheduler() -> Scheduler`（单一配置工厂，5.1 参数 + C-01/C-02/C-07）；`services.scheduling.scheduler.review_card(scheduler, card: Card, rating: Rating) -> tuple[Card, Any]`（py-fsrs review_card 封装——返回 (new_card, review_log)）；`services.scheduling.scheduler.rating_from_str(value: str) -> Rating`（AGAIN/HARD/GOOD/EASY 映射，非法抛 AppError(REVIEW_EVENT_INVALID)）；Task 2 review service 消费
 
-- [ ] **Step 1: 安装 py-fsrs 并核对 API**
+- [x] **Step 1: 安装 py-fsrs 并核对 API**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend pip install "py-fsrs>=4.0"`
 然后核对实际 API（记录到报告）：
@@ -60,14 +60,14 @@ print('after-good:', new_card.state, new_card.due, new_card.stability, new_card.
 ```
 （说明：py-fsrs 的 learning_steps/relearning_steps 以分钟 int 列表（10m=10、1d=1440）；Card() 为默认新卡。记录实际输出——契约断言表按此校准。）
 
-- [ ] **Step 2: 更新 pyproject 与 lock**
+- [x] **Step 2: 更新 pyproject 与 lock**
 
 ```toml
 dependencies 追加: "py-fsrs>=4.0",
 ```
 Run: `conda run -n shanka-backend pip-compile pyproject.toml --extra dev --output-file requirements-dev.lock`
 
-- [ ] **Step 3: 写失败单元测试 `main/tests/unit/test_scheduling_contract.py`**
+- [x] **Step 3: 写失败单元测试 `main/tests/unit/test_scheduling_contract.py`**
 
 ```python
 """services.scheduling 排程契约确定性断言（structure-contract 5.1 表，fuzzing 关闭）。"""
@@ -167,7 +167,7 @@ def test_scheduling_rating_invalid_raises() -> None:
 
 （说明：py-fsrs 的 Card.state 是枚举（Learning/Review/Relearning/New）——`str(new_card.state)` 输出实际值以安装版本为准（可能 "Learning" 或 "LEARNING"）；断言用实际输出校准。due 为 datetime（aware UTC）。）
 
-- [ ] **Step 4: 写失败集成测试 `main/tests/integration/test_scheduling_persistence.py`**
+- [x] **Step 4: 写失败集成测试 `main/tests/integration/test_scheduling_persistence.py`**
 
 ```python
 """排程结果持久化映射集成测试：py-fsrs Card ↔ review_states 表字段。"""
@@ -198,7 +198,7 @@ def test_scheduling_card_fields_map_to_review_state_columns() -> None:
 
 （说明：该测试验证 py-fsrs 输出类型与 ORM 列兼容性；Task 2 做真实事务落库。若 mypy strict 对 fsrs 无类型桩报 import-untyped，在 pyproject `[tool.mypy]` 加 `[[tool.mypy.overrides]] module = ["fsrs"] ignore_missing_imports = true`——记录到报告。）
 
-- [ ] **Step 5: 实现 `main/services/scheduling/scheduler.py`**
+- [x] **Step 5: 实现 `main/services/scheduling/scheduler.py`**
 
 ```python
 """FSRS-6 排程单一适配（structure-contract 5.1；C-01/C-02/C-06/C-07）。
@@ -248,12 +248,12 @@ def rating_from_str(value: str) -> Rating:
     return rating
 ```
 
-- [ ] **Step 6: 运行确认通过 + ruff/mypy**
+- [x] **Step 6: 运行确认通过 + ruff/mypy**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_scheduling_contract.py tests/integration/test_scheduling_persistence.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/scheduling/ tests/unit/test_scheduling_contract.py tests/integration/test_scheduling_persistence.py`
 Expected: PASS（fsrs 类型桩缺失时按 Step 4 说明加 mypy override；Card.state 断言按实际枚举输出校准）
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add main/pyproject.toml main/requirements-dev.lock main/services/scheduling/scheduler.py main/tests/unit/test_scheduling_contract.py main/tests/integration/test_scheduling_persistence.py
@@ -272,7 +272,7 @@ git commit -m "feat(scheduling): py-fsrs 单一适配（5.1 参数 + 确定性�
 - Consumes: Task 1 scheduler、V1 `services.decks`（_owned）、F1 models（ReviewEvent/ReviewState/Card）、F0 errors
 - Produces: `services.review.review_queue(session, *, device_id, deck_id, now) -> list[dict]`（due<=now 按 due、position 排序，返回 {**card_view, review_state}）；`services.review.submit_review(session, *, device_id, card_id, rating: str, client_event_id, device_timezone, now) -> dict`（评级事务：校验卡片归属（CARD_NOT_FOUND 404）→ 读当前 ReviewState（无则按 NEW 初始构造）→ scheduler.review_card → review_event INSERT（UNIQUE(device_id, client_event_id) 冲突 → 比对 card_id+rating → 一致重放（读当前 review_state 构造响应）/不一致 409 REVIEW_EVENT_CONFLICT）→ review_state 全量快照 UPDATE 同事务）；`services.review.review_state_view(rs) -> dict`；Task 3 handler 消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_review_service.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_review_service.py`**
 
 ```python
 """services.review 集成测试：到期队列/评级事务/client_event_id 兜底（真实 SQLite）。"""
@@ -455,12 +455,12 @@ def test_submit_review_rollback_on_failure(
 
 （说明：`result["state"]` 的枚举值输出以 py-fsrs 实际为准——Task 1 已校准；`submit_review` 的 rating 字符串输入由 handler 层经 `rating_from_str` 预校验（本测试直接传非法值验证事务回滚——service 内也应防御：非法 rating 抛 REVIEW_EVENT_INVALID）。review_state 无行时按 NEW 初始构造（V1 创建卡时已插初始行——正常路径有行；防御性兜底）。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_review_service.py -v`
 Expected: FAIL（ModuleNotFoundError: services.review.service）
 
-- [ ] **Step 3: 实现 `main/services/review/service.py`**
+- [x] **Step 3: 实现 `main/services/review/service.py`**
 
 ```python
 """services.review：到期队列 + 评级事务（review_event 插入 + review_state 快照 + client_event_id 兜底）。
@@ -620,12 +620,12 @@ def submit_review(
 
 （说明：py-fsrs `Card` 构造参数与 `new_card.state`/`due` 输出类型按 Task 1 实际安装版本校准——`state` 可能是枚举（`str()` 得 "Learning" 等）或字符串；`due` 为 aware datetime。**关键**：`due` 序列化必须用统一格式（database-design §0 恒 3 位毫秒 Z）——`new_card.due` 转 UTC 后按 format_utc 语义序列化（直接复用 `infra.db.session.format_utc`：`from infra.db.session import format_utc; rs.due = format_utc(new_card.due)`）。review_state 行存在性：`session.get(ReviewState, ...)` 或 scalar select。client_event_id 兜底的重放响应 = 当前 review_state 视图（R-12 口径）。`rating_value` 与 events.rating 存字符串（AGAIN/HARD/GOOD/EASY）。）
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_review_service.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/review/ services/scheduling/ tests/integration/test_review_service.py`
 Expected: PASS（`_submit_review_inner` 的 client_event_id 冲突处理在 flush 时唯一约束冲突 vs 先查——先查模式（SELECT 先行）在单写者下足够；并发同 client_event_id 由 BEGIN IMMEDIATE 串行化（先到者 commit 后到者 SELECT 命中重放）。若测试揭示先查模式的竞态，改为 flush 捕获 IntegrityError 兜底——以实际实现为准并记录。）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/services/review/service.py main/tests/integration/test_review_service.py
@@ -646,7 +646,7 @@ git commit -m "feat(review): 到期队列 + 评级事务（快照落库 + client
 - Consumes: Task 2 review service、F1 幂等原语、V1 schemas（Card）
 - Produces: 路由 `GET /decks/{deck_id}/review`（200 {items: ReviewQueueItem[]}）、`POST /review-events`（200 ReviewState；Idempotency-Key 优先 → execute_idempotent 全快照重放；未命中 → client_event_id 兜底；400 REVIEW_EVENT_INVALID/422 VALIDATION_ERROR、404 CARD_NOT_FOUND、409 REVIEW_EVENT_CONFLICT/IDEMPOTENCY_CONFLICT）；`app.schemas.review.ReviewState`/`ReviewEventRequest`/`ReviewQueueItem`；main.py include_router
 
-- [ ] **Step 1: 实现 `main/app/schemas/review.py`**
+- [x] **Step 1: 实现 `main/app/schemas/review.py`**
 
 ```python
 """复习相关 schema（openapi ReviewState/ReviewEventRequest/ReviewQueueItem；structure-contract 3.10/3.11）。"""
@@ -686,7 +686,7 @@ class ReviewQueueItem(BaseModel):
 
 （说明：`ReviewQueueItem` 用组合模型（card + review_state）——openapi 的 ReviewQueueItem 是 allOf（Card + review_state 平铺）。**修正**：为与 openapi 一致，ReviewQueueItem 应平铺 Card 全部字段 + review_state——实现时用 `Card.model_dump() | {"review_state": ...}` 构造 dict 或定义平铺模型。以守卫校验（Task 4 加 schema 守卫）为准——选择：`ReviewQueueItem(Card 继承)`？pydantic 组合：`class ReviewQueueItem(Card): review_state: ReviewState`——平铺且守卫可校验。用继承方案。）
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_review_api.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_review_api.py`**
 
 ```python
 """复习 API 集成测试：到期队列/评级/双幂等/隔离（迁移 schema + HTTP）。"""
@@ -829,7 +829,7 @@ def test_review_api_cross_device_404(client: TestClient) -> None:
 
 （说明：测试草稿中 `test_review_api_idempotency_key_replays` 的尾部残留与 `test_review_api_cross_device_404` 的草稿行——实现者按说明修正（删除残留、用独立 other device 头）。rating 校验位置：`Literal` 校验在 FastAPI 层产生 422 VALIDATION_ERROR，但契约要求 REVIEW_EVENT_INVALID 400——**决策**：schema 用 `str`（不 Literal），handler/service 内 `rating_from_str` 抛 REVIEW_EVENT_INVALID 400。ReviewEventRequest.rating 用 str + 显式校验。若用 Literal 则 422——契约 7 章 REVIEW_EVENT_INVALID 400 为权威，修正 schema 为 str。）
 
-- [ ] **Step 3: 实现 `main/app/api/review.py`**
+- [x] **Step 3: 实现 `main/app/api/review.py`**
 
 ```python
 """复习路由（structure-contract 6.6；openapi /decks/{id}/review、/review-events）。handler 只做 HTTP 映射。"""
@@ -884,7 +884,7 @@ def submit_review_endpoint(request: Request, payload: ReviewEventRequest, sessio
 
 （说明：`path` 用 `/review-events`（无资源 ID——契约 1.3 说幂等按 (device_id, 接口路径含具体资源 ID, key)；review-events 的资源 ID 在 body（card_id）——path 恒为 /review-events + body hash 区分。V1 的 DELETE 用 `/decks/{id}` 含 ID。评级无路径 ID——用固定 path + body hash，正确。client_event_id 兜底在 biz 内（Task 2 实现）。）
 
-- [ ] **Step 4: 装配 main.py + 运行确认**
+- [x] **Step 4: 装配 main.py + 运行确认**
 
 ```python
 from app.api import review
@@ -895,7 +895,7 @@ from app.api import review
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_review_api.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/api/review.py app/schemas/review.py tests/integration/test_review_api.py`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/app/schemas/review.py main/app/api/review.py main/app/main.py main/tests/integration/test_review_api.py
@@ -914,7 +914,7 @@ git commit -m "feat(review-api): 到期队列 + 评级路由（双幂等接线�
 - Consumes: F1 models（ReviewEvent/ReviewState/Card/Deck）、F0 format_utc/clock、zoneinfo
 - Produces: `services.stats.dashboard(session, *, device_id, timezone: str, weekly_goal: int | None, now: datetime) -> dict`（StatsDashboard 全字段：period{start,end,week_ordinal}/timezone/weekly_activity[7]/weekly_total/week_change_rate/weekly_goal/weekly_goal_progress/recall_accuracy/first_answer_accuracy/retention_rate/streak_days/mastered_card_count/updated_at/has_data；周一起始按 IANA 时区分桶；分母 0 → None；weekly_goal 缺省 → None）；`services.stats._week_bounds(tz, now) -> tuple[datetime, datetime]`（周一起始）；Task 5 handler 消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_stats_service.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_stats_service.py`**
 
 ```python
 """services.stats 看板聚合集成测试（真实 SQLite + zoneinfo 分桶）。"""
@@ -1073,12 +1073,12 @@ def test_stats_dashboard_mastered_count(session_factory: Callable[[], Session]) 
 
 （说明：**口径裁定**（R-12）：recall/retention 按周内事件；first_answer 按每卡历史首个事件（累计）；retention 的"非首次"判定 = 该卡在该事件之前已有更早事件（按 reviewed_at 历史）。`test_stats_dashboard_weekly_bucketing_monday` 的 retention 断言需按实际口径校准（周一+周日两事件分属不同卡——若同卡则一首次一非首次；种子用不同 card_id（_seed_events 里每事件新 card_id）→ 两事件都是各自首次 → retention 分母 0 → None。**修正**：retention 断言改为 None 或构造同卡两事件。以口径为准：retention = 周内非首次事件 GOOD/非首次事件——种子里两事件各自是卡的首个 → 无"非首次" → None。week_change_rate：上周事件 1 个 GOOD（e3）→ (2-1)/1=1.0 ✓。**streak 口径**：按本地当天（timezone 的今天）向前连续有事件的自然日——8/11 今天有 → 8/10 → 8/09 → 8/08 无 → streak=3。**week_ordinal**：ISO 周号。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_stats_service.py -v`
 Expected: FAIL（ModuleNotFoundError: services.stats.service）
 
-- [ ] **Step 3: 实现 `main/services/stats/service.py`**
+- [x] **Step 3: 实现 `main/services/stats/service.py`**
 
 ```python
 """services.stats：看板聚合（structure-contract 3.12/PRD 5.16；database-design §4 直接基于 review_events 聚合）。
@@ -1260,12 +1260,12 @@ def _streak_days(session: Session, *, device_id: str, tz: ZoneInfo, now: datetim
 
 （说明：性能上 `_is_non_first`/`_first_answer_accuracy` 每事件/每卡一次查询——MVP 数据量（千卡万事件）下可接受（database-design §4）；千级事件下可优化为单查询，非本期。`datetime.fromisoformat(ev.reviewed_at.replace("Z", "+00:00"))` 解析统一格式串。**week_ordinal 用 ISO 周号**。**has_data**：周内有事件或已掌握>0 为 True。streak 从今天开始向前连续计数。）
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_stats_service.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/stats/ tests/integration/test_stats_service.py`
 Expected: PASS（断言按口径校准——retention 种子修正为同卡两事件或 None；week_ordinal 与 streak 断言以实际时区行为为准）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/services/stats/service.py main/tests/integration/test_stats_service.py
@@ -1287,7 +1287,7 @@ git commit -m "feat(stats): 看板聚合（周一/指标/分母 0 null/streak）
 - Consumes: Task 4 stats service、V2 review（评级产生事件供看板）
 - Produces: 路由 `GET /stats/dashboard?timezone=...&weekly_goal=...`（400 VALIDATION_ERROR 非法时区；200 StatsDashboard）；`app.schemas.stats.StatsDashboard`（全字段）；AC-10 验收映射
 
-- [ ] **Step 1: 实现 `main/app/schemas/stats.py`**
+- [x] **Step 1: 实现 `main/app/schemas/stats.py`**
 
 ```python
 """看板 schema（openapi StatsDashboard；structure-contract 3.12）。"""
@@ -1320,7 +1320,7 @@ class StatsDashboard(BaseModel):
 
 （说明：weekly_activity 长度 7 由 service 保证；openapi required 集合含全部字段——守卫校验。）
 
-- [ ] **Step 2: 实现 `main/app/api/stats.py`**
+- [x] **Step 2: 实现 `main/app/api/stats.py`**
 
 ```python
 """看板路由（structure-contract 6.8；openapi /stats/dashboard）。"""
@@ -1353,7 +1353,7 @@ def dashboard_endpoint(
 
 （说明：`now` 传真实服务端时钟（UTC aware）；weekly_goal ge=1 校验（openapi minimum 1）→ FastAPI 422 VALIDATION_ERROR 400 包装。）
 
-- [ ] **Step 3: 守卫 + 验收测试**
+- [x] **Step 3: 守卫 + 验收测试**
 
 `main/tests/contract/test_stats_schemas_guard.py`：
 ```python
@@ -1464,7 +1464,7 @@ def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
 
 （说明：AC-10-1 的"到期队列不再含已评级卡"依赖 due 未来——新卡 GOOD 后 due=+10m > now ✓。AC-10-2 的 weekly_goal_progress=0.02（1/50）、recall=1.0（1 GOOD/1）。streak_days>=1（今天有事件）。**dashboard 的 now**：服务端真实时钟（2026-08-11 实际日期）——事件的 reviewed_at 是服务端 now（同一天）→ streak 包含今天 ✓。若真实时钟与测试日期边界（跨天运行）导致 streak 断言 flaky——streak_days>=1 已容错（今天或昨天有事件都 >=1）。）
 
-- [ ] **Step 4: 装配 main.py + 运行确认**
+- [x] **Step 4: 装配 main.py + 运行确认**
 
 ```python
 from app.api import stats
@@ -1475,7 +1475,7 @@ from app.api import stats
 Run: `conda run -n shanka-backend python -m pytest tests/contract/test_stats_schemas_guard.py tests/acceptance/ -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/app/schemas/stats.py main/app/api/stats.py main/app/main.py main/tests/contract/test_stats_schemas_guard.py main/tests/acceptance/test_acceptance_ac10.py
@@ -1489,7 +1489,7 @@ git commit -m "feat(stats-api): 看板路由 + schema 守卫 + AC-10 验收映�
 **Files:**
 - 验证：全部 V2 产物；不新增代码
 
-- [ ] **Step 1: 四工具命令全绿**
+- [x] **Step 1: 四工具命令全绿**
 
 Run（均在 `main/`）:
 ```bash
@@ -1501,7 +1501,7 @@ conda run -n shanka-backend python -m mypy .
 ```
 Expected: 版本 3.12.x；四命令零失败
 
-- [ ] **Step 2: 干净环境安装 + 迁移 + 复习闭环冒烟**
+- [x] **Step 2: 干净环境安装 + 迁移 + 复习闭环冒烟**
 
 ```bash
 conda run -n shanka-backend python -m venv /tmp/v2-accept-venv
@@ -1519,7 +1519,7 @@ print('migration-ok')
 rm -rf /tmp/v2-accept-venv
 ```
 
-- [ ] **Step 3: uvicorn 冒烟（复习闭环：建卡 → 队列 → 评级 → 看板）**
+- [x] **Step 3: uvicorn 冒烟（复习闭环：建卡 → 队列 → 评级 → 看板）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -1541,12 +1541,12 @@ kill %1
 ```
 Expected: queue=1 → 评级返回 LEARNING/reps=1 → queue-after=0 → 看板 weekly_total=1、has_data=true
 
-- [ ] **Step 4: 关键边界复核（收证据）**
+- [x] **Step 4: 关键边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_review_service.py tests/integration/test_review_api.py tests/integration/test_stats_service.py tests/acceptance/ tests/contract/ -v`
 Expected: 全绿；记录关键用例名（确定性断言、client_event_id 去重/冲突、周一分桶、分母 0 null、AC-10）
 
-- [ ] **Step 5: 无明文泄漏抽查**
+- [x] **Step 5: 无明文泄漏抽查**
 
 Run: `grep -rn "sk-" main/app main/services main/infra --include="*.py" || true`
 Expected: 无输出
@@ -1559,14 +1559,14 @@ Expected: 无输出
 - Modify: `docs/Progress.md`
 - Modify: `docs/superpowers/plans/2026-08-11-v2-fsrs-review-and-dashboard.md`（标题下「结果」）
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 V2 行：`TODO` → `DONE`，证据填写：py-fsrs 单一适配（5.1 参数 + 确定性断言）、到期队列、四档评级（client_event_id 去重/双幂等）、ReviewState 快照、看板（周一/DST/分母 0 null/weekly_goal/streak）、AC-10 通过。
 - 第 6 节：登记 R-12 → `RESOLVED`（看板口径裁决：recall/retention 周内、first_answer 历史累计、client_event_id 兜底重放读当前行）；structure-contract 3.10 difficulty 范围漂移（V1 已登记待同步）在 V2 保持。
 - 第 1 节状态基线：自动化验证测试数更新。
 - 计划文件标题下「结果」注明 V2 DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-11-v2-fsrs-review-and-dashboard.md
