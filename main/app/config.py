@@ -3,6 +3,7 @@
 规则：默认值进代码；密钥/令牌走环境变量；禁止散落硬编码。
 敏感项清单（不得写入日志、响应、任务明细或测试报告）：
 - `DEEPSEEK_API_KEY` → `deepseek_api_key`（`repr=False`，仅 infra/llm 调用路径可读取）
+- `API_KEY_ENCRYPTION_KEY` → `api_key_encryption_key`（`repr=False`，仅 infra/llm 调用路径可解密）
 
 运行位置约定：开发/验收在 `main/` 下运行（env_file=".env" 相对工作目录，
 仓库根 .env 不存在于 main/，故测试不会意外加载）；测试一律显式传参构造。
@@ -37,3 +38,9 @@ class Settings(BaseSettings):
     pdf_scan_interval_seconds: float = 1.0
     # 敏感项：禁止打印、复制、写入日志/响应/任务明细；`repr=False` 防意外入日志
     deepseek_api_key: str | None = Field(default=None, repr=False)
+    # API Key 加密密钥（database-design 2.2：环境变量，32 字节 hex；缺失时 PUT /api-key 不可用）
+    api_key_encryption_key: str | None = Field(default=None, repr=False)
+    # DeepSeek 模型与 thinking 单一配置入口（R-09：默认冻结 deepseek-v4-flash + thinking disabled，可替换）
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_thinking: bool = False
+    deepseek_timeout_seconds: float = 60.0

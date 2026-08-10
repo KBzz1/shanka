@@ -22,6 +22,10 @@ def test_settings_defaults() -> None:
     assert settings.pdf_max_size_bytes == 50 * 1024 * 1024
     assert settings.pdf_max_pages == 500
     assert settings.deepseek_api_key is None
+    assert settings.api_key_encryption_key is None
+    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert settings.deepseek_thinking is False
+    assert settings.deepseek_timeout_seconds == 60.0
 
 
 def test_settings_env_var_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,3 +43,8 @@ def test_settings_explicit_kwargs_win_over_env(monkeypatch: pytest.MonkeyPatch) 
 def test_settings_secret_hidden_in_repr() -> None:
     settings = Settings(deepseek_api_key="sk-super-secret-value")
     assert "sk-super-secret-value" not in repr(settings)
+
+
+def test_settings_encryption_key_hidden_in_repr() -> None:
+    settings = Settings(api_key_encryption_key="aa" * 32)
+    assert "aa" * 32 not in repr(settings)
