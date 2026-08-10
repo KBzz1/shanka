@@ -2,11 +2,14 @@
 
 领域/业务层不直接 import fsrs：本模块是唯一入口。
 参数（5.1 + 已确认决策，按 py-fsrs 4.1.2 实际 API 表达；V2 fix round 1 固定 4.x 线，
-详见 task-1-report）：
+R-13 裁决 3 步学习步，详见 task-1-report）：
 - parameters：FSRS-6 默认权重（4.1.2 Scheduler 默认 19 参数；py-fsrs 未导出
   FSRS6_DEFAULT_PARAMETERS 常量，本模块常量与其默认值逐值一致）；
 - desired_retention=0.9；
-- learning_steps=(10m, 1d)、relearning_steps=(10m,)——v4 以 timedelta 表达间隔；
+- learning_steps=(10m, 10m, 1d)、relearning_steps=(10m,)——3 步为 R-13 裁决：
+  py-fsrs 语义下 GOOD 间隔 = steps[step+1]，3 步配置使新卡首 GOOD → 10m、
+  二次 → 1d、三次 → 毕业 Review，复现 5.2 表并符合 C-01 决策意图
+  （新卡 10 分钟后复现,次日复现后毕业）；v4 以 timedelta 表达间隔；
 - maximum_interval=36500、enable_fuzzing=False（C-02 确定性）。
 """
 
@@ -17,8 +20,8 @@ from fsrs import Card, Rating, Scheduler
 
 from app.errors import AppError, ErrorCode
 
-# 学习间隔（v4 以 timedelta 表达）：10m、1d
-_LEARNING_STEPS = [timedelta(minutes=10), timedelta(days=1)]
+# 学习间隔（R-13 裁决 3 步；v4 以 timedelta 表达）：10m、10m、1d
+_LEARNING_STEPS = [timedelta(minutes=10), timedelta(minutes=10), timedelta(days=1)]
 _RELEARNING_STEPS = [timedelta(minutes=10)]
 
 # FSRS-6 默认权重（19 参数，与 py-fsrs 4.1.2 Scheduler 默认值一致）
