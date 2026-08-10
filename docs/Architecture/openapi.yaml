@@ -1,0 +1,1270 @@
+openapi: 3.1.0
+info:
+  title: 闪卡 App 后端 API
+  version: 2.1.0
+  description: >
+    闪卡 App v2.1 接口契约(机器可读版)。行为契约(状态机、幂等、FSRS 排程、
+    错误码语义)见 structure-contract.md;需求依据 PRD v2.1。
+    所有接口需携带 X-Device-ID;写操作需携带 Idempotency-Key。
+
+servers:
+  - url: https://api.example.com/v1
+
+security:
+  - DeviceIdAuth: []
+
+tags:
+  - name: pdf
+    description: PDF 上传、解析与章节(FR-01/FR-02)
+  - name: api-key
+    description: DeepSeek API Key 校验与状态(FR-17,决策 D-03)
+  - name: samples
+    description: 样卡生成(FR-05)
+  - name: tasks
+    description: 生成任务(FR-06/07/12)
+  - name: decks
+    description: 牌组与卡片(FR-03/14)
+  - name: review
+    description: 复习(FR-15,FSRS-6)
+  - name: stats
+    description: 数据看板(FR-16)
+
+paths:
+  # ---------- PDF ----------
+  /pdfs:
+    post:
+      tags: [pdf]
+      summary: 上传 PDF,服务端异步解析(文本层 + 目录结构)
+      operationId: uploadPdf
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PDF 文件(HTTPS 传输)
+      responses:
+        '201':
+          description: 已接收,进入 PARSING
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PdfFile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    get:
+      tags: [pdf]
+      summary: 最近使用的 PDF 列表
+      operationId: listPdfs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PdfFile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /pdfs/{file_id}:
+    parameters:
+      - $ref: '#/components/parameters/FileId'
+    get:
+      tags: [pdf]
+      summary: PDF 详情与章节列表(解析完成前可轮询)
+      operationId: getPdf
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PdfFile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [pdf]
+      summary: 删除 PDF 元数据,此后不可用于创建任务
+      operationId: deletePdf
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ---------- API Key ----------
+  /api-key:
+    put:
+      tags: [api-key]
+      summary: 验证并保存 DeepSeek API Key(仅返回状态与脱敏标识)
+      operationId: saveApiKey
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_key]
+              properties:
+                api_key:
+                  type: string
+                  description: DeepSeek API Key,经 TLS 传输,不落日志
+      responses:
+        '200':
+          description: 校验完成,返回状态(可能为 INVALID / INSUFFICIENT_BALANCE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKey'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '502':
+          description: 上游校验不可用(API_KEY_UNAVAILABLE),可重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api-key/status:
+    get:
+      tags: [api-key]
+      summary: 查询已保存 Key 的状态
+      operationId: getApiKeyStatus
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ---------- 样卡 ----------
+  /samples:
+    post:
+      tags: [samples]
+      summary: 生成 3 张样卡(基础/理解/应用 各 1;问答 2 + 判断 1),不入库
+      operationId: generateSamples
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SampleRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sample_cards]
+                properties:
+                  sample_cards:
+                    type: array
+                    minItems: 3
+                    maxItems: 3
+                    items:
+                      $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  # ---------- 任务 ----------
+  /tasks:
+    post:
+      tags: [tasks]
+      summary: 接受样卡,创建生成任务并启动(知识点规划 + 分批生成)
+      operationId: createTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateRequest'
+      responses:
+        '201':
+          description: 任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /tasks/{task_id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: 任务详情(长任务轮询:状态、stage、已生成数、批次进度、失败码、是否可继续)
+      operationId: getTask
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /tasks/{task_id}/resume:
+    post:
+      tags: [tasks]
+      summary: 继续任务(断点续传,仅处理未完成批次)
+      operationId: resumeTask
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 任务恢复
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /tasks/{task_id}/cancel:
+    post:
+      tags: [tasks]
+      summary: 取消任务(已入库卡片保留)
+      operationId: cancelTask
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已取消
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ---------- 牌组与卡片 ----------
+  /decks:
+    get:
+      tags: [decks]
+      summary: 牌组列表(含进度摘要)
+      operationId: listDecks
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Deck'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [decks]
+      summary: 新建牌组
+      operationId: createDeck
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /decks/{deck_id}:
+    parameters:
+      - $ref: '#/components/parameters/DeckId'
+    get:
+      tags: [decks]
+      summary: 牌组详情与进度(真实聚合数据)
+      operationId: getDeck
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deck'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [decks]
+      summary: 删除牌组及其卡片、复习状态与统计(重复提交安全返回)
+      operationId: deleteDeck
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /decks/{deck_id}/cards:
+    parameters:
+      - $ref: '#/components/parameters/DeckId'
+    get:
+      tags: [decks]
+      summary: 牌组全部卡片(自由刷题,仅浏览)
+      operationId: listCards
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Card'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [decks]
+      summary: 手动新增问答卡(校验 front/back 非空,分配 position)
+      operationId: createCard
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [front, back]
+              properties:
+                front:
+                  type: string
+                  minLength: 1
+                back:
+                  type: string
+                  minLength: 1
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /decks/{deck_id}/cards/import:
+    post:
+      tags: [decks]
+      summary: 批量导入问答卡(原子写入,返回逐张结果)
+      operationId: importCards
+      parameters:
+        - $ref: '#/components/parameters/DeckId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cards]
+              properties:
+                cards:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [front, back]
+                    properties:
+                      front:
+                        type: string
+                        minLength: 1
+                      back:
+                        type: string
+                        minLength: 1
+      responses:
+        '201':
+          description: 写入完成(含逐张结果)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [index, status]
+                      properties:
+                        index:
+                          type: integer
+                          description: 对应请求 cards 下标
+                        status:
+                          type: string
+                          enum: [CREATED, FAILED]
+                        card_id:
+                          type: string
+                          format: uuid
+                        error:
+                          $ref: '#/components/schemas/Error'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ---------- 复习 ----------
+  /decks/{deck_id}/review:
+    get:
+      tags: [review]
+      summary: 到期复习队列(due <= now,按 due、position 排序)
+      operationId: getReviewQueue
+      parameters:
+        - $ref: '#/components/parameters/DeckId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReviewQueueItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /review-events:
+    post:
+      tags: [review]
+      summary: 提交复习评级,返回更新后的 FSRS 复习状态
+      operationId: submitReviewEvent
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewEventRequest'
+      responses:
+        '200':
+          description: 已处理(幂等重放时返回首次结果)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ---------- 单卡重写 ----------
+  /cards/{card_id}/rewrite:
+    post:
+      tags: [decks]
+      summary: 单卡重写(新版本通过 Schema 校验后替换原卡,失败保留原卡)
+      operationId: rewriteCard
+      parameters:
+        - $ref: '#/components/parameters/CardId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                custom_requirements:
+                  type: string
+                  description: 本次重写的附加要求(可选)
+      responses:
+        '200':
+          description: 重写完成,返回新卡
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  # ---------- 数据看板 ----------
+  /stats/dashboard:
+    get:
+      tags: [stats]
+      summary: 当前自然周数据看板(周一起始,按上报时区分桶)
+      operationId: getDashboard
+      parameters:
+        - name: timezone
+          in: query
+          required: true
+          schema:
+            type: string
+            example: Asia/Shanghai
+            description: IANA 时区名称
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsDashboard'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    DeviceIdAuth:
+      type: apiKey
+      in: header
+      name: X-Device-ID
+      description: 匿名设备 ID(UUID v4),服务端首次见到自动建立数据主体(决策 D-02)
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: 幂等键,客户端生成;重复请求返回首次成功结果(见 structure-contract.md 1.3)
+    FileId:
+      name: file_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TaskId:
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DeckId:
+      name: deck_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CardId:
+      name: card_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # ---- 枚举 ----
+    PdfStatus:
+      type: string
+      enum: [PENDING, PARSING, PARSED, FAILED]
+    TaskStatus:
+      type: string
+      enum: [PENDING, RUNNING, PAUSED, COMPLETED, FAILED, CANCELLED]
+    TaskStage:
+      type: string
+      enum: [PLANNING, GENERATING]
+    FailureStage:
+      type: string
+      enum: [PLANNING, GENERATING, WRITE_BACK]
+    QuantityTendency:
+      type: string
+      enum: [COMPACT, BALANCED, EXTENSIVE]
+    Difficulty:
+      type: string
+      enum: [BASIC, UNDERSTANDING, APPLICATION]
+    KnowledgePointStatus:
+      type: string
+      enum: [PENDING, PROCESSED, SKIPPED]
+    BatchStatus:
+      type: string
+      enum: [PENDING, PROCESSING, SUCCEEDED, FAILED, SKIPPED]
+    DeckSource:
+      type: string
+      enum: [MANUAL, IMPORTED]
+    CardSource:
+      type: string
+      enum: [GENERATED, MANUAL, IMPORTED]
+    CardType:
+      type: string
+      enum: [QUESTION, TRUE_FALSE]
+    ReviewStateValue:
+      type: string
+      enum: [NEW, LEARNING, REVIEW, RELEARNING]
+    Rating:
+      type: string
+      enum: [AGAIN, HARD, GOOD, EASY]
+    ApiKeyStatus:
+      type: string
+      enum: [AVAILABLE, INVALID, INSUFFICIENT_BALANCE, UNKNOWN]
+
+    # ---- 资源模型(与 structure-contract.md 第 3 章一致)----
+    Error:
+      type: object
+      required: [code, message, localization_key]
+      properties:
+        code:
+          type: string
+          description: 稳定错误码(见 structure-contract.md 第 7 章)
+        message:
+          type: string
+        localization_key:
+          type: string
+
+    ApiKey:
+      type: object
+      required: [status, masked_key, updated_at]
+      properties:
+        status:
+          $ref: '#/components/schemas/ApiKeyStatus'
+        masked_key:
+          type: string
+          description: 脱敏标识,如 sk-****abcd,禁止返回完整 Key(决策 D-03)
+        updated_at:
+          type: string
+          format: date-time
+
+    Chapter:
+      type: object
+      required: [chapter_id, name, start_page, end_page]
+      properties:
+        chapter_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        start_page:
+          type: integer
+          minimum: 1
+        end_page:
+          type: integer
+          minimum: 1
+
+    PdfFile:
+      type: object
+      required: [file_id, filename, size_bytes, status, created_at]
+      properties:
+        file_id:
+          type: string
+          format: uuid
+        filename:
+          type: string
+        size_bytes:
+          type: integer
+        status:
+          $ref: '#/components/schemas/PdfStatus'
+        error_code:
+          type: [string, 'null']
+          description: PDF_PARSE_FAILED / PDF_TOC_MISSING
+        chapters:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Chapter'
+        created_at:
+          type: string
+          format: date-time
+
+    DifficultyRatio:
+      type: object
+      required: [basic, understanding, application]
+      properties:
+        basic:
+          type: number
+          description: 基础记忆,默认 0.4
+        understanding:
+          type: number
+          description: 理解分析,默认 0.4
+        application:
+          type: number
+          description: 综合应用,默认 0.2
+
+    GenerationConfig:
+      type: object
+      required: [quantity_tendency, difficulty_ratio]
+      properties:
+        quantity_tendency:
+          $ref: '#/components/schemas/QuantityTendency'
+        difficulty_ratio:
+          $ref: '#/components/schemas/DifficultyRatio'
+        custom_requirements:
+          type: [string, 'null']
+
+    TaskCursor:
+      type: object
+      required: [completed_batch_count]
+      properties:
+        completed_batch_count:
+          type: integer
+
+    Task:
+      type: object
+      required:
+        - task_id
+        - file_id
+        - deck_id
+        - status
+        - selected_chapters
+        - generation_config
+        - generated_card_count
+        - resumable
+        - created_at
+        - updated_at
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        file_id:
+          type: string
+          format: uuid
+        deck_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        stage:
+          $ref: '#/components/schemas/TaskStage'
+        selected_chapters:
+          type: array
+          items:
+            $ref: '#/components/schemas/Chapter'
+        generation_config:
+          $ref: '#/components/schemas/GenerationConfig'
+        cursor:
+          $ref: '#/components/schemas/TaskCursor'
+        generated_card_count:
+          type: integer
+        total_batch_count:
+          type: [integer, 'null']
+        completed_batch_count:
+          type: [integer, 'null']
+        resumable:
+          type: boolean
+        failure_stage:
+          $ref: '#/components/schemas/FailureStage'
+        error_code:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        ended_at:
+          type: [string, 'null']
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TaskCreateRequest:
+      type: object
+      required: [file_id, deck_id, chapter_ids, generation_config]
+      properties:
+        file_id:
+          type: string
+          format: uuid
+        deck_id:
+          type: string
+          format: uuid
+        chapter_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+        generation_config:
+          $ref: '#/components/schemas/GenerationConfig'
+      description: 接受样卡后创建任务;请求中不携带 API Key,服务端使用已保存 Key
+
+    SampleRequest:
+      type: object
+      required: [file_id, chapter_ids, generation_config]
+      properties:
+        file_id:
+          type: string
+          format: uuid
+        chapter_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+        generation_config:
+          $ref: '#/components/schemas/GenerationConfig'
+
+    KnowledgePoint:
+      type: object
+      required:
+        - knowledge_point_id
+        - task_id
+        - chapter_id
+        - source_chunk_id
+        - topic
+        - priority
+        - status
+      properties:
+        knowledge_point_id:
+          type: string
+          format: uuid
+        task_id:
+          type: string
+          format: uuid
+        chapter_id:
+          type: string
+          format: uuid
+        source_chunk_id:
+          type: string
+        topic:
+          type: string
+        priority:
+          type: integer
+        status:
+          $ref: '#/components/schemas/KnowledgePointStatus'
+
+    Batch:
+      type: object
+      required: [batch_id, task_id, batch_index, status, retry_count]
+      properties:
+        batch_id:
+          type: string
+          format: uuid
+        task_id:
+          type: string
+          format: uuid
+        batch_index:
+          type: integer
+        status:
+          $ref: '#/components/schemas/BatchStatus'
+        generated_item_ids:
+          type: [array, 'null']
+          items:
+            type: string
+        retry_count:
+          type: integer
+        coverage_rate:
+          type: [number, 'null']
+        duplicate_rate:
+          type: [number, 'null']
+        difficulty_distribution:
+          type: [object, 'null']
+        chapter_distribution:
+          type: [object, 'null']
+        card_type_distribution:
+          type: [object, 'null']
+        cache_hit_tokens:
+          type: [integer, 'null']
+        cache_miss_tokens:
+          type: [integer, 'null']
+        output_tokens:
+          type: [integer, 'null']
+        created_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: [string, 'null']
+          format: date-time
+
+    Deck:
+      type: object
+      required:
+        - deck_id
+        - name
+        - source
+        - card_count
+        - due_count
+        - mastered_card_count
+        - review_count
+        - mastery_ratio
+        - created_at
+        - updated_at
+        - version
+      properties:
+        deck_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        source:
+          $ref: '#/components/schemas/DeckSource'
+        card_count:
+          type: integer
+        due_count:
+          type: integer
+        mastered_card_count:
+          type: integer
+        review_count:
+          type: integer
+        mastery_ratio:
+          type: number
+          description: mastered_card_count / card_count,card_count 为 0 时为 0
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        version:
+          type: string
+          description: 版本号,客户端刷新缓存用
+
+    Card:
+      type: object
+      required:
+        - card_id
+        - deck_id
+        - source
+        - position
+        - front
+        - back
+        - card_type
+        - created_at
+        - updated_at
+      properties:
+        card_id:
+          type: string
+          format: uuid
+        deck_id:
+          type: string
+          format: uuid
+        source:
+          $ref: '#/components/schemas/CardSource'
+        position:
+          type: integer
+        front:
+          type: string
+        back:
+          type: string
+        code:
+          type: [string, 'null']
+        card_type:
+          $ref: '#/components/schemas/CardType'
+        question:
+          type: [string, 'null']
+          description: 仅 QUESTION 卡
+        answer:
+          type: [string, 'null']
+          description: 仅 QUESTION 卡
+        statement:
+          type: [string, 'null']
+          description: 仅 TRUE_FALSE 卡(决策 D-01)
+        answer_boolean:
+          type: [boolean, 'null']
+          description: 仅 TRUE_FALSE 卡
+        explanation:
+          type: [string, 'null']
+          description: 仅 TRUE_FALSE 卡
+        generation_item_id:
+          type: [string, 'null']
+          description: 仅 GENERATED 卡;同一值最多对应一张有效卡片
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ReviewState:
+      type: object
+      required:
+        - review_state_id
+        - card_id
+        - state
+        - stability
+        - difficulty
+        - due
+        - reps
+        - lapses
+        - updated_at
+      properties:
+        review_state_id:
+          type: string
+          format: uuid
+        card_id:
+          type: string
+          format: uuid
+        state:
+          $ref: '#/components/schemas/ReviewStateValue'
+        stability:
+          type: number
+          description: FSRS 稳定性(天)
+        difficulty:
+          type: number
+          description: FSRS 难度(0~10)
+        due:
+          type: string
+          format: date-time
+          description: 下次到期时间(服务端时间)
+        last_review:
+          type: [string, 'null']
+          format: date-time
+        reps:
+          type: integer
+        lapses:
+          type: integer
+        last_rating:
+          $ref: '#/components/schemas/Rating'
+        updated_at:
+          type: string
+          format: date-time
+
+    ReviewEventRequest:
+      type: object
+      required: [card_id, rating, client_event_id, device_timezone]
+      properties:
+        card_id:
+          type: string
+          format: uuid
+        rating:
+          $ref: '#/components/schemas/Rating'
+        client_event_id:
+          type: string
+          format: uuid
+          description: 客户端生成,设备内唯一,离线重试幂等
+        device_timezone:
+          type: string
+          example: Asia/Shanghai
+          description: IANA 时区,仅看板分桶用
+
+    ReviewQueueItem:
+      allOf:
+        - $ref: '#/components/schemas/Card'
+        - type: object
+          properties:
+            review_state:
+              $ref: '#/components/schemas/ReviewState'
+
+    StatsDashboard:
+      type: object
+      required:
+        - period
+        - timezone
+        - weekly_activity
+        - weekly_total
+        - week_change_rate
+        - weekly_goal
+        - weekly_goal_progress
+        - recall_accuracy
+        - first_answer_accuracy
+        - retention_rate
+        - streak_days
+        - mastered_card_count
+        - has_data
+      properties:
+        period:
+          type: object
+          required: [start, end, week_ordinal]
+          properties:
+            start:
+              type: string
+              format: date-time
+            end:
+              type: string
+              format: date-time
+            week_ordinal:
+              type: integer
+        timezone:
+          type: string
+        weekly_activity:
+          type: array
+          minItems: 7
+          maxItems: 7
+          items:
+            type: integer
+          description: 周一~周日每日复习事件数
+        weekly_total:
+          type: integer
+        week_change_rate:
+          type: [number, 'null']
+          description: 上周为 0 时返回 null(客户端显示"暂无对比")
+        weekly_goal:
+          type: [integer, 'null']
+        weekly_goal_progress:
+          type: [number, 'null']
+          description: min(weekly_total / weekly_goal, 1),goal 未配置时 null
+        recall_accuracy:
+          type: [number, 'null']
+          description: 周期内 GOOD 事件 / 全部事件,分母为 0 时 null
+        first_answer_accuracy:
+          type: [number, 'null']
+          description: 首次评级为 GOOD 的卡数 / 首次复习卡数,分母为 0 时 null
+        retention_rate:
+          type: [number, 'null']
+          description: 非首次事件中 GOOD 数 / 非首次事件数,分母为 0 时 null
+        streak_days:
+          type: integer
+          description: 截至用户本地当天连续有复习事件的自然日数
+        mastered_card_count:
+          type: integer
+          description: 掌握卡片数(state=REVIEW 且 stability>=21 天)
+        has_data:
+          type: boolean
+          description: false 时客户端展示空态
+
+  responses:
+    BadRequest:
+      description: 请求非法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: 缺少或非法 X-Device-ID
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 资源不属于当前设备
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: 状态冲突或幂等内容不一致
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unprocessable:
+      description: 业务校验失败(如 PDF_TOC_MISSING、API_KEY_INVALID)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: 限流
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
