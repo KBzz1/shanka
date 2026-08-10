@@ -136,6 +136,26 @@ def test_batches_plan_and_process_all(session_factory: Callable[[], Session]) ->
     assert task.total_batch_count == total_batches
     assert len(cards) > 0
     assert all(c.source == "GENERATED" for c in cards)
+    # T3 审查 carry-forward：SUCCEEDED 批次 Rubric 值断言（AC-04/07；仅观测不影响入库）
+    assert all(b.rubric_version == "v1" for b in batches)
+    assert all(
+        c.evidence_score is not None
+        and c.correctness_score is not None
+        and c.difficulty_score is not None
+        and c.learning_value_score is not None
+        and c.rubric_total_score is not None
+        and 0 < c.rubric_total_score <= 12
+        for c in cards
+    )
+    assert all(
+        b.coverage_rate is not None
+        and b.duplicate_rate is not None
+        and b.difficulty_distribution is not None
+        and b.chapter_distribution is not None
+        and b.card_type_distribution is not None
+        and b.difficulty_deviation is not None
+        for b in batches
+    )
 
 
 def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[], Session]) -> None:
