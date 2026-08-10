@@ -90,6 +90,8 @@ pydantic-settings==2.15.0
     # via shanka-backend (pyproject.toml)
 pygments==2.20.0
     # via pytest
+pypdf==6.15.0
+    # via shanka-backend (pyproject.toml)
 pytest==9.1.1
     # via shanka-backend (pyproject.toml)
 python-discovery==1.5.1

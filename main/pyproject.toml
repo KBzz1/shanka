@@ -19,6 +19,7 @@ dependencies = [
   "alembic>=1.13",
   "prometheus-client>=0.20",
   "fsrs>=4.0,<5",  # py-fsrs 项目（open-spaced-repetition/py-fsrs），PyPI 发行名 fsrs；固定 4.x 线（V2 fix round 1 裁决：契约 4.3/5.2 兼容性验证基线，详见 task-1-report；v5+ 移除 State.New 且学习步进语义漂移；残余差异由主 Agent 登记 R-13）
+  "pypdf>=4.0",  # V3A PDF 生命周期：文本层 + 书签目录解析（services/pdf/parser.py）
 ]
 
 [project.optional-dependencies]
