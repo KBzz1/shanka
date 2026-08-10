@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 V5A DONE 与证据位置>
+**结果**：V5A DONE（2026-08-11）。验收与证据见 docs/Progress.md 第 4 节 V5A 行（10 commits 9bc4301..ae3f498 + fix 7c223a5 + 契约同步 89c3aa8，分支 codex/v5a）：313 用例全绿、四工具通过、干净安装+迁移、uvicorn 冒烟（空态聚合/metrics）、边界 61 用例全绿、AC-04/07 通过、R-16 RESOLVED。全任务 checklist 勾选完成。
 
 **Goal:** 实现按知识点分批生成（每批最多 2 次重试共 3 次尝试）、JSON Schema 唯一入库门槛（card.schema.json）、Rubric 只观测（4 维度 0-3 分，fake judge——LOCAL-DONE 不触网）、批次/知识点状态与游标/计数原子推进（失败批次 SKIPPED 后继续）、usage/版本/质量观测（provider 原样字段与内部统一字段映射、Prompt Cache、cost 估算按生效日期价格常量、metrics 指标）、批次列表与质量聚合 API，使 V5A 依据真实验收证据标记 DONE 且 AC-04/07 通过。
 
@@ -41,7 +41,7 @@
 - Consumes: jsonschema（新依赖）、agent_evolution/schemas/v1/card.schema.json（只读）
 - Produces: `services.generation.schema_validator.load_card_schema() -> dict`（资产加载 + JSON Schema 解析）；`services.generation.schema_validator.validate_card(card: dict, schema: dict) -> list[str]`（返回违约列表；空 = 合法）；Task 2 批处理消费
 
-- [ ] **Step 1: 安装 jsonschema + 核对 card.schema.json 结构**
+- [x] **Step 1: 安装 jsonschema + 核对 card.schema.json 结构**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend pip install "jsonschema>=4.20" && conda run -n shanka-backend pip-compile pyproject.toml --extra dev --output-file requirements-dev.lock`
 然后核验：
@@ -56,7 +56,7 @@ print('props:', list((schema.get('properties') or {}).keys()))
 ```
 Expected: 记录 required/属性（type/question/answer/statement/answer_boolean/explanation 等）——校验器按实际结构实现。
 
-- [ ] **Step 2: 写失败单元测试 `main/tests/unit/test_schema_validator.py`**
+- [x] **Step 2: 写失败单元测试 `main/tests/unit/test_schema_validator.py`**
 
 ```python
 """services.generation.schema_validator 单元测试（5.8 Schema 唯一入库门槛）。"""
@@ -92,7 +92,7 @@ def test_schema_validator_wrong_types_invalid() -> None:
 
 （说明：校验规则以 card.schema.json 实际结构为准——required 与属性类型从资产读取；测试断言按实际 schema 校准（如 type 枚举、answer 字符串）。）
 
-- [ ] **Step 3: 实现 `main/services/generation/schema_validator.py`**
+- [x] **Step 3: 实现 `main/services/generation/schema_validator.py`**
 
 ```python
 """Schema 校验器（5.8/AC-04：Schema 是唯一入库门槛，Rubric 不影响入库）。
@@ -118,12 +118,12 @@ def validate_card(card: dict, schema: dict) -> list[str]:
     return [f"{err.json_path or err.path}: {err.message}" for err in validator.iter_errors(card)]
 ```
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy**
+- [x] **Step 4: 运行确认通过 + ruff/mypy**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_schema_validator.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy services/generation/schema_validator.py tests/unit/test_schema_validator.py`
 Expected: PASS（card.schema.json 的 schema 方言（draft）以实际为准——Draft202012 若与实际不兼容换 Draft7）
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/pyproject.toml main/requirements-dev.lock main/services/generation/schema_validator.py main/tests/unit/test_schema_validator.py
@@ -145,7 +145,7 @@ git commit -m "feat(generation): JSON Schema 校验器（card.schema.json 资产
 - Consumes: Task 1 schema、V3B adapter（DeepSeekClient + mock transport）、V4 prompts/planning、F1 models（Batch/KnowledgePoint）
 - Produces: `services.generation.batches.plan_batches(session, *, task_id, knowledge_points) -> None`（按 batch_size 分组建 Batch PENDING + batch_index）；`services.generation.batches.process_next_batch(session, *, task_id, client) -> int`（取下一个 PENDING/FAILED（retry<2）批次 → PROCESSING → adapter.chat（prompt 组装）→ 解析卡片 → 逐卡 Schema 校验 → 合法卡入库（V1 模式 + generation_item_id 防重）→ 计数/质量 → SUCCEEDED（≥1 合法卡）或 FAILED（0 合法卡，retry+1；retry≥2 → SKIPPED）→ 游标 completed_batch_count 原子推进 → 返回处理数）；Settings 字段：`batch_size: int = 3`、`generation_retry_limit: int = 2`；executor 改为调用 process_next_batch 循环（每任务多批）；Task 3 rubric 与 Task 4 观测消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_batches.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_batches.py`**
 
 ```python
 """分批生成集成测试：批次状态机/重试/游标/原子推进（真实 SQLite + mock transport）。"""
@@ -304,12 +304,12 @@ def test_batches_usage_and_versions_recorded(session_factory: Callable[[], Sessi
 
 （说明：批次生成的卡片难度/章节分布等质量字段 Task 3 填；usage/版本本任务填。`process_next_batch` 返回 0 = 无待处理批次。SKIPPED 的 retry_count=2（3 次尝试）。prompt_version/schema_version 从 asset_versions() 取。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_batches.py -v`
 Expected: FAIL（ModuleNotFoundError）
 
-- [ ] **Step 3: 实现 `main/services/generation/batches.py` + executor 改造**
+- [x] **Step 3: 实现 `main/services/generation/batches.py` + executor 改造**
 
 ```python
 """services.generation.batches：分批执行核心（4.2 批次状态机/重试/游标原子推进）。
@@ -383,16 +383,16 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
 
 （说明：**Key 解密**——adapter.chat 需要真实 Key：executor 从 api_keys 表解密（crypto.decrypt_key，仅 infra/llm 路径）→ 传给 client。**实现细节**：process_next_batch 签名含 client（调用方已构造带 Key 的 client）；executor 负责解密 Key 构造 client。**批次响应解析**：content 为 JSON 字符串 → json.loads → cards 列表；无 cards 或全非法 → FAILED。**原子推进**：批次状态 + 卡入库 + task.completed_batch_count/count + kp 状态同事务。**难度/章节分布**：Task 3 rubric 填。完整实现按上述骨架 + 测试驱动修正。）
 
-- [ ] **Step 4: executor 改造（V4 fake → V5A adapter 分批）**
+- [x] **Step 4: executor 改造（V4 fake → V5A adapter 分批）**
 
 `executor._execute_task` 改为：plan_batches（若未建）→ 循环 process_next_batch（解密 Key 构造 client）→ 全部批次终态 → 任务 COMPLETED（或 FAILED 若系统级错误）。V4 fake 不再用于任务执行（样卡仍用 fake）。
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 5: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_batches.py tests/integration/test_tasks_executor.py -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿（test_tasks_executor 适配新执行——mock transport 注入）
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/app/config.py main/services/generation/batches.py main/services/tasks/executor.py main/tests/integration/test_batches.py main/tests/integration/test_tasks_executor.py
@@ -412,7 +412,7 @@ git commit -m "feat(generation): 分批执行核心（批次状态机/重试/Sch
 - Consumes: rubric.md 资产（评分维度）、F1 models
 - Produces: `services.generation.rubric.score_card(card: dict) -> dict`（deterministic：4 维度 0-3 分 + 总分 0-12——本地规则（字段完整/长度/类型一致性））；`services.generation.rubric.batch_quality(cards, total_kps, duplicated) -> dict`（coverage_rate/duplicate_rate/difficulty_distribution/chapter_distribution/card_type_distribution/difficulty_deviation）；Task 4 观测与批次列表消费
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_rubric.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_rubric.py`**
 
 ```python
 """services.generation.rubric 单元测试（5.9：4 维度 0-3 分总分 0-12，Rubric 不影响入库）。"""
@@ -448,7 +448,7 @@ def test_rubric_batch_quality_shape() -> None:
     assert q["card_type_distribution"]["QUESTION"] == 1
 ```
 
-- [ ] **Step 2: 实现 `main/services/generation/rubric.py`**
+- [x] **Step 2: 实现 `main/services/generation/rubric.py`**
 
 ```python
 """Rubric 观测（5.9/8.5：4 维度 0-3 分总分 0-12；Rubric 不影响入库）。
@@ -495,16 +495,16 @@ def _dist(cards: list[dict], key: str) -> dict:
     return out
 ```
 
-- [ ] **Step 3: batches.py 成功路径填质量/分数**
+- [x] **Step 3: batches.py 成功路径填质量/分数**
 
 批次 SUCCEEDED 时：对每张合法卡 score_card → 分数落 Card 行（evidence/correctness/difficulty/learning_value/rubric_total_score）+ batch_quality → Batch 质量列。卡片需要 target_difficulty/chapter_id——批次内知识点决定（kp 的 difficulty 按批次内轮换、chapter_id=kp.chapter_id）。
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 4: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_rubric.py tests/integration/test_batches.py -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/services/generation/rubric.py main/services/generation/batches.py main/tests/unit/test_rubric.py
@@ -527,7 +527,7 @@ git commit -m "feat(generation): Rubric 观测（deterministic fake judge + 分�
 - Consumes: Task 2/3、metrics REGISTRY（V3B）
 - Produces: `services.generation.cost.estimate_cost(cache_hit_tokens, cache_miss_tokens, output_tokens, effective_date) -> float`（价格常量按生效日期；单价示例：cache_hit ¥0.0000005/token、cache_miss ¥0.000002/token、output ¥0.000008/token——以 DeepSeek 官方定价近似标注生效日期，可替换）；`GET /tasks/{task_id}/batches`（Batch 视图列表：状态/retry/质量/usage/版本/model/http_status/duration/request_id——AC-07 观测）；`GET /observability/quality-summary?group_by=model|pdf|difficulty&days=30`（按 device 隔离聚合：Rubric 各维平均、覆盖/重复率均值、任务完成率、成本汇总）；metrics 扩展（llm_requests_total/llm_request_duration_seconds/llm_tokens_total/generation_tasks_total/generation_tasks_duration_seconds/batch_retry_total）；main.py 装配
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_cost.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_cost.py`**
 
 ```python
 """services.generation.cost 成本估算单元测试（8.4：价格常量按生效日期，历史 token 不变）。"""
@@ -550,7 +550,7 @@ def test_cost_estimate_zero_inputs() -> None:
     assert estimate_cost(0, 0, 0, effective_date="2026-08-11") == 0.0
 ```
 
-- [ ] **Step 2: 实现 `main/services/generation/cost.py`**
+- [x] **Step 2: 实现 `main/services/generation/cost.py`**
 
 ```python
 """成本估算（8.4/O-6）：价格配置常量（生效日期），历史 token 数据不变，调整只改常量。
@@ -574,22 +574,22 @@ def estimate_cost(*, cache_hit_tokens: int, cache_miss_tokens: int, output_token
     )
 ```
 
-- [ ] **Step 3: API 与 metrics**
+- [x] **Step 3: API 与 metrics**
 
 `GET /tasks/{task_id}/batches`（handler：get_task 归属校验 → Batch 列表视图（含 cost 估算））；
 `GET /observability/quality-summary`（handler：device 隔离 → SQL 聚合（group_by model/pdf/difficulty——按批次 model/章节/难度分布分组）→ Rubric 平均/覆盖/重复率均值/任务完成率（COMPLETED 任务数/总数）/成本汇总）；
 metrics 扩展（app/api/metrics.py 增加 6 个指标对象 + executor/batches 上报点：llm_requests_total.labels(model, http_status)、llm_tokens_total.labels(kind)、batch_retry_total.inc()、generation_tasks_total.labels(result)、duration observe）。
 
-- [ ] **Step 4: 写失败集成测试 `main/tests/integration/test_observability.py`**
+- [x] **Step 4: 写失败集成测试 `main/tests/integration/test_observability.py`**
 
 （批次列表含 usage/版本/质量；quality-summary 聚合；metrics 文本含 llm/generation/batch 指标——mock transport 驱动两批后断言）
 
-- [ ] **Step 5: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 5: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/unit/test_cost.py tests/integration/test_observability.py -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/services/generation/cost.py main/app/api/tasks.py main/app/api/observability.py main/app/api/metrics.py main/app/main.py main/tests/integration/test_observability.py main/tests/unit/test_cost.py
@@ -608,7 +608,7 @@ git commit -m "feat(obs): 批次列表/质量聚合 API + llm/generation/batch �
 - Consumes: Task 1-4 全部产物
 - Produces: AC-04（分批/Schema 门槛/Rubric 不影响入库）与 AC-07（Rubric+Cache 记录且不影响入库）验收映射；守卫（Batch ↔ openapi）
 
-- [ ] **Step 1: 守卫测试 `main/tests/contract/test_batch_schemas_guard.py`**
+- [x] **Step 1: 守卫测试 `main/tests/contract/test_batch_schemas_guard.py`**
 
 ```python
 """契约守卫：Batch ↔ openapi（守卫 1 扩展）。"""
@@ -624,7 +624,7 @@ def test_batch_schema_openapi_consistent() -> None:
 
 （说明：Batch 视图模型按 openapi Batch required 集合定义；模型字段与 openapi 一致（守卫事实为准修正）。）
 
-- [ ] **Step 2: 验收测试 `main/tests/acceptance/test_acceptance_ac04_ac07.py`**
+- [x] **Step 2: 验收测试 `main/tests/acceptance/test_acceptance_ac04_ac07.py`**
 
 ```python
 """验收测试：AC-04 正式生成与入库 + AC-07 质量与缓存数据（PRD；迁移 schema + HTTP + mock transport）。"""
@@ -636,12 +636,12 @@ def test_batch_schema_openapi_consistent() -> None:
 #   - GET /tasks/{id}/batches → items 含 cache/output tokens + rubric_total_score + 版本
 ```
 
-- [ ] **Step 3: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 3: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/contract/test_batch_schemas_guard.py tests/acceptance/ -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add main/tests/contract/test_batch_schemas_guard.py main/tests/acceptance/test_acceptance_ac04_ac07.py
@@ -655,16 +655,16 @@ git commit -m "test(acceptance): AC-04/07 验收映射 + Batch 守卫"
 **Files:**
 - 验证：全部 V5A 产物；不新增代码
 
-- [ ] **Step 1: 四工具命令全绿**
+- [x] **Step 1: 四工具命令全绿**
 
 Run（均在 `main/`）: `python --version`、`python -m pytest`、`python -m ruff check .`、`python -m ruff format --check .`、`python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 2: 干净环境安装 + 迁移**
+- [x] **Step 2: 干净环境安装 + 迁移**
 
 （venv + alembic upgrade 验证）
 
-- [ ] **Step 3: uvicorn 冒烟（种子 → 任务 → 后台分批执行（mock 不可用于 uvicorn——**决策**：uvicorn 冒烟用 env 注入 mock transport？不——**LOCAL-DONE 红线**：不触网。**决策**：uvicorn 冒烟只验证不触网路径（healthz/批次列表空/质量聚合空态），分批执行由集成测试（mock transport）覆盖。**或**：Settings 加 `deepseek_mock_transport: bool = False`（测试/冒烟用）？——不引入生产 mock 配置。**决策**：uvicorn 冒烟 = 路由可达 + 空态；分批 mock 链路由测试证明。）**
+- [x] **Step 3: uvicorn 冒烟（种子 → 任务 → 后台分批执行（mock 不可用于 uvicorn——**决策**：uvicorn 冒烟用 env 注入 mock transport？不——**LOCAL-DONE 红线**：不触网。**决策**：uvicorn 冒烟只验证不触网路径（healthz/批次列表空/质量聚合空态），分批执行由集成测试（mock transport）覆盖。**或**：Settings 加 `deepseek_mock_transport: bool = False`（测试/冒烟用）？——不引入生产 mock 配置。**决策**：uvicorn 冒烟 = 路由可达 + 空态；分批 mock 链路由测试证明。）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -679,12 +679,12 @@ kill %1
 ```
 Expected: healthz 200、quality-summary 空态（has_data false 或空 items）、metrics 含 llm_requests_total
 
-- [ ] **Step 4: 关键边界复核（收证据）**
+- [x] **Step 4: 关键边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_batches.py tests/integration/test_observability.py tests/acceptance/ tests/contract/ -v`
 Expected: 全绿；记录关键用例名（重试→SKIPPED、游标推进、usage/版本、质量聚合、AC-04/07）
 
-- [ ] **Step 5: 无明文泄漏抽查**
+- [x] **Step 5: 无明文泄漏抽查**
 
 Run: `grep -rn "sk-" main/app main/services main/infra --include="*.py" || true`
 Expected: 无真实泄漏（测试假值除外）
@@ -697,14 +697,14 @@ Expected: 无真实泄漏（测试假值除外）
 - Modify: `docs/Progress.md`
 - Modify: `docs/superpowers/plans/2026-08-11-v5a-batched-generation-quality.md`（标题下「结果」）
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 V5A 行：`TODO` → `DONE`，证据填写：分批状态机/重试/Schema 门槛/游标原子推进、Rubric 观测、usage/版本/质量/成本/metrics、批次列表/质量聚合 API、AC-04/07 通过。
 - 第 6 节：登记 R-15（4.1/4.4 PENDING vs RUNNING 契约文本同步——V5A 或 R1）与 V5A 相关裁决。
 - 第 1 节状态基线：自动化验证测试数更新。
 - 计划文件标题下「结果」注明 V5A DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-11-v5a-batched-generation-quality.md
