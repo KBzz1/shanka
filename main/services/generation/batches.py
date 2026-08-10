@@ -121,7 +121,12 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     prompt_asset = load_asset("prompts", "generator")
     card_schema = json.dumps(load_card_schema(), ensure_ascii=False)
     topic_list = "\n".join(f"- {kp.topic}" for kp in kps)
-    prompt = f"{prompt_asset}\n本次批次知识点：\n{topic_list}\n请按 schema 输出：\n{card_schema}"
+    # PRD 5.11：稳定块（asset + schema）在前、动态内容（知识点）在后——跨批次前缀稳定，
+    # 缓存前缀覆盖 asset + schema（FR-11 观测价值），topic_list 为唯一动态后缀
+    prompt = (
+        f"{prompt_asset}\n请严格按以下 JSON Schema 输出：\n{card_schema}"
+        f"\n本次批次知识点（动态内容）：\n{topic_list}"
+    )
     result = client.chat(prompt, api_key="")  # 明文 Key 在 client 构造时注入（executor 解密）
     _observe_llm_call(result)  # 8.3：每批一次 chat 的 llm 指标上报
     inserted, duplicated = _insert_valid_cards(

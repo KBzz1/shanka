@@ -11,6 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY, generate_latest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -39,7 +40,7 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_task(session: Session, *, device_id: str) -> str:
+def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "COMPACT") -> str:
     from infra.db.models import ApiKey, Chapter, Device, PdfFile
     from services.decks.service import create_deck
 
@@ -81,7 +82,7 @@ def _seed_task(session: Session, *, device_id: str) -> str:
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config={
-            "quantity_tendency": "COMPACT",
+            "quantity_tendency": quantity_tendency,
             "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
         },
         now="2026-08-11T00:00:00.000Z",
@@ -171,3 +172,64 @@ def test_executor_same_chapter_second_task_still_generates(
             assert task is not None
             assert task.status == "COMPLETED"
             assert task.generated_card_count > 0  # 若无 task 维度，第二个任务会被全局去重清 0
+
+
+def _metric_value(name: str, fragments: list[str]) -> float:
+    """Prometheus 文本中指定 name+label 片段的数值（label 顺序不敏感）；不存在返回 0。"""
+    for line in generate_latest(REGISTRY).decode().splitlines():
+        if not line.startswith(f"{name}{{"):
+            continue
+        labels = line.split("{", 1)[1].split("}", 1)[0]
+        if all(frag in labels for frag in fragments):
+            return float(line.split()[-1])
+    return 0.0
+
+
+def test_executor_system_failure_fails_task_and_keeps_cards(
+    session_factory: Callable[[], Session],
+) -> None:
+    """F-2 系统级失败路径：第 2 批 transport 401 → adapter 抛 API_KEY_UNAVAILABLE →
+    任务 FAILED + error_code + resumable=0 + 已入库卡保留 + generation_tasks_total{FAILED} 计数。
+
+    BALANCED 密度 → 6 知识点 → 2 批（batch_size=3）：第 1 批成功（3 卡入库），
+    第 2 批 401（Key 失效）→ executor 上抛 AppError → _fail_task（4.1 系统级失败）。
+    """
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_task(session, device_id=device, quantity_tendency="BALANCED")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": _valid_cards_json()}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                    "model": "deepseek-v4-flash",
+                },
+            )
+        return httpx.Response(401, json={"error": {"message": "invalid api key"}})
+
+    client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+    before = _metric_value("generation_tasks_total", ['result="FAILED"'])
+    with session_factory() as session:
+        n = process_running_tasks(
+            session, settings=_SETTINGS, client_factory=lambda _api_key: client
+        )
+        session.commit()
+        task = session.get(Task, task_id)
+        assert task is not None and task.deck_id is not None
+        cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
+    after = _metric_value("generation_tasks_total", ['result="FAILED"'])
+    assert n == 1
+    assert calls == 2  # 第 1 批成功、第 2 批 401
+    assert task.status == "FAILED"
+    assert task.error_code == "API_KEY_UNAVAILABLE"
+    assert task.failure_stage == "GENERATING"
+    assert task.resumable == 0
+    assert task.ended_at == task.updated_at
+    assert len(cards) == 3  # 第 1 批已入库卡保留（4.1）
+    assert after - before == 1.0  # 8.3：系统级失败也计数
