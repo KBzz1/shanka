@@ -126,16 +126,19 @@ Android 前端 ──HTTPS──▶ api.<domain>（Cloudflare 边缘，DNS + 自
 
 | 子域名 | 用途 | Tunnel 路由 |
 | --- | --- | --- |
-| `api.<domain>` | 生产 API（App 连接） | `localhost:8000` |
+| `api.<domain>` | 生产 API（App 连接） | `localhost:<port>`（默认 8000，可配置） |
 | `dev.api.<domain>` | 开发联调 | 同上或独立端口 |
 
-### 6.3 接入要点（实现阶段执行）
+### 6.3 接入要点（设计定稿；实际实施推迟到最后阶段）
 
-1. Cloudflare Zero Trust → Networks → Tunnels → 创建命名隧道（如 `shanka-api`），记录 Tunnel Token。
-2. WSL2 安装 cloudflared，常驻运行（systemd / nohup）。
-3. 公共主机名配置：`api.<domain>` → `http://localhost:8000`。
-4. TLS：边缘到用户自动 HTTPS；边缘到本机回源走 Tunnel 内部加密，回源不暴露端口。
-5. 可选加固：WAF 自定义规则（限流）；`/metrics` 只走 dev 子域名或加 Access。
+1. **本地端口可配置**：FastAPI 监听端口为配置项（默认 `8000`，环境变量覆盖）。实际实施时先检测端口占用，被占用则换端口并同步更新 Tunnel 路由；`api.<domain>` 指向的本地端口以 Tunnel 配置为准。
+2. Cloudflare Zero Trust → Networks → Tunnels → 创建命名隧道（如 `shanka-api`），记录 Tunnel Token。
+3. WSL2 安装 cloudflared，常驻运行（systemd / nohup）。
+4. 公共主机名配置：`api.<domain>` → `localhost:<port>`（端口跟随第 1 条）。
+5. TLS：边缘到用户自动 HTTPS；边缘到本机回源走 Tunnel 内部加密，回源不暴露端口。
+6. 可选加固：WAF 自定义规则（限流）；`/metrics` 只走 dev 子域名或加 Access。
+
+> **实施时机**：Tunnel 实际接入（cloudflared 安装、隧道创建、DNS/路由配置）**推迟到最后阶段执行**（见第 10 节实施顺序与 Progress.md）；本期仅完成设计文档（deployment.md）。
 
 ### 6.4 与现有契约衔接
 
@@ -160,15 +163,16 @@ Android 前端 ──HTTPS──▶ api.<domain>（Cloudflare 边缘，DNS + 自
 - 字段层完备：单卡 Rubric 分、整批质量分布、Cache tokens、版本字段均有落点（Card / Batch）。
 - 机制层缺失：无结构化日志规范、无健康检查、无指标出口、无追踪；唯一观测接口（6.9）仅单任务视图，PRD 8.2 跨任务聚合口径无法核验；Rubric 评分过程无痕；版本字段无资产载体（由 agent_evolution/ 解决）。
 
-### 7.2 补齐项（全部入契约）
+### 7.2 补齐项（全部入契约；**观测范围限定 DeepSeek API**，其他模型厂商不做）
 
 | 编号 | 补齐项 | 内容 |
 | --- | --- | --- |
 | O-1 | 结构化日志规范 | JSON 单行；统一字段 timestamp/level/request_id/device_id/task_id/batch_id/error_code/message；级别规范（INFO/WARN/ERROR）；中间件生成 request_id 贯穿，后台批处理以 task_id+batch_id 关联；红线 1.5/7.1 保留 |
 | O-2 | 健康检查 | `GET /healthz`（存活）、`GET /readyz`（DB 连接 + 存储可写，失败 503） |
-| O-3 | 指标 | `GET /metrics`（Prometheus 文本）；业务：任务终态计数/耗时/批次重试/限流命中；LLM：请求数（model/状态码）/耗时/token 分桶；框架：HTTP 请求数/耗时；`/metrics` 生产子域名默认不暴露 |
-| O-4 | 聚合观测接口 | `GET /v1/observability/quality-summary?group_by=model|pdf|difficulty&days=30`：Rubric 各维平均分、覆盖/重复率均值、任务完成率；按当前 device_id 聚合（与业务同隔离），跨设备聚合留给未来后台 |
+| O-3 | 指标 | `GET /metrics`（Prometheus 文本）；业务：任务终态计数/耗时/批次重试/限流命中；LLM：请求数（model/状态码）/耗时/token 分桶（**model 维度限定 DeepSeek 模型族**）；框架：HTTP 请求数/耗时；`/metrics` 生产子域名默认不暴露 |
+| O-4 | 聚合观测接口 | `GET /v1/observability/quality-summary?group_by=model|pdf|difficulty&days=30`：Rubric 各维平均分、覆盖/重复率均值、任务完成率、**成本汇总**（见 O-6）；按当前 device_id 聚合（与业务同隔离），跨设备聚合留给未来后台 |
 | O-5 | 评估骨架补全 | 评分执行者明确为 LLM-as-judge；评分 prompt 资产落 `agent_evolution/rubrics/v1/scoring-prompt.md`；评分请求记录 prompt 版本 + 输入摘要 + 输出分（不落完整 prompt）；版本字段值 = manifest version |
+| O-6 | 成本观测（经济指标） | 原始 token 数据（cache_hit/cache_miss/output）已入 Batch 表，**不变**；**估算成本**在聚合时按"价格配置常量"换算——常量取 DeepSeek 官方定价、标注生效日期，不固化进 DB（价格调整只改配置，不动历史数据）；O-3 指标与 O-4 聚合接口增加成本汇总（hit/miss/output 分开计价，给出估算金额） |
 
 ## 8. 契约文档更新清单
 
@@ -186,6 +190,7 @@ Android 前端 ──HTTPS──▶ api.<domain>（Cloudflare 边缘，DNS + 自
 - 不写任何可运行代码（本期为纯骨架 + 契约）。
 - 不引入 OpenTelemetry / 追踪系统（MVP 用 request_id + 结构化日志 + 已观测字段，满足即可；P3-3 后按实测再评估）。
 - 不做跨设备聚合观测接口（数据出口合法性优先）。
+- 不做多模型厂商 API 观测适配（观测范围仅 DeepSeek）。
 - 不实现 CF 边缘 WAF 规则细节（入 deployment.md 为可选项）。
 - 不建测试用例（本期只建目录 + 策略契约）。
 
@@ -193,6 +198,6 @@ Android 前端 ──HTTPS──▶ api.<domain>（Cloudflare 边缘，DNS + 自
 
 1. 建 `main/` 空文件骨架（含 tests/ 四层目录）。
 2. 建 `agent_evolution/`（manifest + CHANGELOG + 各资产 v1 首版，资产内容由契约/PRD 推导）。
-3. 更新契约文档（第 8 节清单）。
-4. 写 deployment.md。
+3. 更新契约文档（第 8 节清单；含 O-6 成本观测与 DeepSeek 范围限定）。
+4. 写 deployment.md（Tunnel 设计定稿；实际接入为**最后阶段**任务，见 Progress.md P3-4）。
 5. 提交。
