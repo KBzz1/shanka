@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 F0 DONE 与证据位置>
+**结果**：F0 DONE（2026-08-10）。验收与证据见 docs/Progress.md 第 4 节 F0 行（9 commits c18df94..320466a，分支 codex/f0）：34 用例全绿、四工具命令通过、干净安装复现、uvicorn 冒烟 healthz/readyz 200、守卫 15 用例、无明文泄漏；R-01/R-02/R-07 RESOLVED。全任务 checklist 勾选完成。
 
 **Goal:** 建立可运行、可安装、可验证的后端基线与四道防漂移护栏：Settings 唯一入口、DB session 唯一入口、统一错误对象与错误码注册表、healthz/readyz 探针、四类契约守卫与测试基座，解决 R-01/R-02，使 F0 依据真实验收证据标记 DONE。
 
@@ -39,7 +39,7 @@
 - Consumes: 无（本任务为全仓依赖地基）
 - Produces: hatchling 构建后端；依赖 `sqlalchemy>=2.0`（运行时）、`httpx>=0.27`、`pyyaml>=6.0`、`types-PyYAML>=6.0`（dev）；pytest `pythonpath=["."]`；锁定文件与再生成命令
 
-- [ ] **Step 1: 重写 `main/pyproject.toml`**
+- [x] **Step 1: 重写 `main/pyproject.toml`**
 
 ```toml
 # 依赖与 lint 配置唯一事实源（CLAUDE.md 工具链）
@@ -89,7 +89,7 @@ python_version = "3.12"
 strict = true
 ```
 
-- [ ] **Step 2: 追加 `.gitignore` 运行时产物条目**（保留既有 `/res/*.pdf`、`/.env`）
+- [x] **Step 2: 追加 `.gitignore` 运行时产物条目**（保留既有 `/res/*.pdf`、`/.env`）
 
 ```
 # 运行时产物（F0 起）
@@ -102,18 +102,18 @@ __pycache__/
 .mypy_cache/
 ```
 
-- [ ] **Step 3: 可编辑安装并安装锁定工具**
+- [x] **Step 3: 可编辑安装并安装锁定工具**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend pip install -e ".[dev]"`
 Expected: 成功（不再因多顶层包报错）；随后 `conda run -n shanka-backend pip install pip-tools`
 验证: `conda run -n shanka-backend python -c "import app, domain, services, infra, sqlalchemy, yaml, fastapi.testclient"` 无 ImportError
 
-- [ ] **Step 4: 生成锁定文件**
+- [x] **Step 4: 生成锁定文件**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend pip-compile pyproject.toml --extra dev --output-file requirements-dev.lock`
 Expected: 生成 `requirements-dev.lock`，含全部运行时与 dev 依赖的钉版本；确认 `fastapi`、`sqlalchemy`、`pytest`、`pyyaml`、`types-PyYAML` 在列
 
-- [ ] **Step 5: 干净环境安装冒烟（锁定结果可复现）**
+- [x] **Step 5: 干净环境安装冒烟（锁定结果可复现）**
 
 Run:
 ```bash
@@ -124,7 +124,7 @@ cd /home/kbzz1/shanka_backend/main && /tmp/f0-clean-venv/bin/python -c "import s
 ```
 Expected: 全部成功；删除冒烟 venv：`rm -rf /tmp/f0-clean-venv`
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/pyproject.toml main/requirements-dev.lock .gitignore
@@ -143,7 +143,7 @@ git commit -m "build: hatchling 可编辑安装 + pip-tools 锁定（R-02 解决
 - Consumes: Task 1 的 pydantic-settings 依赖
 - Produces: `app.config.Settings`（字段：`app_name: str`、`version: str`、`environment: Literal[development/test/production]`、`log_level: str`、`database_url: str`、`storage_path: Path`、`deepseek_api_key: str | None`（`repr=False`））；可 `Settings(database_url=..., storage_path=...)` 显式构造，默认值进代码
 
-- [ ] **Step 1: 写失败测试 `main/tests/unit/test_settings.py`**
+- [x] **Step 1: 写失败测试 `main/tests/unit/test_settings.py`**
 
 ```python
 """app.config 单一配置入口单元测试。"""
@@ -178,12 +178,12 @@ def test_settings_secret_hidden_in_repr() -> None:
     assert "sk-super-secret-value" not in repr(settings)
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_settings.py -v`
 Expected: FAIL（ModuleNotFoundError: app.config）
 
-- [ ] **Step 3: 实现 `main/app/config.py`**
+- [x] **Step 3: 实现 `main/app/config.py`**
 
 ```python
 """单一配置入口（project-structure 6）：pydantic-settings 单层配置类。
@@ -216,12 +216,12 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = Field(default=None, repr=False)
 ```
 
-- [ ] **Step 4: 运行确认通过 + 格式/静态检查**
+- [x] **Step 4: 运行确认通过 + 格式/静态检查**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_settings.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/config.py tests/unit/test_settings.py`
 Expected: PASS 且 ruff/mypy 无报错
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/app/config.py main/tests/unit/test_settings.py
@@ -241,7 +241,7 @@ git commit -m "feat(config): 单一 Settings 配置入口（默认值进代码�
 - Consumes: 无（engine 接收数据库 URL 字符串，不依赖 Settings）
 - Produces: `infra.db.session.create_db_engine(database_url: str) -> Engine`、`infra.db.session.format_utc(dt: datetime) -> str`；`infra.clock.Clock`（Protocol）、`infra.clock.SystemClock`、`infra.clock.FrozenClock`（`now_utc() -> datetime`）；后续任务/服务按 `now_utc()` 获取服务端权威时间
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_session_format_utc.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_session_format_utc.py`**
 
 ```python
 """infra.db.session.format_utc 统一时间格式单元测试（database-design 0）。"""
@@ -275,7 +275,7 @@ def test_format_utc_naive_raises() -> None:
         format_utc(datetime(2026, 8, 10, 9, 0, 0))
 ```
 
-- [ ] **Step 2: 写失败单元测试 `main/tests/unit/test_clock.py`**
+- [x] **Step 2: 写失败单元测试 `main/tests/unit/test_clock.py`**
 
 ```python
 """infra.clock 时钟唯一入口单元测试（Progress 2.5：时钟唯一入口）。"""
@@ -296,7 +296,7 @@ def test_clock_frozen_returns_fixed_value() -> None:
     assert FrozenClock(fixed).now_utc() == fixed
 ```
 
-- [ ] **Step 3: 写失败集成测试 `main/tests/integration/test_session_engine.py`**
+- [x] **Step 3: 写失败集成测试 `main/tests/integration/test_session_engine.py`**
 
 ```python
 """infra.db.session 引擎集成测试：空测试库创建、WAL/外键（database-design 0）。"""
@@ -327,12 +327,12 @@ def test_session_engine_enables_wal_and_foreign_keys(tmp_path: Path) -> None:
         assert conn.execute(text("PRAGMA foreign_keys")).scalar() == 1
 ```
 
-- [ ] **Step 4: 运行确认三个测试均失败**
+- [x] **Step 4: 运行确认三个测试均失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_session_format_utc.py tests/unit/test_clock.py tests/integration/test_session_engine.py -v`
 Expected: FAIL（ModuleNotFoundError: infra.db.session / infra.clock）
 
-- [ ] **Step 5: 实现 `main/infra/db/session.py`**
+- [x] **Step 5: 实现 `main/infra/db/session.py`**
 
 ```python
 """DB 唯一入口（database-design 0 / Progress 2.5）。
@@ -378,7 +378,7 @@ def format_utc(dt: datetime) -> str:
     return dt_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt_utc.microsecond // 1000:03d}Z"
 ```
 
-- [ ] **Step 6: 实现 `main/infra/clock.py`**
+- [x] **Step 6: 实现 `main/infra/clock.py`**
 
 ```python
 """时钟唯一入口（Progress 2.5）：服务端为权威时钟（structure-contract 1.2）。"""
@@ -406,12 +406,12 @@ class FrozenClock:
         return self._now
 ```
 
-- [ ] **Step 7: 运行确认通过 + 格式/静态检查**
+- [x] **Step 7: 运行确认通过 + 格式/静态检查**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_session_format_utc.py tests/unit/test_clock.py tests/integration/test_session_engine.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/config.py app/__init__.py app/main.py domain/ services/ infra/ tests/`
 Expected: PASS 且 ruff/mypy 无报错（`app/main.py` 现为占位 docstring，mypy 应通过）
 
-- [ ] **Step 8: 提交**
+- [x] **Step 8: 提交**
 
 ```bash
 git add main/infra/db/session.py main/infra/clock.py main/tests/unit/test_session_format_utc.py main/tests/unit/test_clock.py main/tests/integration/test_session_engine.py
@@ -430,7 +430,7 @@ git commit -m "feat(infra): DB session 唯一入口（WAL/外键）+ 统一时�
 - Consumes: 无（纯标准库）
 - Produces: `app.errors.ErrorCode`（23 个成员，str 值即契约错误码）、`app.errors.ERROR_HTTP_STATUS: dict[ErrorCode, int]`、`app.errors.LOCALIZATION_KEYS: frozenset[str]`（唯一文案清单）、`app.errors.http_status(code: ErrorCode) -> int`、`app.errors.localization_key(code: ErrorCode) -> str`、`app.errors.AppError`（`code`/`message` 属性 + `to_response() -> dict`）；Task 5/6/7 与后续全部纵向包使用
 
-- [ ] **Step 1: 写失败单元测试 `main/tests/unit/test_errors.py`**
+- [x] **Step 1: 写失败单元测试 `main/tests/unit/test_errors.py`**
 
 ```python
 """app.errors 统一错误对象单元测试（structure-contract 1.4 / 7）。"""
@@ -488,12 +488,12 @@ def test_errors_app_error_response_shape() -> None:
     }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_errors.py -v`
 Expected: FAIL（ModuleNotFoundError: app.errors）
 
-- [ ] **Step 3: 实现 `main/app/errors.py`**
+- [x] **Step 3: 实现 `main/app/errors.py`**
 
 ```python
 """统一错误对象与错误码注册表（structure-contract 1.4 / 7；红线 3：格式统一于 app/middleware）。
@@ -624,12 +624,12 @@ class AppError(Exception):
         }
 ```
 
-- [ ] **Step 4: 运行确认通过 + 格式/静态检查**
+- [x] **Step 4: 运行确认通过 + 格式/静态检查**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/unit/test_errors.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/errors.py tests/unit/test_errors.py`
 Expected: PASS 且 ruff/mypy 无报错
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/app/errors.py main/tests/unit/test_errors.py
@@ -649,7 +649,7 @@ git commit -m "feat(errors): 统一错误对象/错误码注册表/localization_
 - Consumes: Task 4 无（schema 守卫独立）；openapi.yaml 的 `Error` schema
 - Produces: `app.schemas.common.ErrorDetail`/`ErrorResponse`（pydantic 模型，与 openapi `Error` 一致）；`tests.contract.support`：`REPO_ROOT`、`OPENAPI_PATH`、`STRUCTURE_CONTRACT_PATH`、`MANIFEST_PATH`、`load_openapi() -> dict[str, Any]`、`openapi_schema(name) -> dict[str, Any]`、`resolve_ref(schema, openapi) -> dict`、`check_schema_consistency(model, schema, openapi, path="$") -> list[str]`、`parse_error_codes_table(md_text) -> dict[str, int]`、`load_manifest() -> dict[str, Any]`、`extract_version_declarations(md_text) -> dict[str, str]`（后三者 Task 6 复用）
 
-- [ ] **Step 1: 重写 `main/app/schemas/common.py`**
+- [x] **Step 1: 重写 `main/app/schemas/common.py`**
 
 ```python
 """通用 schema：统一错误响应（structure-contract 1.4 / openapi `Error`）。"""
@@ -667,7 +667,7 @@ class ErrorResponse(BaseModel):
     error: ErrorDetail
 ```
 
-- [ ] **Step 2: 写失败守卫测试 `main/tests/contract/test_schemas_openapi_guard.py`**
+- [x] **Step 2: 写失败守卫测试 `main/tests/contract/test_schemas_openapi_guard.py`**
 
 ```python
 """契约守卫 1：app/schemas ↔ openapi.yaml（project-structure 5，红线 1）。"""
@@ -710,12 +710,12 @@ def test_schema_guard_detects_missing_required_field() -> None:
     assert any("localization_key" in v for v in violations)
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/contract/test_schemas_openapi_guard.py -v`
 Expected: FAIL（ModuleNotFoundError: tests.contract.support）
 
-- [ ] **Step 4: 实现 `main/tests/contract/support.py`**
+- [x] **Step 4: 实现 `main/tests/contract/support.py`**
 
 ```python
 """契约守卫辅助：解析 openapi.yaml / structure-contract.md / manifest.json 与 pydantic 模型比对。
@@ -855,12 +855,12 @@ def extract_version_declarations(md_text: str) -> dict[str, str]:
     return result
 ```
 
-- [ ] **Step 5: 运行确认通过 + 格式/静态检查**
+- [x] **Step 5: 运行确认通过 + 格式/静态检查**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/contract/test_schemas_openapi_guard.py -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy app/schemas/ tests/contract/`
 Expected: PASS 且 ruff/mypy 无报错
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add main/app/schemas/common.py main/tests/contract/support.py main/tests/contract/test_schemas_openapi_guard.py
@@ -880,7 +880,7 @@ git commit -m "feat(guard): 错误响应 schema + schema↔openapi 守卫框架�
 - Consumes: Task 4 `app.errors`（`ErrorCode`/`ERROR_HTTP_STATUS`/`LOCALIZATION_KEYS`/`localization_key`）；Task 5 `tests.contract.support`（`STRUCTURE_CONTRACT_PATH`、`MANIFEST_PATH`、`parse_error_codes_table`、`load_manifest`、`extract_version_declarations`）
 - Produces: 三道可运行守卫（守卫 3/4 + manifest 版本守卫），R-01 的自动化落点
 
-- [ ] **Step 1: 写 `main/tests/contract/test_error_codes_guard.py`**
+- [x] **Step 1: 写 `main/tests/contract/test_error_codes_guard.py`**
 
 ```python
 """契约守卫 3：错误码清单 ↔ structure-contract 第 7 章（project-structure 5，红线 1）。"""
@@ -895,7 +895,7 @@ def test_error_codes_match_contract_chapter7() -> None:
     assert code_registry == doc_codes
 ```
 
-- [ ] **Step 2: 写 `main/tests/contract/test_localization_guard.py`**
+- [x] **Step 2: 写 `main/tests/contract/test_localization_guard.py`**
 
 ```python
 """契约守卫 4：localization_key ↔ 文案清单（project-structure 5；R-01 派生规则与唯一位置）。"""
@@ -915,7 +915,7 @@ def test_localization_keys_format() -> None:
         assert re.fullmatch(r"error\.[a-z0-9_]+", key) is not None
 ```
 
-- [ ] **Step 3: 写 `main/tests/contract/test_manifest_guard.py`**
+- [x] **Step 3: 写 `main/tests/contract/test_manifest_guard.py`**
 
 ```python
 """契约守卫：agent_evolution/manifest.json ↔ structure-contract 版本引用（Architecture AGENTS.md 6）。"""
@@ -966,12 +966,12 @@ def test_manifest_json_parseable() -> None:
     assert "prompts" in data and "schemas" in data and "rubrics" in data
 ```
 
-- [ ] **Step 4: 运行确认通过 + 格式/静态检查**
+- [x] **Step 4: 运行确认通过 + 格式/静态检查**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/contract/ -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy tests/contract/`
 Expected: PASS 且 ruff/mypy 无报错
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/tests/contract/test_error_codes_guard.py main/tests/contract/test_localization_guard.py main/tests/contract/test_manifest_guard.py
@@ -994,7 +994,7 @@ git commit -m "feat(guard): 错误码/localization_key/manifest 契约守卫"
 - Consumes: Task 2 `Settings`；Task 3 `create_db_engine`；Task 4 `AppError`/`ErrorCode`/`http_status`；`infra.storage.local.LocalStorage`（本任务创建）
 - Produces: `app.main.create_app(settings: Settings | None = None) -> FastAPI`（模块级 `app` 供 uvicorn；`app.state.settings/engine/storage`；lifespan 关闭时 dispose engine）；`app.middleware.error_handler.register_exception_handlers(app: FastAPI) -> None`；`app.api.probes.router`（`GET /healthz`→200、`GET /readyz`→200/503，豁免鉴权，契约 8.2）；`infra.storage.local.LocalStorage`（`__init__(storage_path: Path)`、`check_writable() -> bool`）；`tests.conftest` fixtures：`settings`/`app`/`client`/`clock`
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_probes.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_probes.py`**
 
 ```python
 """探针集成测试（structure-contract 8.2）：healthz 存活、readyz DB+存储真实检查。"""
@@ -1052,7 +1052,7 @@ def test_probes_healthz_alive_even_when_db_down(tmp_path: Path) -> None:
         assert client.get("/healthz").status_code == 200
 ```
 
-- [ ] **Step 2: 写失败集成测试 `main/tests/integration/test_error_handler.py`**
+- [x] **Step 2: 写失败集成测试 `main/tests/integration/test_error_handler.py`**
 
 ```python
 """统一错误 handler 集成测试（structure-contract 1.4 / 红线 3）。"""
@@ -1084,12 +1084,12 @@ def test_error_handler_returns_contract_shape() -> None:
     }
 ```
 
-- [ ] **Step 3: 运行确认失败**
+- [x] **Step 3: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_probes.py tests/integration/test_error_handler.py -v`
 Expected: FAIL（ModuleNotFoundError: app.main / app.middleware.error_handler / infra.storage.local / conftest）
 
-- [ ] **Step 4: 实现 `main/infra/storage/local.py`**
+- [x] **Step 4: 实现 `main/infra/storage/local.py`**
 
 ```python
 """本地文件存储（infra/storage）：F0 提供就绪探针可写性检查；PDF 受控存储在 V3A 扩展。"""
@@ -1115,7 +1115,7 @@ class LocalStorage:
             return False
 ```
 
-- [ ] **Step 5: 实现 `main/app/middleware/error_handler.py`**
+- [x] **Step 5: 实现 `main/app/middleware/error_handler.py`**
 
 ```python
 """统一错误响应 handler（structure-contract 1.4；红线 3：错误码格式统一于 app/middleware）。
@@ -1135,7 +1135,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=http_status(exc.code), content=exc.to_response())
 ```
 
-- [ ] **Step 6: 实现 `main/app/api/probes.py`**
+- [x] **Step 6: 实现 `main/app/api/probes.py`**
 
 ```python
 """运行观测探针（structure-contract 8.2）：/healthz 存活、/readyz 就绪（DB + 存储），豁免 X-Device-ID 鉴权。"""
@@ -1174,7 +1174,7 @@ def readyz(request: Request) -> JSONResponse:
     return JSONResponse(content={"status": "ready", "checks": checks})
 ```
 
-- [ ] **Step 7: 重写 `main/app/main.py`**
+- [x] **Step 7: 重写 `main/app/main.py`**
 
 ```python
 """应用装配（project-structure 3）：唯一创建入口 create_app；模块级 app 供 uvicorn 启动。"""
@@ -1213,7 +1213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 app = create_app()
 ```
 
-- [ ] **Step 8: 实现 `main/tests/conftest.py` 共享测试基座**
+- [x] **Step 8: 实现 `main/tests/conftest.py` 共享测试基座**
 
 ```python
 """共享测试基座（Progress F0）：隔离 Settings、临时 DB/存储、TestClient、可控时钟。
@@ -1256,12 +1256,12 @@ def clock() -> FrozenClock:
     return FrozenClock(datetime(2026, 8, 10, 9, 0, 0, tzinfo=UTC))
 ```
 
-- [ ] **Step 9: 运行确认全部通过 + 格式/静态检查**
+- [x] **Step 9: 运行确认全部通过 + 格式/静态检查**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest -v && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全部测试 PASS，ruff/mypy 零报错
 
-- [ ] **Step 10: 提交**
+- [x] **Step 10: 提交**
 
 ```bash
 git add main/app/main.py main/app/middleware/error_handler.py main/app/api/probes.py main/infra/storage/local.py main/tests/conftest.py main/tests/integration/test_probes.py main/tests/integration/test_error_handler.py
@@ -1278,7 +1278,7 @@ git commit -m "feat(app): create_app 装配 + healthz/readyz 探针 + 统一错�
 **Interfaces:**
 - Consumes: Task 1~7 全部产物
 
-- [ ] **Step 1: 四个工具命令全绿**
+- [x] **Step 1: 四个工具命令全绿**
 
 Run（均在 `main/`）:
 ```bash
@@ -1290,7 +1290,7 @@ conda run -n shanka-backend python -m mypy .
 ```
 Expected: 版本 3.12.x；四命令零失败
 
-- [ ] **Step 2: 干净环境按锁定结果安装成功**
+- [x] **Step 2: 干净环境按锁定结果安装成功**
 
 ```bash
 conda run -n shanka-backend python -m venv /tmp/f0-accept-venv
@@ -1300,7 +1300,7 @@ cd /home/kbzz1/shanka_backend/main && /tmp/f0-accept-venv/bin/python -c "import 
 rm -rf /tmp/f0-accept-venv
 ```
 
-- [ ] **Step 3: 应用启动冒烟（真实 uvicorn）**
+- [x] **Step 3: 应用启动冒烟（真实 uvicorn）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -1313,12 +1313,12 @@ kill $UV_PID
 ```
 Expected: healthz=200、readyz=200；`main/shanka.db` 已创建（git 忽略）
 
-- [ ] **Step 4: 契约守卫与 readyz 成败边界复核（收证据）**
+- [x] **Step 4: 契约守卫与 readyz 成败边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/contract tests/integration/test_probes.py -v`
 Expected: 全绿；记录测试输出中守卫用例与 readyz 200/503 用例名称作为验收证据
 
-- [ ] **Step 5: 无明文泄漏抽查**
+- [x] **Step 5: 无明文泄漏抽查**
 
 Run: `grep -rn "sk-" main/app --include="*.py" || true`
 Expected: 无输出（实现代码中不得出现 API Key 明文形态；tests 中仅允许测试用假值 `sk-super-secret-value` 存在）
@@ -1333,14 +1333,14 @@ Expected: 无输出（实现代码中不得出现 API Key 明文形态；tests �
 **Interfaces:**
 - Consumes: Task 8 验收证据
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 F0 行：`TODO` → `DONE`，当前证据填写：可编辑安装+锁定（requirements-dev.lock 干净环境复现）、四工具命令全绿、healthz/readyz 200/503 集成测试、空测试库创建、四类守卫（schema↔openapi/错误码/localization/manifest）用例通过、uvicorn 启动冒烟。
 - 第 6 节：R-01 → `RESOLVED`（派生规则+唯一位置：`app/errors.py`，清单 `LOCALIZATION_KEYS`，守卫全等校验）；R-02 → `RESOLVED`（hatchling + pip-tools 锁定，`requirements-dev.lock`）；R-07 → `RESOLVED`（Superpowers 插件已安装，本会话可用 writing-plans/subagent-driven-development）。
 - 第 1 节状态基线：`可运行后端` → `DONE`（F0 基线：装配+探针；业务路由随 V1+ 纵向包）、`自动化验证` → `DONE`（F0：unit/integration/contract 首批用例）。
 - 计划文件标题下「结果」注明 F0 DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-10-f0-executable-baseline-and-guards.md

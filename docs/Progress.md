@@ -19,8 +19,8 @@
 | agent 资产 v1 | `DONE`（初稿） | manifest 指向 prompt/schema/rubric v1；CHANGELOG 说明实现时仍需精修，不代表 LLM 链路完成 |
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
-| 可运行后端 | `TODO` | 无 FastAPI app、配置、ORM、迁移、服务或基础设施实现 |
-| 自动化验证 | `TODO` | tests 下没有测试文件，当前不能用 pytest 证明任何能力 |
+| 可运行后端 | `DONE`（F0 基线） | create_app 装配（settings/engine/storage state + lifespan dispose）+ healthz/readyz 探针 + 统一错误 handler + LocalStorage 就绪探测；业务路由随 V1+ 纵向包逐步接入 |
+| 自动化验证 | `DONE`（F0 首批） | 34 passed：unit（Settings/errors/format_utc/clock）+ integration（engine WAL/外键/空库、probes 200/503、error handler 1.4 形状）+ contract（四类守卫含负例）；四工具命令全绿 |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -59,11 +59,20 @@
 
 ### F0 — 可执行基线与防漂移护栏
 
-**`TODO`｜依赖：无｜覆盖：project-structure 5～7、structure-contract 1/7**
+**`DONE`｜依赖：无｜覆盖：project-structure 5～7、structure-contract 1/7**
 
 复用已创建的 Conda 环境；补齐 build backend/package discovery，使 `pip install -e .[dev]` 可用并生成锁定文件；建立单一 Settings、应用装配、DB session、隔离测试配置；实现统一错误对象/错误码/localization key 清单和 contract 守卫；提供测试 client、临时 DB/存储、可控时钟；实现 healthz，readyz 在 DB/存储不可用时真实 503。
 
 验收：`conda run -n shanka-backend python --version` 为 3.12；从干净环境按锁定结果安装成功；四个工具命令通过；应用启动、空测试库创建；schema/OpenAPI、错误码、localization key、manifest 守卫；readyz 成败测试。开工前解决 R-01。
+
+当前证据（2026-08-10，分支 codex/f0 合并回 main，9 commits c18df94..320466a）：
+- 可编辑安装 + pip-tools 锁定：hatchling build backend，`pip install -e .[dev]` 成功；`requirements-dev.lock`（46 个钉版本）从干净 venv 安装 + editable 冒烟通过（sqlalchemy 2.0.51）。
+- 四工具命令全绿：`python -m pytest` 34 passed、`python -m ruff check .` All checks passed、`python -m ruff format --check .` 107 files already formatted、`python -m mypy .` Success（69 source files），Python 3.12.13。
+- 应用启动冒烟：真实 uvicorn（port 8099）healthz=200、readyz=200（`{"status":"ready","checks":{"database":"ok","storage":"ok"}}`），`main/shanka.db` 创建（git 忽略）。
+- 空测试库创建 + readyz 成败：`test_probes_readyz_ok_creates_empty_db`（readyz 请求后文件落盘）、`test_probes_readyz_db_unavailable_returns_503`、`test_probes_readyz_storage_unavailable_returns_503`、`test_probes_healthz_alive_even_when_db_down` 全通过。
+- 四类守卫（15 用例全绿）：schema↔openapi（含负例）、错误码↔第 7 章（23 码全等 + HTTP 状态）、localization_key↔文案清单（派生全等 + 格式正则）、manifest 资产版本/路径（+ 契约声明一致性）。
+- 统一错误对象：`app/errors.py` 23 个 ErrorCode、ERROR_HTTP_STATUS、LOCALIZATION_KEYS（R-01 唯一位置 + 派生规则）；AppError → 1.4 响应形状集成测试通过。
+- 无明文泄漏：`grep -rn "sk-" main/app --include="*.py"` 无输出。
 
 ### F1 — 数据与 HTTP 共享基础
 
@@ -165,13 +174,13 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 
 | ID | 状态 | 事实与影响 | 处理边界 |
 | --- | --- | --- | --- |
-| R-01 | `OPEN` | 要求校验 localization_key↔文案清单，但正式契约未指定清单 | F0 先明确唯一位置/派生规则；测试不得自创第二份错误码权威 |
-| R-02 | `OPEN` | Conda 环境已创建且当前依赖已安装，但 pyproject 无 build backend/package discovery，`pip install -e .[dev]` 因多顶层包失败；实现依赖和锁也未补齐 | F0 修复可编辑安装并确定唯一锁定方式；依赖仍只维护在 pyproject，不创建重复 environment 依赖清单 |
+| R-01 | `RESOLVED` | 要求校验 localization_key↔文案清单，但正式契约未指定清单 | 唯一位置 = `app/errors.py`（ErrorCode 注册表 + LOCALIZATION_KEYS 显式清单），派生规则 `"error." + 错误码.lower()`；`test_localization_guard` 校验派生集合与清单全等（F0-T4/T6，已实测） |
+| R-02 | `RESOLVED` | Conda 环境已创建且当前依赖已安装，但 pyproject 无 build backend/package discovery，`pip install -e .[dev]` 因多顶层包失败；实现依赖和锁也未补齐 | hatchling build backend + wheel packages 四包；pip-tools 锁定为唯一锁定方式，`requirements-dev.lock`（46 钉版本）干净环境复现通过；依赖仍只维护在 pyproject（F0-T1） |
 | R-03 | `OPEN` | agent v1 已版本化，但 CHANGELOG 明确待 V4/V5A 精修 | 修改须新版本目录 + manifest + CHANGELOG，不原地改 v1 |
 | R-04 | `ACCEPTED` | metrics 是运行端点，但有意不进业务 OpenAPI | F1/R1 直接测试，不强行写入 OpenAPI |
 | R-05 | `ACCEPTED` | PRD 成功率/恢复率不能由单测或 60 个受控 generation units 完整证明；相同书籍/模型也限制独立性 | R1 只对预先固定抽样框中的单元失败率作带条件统计界限；另报重试、18 张描述性人工复核和自动化，不外推全书/生产质量 |
 | R-06 | `ACCEPTED` | deployment.md 描述未来 Cloudflare/HTTPS 真机入口，但当前阶段明确只做本机模拟 | Tunnel、TLS、公网和真机联网属于当前 Goal 之外的后续部署；不得阻塞 F0～R1 DONE，代码只保留可配置监听和反向代理兼容性 |
-| R-07 | `OPEN` | 仓库仅有 Superpowers 历史产物约定，当前会话未安装 `writing-plans`/ `subagent-driven-development` skill | 启动长程 Goal 前安装 Superpowers 插件；未安装时不得假称使用该模式，可先停在 F0 plan 生成前 |
+| R-07 | `RESOLVED` | 仓库仅有 Superpowers 历史产物约定，当前会话未安装 `writing-plans`/ `subagent-driven-development` skill | Superpowers 插件已安装：writing-plans、using-git-worktrees、subagent-driven-development、executing-plans、finishing-a-development-branch 均可用；F0 以 SDD 模式执行（9 commits + 每任务契约/质量审查 + 最终整支审查） |
 | R-08 | `RESOLVED` | `.env` 可被执行进程加载且 2026-08-10 真实直连 smoke 成功；执行 Agent 无视觉能力 | 不再重复凭据 smoke；后续 live 只能在 LOCAL-DONE 后走正式应用链路。PDF 只走已验证文本层/书签，未来无文本层样本按契约失败，不引入 OCR |
 | R-09 | `ACCEPTED` | 正式契约要求记录 model，但不冻结具体模型或 thinking 模式 | 产品配置保持单一可替换入口；R1 为可比性冻结 `deepseek-v4-flash` + thinking disabled，不能反向改写 PRD/Architecture |
 
