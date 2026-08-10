@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（V4 扩展） | 289 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 47；四工具命令全绿（mypy 148 files） |
+| 自动化验证 | `DONE`（V4 扩展） | 289 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43；四工具命令全绿（mypy 148 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -175,7 +175,7 @@
 
 验收：样卡构成；无 Key/章节/牌组、非法比例；COMPACT ≤ BALANCED ≤ EXTENSIVE；自定义要求不继承；同 key 单任务；状态转移和 AC-03。
 
-当前证据（2026-08-11，分支 codex/v4 合并回 main，9 commits 89c0390..656c17b + fix 5842898）：
+当前证据（2026-08-11，分支 codex/v4 合并回 main，9 commits 89c0390..f4e9077）：
 - manifest 加载与 Prompt 组装（infra/llm/prompts.py）：按 agent_evolution/manifest.json 加载（R-03 只读）；稳定前缀（资产）+ 动态后缀（topic/chapter/difficulty/custom/JSON schema）；完整 Prompt 不落日志（红线 4/AC-08）。
 - 样卡（6.3/AC-03）：POST /samples 豁免幂等键；固定 3 张（1 基础+1 理解+1 应用；2 问答+1 判断——fake 按难度定类型）；不入库不统计；GenerationConfig 校验（difficulty_ratio 三值>0 和=1、quantity_tendency 枚举 → 400）。
 - 任务（6.4/4.1）：POST /tasks（幂等 + 校验归属/配置/已保存 Key（无 → 422 API_KEY_NOT_SET）→ RUNNING + stage=GENERATING + selected_chapters/generation_config JSON 快照（**对象数组**——契约 3.4/3.6 名称还原）→ 规划同事务）；GET 轮询；cancel（PENDING/RUNNING/PAUSED → CANCELLED）；resume（DB 条件更新 PAUSED AND resumable=1 → RUNNING，否则 409 TASK_STATE_CONFLICT）。
