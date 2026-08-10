@@ -24,5 +24,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = "sqlite:///./shanka.db"
     storage_path: Path = Path("./storage")
+    # 限流阈值（structure-contract 1.6；可运维调整，客户端不得硬编码）
+    rate_limit_write_per_minute: int = 60
+    rate_limit_ip_per_second: int = 5
+    rate_limit_api_key_per_hour: int = 10
+    rate_limit_samples_per_hour: int = 20
+    rate_limit_pdf_per_hour: int = 10
     # 敏感项：禁止打印、复制、写入日志/响应/任务明细；`repr=False` 防意外入日志
     deepseek_api_key: str | None = Field(default=None, repr=False)

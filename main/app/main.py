@@ -10,6 +10,7 @@ from app.config import Settings
 from app.middleware.device_id import DeviceIDMiddleware
 from app.middleware.error_handler import register_exception_handlers
 from app.middleware.logging import LoggingMiddleware
+from app.middleware.rate_limit import RateLimitMiddleware
 from app.middleware.request_id import RequestIDMiddleware
 from infra.db.session import create_db_engine, create_session_factory
 from infra.logging import setup_logging
@@ -36,6 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 之后插入 DeviceID，Task 9 在 DeviceID 与 RequestID 之间插入 RateLimit，Task 10 追加 Metrics）。
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(DeviceIDMiddleware)
+    app.add_middleware(RateLimitMiddleware, settings=settings)  # 在 DeviceID 与 RequestID 之间
     app.add_middleware(RequestIDMiddleware)
     app.include_router(probes.router)
     app.state.settings = settings
