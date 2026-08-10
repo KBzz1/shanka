@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from app.api import probes
 from app.config import Settings
+from app.middleware.device_id import DeviceIDMiddleware
 from app.middleware.error_handler import register_exception_handlers
 from app.middleware.logging import LoggingMiddleware
 from app.middleware.request_id import RequestIDMiddleware
@@ -28,11 +29,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
     register_exception_handlers(app)
-    # 中间件运行序（外层→内层）：RequestID → Logging → 路由。
+    # 中间件运行序（外层→内层）：RequestID → DeviceID → Logging → 路由。
     # Starlette add_middleware 为 insert(0) 语义（后加者在外层），故按目标运行序
-    # 倒序添加；最终约定（外层→内层）：Metrics → RequestID → DeviceID →
-    # RateLimit → Logging → 路由（Task 6/9/10 按目标序倒序追加）。
+    # 倒序添加；最终约定（外层→内层）：Metrics → RequestID → RateLimit → DeviceID →
+    # Logging → 路由（RateLimit 键用原始头，运行于 DeviceID 外层；Task 6 在 Logging
+    # 之后插入 DeviceID，Task 9 在 DeviceID 与 RequestID 之间插入 RateLimit，Task 10 追加 Metrics）。
     app.add_middleware(LoggingMiddleware)
+    app.add_middleware(DeviceIDMiddleware)
     app.add_middleware(RequestIDMiddleware)
     app.include_router(probes.router)
     app.state.settings = settings

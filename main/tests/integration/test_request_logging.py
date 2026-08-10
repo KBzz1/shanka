@@ -79,8 +79,10 @@ def test_request_logging_error_path_logs_internal_error(
     app.add_api_route("/boom", _boom, methods=["GET"])
     # raise_server_exceptions=False：Starlette 对未处理异常先发 500 再重抛
     # （ServerErrorMiddleware 语义），测试关注 500 与 ERROR 日志而非重抛。
+    # 非豁免路径需携带合法 X-Device-ID（Task 6 设备鉴权中间件；devices 表未建
+    # 表时注册静默失败不阻断，恰好覆盖注册降级路径）。
     with TestClient(app, raise_server_exceptions=False) as client:
-        resp = client.get("/boom")
+        resp = client.get("/boom", headers={"X-Device-ID": "123e4567-e89b-12d3-a456-426614174000"})
     assert resp.status_code == 500
     assert len(captured_logs) >= 1
     entry = captured_logs[0]
