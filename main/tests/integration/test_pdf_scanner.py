@@ -8,6 +8,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -136,6 +138,103 @@ def test_scanner_scan_once_resumes_after_restart(
     assert row1 is not None and row2 is not None
     assert row1.status == "PARSED"
     assert row2.status == "PARSED"
+
+
+def _write_text_page(path: Path, text: str = "hello world") -> None:
+    """构造 1 页 PDF：content stream 手写文本 + Type1 Helvetica 资源，无 outline。
+
+    构造法与 T1 解析器测试同款（pypdf 无 create_text API；add_blank_page 不产生
+    文本层，需手写 content stream）——"有文本层无 outline"样本来源。
+    """
+    w = PdfWriter()
+    page = w.add_blank_page(width=200, height=200)
+    content = DecodedStreamObject()
+    content.set_data(f"BT /F1 12 Tf 72 160 Td ({text}) Tj ET".encode("ascii"))
+    page[NameObject("/Contents")] = w._add_object(content)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = w._add_object(font)
+    resources = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+    )
+    page[NameObject("/Resources")] = w._add_object(resources)
+    with path.open("wb") as f:
+        w.write(f)
+
+
+def test_scanner_process_pending_no_toc_fails(
+    tmp_path: Path, session_factory: sessionmaker[Session], storage: LocalStorage
+) -> None:
+    """有文本层但无目录（TOC_MISSING 分支）→ FAILED + PDF_TOC_MISSING。
+
+    T3 审查补覆盖：T1 解析器测试只到 parse_pdf 抛错；此处走完整扫描路径验证
+    FAILED 终态与 error_code 落库（流程停止）。
+    """
+    device = _uuid()
+    pdf_path = tmp_path / "notoc.pdf"
+    _write_text_page(pdf_path)
+    with session_factory() as session:
+        storage_key = storage.save(pdf_path.read_bytes())
+        file_id = _seed_pending(session, device_id=device, storage_key=storage_key)
+        session.commit()
+    with session_factory() as session:
+        n = process_pending(session, storage=storage)
+        session.commit()
+        row = session.get(PdfFile, file_id)
+    assert n == 1
+    assert row is not None
+    assert row.status == "FAILED"
+    assert row.error_code == "PDF_TOC_MISSING"
+
+
+def test_scanner_validate_upload_page_count_boundary() -> None:
+    """页数维度边界（T3 审查补覆盖）：=500 通过；501 → PDF_UPLOAD_INVALID；None 跳过。"""
+    settings = Settings()
+    validate_upload(
+        filename="a.pdf",
+        content_type="application/pdf",
+        magic=b"%PDF-1.4",
+        size_bytes=100,
+        page_count_hint=500,
+        settings=settings,
+    )
+    with pytest.raises(AppError) as excinfo:
+        validate_upload(
+            filename="a.pdf",
+            content_type="application/pdf",
+            magic=b"%PDF-1.4",
+            size_bytes=100,
+            page_count_hint=501,
+            settings=settings,
+        )
+    assert excinfo.value.code is ErrorCode.PDF_UPLOAD_INVALID
+    # None → 跳过页数校验（hint 不可得时由扫描器兜底）
+    validate_upload(
+        filename="a.pdf",
+        content_type="application/pdf",
+        magic=b"%PDF-1.4",
+        size_bytes=100,
+        page_count_hint=None,
+        settings=settings,
+    )
+
+
+def test_scanner_validate_upload_size_boundary_exact_max() -> None:
+    """大小边界（T3 审查补覆盖）：==50MB 通过（>50MB 已由 triple_check 覆盖）。"""
+    settings = Settings()
+    validate_upload(
+        filename="a.pdf",
+        content_type="application/pdf",
+        magic=b"%PDF-1.4",
+        size_bytes=settings.pdf_max_size_bytes,
+        page_count_hint=None,
+        settings=settings,
+    )
 
 
 def test_scanner_validate_upload_triple_check(tmp_path: Path) -> None:
