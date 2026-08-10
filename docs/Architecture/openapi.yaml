@@ -715,6 +715,49 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /healthz:
+    get:
+      summary: 存活探针
+      tags: [observability]
+      security: []
+      responses:
+        "200":
+          description: 进程存活
+  /readyz:
+    get:
+      summary: 就绪探针
+      tags: [observability]
+      security: []
+      responses:
+        "200":
+          description: DB 连接与存储可写
+        "503":
+          description: 依赖不可用
+  /v1/observability/quality-summary:
+    get:
+      summary: 跨任务质量聚合观测（契约 6.10）
+      tags: [observability]
+      parameters:
+        - name: group_by
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [model, pdf, difficulty]
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 30
+      responses:
+        "200":
+          description: 质量聚合结果（Rubric 均分 / 覆盖重复率 / 完成率 / 成本汇总）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QualitySummary"
+
 components:
   securitySchemes:
     DeviceIdAuth:
@@ -1404,6 +1447,57 @@ components:
         has_data:
           type: boolean
           description: false 时客户端展示空态
+    QualitySummary:
+      type: object
+      properties:
+        group_by:
+          type: string
+        groups:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              card_count:
+                type: integer
+              evidence_avg:
+                type: number
+                format: float
+              correctness_avg:
+                type: number
+                format: float
+              difficulty_avg:
+                type: number
+                format: float
+              learning_value_avg:
+                type: number
+                format: float
+              coverage_avg:
+                type: number
+                format: float
+              duplicate_avg:
+                type: number
+                format: float
+              task_completion_rate:
+                type: number
+                format: float
+              cost_estimate:
+                type: object
+                properties:
+                  cache_hit:
+                    type: number
+                    description: 估算金额(元)
+                  cache_miss:
+                    type: number
+                  output:
+                    type: number
+                  total:
+                    type: number
+        days:
+          type: integer
+        generated_at:
+          type: string
 
   responses:
     BadRequest:
