@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from app.api import probes
 from app.config import Settings
 from app.middleware.error_handler import register_exception_handlers
-from infra.db.session import create_db_engine
+from infra.db.session import create_db_engine, create_session_factory
 from infra.storage.local import LocalStorage
 
 
@@ -27,6 +27,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(probes.router)
     app.state.settings = settings
     app.state.engine = engine
+    app.state.session_factory = create_session_factory(engine)
     app.state.storage = storage
     return app
 

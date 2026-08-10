@@ -4,6 +4,8 @@
 #
 #    pip-compile --extra=dev --output-file=requirements-dev.lock pyproject.toml
 #
+alembic==1.19.1
+    # via shanka-backend (pyproject.toml)
 annotated-doc==0.0.5
     # via fastapi
 annotated-types==0.8.0
@@ -53,6 +55,10 @@ iniconfig==2.3.0
     # via pytest
 librt==0.15.0
     # via mypy
+mako==1.4.1
+    # via alembic
+markupsafe==3.0.3
+    # via mako
 mypy==2.3.0
     # via shanka-backend (pyproject.toml)
 mypy-extensions==1.1.0
@@ -68,6 +74,8 @@ platformdirs==4.11.1
 pluggy==1.6.0
     # via pytest
 pre-commit==4.6.1
+    # via shanka-backend (pyproject.toml)
+prometheus-client==0.26.0
     # via shanka-backend (pyproject.toml)
 pydantic==2.13.4
     # via
@@ -96,13 +104,16 @@ pyyaml==6.0.3
 ruff==0.16.2
     # via shanka-backend (pyproject.toml)
 sqlalchemy==2.0.51
-    # via shanka-backend (pyproject.toml)
+    # via
+    #   alembic
+    #   shanka-backend (pyproject.toml)
 starlette==1.6.0
     # via fastapi
 types-pyyaml==6.0.12.20260724
     # via shanka-backend (pyproject.toml)
 typing-extensions==4.16.0
     # via
+    #   alembic
     #   anyio
     #   fastapi
     #   mypy
