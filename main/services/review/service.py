@@ -5,11 +5,13 @@
 本模块负责 client_event_id 兜底（UNIQUE(device_id, client_event_id) 冲突 → 比对 → 重放/409；
 并发由 BEGIN IMMEDIATE 串行化，先查模式在单写者下足够）。
 
-py-fsrs 4.1.2 事实（R-13 落地，Task 1 校准）：
+py-fsrs 4.1.2 事实（R-13 落地，Task 1 校准；final review I-1：fsrs 类型构造/状态映射
+经 services.scheduling.scheduler 适配器导出——build_fsrs_card/state_upper，本模块不直接
+import fsrs，构造口径见 scheduler.py docstring）：
 - Card() = Learning step 0 新卡；无 State.New——ORM "NEW" 初始行（V1）等价 Learning step 0 卡；
 - Card 无 reps/lapses 属性——本模块自计数（每次评级 reps +1；AGAIN 时 lapses +1）；
 - state 落库用 State 枚举 .name 大写（LEARNING/REVIEW/RELEARNING，契约 3.10 枚举值域），
-  构造时由大写反映射回 fsrs State（裁决 1）；
+  构造时由大写反映射回 fsrs State（裁决 1，经 state_upper）；
 - 契约 3.10 无 step 字段——Learning 卡重建时由 due - last_review 间隔 + last_rating 推导（裁决 2 + I-1）。
 
 now 入参格式契约（M-3）：必须为 `infra.db.session.format_utc` 输出
@@ -18,9 +20,8 @@ now 入参格式契约（M-3）：必须为 `infra.db.session.format_utc` 输出
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fsrs import Card as FsrsCard
-from fsrs import Rating, State
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,7 +30,16 @@ from infra.db.models import Card, ReviewEvent, ReviewState
 from infra.db.session import format_utc
 from services.cards.service import card_view
 from services.decks.service import _owned
-from services.scheduling.scheduler import create_scheduler, rating_from_str, review_card
+from services.scheduling.scheduler import (
+    Card as FsrsCard,  # fsrs Card 类型经 scheduler 适配器导出（I-1：单一适配边界）
+)
+from services.scheduling.scheduler import (
+    build_fsrs_card,
+    create_scheduler,
+    rating_from_str,
+    review_card,
+    state_upper,
+)
 
 # 初始 NEW 排程（V1 已插行；防御性兜底值）
 _INITIAL_STATE = "NEW"
@@ -46,6 +56,18 @@ def _uuid4() -> str:
 def _parse_utc(value: str) -> datetime:
     """format_utc 输出（database-design §0 恒 3 位毫秒 Z）→ aware UTC datetime。"""
     return datetime.strptime(value, _DUE_FORMAT).replace(tzinfo=UTC)
+
+
+def _validate_timezone(device_timezone: str) -> None:
+    """M-3：device_timezone 须为 IANA 时区（契约第 7 章 VALIDATION_ERROR 含此场景）。
+
+    ZoneInfo 构造失败（未知区名 → ZoneInfoNotFoundError；非法名 → ValueError）→
+    400 VALIDATION_ERROR，在 _submit_review_inner 入口校验。
+    """
+    try:
+        ZoneInfo(device_timezone)
+    except (ValueError, ZoneInfoNotFoundError):
+        raise AppError(ErrorCode.VALIDATION_ERROR, f"非 IANA 时区: {device_timezone}") from None
 
 
 def _get_review_state(session: Session, *, card_id: str, now: str) -> ReviewState:
@@ -87,31 +109,23 @@ def _derive_learning_step(rs: ReviewState) -> int:
 
 
 def _to_fsrs_card(rs: ReviewState) -> FsrsCard:
-    """ReviewState 快照 → py-fsrs Card（构造口径见模块 docstring）。
+    """ReviewState 快照 → py-fsrs Card（构造口径见模块 docstring + scheduler.build_fsrs_card）。
 
-    NEW：stability/difficulty 传 None 走 fsrs 首评初始化（裁决 3）——快照占位值 0.0/1.0 不可直接输入
-    （stability=0.0 + last_review=None → retrievability=0 → _next_stability log(0) ValueError）。
-    LEARNING：由 _derive_learning_step 重建 step（裁决 2）。
-    RELEARNING：relearning_steps 单步（10m）step 恒为 0，须显式传——fsrs 仅对 Learning 默认
-    step=0，Relearning step=None 会在 review_card 断言失败。
+    fsrs 类型构造全部经 scheduler 适配器（I-1）；本函数只做业务侧取值：
+    learning_step 仅对 LEARNING 卡有推导语义（_derive_learning_step）；NEW 传 0
+    （与 fsrs Learning 默认 step=0 等价）；REVIEW/RELEARNING 的 step 由 build_fsrs_card
+    固定（None/0）。
     """
-    if rs.state == "NEW":
-        return FsrsCard(state=State.Learning, due=_parse_utc(rs.due), last_review=None)
-    kwargs: dict[str, object] = {
-        "stability": rs.stability,
-        "difficulty": rs.difficulty,
-        "due": _parse_utc(rs.due),
-        "last_review": _parse_utc(rs.last_review) if rs.last_review else None,
-    }
-    if rs.state == "LEARNING":
-        kwargs["state"] = State.Learning
-        kwargs["step"] = _derive_learning_step(rs)
-    elif rs.state == "REVIEW":
-        kwargs["state"] = State.Review
-    else:  # RELEARNING
-        kwargs["state"] = State.Relearning
-        kwargs["step"] = 0
-    return FsrsCard(**kwargs)
+    return build_fsrs_card(
+        stability=rs.stability,
+        difficulty=rs.difficulty,
+        due=rs.due,
+        last_review=rs.last_review,
+        reps=rs.reps,
+        lapses=rs.lapses,
+        state=rs.state,
+        learning_step=_derive_learning_step(rs) if rs.state == "LEARNING" else 0,
+    )
 
 
 def review_state_view(rs: ReviewState) -> dict[str, object]:
@@ -155,6 +169,7 @@ def _submit_review_inner(
     now: str,
 ) -> tuple[bool, dict[str, object]]:
     """执行评级（幂等原语 fn 内）：返回 (是否因 client_event_id 兜底重放, 响应视图)。"""
+    _validate_timezone(device_timezone)  # M-3：非法 IANA → 400 VALIDATION_ERROR
     card = session.get(Card, card_id)
     if card is None or card.device_id != device_id:
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
@@ -179,14 +194,14 @@ def _submit_review_inner(
     )
 
     # 更新 ReviewState 全量快照（database-design 2.10）；reps/lapses 自计数（4.x Card 无此属性）
-    # state 落库大写（契约 3.10 枚举 NEW/LEARNING/REVIEW/RELEARNING，裁决 1）
-    rs.state = new_card.state.name.upper()
+    # state 落库大写（契约 3.10 枚举 NEW/LEARNING/REVIEW/RELEARNING，裁决 1，经 state_upper）
+    rs.state = state_upper(new_card.state.name)
     rs.stability = float(new_card.stability)
     rs.difficulty = float(new_card.difficulty)
     rs.due = format_utc(new_card.due)
     rs.last_review = now
     rs.reps += 1
-    if rating == Rating.Again:
+    if rating_value == "AGAIN":  # Rating 枚举比较经字符串域值（rating_from_str 已校验；I-1）
         rs.lapses += 1
     rs.last_rating = rating_value
     rs.updated_at = now

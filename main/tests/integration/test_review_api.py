@@ -155,6 +155,24 @@ def test_review_api_invalid_rating_400(client: TestClient) -> None:
     assert resp.json()["error"]["code"] == "REVIEW_EVENT_INVALID"
 
 
+def test_review_api_invalid_timezone_400(client: TestClient) -> None:
+    """M-3（final review）：device_timezone 非 IANA 时区 → 400 VALIDATION_ERROR（契约第 7 章）。"""
+    device = _device()
+    _, card_id = _make_deck_card(client, device)
+    resp = client.post(
+        "/review-events",
+        json={
+            "card_id": card_id,
+            "rating": "GOOD",
+            "client_event_id": str(uuid.uuid4()),
+            "device_timezone": "Not/AZone",
+        },
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
 def test_review_api_cross_device_404(client: TestClient) -> None:
     """跨设备提交评级：卡归属校验 → CARD_NOT_FOUND（用独立 other device 头）。"""
     device = _device()

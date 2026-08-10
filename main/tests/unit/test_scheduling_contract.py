@@ -10,12 +10,19 @@ task-1-report）：
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fsrs import Card, Rating
 
 from app.errors import AppError, ErrorCode
-from services.scheduling.scheduler import create_scheduler, rating_from_str, review_card
+from services.scheduling.scheduler import (
+    build_fsrs_card,
+    create_scheduler,
+    rating_from_str,
+    review_card,
+    state_upper,
+)
 
 
 def test_scheduling_new_card_good_learning_plus_10m() -> None:
@@ -91,3 +98,52 @@ def test_scheduling_rating_invalid_raises() -> None:
     with pytest.raises(AppError) as excinfo:
         rating_from_str("MAYBE")
     assert excinfo.value.code is ErrorCode.REVIEW_EVENT_INVALID
+
+
+def _snapshot(**overrides: Any) -> dict[str, Any]:
+    """ReviewState 快照风格入参（build_fsrs_card 关键字参数）。"""
+    kwargs: dict[str, Any] = {
+        "stability": 5.0,
+        "difficulty": 1.0,
+        "due": "2026-08-11T00:00:00.000Z",
+        "last_review": "2026-08-11T00:00:00.000Z",
+        "reps": 3,
+        "lapses": 0,
+        "state": "REVIEW",
+        "learning_step": 0,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_scheduling_build_fsrs_card_new_first_review_init() -> None:
+    """I-1：NEW → Learning；快照占位 stability 0.0/difficulty 1.0 不传入（fsrs 首评初始化，裁决 3）。"""
+    card = build_fsrs_card(**_snapshot(stability=0.0, difficulty=1.0, state="NEW"))
+    assert card.state.name == "Learning"
+    assert card.stability is None
+    assert card.difficulty is None
+    assert card.last_review is None
+    assert card.step == 0
+
+
+def test_scheduling_build_fsrs_card_state_mapping_and_steps() -> None:
+    """I-1：大写状态映射 + step 语义——LEARNING 用 learning_step；REVIEW step=None；RELEARNING 恒 0。"""
+    learning = build_fsrs_card(**_snapshot(state="LEARNING", learning_step=1))
+    assert learning.state.name == "Learning"
+    assert learning.step == 1
+    assert learning.stability == 5.0  # 非 NEW：快照值直传
+    review = build_fsrs_card(**_snapshot(state="REVIEW"))
+    assert review.state.name == "Review"
+    assert review.step is None
+    relearning = build_fsrs_card(**_snapshot(state="RELEARNING"))
+    assert relearning.state.name == "Relearning"
+    assert relearning.step == 0  # relearning_steps 单步；fsrs 仅对 Learning 默认 step=0
+
+
+def test_scheduling_state_upper_mapping() -> None:
+    """I-1：fsrs State 名 → 契约 3.10 大写枚举（落库口径，裁决 1）。"""
+    assert state_upper("Learning") == "LEARNING"
+    assert state_upper("Review") == "REVIEW"
+    assert state_upper("Relearning") == "RELEARNING"
+    with pytest.raises(ValueError):
+        state_upper("New")  # 4.x 无 State.New——未知名显式报错
