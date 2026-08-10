@@ -1,6 +1,8 @@
-"""任务 schema（openapi Task/TaskCreateRequest/Chapter；structure-contract 3.4/6.4）。
+"""任务 schema（openapi Task/TaskCreateRequest/Chapter/KnowledgePoint；structure-contract 3.4/3.6/6.4）。
 
 Task 视图：selected_chapters 为 Chapter 对象数组快照（契约 3.4/3.6，章节删除后名称可还原）。
+KnowledgePoint 为内部资源（契约 3.6；本期无独立接口，经任务详情/批次观测间接呈现）——
+视图模型作为守卫锚点（红线 1：app/schemas ↔ openapi 三处一致）。
 """
 
 from pydantic import BaseModel, Field
@@ -24,6 +26,21 @@ class TaskCreateRequest(BaseModel):
 
 class TaskCursor(BaseModel):
     completed_batch_count: int
+
+
+class KnowledgePoint(BaseModel):
+    """知识点视图（openapi KnowledgePoint；structure-contract 3.6，required 七字段）。
+
+    内部资源、无独立端点：视图模型仅作为守卫锚点，V5 经任务详情/批次观测呈现时复用。
+    """
+
+    knowledge_point_id: str
+    task_id: str
+    chapter_id: str
+    source_chunk_id: str
+    topic: str
+    priority: int
+    status: str  # PENDING/PROCESSED/SKIPPED
 
 
 class Task(BaseModel):
