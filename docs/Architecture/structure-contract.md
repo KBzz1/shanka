@@ -529,7 +529,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | `generation_tasks_total` | counter | result(COMPLETED/FAILED/CANCELLED) |
 | `generation_tasks_duration_seconds` | histogram | - |
 | `batch_retry_total` | counter | - |
-| `rate_limit_hit_total` | counter | scope(device/ip/api_key/samples/pdf) |
+| `rate_limit_hit_total` | counter | scope(write/ip/api_key/samples/pdf)  # 1.6 写操作维度命名，与实现一致（审核修正：8.3 原 device 与 1.6 写操作维度矛盾） |
 | `llm_requests_total` | counter | model(DeepSeek 模型族)/http_status |
 | `llm_request_duration_seconds` | histogram | model |
 | `llm_tokens_total` | counter | kind(cache_hit/cache_miss/output) |
