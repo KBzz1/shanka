@@ -1146,6 +1146,25 @@ components:
           type: [integer, 'null']
         output_tokens:
           type: [integer, 'null']
+        difficulty_deviation:
+          type: [number, 'null']
+        request_id:
+          type: [string, 'null']
+        model:
+          type: [string, 'null']
+        prompt_version:
+          type: [string, 'null']
+        schema_version:
+          type: [string, 'null']
+        rubric_version:
+          type: [string, 'null']
+        duration_ms:
+          type: [integer, 'null']
+        http_status:
+          type: [integer, 'null']
+        cost_estimate:
+          type: [number, 'null']
+          description: 估算金额(元, 按生效日期价格常量换算, 仅观测不落库; 契约 8.4)
         created_at:
           type: string
           format: date-time
