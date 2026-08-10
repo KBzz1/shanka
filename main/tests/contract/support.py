@@ -112,8 +112,10 @@ def parse_error_codes_table(md_text: str) -> dict[str, int]:
     """解析 structure-contract 第 7 章错误码表 → {CODE: http_status}。"""
     section = md_text.split("## 7. 错误码表", 1)[1].split("## 8.", 1)[0]
     result: dict[str, int] = {}
+    # 数据行带分组前缀列（`| 通用 | `CODE` | 400 |` 或空分组 `| | `CODE` | 400 |`）；
+    # 表头/分隔/注行无错误码单元（反引号），不会误匹配
     for line in section.splitlines():
-        match = re.match(r"^\|\s*`([A-Z][A-Z0-9_]*)`\s*\|\s*(\d{3})\s*\|", line)
+        match = re.match(r"^\|\s*[^|]*\|\s*`([A-Z][A-Z0-9_]*)`\s*\|\s*(\d{3})\s*\|", line)
         if match:
             result[match.group(1)] = int(match.group(2))
     return result

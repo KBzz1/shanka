@@ -3,7 +3,13 @@
 from pydantic import BaseModel
 
 from app.schemas.common import ErrorResponse
-from tests.contract.support import check_schema_consistency, load_openapi, openapi_schema
+from tests.contract.support import (
+    STRUCTURE_CONTRACT_PATH,
+    check_schema_consistency,
+    load_openapi,
+    openapi_schema,
+    parse_error_codes_table,
+)
 
 
 def test_schema_openapi_error_consistent() -> None:
@@ -36,3 +42,11 @@ def test_schema_guard_detects_missing_required_field() -> None:
     nested = openapi_schema("Error")["properties"]["error"]
     violations = check_schema_consistency(MissingRequired, nested, load_openapi())
     assert any("localization_key" in v for v in violations)
+
+
+def test_error_codes_table_parses_with_group_prefix() -> None:
+    """防假阴性回归：第 7 章表格带分组前缀列，错误码仍须全部解析出来（守卫 3 前置）。"""
+    codes = parse_error_codes_table(STRUCTURE_CONTRACT_PATH.read_text(encoding="utf-8"))
+    assert codes, "错误码表解析结果为空（分组前缀列导致假阴性）"
+    assert codes["DECK_NOT_FOUND"] == 404
+    assert codes["REVIEW_EVENT_CONFLICT"] == 409
