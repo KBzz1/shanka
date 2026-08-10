@@ -6,7 +6,8 @@
   generation_item_id 防重）→ SUCCEEDED（≥1 合法卡）/ FAILED（0 合法卡，retry+1）/ 重试达上限
   （retry_count >= limit，共 3 次尝试）→ SKIPPED → 游标 completed_batch_count 与批次状态/计数
   同事务原子推进 → 返回处理批次数（0 = 无）。
-- Schema 是唯一入库门槛；Rubric 只观测（Task 3 接入）。
+- Schema 是唯一入库门槛；Rubric 只观测（Task 3：SUCCEEDED 时 score_card 落
+  Card 评分字段 + batch_quality 落 Batch 质量列，不影响入库决策）。
 - Key 解密在 executor（仅 infra/llm 路径）：本模块接收已构造带 Key 的 DeepSeekClient。
 """
 
@@ -25,6 +26,7 @@ from app.errors import AppError, ErrorCode
 from infra.db.models import Batch, Card, KnowledgePoint, ReviewState, Task
 from infra.llm.deepseek import DeepSeekClient
 from infra.llm.prompts import asset_versions, load_asset
+from services.generation.rubric import batch_quality, score_card
 from services.generation.schema_validator import load_card_schema, validate_card
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,9 @@ _DEFAULT_BATCH_SIZE = 3
 _DEFAULT_RETRY_LIMIT = 2
 
 _TERMINAL_STATUSES = ("SUCCEEDED", "SKIPPED")
+
+# 难度轮换（V4 语义 carry-forward）：Rubric 观测按 kp priority 批次内轮换三档
+_DIFFICULTY_ROTATION = ("BASIC", "UNDERSTANDING", "APPLICATION")
 
 
 def plan_batches(
@@ -112,7 +117,7 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     topic_list = "\n".join(f"- {kp.topic}" for kp in kps)
     prompt = f"{prompt_asset}\n本次批次知识点：\n{topic_list}\n请按 schema 输出：\n{card_schema}"
     result = client.chat(prompt, api_key="")  # 明文 Key 在 client 构造时注入（executor 解密）
-    inserted = _insert_valid_cards(
+    inserted, duplicated = _insert_valid_cards(
         session,
         task=task,
         deck_id=deck_id,
@@ -120,7 +125,7 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         batch=batch,
         cards=_parse_cards(result["content"]),
     )
-    # usage/版本观测（structure-contract 3.7；rubric_version Task 3 接入）
+    # usage/版本观测（structure-contract 3.7；rubric_version 随 rubric 落库）
     usage = result["usage"]
     versions = asset_versions()
     batch.cache_hit_tokens = usage.get("prompt_cache_hit_tokens")
@@ -136,6 +141,8 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     if inserted:
         batch.status = "SUCCEEDED"
         batch.generated_item_ids = json.dumps([card.generation_item_id for card in inserted])
+        batch.rubric_version = versions["rubric_version"]
+        _record_rubric(batch, cards=inserted, kps=kps, duplicated=duplicated)
         for kp in kps:
             kp.status = "PROCESSED"
     else:
@@ -204,10 +211,14 @@ def _insert_valid_cards(
     now: str,
     batch: Batch,
     cards: list[dict[str, Any]],
-) -> list[Card]:
-    """逐卡 Schema 校验 → 合法卡入库（V1 模式 + generation_item_id 防重）。返回插入的卡列表。"""
+) -> tuple[list[Card], int]:
+    """逐卡 Schema 校验 → 合法卡入库（V1 模式 + generation_item_id 防重）。
+
+    返回 (插入的卡列表, 批次内重复跳过数)——重复计数供 Rubric 重复率观测（Task 3）。
+    """
     schema = load_card_schema()
     inserted: list[Card] = []
+    duplicated = 0
     rejected = 0
     for raw in cards:
         internal = _to_internal_card(raw)
@@ -217,14 +228,57 @@ def _insert_valid_cards(
         card = _insert_card(
             session, task=task, deck_id=deck_id, now=now, batch=batch, internal=internal
         )
-        if card is not None:
+        if card is None:
+            duplicated += 1  # 同 seed 已入库（批次内重复内容）→ 重复率观测计数
+        else:
             inserted.append(card)
     if rejected:
         logger.info(
             "batch cards rejected by schema",
             extra={"task_id": task.task_id, "batch_index": batch.batch_index, "rejected": rejected},
         )
-    return inserted
+    return inserted, duplicated
+
+
+def _record_rubric(
+    batch: Batch, *, cards: Sequence[Card], kps: Sequence[KnowledgePoint], duplicated: int
+) -> None:
+    """批次 SUCCEEDED 时 Rubric 观测落库（Task 3，仅观测不影响入库——红线）。
+
+    逐卡 score_card → Card 5 个评分字段；batch_quality → Batch 质量列（分布 JSON→TEXT）。
+    target_difficulty 按批次内 kp priority 轮换（V4 语义）、chapter_id 取 kp.chapter_id
+    （carry-forward：批次内卡片按生成顺序轮换映射到本批知识点）。
+    """
+    quality_cards: list[dict[str, Any]] = []
+    for i, card in enumerate(cards):
+        kp = kps[i % len(kps)]
+        target_difficulty = _DIFFICULTY_ROTATION[(kp.priority - 1) % len(_DIFFICULTY_ROTATION)]
+        q: dict[str, Any] = {
+            "type": card.card_type,
+            "question": card.question,
+            "answer": card.answer,
+            "statement": card.statement,
+            "explanation": card.explanation,
+            "target_difficulty": target_difficulty,
+            "chapter_id": kp.chapter_id,
+        }
+        scores = score_card(q)
+        card.target_difficulty = target_difficulty
+        card.evidence_score = scores["evidence_score"]
+        card.correctness_score = scores["correctness_score"]
+        card.difficulty_score = scores["difficulty_score"]
+        card.learning_value_score = scores["learning_value_score"]
+        card.rubric_total_score = scores["rubric_total_score"]
+        quality_cards.append(q)
+    quality = batch_quality(quality_cards, total_kps=len(kps), duplicated=duplicated)
+    batch.coverage_rate = quality["coverage_rate"]
+    batch.duplicate_rate = quality["duplicate_rate"]
+    batch.difficulty_distribution = json.dumps(
+        quality["difficulty_distribution"], ensure_ascii=False
+    )
+    batch.chapter_distribution = json.dumps(quality["chapter_distribution"], ensure_ascii=False)
+    batch.card_type_distribution = json.dumps(quality["card_type_distribution"], ensure_ascii=False)
+    batch.difficulty_deviation = quality["difficulty_deviation"]
 
 
 def _insert_card(
@@ -259,7 +313,7 @@ def _insert_card(
         answer_boolean=_bool_to_int(internal.get("answer_boolean")),
         explanation=internal.get("explanation"),
         generation_item_id=gen_item,
-        target_difficulty=None,  # 难度分布/偏差 Task 3 rubric 填
+        target_difficulty=None,  # Rubric 观测时填（_record_rubric，kp 难度轮换）
         version="v1",
         created_at=now,
         updated_at=now,
