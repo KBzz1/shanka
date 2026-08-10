@@ -6,9 +6,10 @@
 
 import json
 import re
+import types
 from enum import Enum
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Union, cast, get_origin
 
 import yaml
 from pydantic import BaseModel
@@ -56,6 +57,8 @@ def check_schema_consistency(
 
     F0 覆盖：object 属性名与必填、string（含 enum）、integer/number/boolean/array 类型映射、
     $ref 解析；anyOf/oneOf/allOf 契约暂无，纵向包按需扩展。
+    V1（守卫 1 扩展）：openapi 3.1 type 数组（[X, 'null'] 联合）、array items 递归（嵌套
+    $ref 与 list[annotation]）、注解 X | None 与 null 联合对应。
     """
     violations: list[str] = []
     schema = resolve_ref(schema, openapi)
@@ -76,6 +79,8 @@ def check_schema_consistency(
         if name not in model_fields:
             continue
         annotation: Any = model_fields[name].annotation
+        # openapi 3.1 null 联合（type: [X, 'null']）：注解 X | None 剥离 None 后比较
+        annotation = _strip_optional(annotation)
         resolved = resolve_ref(prop, openapi)
         prop_type: Any = resolved.get("type")
         if prop_type == "object":
@@ -83,21 +88,54 @@ def check_schema_consistency(
                 check_schema_consistency(annotation, resolved, openapi, f"{path}.{name}")
             )
             continue
-        expected = _TYPE_MAP.get(prop_type)
-        if expected is None:
-            violations.append(f"{path}.{name}: 未支持的 openapi type {prop_type!r}")
-            continue
-        if not _annotation_matches(annotation, expected):
-            violations.append(f"{path}.{name}: openapi {prop_type!r} 与注解 {annotation!r} 不匹配")
-        if prop_type == "string" and "enum" in resolved and _is_enum(annotation):
-            member_values = {member.value for member in annotation}
-            if member_values != set(resolved["enum"]):
-                violations.append(f"{path}.{name}: openapi enum 与模型枚举不一致")
+        # openapi 3.1 type 数组（如 ["string", "null"]）：取首个非 null 类型
+        if isinstance(prop_type, list):
+            prop_type = next((t for t in prop_type if t != "null"), None)
+        if prop_type == "array":
+            # items 类型映射：list[annotation] 或 list[Model]（嵌套 $ref 在 items 中）
+            items = resolved.get("items", {})
+            item_schema = resolve_ref(items, openapi)
+            if item_schema.get("type") == "object":
+                item_origin: Any = getattr(annotation, "__args__", (Any,))[0]
+                violations.extend(
+                    check_schema_consistency(item_origin, item_schema, openapi, f"{path}.{name}[]")
+                )
+            else:
+                item_type = item_schema.get("type")
+                if item_type and item_type != "null":
+                    origin = getattr(annotation, "__origin__", None)
+                    if origin is not list:
+                        violations.append(
+                            f"{path}.{name}: openapi array 与注解 {annotation!r} 不匹配"
+                        )
+        if prop_type in ("string", "integer", "number", "boolean"):
+            expected = _TYPE_MAP[prop_type]
+            if not _annotation_matches(annotation, expected):
+                violations.append(
+                    f"{path}.{name}: openapi {prop_type!r} 与注解 {annotation!r} 不匹配"
+                )
+            if prop_type == "string" and "enum" in resolved and _is_enum(annotation):
+                member_values = {member.value for member in annotation}
+                if member_values != set(resolved["enum"]):
+                    violations.append(f"{path}.{name}: openapi enum 与模型枚举不一致")
     return violations
 
 
 def _is_enum(annotation: Any) -> bool:
     return isinstance(annotation, type) and issubclass(annotation, Enum)
+
+
+def _strip_optional(annotation: Any) -> Any:
+    """`X | None` 联合 → X（对应 openapi 3.1 null 联合）；其余注解原样返回。"""
+    args = getattr(annotation, "__args__", None)
+    if not args:
+        return annotation
+    if get_origin(annotation) not in (types.UnionType, Union):
+        return annotation
+    non_none = [a for a in args if a is not type(None)]
+    if len(non_none) == 1:
+        return non_none[0]
+    return annotation
 
 
 def _annotation_matches(annotation: Any, expected: Any) -> bool:
