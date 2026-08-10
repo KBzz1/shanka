@@ -131,11 +131,22 @@
 
 ### V3A — PDF 生命周期闭环
 
-**`TODO`｜依赖：F1｜可与 V1/V2/V3B 并行｜覆盖：FR-01/02/18、接口 6.1、AC-01/02 及 AC-08 后端存储边界**
+**`DONE`｜依赖：F1｜可与 V1/V2/V3B 并行｜覆盖：FR-01/02/18、接口 6.1、AC-01/02 及 AC-08 后端存储边界**
 
 实现 PDF 三重校验、大小/页数限制、受控存储、文本层/真实目录解析、轮询、章节 PATCH、最近列表、删除保护；不做 OCR 或目录兜底。解析由进程内、DB 驱动的可重启扫描器执行。验收书籍 `res/AI-Agents-in-Depth-zh-CN.pdf` 已有文本层和书签目录，执行 Agent 只需程序化解析文本/书签，不依赖视觉、页面截图或 OCR。
 
 验收：有效/无目录/扫描件/损坏/伪 MIME/超限、路径穿越、隔离；以磁盘 DB 和文件存储启动新 app/worker 验证恢复；章节范围、删除清理及 AC-01/02 的本机后端行为通过。
+
+当前证据（2026-08-11，分支 codex/v3a 合并回 main，8 commits ae5a1a1..069e137 + fix bc396f1）：
+- 三重校验与限制（6.1）：魔数 %PDF + 扩展名 .pdf + MIME application/pdf + ≤50MB + ≤500 页（Settings pdf_max_size_bytes/pdf_max_pages）→ 400 PDF_UPLOAD_INVALID；页数 hint 由 handler 用 PdfReader 读取（损坏文件 hint=None 由扫描器 FAILED 兜底）。
+- 受控存储（1.7/2.3）：storage_key=随机 UUID hex、分目录（[:2]/[2:4]）、32 位 hex 严格校验（路径穿越防护）；删除元数据同步清理存储对象（失败 WARN 不阻断）。
+- pypdf 解析（5.1/5.2/AC-01）：文本层抽样（前 5 页）+ outline 顶层条目为章节（样书 318 页、12 章节：引言/第1-10章/后记，页码 1-based 归一化 + clamp）；不可提取 → PDF_PARSE_FAILED、无目录 → PDF_TOC_MISSING（FAILED 终态 + error_code，不重试不删原始文件）；不 OCR/不猜测/不兜底。
+- 扫描器（4.4 定式）：进程内 DB 驱动（PENDING/PARSING → PARSING → PARSED/FAILED），lifespan daemon 线程（pdf_scan_interval_seconds=1.0，wait-first 宽限期）；重启后 PENDING/PARSING 残留重新解析（chapters 先删后插幂等）。
+- 路由：POST /pdfs（201 PENDING）、GET /pdfs（最近列表 device+created DESC）、GET /pdfs/{file_id}（轮询详情 + 章节）、DELETE（204；非终态任务 409 TASK_IN_PROGRESS + 存储清理 + tasks.file_id SET NULL）、PATCH 章节（**部分更新语义**——openapi 无 required"至少一个字段"；全 None → 400；非 PARSED → 409 TASK_STATE_CONFLICT；范围校验）。
+- 幂等：POST/DELETE/PATCH 走 execute_idempotent（multipart body hash=文件内容；同 key 重试孤儿文件 MVP 接受已登记）。
+- 修复（F1 遗留契约违约）：rate_limit 专门维度前缀匹配（/v1/pdfs 等 → 无前缀路由）——pdf/samples/api-key 专门维度（10/h/20/h/10/h）自 F1 起从未生效，V3A 修复并加 pdf 维度 429 回归测试。
+- 验收实测：四工具全绿（201 passed、mypy 120 files）；干净 venv 安装 + 迁移 OK；真实 uvicorn 冒烟（上传样书 PENDING → 后台扫描轮询 PARSED、12 章节、PATCH 部分更新 200）；边界 67 用例全绿；无密钥泄漏、实现无样书路径引用。
+- 登记：AC-01/02 验收通过（TOC_MISSING 专属证明在集成层）；AC-08 后端存储边界（日志不记 body + 文本样例 501 字符上限不落库）；样书硬断言（12 章节/318 页）校准值——样书变更需同步（services/pdf/AGENTS.md 注明）。
 
 ### V3B — API Key 安全与 DeepSeek 适配边界
 
