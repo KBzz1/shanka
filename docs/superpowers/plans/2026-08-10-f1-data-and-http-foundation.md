@@ -70,7 +70,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -1394,7 +1394,7 @@ git commit -m "feat(auth): X-Device-ID 鉴权中间件（自动注册 + 探针�
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from app.middleware.error_handler import register_exception_handlers
