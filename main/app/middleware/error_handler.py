@@ -47,4 +47,10 @@ def register_exception_handlers(app: FastAPI) -> None:
             exc_info=exc,
         )
         err = AppError(ErrorCode.INTERNAL_ERROR, "服务器内部错误")
-        return JSONResponse(status_code=500, content=err.to_response())
+        response = JSONResponse(status_code=500, content=err.to_response())
+        # final review I-1：未处理异常 500 由最外层 ServerErrorMiddleware 兜底直发
+        # （exception handler 按 FastAPI 装配成为其 handler，绕过全部用户中间件），
+        # RequestIDMiddleware 的 call_next 因异常传播不会返回、响应头写入不执行；
+        # 此处补 X-Request-ID，保证 1.4 契约的 request_id 日志关联对 500 同样成立。
+        response.headers["X-Request-ID"] = getattr(request.state, "request_id", "")
+        return response

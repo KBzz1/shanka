@@ -42,6 +42,34 @@ def test_metrics_tracks_http_requests(tmp_path: Path) -> None:
     assert _metric_value(after, healthz_line) - _metric_value(before, healthz_line) == 2.0
 
 
+def test_metrics_counts_unhandled_exception_500(tmp_path: Path) -> None:
+    """final review I-2：未处理异常 500 由最外层 ServerErrorMiddleware 兜底直发，
+    不经过 MetricsMiddleware 的正常返回路径；dispatch 的异常分支必须显式计数。"""
+    from fastapi import FastAPI
+
+    from app.api import metrics as metrics_api
+    from app.middleware.error_handler import register_exception_handlers
+    from app.middleware.metrics_middleware import MetricsMiddleware
+
+    probe = FastAPI()
+    register_exception_handlers(probe)
+    probe.include_router(metrics_api.router)
+    probe.add_middleware(MetricsMiddleware)
+
+    @probe.get("/boom")
+    def boom() -> None:
+        raise RuntimeError("internal detail")
+
+    boom_line = 'http_requests_total{method="GET",path="/boom",status="500"}'
+    with TestClient(probe, raise_server_exceptions=False) as client:
+        before = _metric_value(client.get("/metrics").text, boom_line)
+        resp = client.get("/boom")
+        after = _metric_value(client.get("/metrics").text, boom_line)
+    assert resp.status_code == 500
+    # 进程级注册表跨测试累加：断言差值而非绝对值
+    assert after - before == 1.0
+
+
 def test_metrics_rate_limit_hit_recorded(tmp_path: Path) -> None:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'm3.db'}",
