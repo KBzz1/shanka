@@ -69,6 +69,16 @@ def test_alembic_upgrade_downgrade_upgrade_roundtrip(alembic_env: tuple[Config, 
     assert "cards" in tables and "review_states" in tables
 
 
+def test_alembic_0002_adds_request_body_hash(alembic_env: tuple[Config, Path]) -> None:
+    """0002 增量迁移：idempotency_keys 增加 request_body_hash 列（database-design 2.12）。"""
+    config, db_path = alembic_env
+    command.upgrade(config, "head")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info('idempotency_keys')"))}
+    assert "request_body_hash" in cols
+
+
 def test_alembic_foreign_keys_and_checks_active(alembic_env: tuple[Config, Path]) -> None:
     """磁盘 SQLite：外键与 CHECK 约束真实生效（database-design 0/3）。"""
     config, db_path = alembic_env

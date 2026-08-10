@@ -226,6 +226,7 @@ devices 1──N idempotency_keys
 | path | TEXT | 复合主键 | 接口路径**含具体资源 ID**(`/v1/pdfs/<file_id>`),避免同一设备对不同资源复用同键被静默吞掉(审核修复) |
 | response_status | INTEGER | NOT NULL | 首次成功响应状态码 |
 | response_body | TEXT | NOT NULL | 首次成功响应体快照(JSON,重放用) |
+| request_body_hash | TEXT | NOT NULL | 首次请求体 SHA-256 摘要(hex)；幂等键相同但摘要与首次不一致 → `409 IDEMPOTENCY_CONFLICT`(契约 1.3 比对的持久化载体,审核补全) |
 | created_at | TEXT | NOT NULL | |
 
 主键:`PRIMARY KEY (device_id, path, idempotency_key)`(审核修复)。
@@ -234,6 +235,7 @@ devices 1──N idempotency_keys
 
 - 仅记录成功(2xx)响应;失败的重复请求直接重试执行。
 - 重复请求:返回快照 `response_status + response_body`,不执行任何副作用;**幂等记录 INSERT 与业务副作用必须在同一事务内**(响应丢失后同键重试不双写,AC-05/AC-10)。
+- 请求体一致性:重复请求携带相同 `Idempotency-Key` 时,比对 `request_body_hash` 与首次记录;不一致 → `409 IDEMPOTENCY_CONFLICT`(契约 1.3)。
 - 保留策略:TTL 90 天(幂等窗口只需覆盖客户端重试周期),清理任务定期删除过期记录(审核修复)。
 
 ## 3. 级联与并发

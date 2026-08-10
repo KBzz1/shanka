@@ -291,4 +291,7 @@ class IdempotencyKey(Base):
     idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
     response_status: Mapped[int] = mapped_column(Integer, nullable=False)
     response_body: Mapped[str] = mapped_column(Text, nullable=False)  # JSON 快照
+    request_body_hash: Mapped[str] = mapped_column(
+        String, nullable=False
+    )  # 首次请求体 SHA-256(hex)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
