@@ -44,3 +44,12 @@ def test_manifest_json_parseable() -> None:
     with MANIFEST_PATH.open(encoding="utf-8") as f:
         data = json.load(f)
     assert "prompts" in data and "schemas" in data and "rubrics" in data
+
+
+def test_rewrite_prompt_asset_registered() -> None:
+    """V6：manifest 注册 rewrite prompt，加载可得且可读（资产演进红线 5）。"""
+    from infra.llm.prompts import load_asset
+
+    text = load_asset("prompts", "rewrite")
+    assert "重写" in text or "rewrite" in text  # 资产内容含重写指令
+    assert "JSON Schema" in text  # 输出格式契约
