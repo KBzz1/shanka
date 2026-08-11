@@ -1,13 +1,14 @@
-"""卡片路由（structure-contract 6.5；openapi /decks/{deck_id}/cards）。
+"""卡片路由（structure-contract 6.5；openapi /decks/{deck_id}/cards + /cards/{card_id}/rewrite）。
 
 写操作幂等接线：handler 内 execute_idempotent(session, ...) → session.commit()，
 幂等记录与业务副作用同事务。import 响应统一用 ImportResponse 模型构造
-（openapi 的 import 请求体是内联 schema，无命名组件 → dict 解析 + 手动校验）。
+（openapi 的 import 请求体是内联 schema，无命名组件 → dict 解析 + 手动校验）；
+rewrite 请求体同为内联 object（custom_requirements 可空，非 str → 手动 VALIDATION_ERROR）。
 """
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -20,9 +21,11 @@ from app.middleware.idempotency import (
 from app.schemas.cards import CardCreate, ImportResponse, ImportResult
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
+from services.cards.rewrite import rewrite_card
 from services.cards.service import card_view, create_card, import_cards, list_cards
 
 router = APIRouter(prefix="/decks/{deck_id}/cards", tags=["decks"])
+router_rewrite = APIRouter(prefix="/cards", tags=["decks"])
 
 
 def _now() -> str:
@@ -103,6 +106,54 @@ def import_cards_endpoint(
         response = ImportResponse(results=[ImportResult.model_validate(r) for r in results])
         # exclude_none：CREATED result 的 error 为 None，openapi error 非 nullable，不得输出 null
         return 201, response.model_dump(exclude_none=True)
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        device_id=device_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router_rewrite.post("/{card_id}/rewrite")
+def rewrite_card_endpoint(
+    request: Request,
+    card_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+    body: Annotated[dict[str, Any] | None, Body()] = None,
+) -> JSONResponse:
+    """单卡重写（structure-contract 6.7；openapi /cards/{card_id}/rewrite，V6）。
+
+    幂等接线同 create_card（V1 模式）：execute_idempotent + session.commit() 同事务；
+    错误路径（404/422/502）AppError 上抛由错误 handler 处理，session 依赖关闭回滚——
+    非 2xx 不落幂等记录（execute_idempotent 契约 1.3/2.12），不 commit。
+    client_factory 从 app.state 注入（getattr 缺省 None → 生产构造真实 client；测试注入 mock）。
+    """
+    device_id: str = request.state.device_id
+    key = get_idempotency_key(request)
+    path = f"/cards/{card_id}/rewrite"  # 与 openapi 路径一致，无 /v1 前缀（现有路由惯例）
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+    payload = body or {}  # openapi 内联 object：custom_requirements 可空
+    custom_requirements = payload.get("custom_requirements")
+    if custom_requirements is not None and not isinstance(custom_requirements, str):
+        # V1 import 同款手动校验（内联 object 无命名组件 → 非 str 手动 VALIDATION_ERROR）
+        raise AppError(ErrorCode.VALIDATION_ERROR, "custom_requirements 必须为字符串")
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        card = rewrite_card(
+            session,
+            device_id=device_id,
+            card_id=card_id,
+            custom_requirements=custom_requirements,
+            now=_now(),
+            settings=request.app.state.settings,
+            client_factory=getattr(request.app.state, "client_factory", None),
+        )
+        return 200, card_view(card)
 
     _replayed, status, body = execute_idempotent(
         session,

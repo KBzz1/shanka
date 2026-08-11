@@ -1,0 +1,375 @@
+"""验收测试：AC-06 单卡重写（PRD 5.13；迁移 schema + HTTP + mock transport 注入）。
+
+映射（AC-06 三条）：
+AC-06-a 可重写 → 200：card_id 与请求一致、front 新值、version 递增（mock transport 返回新内容）
+AC-06-b Schema 通过才替换 → Schema 违约响应（front/back 空串）→ 422 REWRITE_SCHEMA_INVALID，
+        重查原卡全字段不变（HTTP 层 + DB 直读双断言）
+AC-06-c 失败保留原卡 → 422 违约时原卡不动（b）+ 错误路径（404）幂等表无记录、无业务残留、
+        下次同键重试重新执行（T3 审查 Minor 2 集成确认）
+幂等接线（T1 模式）：同键同 body 重放（chat 计数 1、响应体与首次一致）；同键异 body →
+409 IDEMPOTENCY_CONFLICT（冲突在业务前判定，不二次 chat）。
+
+注入：重写是请求内同步调用，`client.app.state.client_factory = factory`（端点 getattr 读取，
+生产缺省 None 构造真实 client）；mock transport 只返回假数据（红线 4）。
+"""
+
+import json
+import uuid
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import cast
+
+import httpx
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.config import Settings
+from app.main import create_app
+from infra.db.models import ApiKey, Card, Device, IdempotencyKey, ReviewState
+from infra.db.session import create_db_engine, create_session_factory
+from infra.llm.crypto import encrypt_key, key_from_settings
+from infra.llm.deepseek import DeepSeekClient
+from services.decks.service import create_deck
+
+REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/acceptance/ → 仓库根
+
+_SETTINGS = Settings(api_key_encryption_key="aa" * 32)
+_TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
+assert _TEST_ENCRYPTION_KEY is not None
+_ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
+
+_NOW = "2026-08-11T00:00:00.000Z"
+
+# 重写成功内容：QUESTION 卡不带 front/back（由 question/answer 派生）
+_REWRITTEN_JSON = json.dumps(
+    {"cards": [{"type": "QUESTION", "question": "新问题？改进后", "answer": "新答案。更详细。"}]},
+    ensure_ascii=False,
+)
+# Schema 违约内容：front/back 空串（card.schema.json minLength 1）→ REWRITE_SCHEMA_INVALID
+_SCHEMA_INVALID_JSON = json.dumps(
+    {"cards": [{"type": "QUESTION", "front": "", "back": ""}]}, ensure_ascii=False
+)
+
+
+@pytest.fixture
+def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path, Settings]]:
+    """迁移后 schema 的 TestClient（后台循环隔离：间隔 3600s）+ DB 路径 + 应用 settings。"""
+    from alembic import command
+    from alembic.config import Config
+
+    db_path = tmp_path / "ac06.db"
+    cfg = Config(str(REPO_ROOT / "main" / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+    command.upgrade(cfg, "head")
+    settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        storage_path=tmp_path / "storage",
+        task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环
+        api_key_encryption_key="aa" * 32,  # 与 _ENCRYPTED_TEST_KEY 同配置（rewrite 解密路径）
+    )
+    with TestClient(create_app(settings)) as client:
+        yield client, db_path, settings
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
+def _device() -> dict[str, str]:
+    return {"X-Device-ID": str(uuid.uuid4())}
+
+
+def _idem() -> dict[str, str]:
+    return {"Idempotency-Key": str(uuid.uuid4())}
+
+
+def _db_factory(db_path: Path) -> sessionmaker[Session]:
+    return create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+
+
+def _seed_card(db_path: Path, *, device_id: str) -> tuple[str, dict[str, object]]:
+    """devices + 牌组 + 真实加密 Key + GENERATED 卡（QUESTION, version v3）+ REVIEW 态（重写前状态）。
+
+    返回 (card_id, before)：before 为原卡可迁移字段快照（「原卡全字段不变」断言基准）。
+    """
+    factory = _db_factory(db_path)
+    with factory() as session:
+        session.add(Device(device_id=device_id, created_at=_NOW))
+        session.flush()
+        session.add(
+            ApiKey(
+                device_id=device_id,
+                encrypted_key=_ENCRYPTED_TEST_KEY,
+                status="AVAILABLE",
+                masked_key="sk-****",
+                updated_at=_NOW,
+            )
+        )
+        session.flush()
+        deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
+        session.flush()
+        card = Card(
+            card_id=_uuid(),
+            deck_id=deck.deck_id,
+            device_id=device_id,
+            source="GENERATED",
+            position=1,
+            front="旧正面",
+            back="旧背面",
+            code="A1",
+            card_type="QUESTION",
+            question="旧问题？",
+            answer="旧答案",
+            generation_item_id="gen-old-0000",
+            target_difficulty="APPLICATION",
+            knowledge_point_ids='["kp-1"]',
+            evidence_score=1,
+            version="v3",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        session.add(card)
+        session.flush()
+        session.add(
+            ReviewState(
+                review_state_id=_uuid(),
+                card_id=card.card_id,
+                state="REVIEW",
+                stability=0.5,
+                difficulty=3.0,
+                due="2026-08-12T00:00:00.000Z",
+                last_review="2026-08-10T00:00:00.000Z",
+                reps=5,
+                lapses=2,
+                last_rating="GOOD",
+                updated_at=_NOW,
+            )
+        )
+        session.commit()
+    before: dict[str, object] = {
+        "front": "旧正面",
+        "back": "旧背面",
+        "code": "A1",
+        "card_type": "QUESTION",
+        "question": "旧问题？",
+        "answer": "旧答案",
+        "statement": None,
+        "explanation": None,
+        "answer_boolean": None,
+        "generation_item_id": "gen-old-0000",
+        "target_difficulty": "APPLICATION",
+        "knowledge_point_ids": '["kp-1"]',
+        "evidence_score": 1,
+        "version": "v3",
+        "created_at": _NOW,
+        "updated_at": _NOW,
+    }
+    return card.card_id, before
+
+
+def _inject_factory(client: TestClient, factory: Callable[[str], DeepSeekClient]) -> None:
+    """mock transport 注入 app.state.client_factory（端点 getattr 读取；mypy: TestClient.app 为 ASGIApp）。"""
+    cast(FastAPI, client.app).state.client_factory = factory
+
+
+def _scripted_factory(calls: dict[str, int], *, content: str) -> Callable[[str], DeepSeekClient]:
+    """mock transport 工厂：每次 chat 返回同一内容，调用计数到 calls["n"]（重放/冲突判定观测）。"""
+
+    def factory(_api_key: str) -> DeepSeekClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": content}}],
+                    "model": "deepseek-v4-flash",
+                },
+            )
+
+        return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+
+    return factory
+
+
+def _idem_record(db_path: Path, *, device_id: str, path: str, key: str) -> IdempotencyKey | None:
+    with _db_factory(db_path)() as session:
+        return session.scalar(
+            select(IdempotencyKey).where(
+                IdempotencyKey.device_id == device_id,
+                IdempotencyKey.path == path,
+                IdempotencyKey.idempotency_key == key,
+            )
+        )
+
+
+def test_acceptance_ac06_rewrite_succeeds(
+    ctx: tuple[TestClient, Path, Settings],
+) -> None:
+    """AC-06-a 可重写：200，响应卡 card_id 与请求一致、front 新值、version 递增（一次 chat）。"""
+    client, db_path, _ = ctx
+    device = _device()
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    calls: dict[str, int] = {"n": 0}
+    _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
+
+    resp = client.post(
+        f"/cards/{card_id}/rewrite",
+        json={"custom_requirements": "更简洁"},
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["card_id"] == card_id  # 与请求一致
+    assert body["front"] == "新问题？改进后"  # front 新值（question/answer 派生）
+    assert body["back"] == "新答案。更详细。"
+    assert body["version"] == "v4"  # v3 → 递增
+    assert body["generation_item_id"] != "gen-old-0000"  # 新版本新标识
+    assert calls["n"] == 1  # 一次 chat
+
+    # DB 直读：原地替换落库
+    with _db_factory(db_path)() as session:
+        card = session.get(Card, card_id)
+        assert card is not None
+        assert card.front == "新问题？改进后"
+        assert card.version == "v4"
+        rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
+        assert rs is not None
+        assert rs.state == "NEW"  # ReviewState 原子重置（2.10 新建卡初始值）
+        assert rs.difficulty == 1.0
+
+
+def test_acceptance_ac06_schema_invalid_preserves_card(
+    ctx: tuple[TestClient, Path, Settings],
+) -> None:
+    """AC-06-b 通过才替换：Schema 违约响应 → 422 REWRITE_SCHEMA_INVALID，原卡全字段不变。"""
+    client, db_path, _ = ctx
+    device = _device()
+    card_id, before = _seed_card(db_path, device_id=device["X-Device-ID"])
+    calls: dict[str, int] = {"n": 0}
+    _inject_factory(client, _scripted_factory(calls, content=_SCHEMA_INVALID_JSON))
+    headers = {**device, **_idem()}
+
+    resp = client.post(f"/cards/{card_id}/rewrite", json={}, headers=headers)
+    assert resp.status_code == 422  # HTTP 层：422
+    assert resp.json()["error"]["code"] == "REWRITE_SCHEMA_INVALID"
+    assert calls["n"] == 1  # 已 chat（Schema 违约在响应侧判定）
+
+    # DB 直读：原卡全字段不变 + 幂等表无记录（非 2xx 不落）
+    with _db_factory(db_path)() as session:
+        card = session.get(Card, card_id)
+        assert card is not None
+        for field, value in before.items():
+            assert getattr(card, field) == value, f"{field} 不应被违约响应修改"
+        rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
+        assert rs is not None
+        assert rs.state == "REVIEW"  # ReviewState 原值保留
+        assert rs.reps == 5 and rs.lapses == 2
+    assert (
+        _idem_record(
+            db_path,
+            device_id=device["X-Device-ID"],
+            path=f"/cards/{card_id}/rewrite",
+            key=headers["Idempotency-Key"],
+        )
+        is None
+    )
+
+
+def test_acceptance_ac06_idempotent_replay(
+    ctx: tuple[TestClient, Path, Settings],
+) -> None:
+    """幂等重放：同键同 body 第二次 → 200 且响应体与首次一致（重放不二次 chat，chat 计数 = 1）。"""
+    client, db_path, _ = ctx
+    device = _device()
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    calls: dict[str, int] = {"n": 0}
+    _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
+    headers = {**device, **_idem()}
+    payload = {"custom_requirements": "更简洁"}
+
+    first = client.post(f"/cards/{card_id}/rewrite", json=payload, headers=headers)
+    assert first.status_code == 200
+    assert calls["n"] == 1
+
+    replay = client.post(f"/cards/{card_id}/rewrite", json=payload, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json() == first.json()  # 响应体与首次一致（幂等快照重放）
+    assert calls["n"] == 1  # 重放不二次 chat
+
+    # DB 直读：重放不产生第二次替换（version 仍 v4，未再递增）
+    with _db_factory(db_path)() as session:
+        card = session.get(Card, card_id)
+        assert card is not None
+        assert card.version == "v4"
+
+
+def test_acceptance_ac06_idempotency_conflict(
+    ctx: tuple[TestClient, Path, Settings],
+) -> None:
+    """幂等冲突：同键异 body → 409 IDEMPOTENCY_CONFLICT（冲突在业务前判定，不二次 chat）。"""
+    client, db_path, _ = ctx
+    device = _device()
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    calls: dict[str, int] = {"n": 0}
+    _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
+    headers = {**device, **_idem()}
+
+    first = client.post(
+        f"/cards/{card_id}/rewrite", json={"custom_requirements": "A"}, headers=headers
+    )
+    assert first.status_code == 200
+
+    conflict = client.post(
+        f"/cards/{card_id}/rewrite", json={"custom_requirements": "B"}, headers=headers
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert calls["n"] == 1  # 同键异 body 判定在 chat 之前，不二次调用
+
+
+def test_acceptance_ac06_error_path_no_idempotency_record(
+    ctx: tuple[TestClient, Path, Settings],
+) -> None:
+    """错误路径（404）幂等表无记录 + 无业务残留：下次同键重试重新执行（T3 审查 Minor 2 集成确认）。"""
+    client, db_path, _ = ctx
+    device = _device()
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    calls: dict[str, int] = {"n": 0}
+    _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
+    key = _idem()["Idempotency-Key"]
+
+    # 跨设备查卡 → 404 CARD_NOT_FOUND（统一 404，不暴露存在性）
+    other = _device()
+    resp = client.post(
+        f"/cards/{card_id}/rewrite", json={}, headers={**other, "Idempotency-Key": key}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "CARD_NOT_FOUND"
+    assert calls["n"] == 0  # 查卡失败在 chat 之前
+
+    # 幂等表无记录（404 非 2xx 不落）+ 原卡无业务残留（front/version/updated_at 不动）
+    assert (
+        _idem_record(
+            db_path, device_id=other["X-Device-ID"], path=f"/cards/{card_id}/rewrite", key=key
+        )
+        is None
+    )
+    with _db_factory(db_path)() as session:
+        card = session.get(Card, card_id)
+        assert card is not None
+        assert card.front == "旧正面"
+        assert card.version == "v3"
+        assert card.updated_at == _NOW
+
+    # 同键重试（卡存在）→ 重新执行（chat 1 次、200）——未被 404 失败记录污染
+    resp = client.post(
+        f"/cards/{card_id}/rewrite", json={}, headers={**device, "Idempotency-Key": key}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["card_id"] == card_id
+    assert resp.json()["front"] == "新问题？改进后"
+    assert resp.json()["version"] == "v4"
+    assert calls["n"] == 1
