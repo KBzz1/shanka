@@ -33,6 +33,12 @@ from infra.metrics import (
     LLM_REQUESTS_TOTAL,
     LLM_TOKENS_TOTAL,
 )
+from services.generation.response_parse import (
+    parse_cards_json as _parse_cards,
+)
+from services.generation.response_parse import (
+    to_internal_card as _to_internal_card,
+)
 from services.generation.rubric import batch_quality, score_card
 from services.generation.schema_validator import load_card_schema, validate_card
 
@@ -219,48 +225,6 @@ def _observe_llm_call(result: dict[str, Any]) -> None:
             tokens = usage.get(key)
             if isinstance(tokens, int) and tokens > 0:
                 LLM_TOKENS_TOTAL.labels(kind=kind).inc(tokens)
-
-
-def _parse_cards(content: str) -> list[dict[str, Any]]:
-    """响应 content JSON → 卡片列表。非 JSON / 无 cards 列表 → []（0 合法卡 → FAILED/重试）。"""
-    try:
-        data = json.loads(content)
-    except (ValueError, TypeError):
-        return []
-    if not isinstance(data, dict):
-        return []
-    cards = data.get("cards")
-    if not isinstance(cards, list):
-        return []
-    return [c for c in cards if isinstance(c, dict)]
-
-
-def _to_internal_card(card: dict[str, Any]) -> dict[str, Any]:
-    """响应卡片 → 内部卡 dict（T1 carry-forward：必须产出 front/back，否则 Schema 违约）。
-
-    - QUESTION：front/back 缺失时从 question/answer 派生（生成输出允许不带 front/back）；
-    - TRUE_FALSE：front/back 缺失时从 statement/explanation 派生；
-    - 派生后仍缺失 → 对应键为 None → Schema 校验违约，不入库（唯一门槛）。
-    """
-    ctype = card.get("type")
-    if ctype == "QUESTION":
-        return {
-            "type": "QUESTION",
-            "front": card.get("front") or card.get("question"),
-            "back": card.get("back") or card.get("answer"),
-            "question": card.get("question"),
-            "answer": card.get("answer"),
-        }
-    if ctype == "TRUE_FALSE":
-        return {
-            "type": "TRUE_FALSE",
-            "front": card.get("front") or card.get("statement"),
-            "back": card.get("back") or card.get("explanation"),
-            "statement": card.get("statement"),
-            "answer_boolean": card.get("answer_boolean"),
-            "explanation": card.get("explanation"),
-        }
-    return dict(card)
 
 
 def _insert_valid_cards(
