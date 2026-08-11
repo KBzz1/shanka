@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（R1 扩展） | 353 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8 + V6 26 + R1 5；四工具命令全绿（mypy 173 files） |
+| 自动化验证 | `DONE`（R14 扩展） | 354 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8 + V6 26 + R1 5 + R14 1（守卫）；四工具命令全绿（mypy 174 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -182,7 +182,7 @@
 - KnowledgePoint 规划（5.4.1 可测口径）：每章 3×密度（COMPACT=1/BALANCED=2/EXTENSIVE=3）——2 章实测 6/12/18；字段完整 + PENDING。
 - 任务执行（V4 fake，红线不代替生产）：进程内 DB 驱动后台循环（4.4 定式）；deterministic fake 生成（sha256 派生 ID，seed 含 task 维度——跨任务不冲突）；入库 V1 模式 + generation_item_id 部分唯一索引防重（AC-05）+ 难度按 priority 轮换三档；COMPLETED/FAILED 状态机。
 - 验收实测：四工具全绿（289 passed、mypy 148 files）；干净 venv 安装 + 迁移 OK；uvicorn 冒烟（样卡 3 张 QUESTION+TRUE_FALSE、任务 RUNNING→COMPLETED 12 卡入库）；边界 70 用例全绿；无明文泄漏。
-- 登记：R-14 OPEN（openapi /samples 响应 items 引用 Card 但样卡无 deck_id/position——V4 过渡 handler 合成占位 + R1 定义 SampleCard 轻量组件）；fake 跨设备防重已由 task 维度修复；4.4 表述 PENDING vs RUNNING 观察（V5A 同步契约文本）。
+- 登记：R-14 RESOLVED（2026-08-11 SampleCard 轻量组件落地——契约 3.13 + openapi + schemas 三处一致，handler 去占位，见第 4 节 R14 包）；fake 跨设备防重已由 task 维度修复；4.4 表述 PENDING vs RUNNING 观察（V5A 同步契约文本）。
 - 流程记录：V4-T4 fix 中 implementer 越权修改 Progress.md（登记 R-14）——内容正确保留，后续已重申禁令。
 
 ### V5A — 分批生成与质量观测闭环
@@ -253,6 +253,16 @@
 - **交付**：`docs/r1-live-report.md`（执行参数/统计/失败详情/复核/边界）；Progress F0-R1 全部 DONE。
 - 登记：R-03 generator v2（v1 裸单卡契约断裂修复）；R-20（live 实证：1/60 上游失败、成本 ¥1.635、fingerprint 冻结）；API_KEY_ENCRYPTION_KEY 未提供（driver 临时密钥，live DB 密文跨进程不可解——已知限制）。
 
+### R14 — SampleCard 轻量组件（R-14 清账）
+
+**`DONE`｜依赖：V4｜覆盖：structure-contract 6.3、红线 1（三处一致）｜2026-08-11**
+
+- **背景**：V4-T4 fix F-2 登记 R-14——openapi /samples 响应 items `$ref Card`（required 含 deck_id/position/created_at/updated_at），样卡不入库无真实值，V4 过渡由 handler 合成占位（deck_id=""/position=0）；R1 契约修订未落地 SampleCard 组件。
+- **契约**：structure-contract 新增 3.13 SampleCard（11 字段，删去落库/归属/版本语义字段 deck_id/position/source/generation_item_id/knowledge_point_ids/Rubric 四维+总分/version/created_at/updated_at——PRD 5.5 数据规则）；openapi 新增 SampleCard 组件（required 四项 card_id/front/back/card_type；7 个可选字段 null 联合 + description，对齐 Card 先例）；6.3 表述同步（"响应返回 SampleCard 轻量组件"）。
+- **实现**：`app/schemas/samples.py` 新增 SampleCard 守卫锚点模型；`app/api/samples.py` 移除合成占位（死代码 _now/SystemClock 清理），`_to_sample_card` 显式映射（fake 超集 → 轻量子集，type: ignore[arg-type] 4 处 mypy 必需）；样卡行为不变（不入库/不统计/豁免幂等键）；fake 生成器与 database-design 不动。
+- **测试**：守卫新增 `test_sample_card_schema_openapi_consistent`（5 passed）；samples 集成 + AC-03 占位断言 → SampleCard 断言（先红后绿 TDD）；顺带修复 base 遗留的 2 处 ruff format 漂移（test_acceptance_ac04_ac07.py:293、test_batches.py:216——R1 canary v1→v2 改长行时引入，main 验收在行变长前）。
+- **验收实测**：四工具全绿（**354 passed**、ruff check、ruff format 213 files、mypy 174 files——主 Agent 亲自复跑）；审查两轮（契约合规 ✅ + 代码质量 ✅ → Important-1 openapi null 声明修复 + Minor-1/2 → scoped re-review ✅ 无残留）。
+
 ## 5. 依赖关系与下一步
 
 ```text
@@ -280,7 +290,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | R-09 | `ACCEPTED` | 正式契约要求记录 model，但不冻结具体模型或 thinking 模式 | 产品配置保持单一可替换入口；R1 为可比性冻结 `deepseek-v4-flash` + thinking disabled，不能反向改写 PRD/Architecture |
 | R-10 | `RESOLVED` | 契约 1.3 要求"幂等键相同但请求体与首次不一致 → 409"，但 database-design 2.12 无 body 比对持久化载体 | F1 兼容性契约更新（AGENTS.md 版本管理规则）：database-design §2.12 新增 `request_body_hash` 列（首次请求体 SHA-256 hex）+ 规则段；ORM/增量迁移 0002/守卫三处同步（F1-T8） |
 | R-11 | `RESOLVED` | structure-contract 3.8 Deck.source 为 `MANUAL/IMPORTED/GENERATED`，database-design 2.8 只列 `MANUAL/IMPORTED`——字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明 | V4 收口：任务创建走用户指定 deck_id（TaskCreateRequest），本期无 GENERATED 牌组创建路径；契约 3.8 枚举保留（未来自动归属牌组使用），database-design 2.8 派生遗漏说明已核对（V4-T7） |
-| R-14 | `OPEN` | openapi /samples 响应 items `$ref Card`（required 含 deck_id/position/created_at/updated_at），但样卡不入库、无这些字段 | V4 过渡（V4-T4 fix F-2）：handler 合成占位字段返回（deck_id=""/position=0/created_at/updated_at=请求时刻）；R1 契约修订定义轻量 `SampleCard` 组件（structure-contract 3.6/6.3）消除占位 |
+| R-14 | `RESOLVED` | openapi /samples 响应 items `$ref Card`（required 含 deck_id/position/created_at/updated_at），但样卡不入库、无这些字段 | V4 过渡（V4-T4 fix F-2）：handler 合成占位字段返回（deck_id=""/position=0/created_at/updated_at=请求时刻）；**R14 清账（2026-08-11）**：structure-contract 3.13 SampleCard 轻量组件 + openapi 组件（null 联合对齐 Card 先例）+ schemas 锚点 + handler 去占位，三处一致，见第 4 节 R14 包 |
 | R-17 | `ACCEPTED` | SQLite 单写者：batch chat 期间（BEGIN IMMEDIATE 写锁跨长事务，无 busy_timeout）cancel/resume 等写接口 → 500 database-locked；批次间隙 cancel 已修复（I-1 条件更新） | 单写者串行化是本阶段既定架构（database-design 事务边界）；生产 DB（PostgreSQL 等）/多实例时按行级锁自然消失，不引入重试或额外设施；V5B 修复只覆盖可确定路径（批次间隙），chat 期间 500 保持 8.3 统一错误码响应 |
 | R-18 | `ACCEPTED` | version 递增格式分支：V1 手动卡 version=ISO 时间戳，生成卡 version="v1"——重写递增规则统一为 ^v\d+$ → v(n+1)，非 vN 格式 → "v2" | V6 实现（_next_version 单测 5 例）；语义符合 database-design 2.9「变更版本，重写时递增」；R1 契约整理可考虑统一 version 语义（手动卡创建时即 v1），不阻塞 |
 | R-19 | `ACCEPTED` | MANUAL/IMPORTED 卡重写后 generation_item_id 非空，但部分唯一索引仅覆盖 GENERATED（source='GENERATED'）——「同一 generation_item_id 最多对应一张有效卡片」对非 GENERATED 卡无索引兜底 | V6 实现：重写一律分配新 uuid4（PRD 5.13），source 不变；uuid 随机无防重冲突风险；database-design 2.9「仅 GENERATED 卡」描述性说明随重写语义扩展登记 |
