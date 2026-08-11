@@ -1083,23 +1083,30 @@ components:
         back:
           type: string
         code:
-          type: string
+          type: [string, 'null']
+          description: 卡片编号
         card_type:
           type: string
           enum: [QUESTION, TRUE_FALSE]
         question:
-          type: string
+          type: [string, 'null']
+          description: 仅 QUESTION 卡
         answer:
-          type: string
+          type: [string, 'null']
+          description: 仅 QUESTION 卡
         statement:
-          type: string
+          type: [string, 'null']
+          description: 仅 TRUE_FALSE 卡
         answer_boolean:
-          type: boolean
+          type: [boolean, 'null']
+          description: 仅 TRUE_FALSE 卡
         explanation:
-          type: string
+          type: [string, 'null']
+          description: 仅 TRUE_FALSE 卡
         target_difficulty:
-          type: string
+          type: [string, 'null']
           enum: [BASIC, UNDERSTANDING, APPLICATION]
+          description: 生成时目标难度
 
     SampleRequest:
       type: object

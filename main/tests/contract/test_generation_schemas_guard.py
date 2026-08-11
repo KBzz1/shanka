@@ -1,4 +1,4 @@
-"""契约守卫：Task/KnowledgePoint/SampleRequest/TaskCreateRequest ↔ openapi（守卫 1 扩展，红线 1）。
+"""契约守卫：Task/KnowledgePoint/SampleRequest/SampleCard/TaskCreateRequest ↔ openapi（守卫 1 扩展，红线 1）。
 
 Task 视图的 selected_chapters 为 Chapter[]（object 数组快照，契约 3.4/3.6）、
 generation_config 为 $ref GenerationConfig（object）——守卫 array-of-object / object
