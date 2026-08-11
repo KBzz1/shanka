@@ -97,3 +97,20 @@ class Batch(BaseModel):
     created_at: str | None = None
     ended_at: str | None = None
     cost_estimate: float | None = None
+
+
+class CostEstimateRequest(BaseModel):
+    """价格预估请求(spec 4:与 TaskCreateRequest 同构子集——仅章节+配置;纯计算,豁免幂等键)。"""
+
+    chapter_ids: list[str] = Field(min_length=1)
+    generation_config: GenerationConfig
+
+
+class CostEstimateResponse(BaseModel):
+    """价格预估响应(区间估值,单位元 CNY;spec 4/6.x)。"""
+
+    knowledge_point_count: int
+    estimated_card_count: int
+    price_low: float
+    price_high: float
+    currency: str

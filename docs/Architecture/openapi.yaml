@@ -295,6 +295,27 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /tasks/estimate:
+    post:
+      tags: [tasks]
+      summary: 创建任务前价格预估(区间估值:全命中~全未命中,单位元;纯计算,豁免幂等键)
+      operationId: estimateTaskCost
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CostEstimateRequest'
+      responses:
+        '200':
+          description: 预估成功(price_low=全部 prompt 命中缓存,price_high=全部未命中)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostEstimateResponse'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
   /tasks/{task_id}:
     parameters:
       - $ref: '#/components/parameters/TaskId'
@@ -1172,6 +1193,33 @@ components:
         generation_config:
           $ref: '#/components/schemas/GenerationConfig'
       description: 接受样卡后创建任务;请求中不携带 API Key,服务端使用已保存 Key
+
+    CostEstimateRequest:
+      type: object
+      required: [chapter_ids, generation_config]
+      properties:
+        chapter_ids:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+        generation_config:
+          $ref: '#/components/schemas/GenerationConfig'
+    CostEstimateResponse:
+      type: object
+      required: [knowledge_point_count, estimated_card_count, price_low, price_high, currency]
+      properties:
+        knowledge_point_count:
+          type: integer
+        estimated_card_count:
+          type: integer
+        price_low:
+          type: number
+        price_high:
+          type: number
+        currency:
+          type: string
 
     SampleCard:
       type: object

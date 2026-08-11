@@ -434,6 +434,7 @@ Scheduler(
 | GET | `/v1/tasks/{task_id}` | 长任务轮询:状态、stage、已生成数、批次进度、失败码、是否可继续(FR-18) | - |
 | POST | `/v1/tasks/{task_id}/resume` | 断点续传,仅处理未完成批次 | ✓ |
 | POST | `/v1/tasks/{task_id}/cancel` | 取消任务 | ✓ |
+| POST | `/v1/tasks/estimate` | 创建任务前价格预估(区间估值,单位元):请求 `{chapter_ids, generation_config}`(空章节/非法配置 → 422,校验与 POST /tasks 同);响应 `{knowledge_point_count, estimated_card_count, price_low, price_high, currency}`;纯计算、不落库、**豁免幂等键**(与 6.3 /samples 同)、不需要 API Key | 豁免 |
 
 ### 6.5 牌组与卡片(FR-03/14)
 
@@ -567,6 +568,9 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 - 原始 token 数据(`cache_hit_tokens` / `cache_miss_tokens` / `output_tokens`)落 Batch 表,不变。
 - 估算成本在聚合时按"价格配置常量"换算;常量取 DeepSeek 官方定价、标注生效日期;价格调整只改配置,不动历史数据。
 - 出口:8.3 `llm_tokens_total` 与 6.10 聚合接口的成本汇总。
+- **token 用量估算模型(事前预估)**:估算常量 = 对 8.3/6.2 观测数据(Batch 实际 token)的离线校准值——`PROMPT_TOKENS_PER_KP=1500` / `OUTPUT_TOKENS_PER_KP=3300`(2026-08-12 校准自 R1 live 实测,向上取整偏保守)、`custom_requirements` 每字符 ≈0.5 token;换模型/换书籍时单点重新校准,消费方零改动。
+- 预估输入映射与 V4 规划同口径:知识点数 = 章节数 × 3 × 密度系数(`COMPACT=1/BALANCED=2/EXTENSIVE=3`),每知识点一卡。
+- 区间口径(8.3 hit/miss 边界):`price_low` = 全部 prompt 命中缓存(hit ratio 100%),`price_high` = 全部未命中(0%);output 固定价;复用本节约价档位。
 
 ### 8.5 评估骨架（O-5）
 

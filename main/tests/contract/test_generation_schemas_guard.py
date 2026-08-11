@@ -8,7 +8,12 @@ enum 值集（既有口径），值集一致性由 structure-contract 状态机�
 """
 
 from app.schemas.samples import SampleCard, SampleRequest
-from app.schemas.tasks import KnowledgePoint, TaskCreateRequest
+from app.schemas.tasks import (
+    CostEstimateRequest,
+    CostEstimateResponse,
+    KnowledgePoint,
+    TaskCreateRequest,
+)
 from app.schemas.tasks import Task as TaskView
 from tests.contract.support import check_schema_consistency, load_openapi, openapi_schema
 
@@ -40,5 +45,19 @@ def test_sample_card_schema_openapi_consistent() -> None:
 def test_task_create_request_schema_openapi_consistent() -> None:
     violations = check_schema_consistency(
         TaskCreateRequest, openapi_schema("TaskCreateRequest"), load_openapi()
+    )
+    assert violations == []
+
+
+def test_cost_estimate_request_schema_openapi_consistent() -> None:
+    violations = check_schema_consistency(
+        CostEstimateRequest, openapi_schema("CostEstimateRequest"), load_openapi()
+    )
+    assert violations == []
+
+
+def test_cost_estimate_response_schema_openapi_consistent() -> None:
+    violations = check_schema_consistency(
+        CostEstimateResponse, openapi_schema("CostEstimateResponse"), load_openapi()
     )
     assert violations == []
