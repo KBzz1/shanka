@@ -1,5 +1,7 @@
 # Cloudflare Tunnel 落地实施计划（2026-08-11）
 
+> **结果（2026-08-11）**：✅ 全部 6 任务完成并验收（subagent-driven-development 执行，每任务契约+质量审查，最终整支审查通过，无必须修复项）。公网 `https://shanka.kbzz1.top` 可达（healthz/readyz 200），真机移动网络 306ms，实测记录已写入 deployment.md 第 7 节；Docker 演进（计划外）按设计第 4 节留待迁移时实施。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将闪卡后端（FastAPI）通过 Cloudflare Tunnel（隧道 `shanka`，公共主机名 `shanka.kbzz1.top`）暴露到公网，供 Android 前端访问；数据目录集中到 `main/data/`，为将来 Docker 化铺路。
@@ -29,7 +31,7 @@
 - Produces: `scripts/run.sh` —— 可执行脚本；`source ../.env` 读取 `DATABASE_URL` / `STORAGE_PATH`（Task 2 写入）；以 `conda run -n shanka-backend uvicorn ... --port $PORT` 启动，`PORT` 默认 8000、被占用自动换 8001。
 - Consumes: 根 `.env`（Task 2 才写入完整键；脚本对缺失键不报错，此时用 config.py 默认值）。
 
-- [ ] **Step 1: 创建 `scripts/run.sh`**
+- [x] **Step 1: 创建 `scripts/run.sh`**
 
 ```bash
 mkdir -p /home/kbzz1/shanka_backend/scripts
@@ -68,12 +70,12 @@ set +a
 exec conda run -n shanka-backend uvicorn app.main:app --host 127.0.0.1 --port "${PORT}"
 ```
 
-- [ ] **Step 2: 赋可执行权限并做语法检查**
+- [x] **Step 2: 赋可执行权限并做语法检查**
 
 Run: `chmod +x /home/kbzz1/shanka_backend/scripts/run.sh && bash -n /home/kbzz1/shanka_backend/scripts/run.sh`
 Expected: 无输出（语法 OK），退出码 0。
 
-- [ ] **Step 3: 空运行验证（只验证到端口检测与 .env 加载，不真正启动）**
+- [x] **Step 3: 空运行验证（只验证到端口检测与 .env 加载，不真正启动）**
 
 说明：脚本 exec uvicorn，无法"空跑"；本步验证前置条件——`.env` 可被 source 且 conda 环境存在。
 
@@ -84,7 +86,7 @@ cd /home/kbzz1/shanka_backend && set -a && source .env && set +a \
 ```
 Expected: 输出 `env ok`。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd /home/kbzz1/shanka_backend
@@ -103,19 +105,19 @@ git commit -m "feat(scripts): run.sh 启动封装（端口检测 + 根 .env + co
 - Consumes: 无（本任务只写配置）。
 - Produces: 键 `DATABASE_URL=sqlite:///./data/shanka.db`、`STORAGE_PATH=./data/storage`（相对 uvicorn CWD=`main/`）——Task 3 迁移与 Task 5 验收依赖。
 
-- [ ] **Step 1: 检查键是否已存在（幂等）**
+- [x] **Step 1: 检查键是否已存在（幂等）**
 
 Run: `grep -c '^DATABASE_URL=' /home/kbzz1/shanka_backend/.env; grep -c '^STORAGE_PATH=' /home/kbzz1/shanka_backend/.env`
 Expected: 两个 0（若已有，跳到 Step 4，本计划假定无）。
 
-- [ ] **Step 2: 追加两个键**
+- [x] **Step 2: 追加两个键**
 
 Run:
 ```bash
 printf 'DATABASE_URL=sqlite:///./data/shanka.db\nSTORAGE_PATH=./data/storage\n' >> /home/kbzz1/shanka_backend/.env
 ```
 
-- [ ] **Step 3: 验证加载（不打印任何密钥值）**
+- [x] **Step 3: 验证加载（不打印任何密钥值）**
 
 Run:
 ```bash
@@ -125,12 +127,12 @@ cd /home/kbzz1/shanka_backend/main && set -a && source ../.env && set +a \
 ```
 Expected: 输出 `sqlite:///./data/shanka.db` 与 `./data/storage`（环境变量已覆盖默认值）。
 
-- [ ] **Step 4: 权限与忽略确认（防回归）**
+- [x] **Step 4: 权限与忽略确认（防回归）**
 
 Run: `ls -l /home/kbzz1/shanka_backend/.env | awk '{print $1}'; grep -q '^/.env$' /home/kbzz1/shanka_backend/.gitignore && echo ignored`
 Expected: `-rw-------` 且输出 `ignored`。
 
-- [ ] **Step 5: Commit（记录配置决策）**
+- [x] **Step 5: Commit（记录配置决策）**
 
 ```bash
 cd /home/kbzz1/shanka_backend
@@ -151,12 +153,12 @@ git commit --allow-empty -m "docs: 根 .env 数据目录配置（git 忽略，�
 - Consumes: Task 2 的 `DATABASE_URL` / `STORAGE_PATH`。
 - Produces: `main/data/` 单目录承载全部运行时数据（Docker 化铺路）；Task 5 验收依赖。
 
-- [ ] **Step 1: 确认后端未在运行（迁移要求）**
+- [x] **Step 1: 确认后端未在运行（迁移要求）**
 
 Run: `ss -tln | grep -E ':8000|:8001' || echo "无 uvicorn 监听"`
 Expected: `无 uvicorn 监听`（若有：先停掉，再继续）。
 
-- [ ] **Step 2: 创建 data/ 并迁移**
+- [x] **Step 2: 创建 data/ 并迁移**
 
 Run:
 ```bash
@@ -167,12 +169,12 @@ mv storage/* data/storage/ 2>/dev/null || true   # storage 当前为空目录
 rmdir storage
 ```
 
-- [ ] **Step 3: 验证文件落位**
+- [x] **Step 3: 验证文件落位**
 
 Run: `ls -l /home/kbzz1/shanka_backend/main/data/ /home/kbzz1/shanka_backend/main/data/storage/`
 Expected: `data/shanka.db`（192512 字节左右）；`data/storage/` 存在；`main/storage` 与 `main/shanka.db` 已不存在。
 
-- [ ] **Step 4: 用 run.sh 启动并探活**
+- [x] **Step 4: 用 run.sh 启动并探活**
 
 Run（后台）: `/home/kbzz1/shanka_backend/scripts/run.sh`
 Expected: uvicorn 启动日志，监听 8000。
@@ -180,12 +182,12 @@ Expected: uvicorn 启动日志，监听 8000。
 Run: `curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/healthz && echo; curl -s http://localhost:8000/readyz`
 Expected: `200` + `{"status":"ok"}` 类 JSON（readyz 校验 DB + 存储可写，即验证 data/ 布局有效）。
 
-- [ ] **Step 5: 验证旧库未残留（新库为新文件）**
+- [x] **Step 5: 验证旧库未残留（新库为新文件）**
 
 Run: `ls /home/kbzz1/shanka_backend/main/shanka.db 2>&1; sqlite3 /home/kbzz1/shanka_backend/main/data/shanka.db 'select count(*) from decks;' 2>/dev/null || conda run -n shanka-backend python -c "import sqlite3; print(sqlite3.connect('/home/kbzz1/shanka_backend/main/data/shanka.db').execute('select count(*) from decks').fetchone())"`
 Expected: `No such file`（旧路径）+ 表存在（count 返回数值；`decks` 表来自 database-design）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/kbzz1/shanka_backend
@@ -206,12 +208,12 @@ git commit -m "chore: 数据目录集中到 main/data/（Docker 化铺路）"
 - Consumes: 根 `.env` 的 `CLOUDFLARED_SERVICE_INSTALL_TOKEN`（用户已放入）。
 - Produces: systemd 服务 `cloudflared`（active running）——Task 5 公网验收依赖。
 
-- [ ] **Step 1: 确认 cloudflared 已装且版本可用**
+- [x] **Step 1: 确认 cloudflared 已装且版本可用**
 
 Run: `cloudflared --version`
 Expected: `cloudflared version 2026.1.2`（已装，无需重装；若未装则按 deployment.md 第 3 步 Debian apt 源安装）。
 
-- [ ] **Step 2: 用安装令牌装为系统服务**
+- [x] **Step 2: 用安装令牌装为系统服务**
 
 Run:
 ```bash
@@ -222,7 +224,7 @@ sudo cloudflared service install "$CLOUDFLARED_SERVICE_INSTALL_TOKEN"
 说明：token 以命令参数短暂出现在进程列表（单用户机器可接受）；`.env` 权限 600，仅本用户与 root 可读。
 Expected: 输出 `Successfully installed cloudflared as a system service` 类信息。
 
-- [ ] **Step 3: 验证服务运行与隧道连接**
+- [x] **Step 3: 验证服务运行与隧道连接**
 
 Run: `systemctl status cloudflared --no-pager | head -8`
 Expected: `active (running)`。
@@ -230,13 +232,13 @@ Expected: `active (running)`。
 Run: `sudo journalctl -u cloudflared --no-pager -n 20`
 Expected: 出现隧道注册成功日志（`Registered tunnel connection` 类）；无认证错误。
 
-- [ ] **Step 4: 确认隧道与主机名（Dashboard 已配）**
+- [x] **Step 4: 确认隧道与主机名（Dashboard 已配）**
 
 Run: `sudo cloudflared tunnel list`
 Expected: 列出隧道 `shanka`（此命令需要服务凭证，位于 `/etc/cloudflared/`；若提示认证，检查服务安装是否成功——上一步日志为准）。
 说明：公共主机名 `shanka.kbzz1.top → http://localhost:8000` 用户已在 Dashboard 配置（类型 HTTP），本步只确认隧道本身在线。
 
-- [ ] **Step 5: Commit（无代码变更时的记录提交）**
+- [x] **Step 5: Commit（无代码变更时的记录提交）**
 
 ```bash
 cd /home/kbzz1/shanka_backend
@@ -255,12 +257,12 @@ git commit --allow-empty -m "ops: cloudflared 常驻服务安装（隧道 shanka
 - Consumes: Task 1（run.sh 后端运行）、Task 3（data/ 就绪）、Task 4（cloudflared 在线）。
 - Produces: 延迟实测记录（deployment.md 第 7 节）——大陆延迟阶梯决策的输入。
 
-- [ ] **Step 1: 确认后端本地在线**
+- [x] **Step 1: 确认后端本地在线**
 
 Run: `curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/healthz`
 Expected: `200`。
 
-- [ ] **Step 2: 公网探活（经 CF 边缘）**
+- [x] **Step 2: 公网探活（经 CF 边缘）**
 
 Run: `curl -s -o /dev/null -w 'healthz=%{http_code} 总耗时=%{time_total}s\n' https://shanka.kbzz1.top/healthz`
 Expected: `healthz=200`（首次访问含 TLS 握手，耗时 1-3s 属正常）。
@@ -268,16 +270,16 @@ Expected: `healthz=200`（首次访问含 TLS 握手，耗时 1-3s 属正常）�
 Run: `curl -s https://shanka.kbzz1.top/readyz`
 Expected: 200 + 就绪 JSON（DB + 存储可写 → 证明 data/ 迁移后公网链路全通）。
 
-- [ ] **Step 3: 验证边缘 TLS 证书**
+- [x] **Step 3: 验证边缘 TLS 证书**
 
 Run: `echo | openssl s_client -connect shanka.kbzz1.top:443 -servername shanka.kbzz1.top 2>/dev/null | grep -m1 'CN\|subject='`
 Expected: 显示 Cloudflare 签发的证书（CN 含 shanka.kbzz1.top 或 *.kbzz1.top）。
 
-- [ ] **Step 4: 真机实测并记录延迟**
+- [x] **Step 4: 真机实测并记录延迟**
 
 操作（需用户手机）：Android 手机切**移动网络**（关闭 Wi-Fi），浏览器访问 `https://shanka.kbzz1.top/healthz`，用开发者工具/网络面板或 `curl -w` 记录总耗时。
 
-- [ ] **Step 5: 把实测结果写入 deployment.md 第 7 节**
+- [x] **Step 5: 把实测结果写入 deployment.md 第 7 节**
 
 追加到 `docs/Architecture/deployment.md` 第 7 节（保留原内容）：
 
@@ -288,7 +290,7 @@ Expected: 显示 Cloudflare 签发的证书（CN 含 shanka.kbzz1.top 或 *.kbzz
   - 结论：`<在阶梯 1 可用 / 延迟不可接受需评估阶梯 2>`（按实测填）
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /home/kbzz1/shanka_backend
@@ -308,7 +310,7 @@ git commit -m "docs(deployment): 真机延迟实测记录（阶梯决策输入�
 - Consumes: 全部前序任务的实际决策。
 - Produces: 契约与实际部署一致（防漂移红线）。
 
-- [ ] **Step 1: 更新 deployment.md 第 3 节子域名规划表**
+- [x] **Step 1: 更新 deployment.md 第 3 节子域名规划表**
 
 将表格改为实际值：
 
@@ -318,23 +320,23 @@ git commit -m "docs(deployment): 真机延迟实测记录（阶梯决策输入�
 | dev.api.<domain> | 开发联调(可选,未配置) | 同上或独立端口 |
 ```
 
-- [ ] **Step 2: 统一键名引用（deployment.md 全文）**
+- [x] **Step 2: 统一键名引用（deployment.md 全文）**
 
 把 `TUNNEL_TOKEN` 全部替换为 `CLOUDFLARED_SERVICE_INSTALL_TOKEN`（第 2/4/7/8 节引用处）。
 
-- [ ] **Step 3: 同步 spec 实际值**
+- [x] **Step 3: 同步 spec 实际值**
 
 `docs/superpowers/specs/2026-08-11-cloudflare-tunnel-落地-design.md`：
 - 3.2 表：`TUNNEL_TOKEN` → `CLOUDFLARED_SERVICE_INSTALL_TOKEN`，说明改为「隧道 shanka 服务安装令牌」。
 - 3.5：公共主机名 `shanka.kbzz1.top`（替代 `api.<域名>`）。
 - 3.6：systemd 常驻方式改为 `cloudflared service install`（已确认 WSL2 systemd 开启、cloudflared 2026.1.2 已装）。
 
-- [ ] **Step 4: 验证文档无残留旧值**
+- [x] **Step 4: 验证文档无残留旧值**
 
 Run: `grep -rn 'TUNNEL_TOKEN\|api.<domain>' /home/kbzz1/shanka_backend/docs/Architecture/deployment.md /home/kbzz1/shanka_backend/docs/superpowers/specs/2026-08-11-cloudflare-tunnel-落地-design.md`
 Expected: 无输出（无残留）。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /home/kbzz1/shanka_backend
@@ -346,10 +348,10 @@ git commit -m "docs: 子域名规划与凭据键名同步实际值（shanka.kbzz
 
 ## 验收清单（全部完成后）
 
-- [ ] `scripts/run.sh` 存在、可执行，端口占用自动切换 8001。
-- [ ] 根 `.env` 含 `DATABASE_URL` / `STORAGE_PATH` / `CLOUDFLARED_SERVICE_INSTALL_TOKEN`；权限 600、git 忽略。
-- [ ] `main/data/` 含 `shanka.db` 与 `storage/`；旧路径无残留。
-- [ ] `systemctl status cloudflared` = active；`cloudflared tunnel list` 见隧道 `shanka`。
-- [ ] `curl https://shanka.kbzz1.top/healthz` = 200；`/readyz` = 200。
-- [ ] deployment.md 第 7 节含 2026-08-11 实测记录；子域名表与键名已同步。
-- [ ] 全部提交入库（`.env` 未入 git）。
+- [x] `scripts/run.sh` 存在、可执行，端口占用自动切换 8001。
+- [x] 根 `.env` 含 `DATABASE_URL` / `STORAGE_PATH` / `CLOUDFLARED_SERVICE_INSTALL_TOKEN`；权限 600、git 忽略。
+- [x] `main/data/` 含 `shanka.db` 与 `storage/`；旧路径无残留。
+- [x] `systemctl status cloudflared` = active；`cloudflared tunnel list` 见隧道 `shanka`。
+- [x] `curl https://shanka.kbzz1.top/healthz` = 200；`/readyz` = 200。
+- [x] deployment.md 第 7 节含 2026-08-11 实测记录；子域名表与键名已同步。
+- [x] 全部提交入库（`.env` 未入 git）。
