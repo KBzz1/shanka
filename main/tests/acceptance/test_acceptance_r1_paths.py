@@ -185,7 +185,8 @@ def test_acceptance_ac08_prompt_content_not_logged(
 
     monkeypatch.setattr(logging.getLogger("infra.llm.deepseek"), "disabled", False)
     client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
-    with caplog.at_level(logging.WARNING):
+    # R1 review P2-1：INFO 级捕获——成功路径若以 INFO 记录 prompt 内容也能检出（漏检窗口收窄）
+    with caplog.at_level(logging.INFO):
         result = client.chat(prompt, api_key="sk-test")  # 成功路径（无日志输出）
         assert result["content"] == '{"cards": []}'
         failing = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(failing_handler))
