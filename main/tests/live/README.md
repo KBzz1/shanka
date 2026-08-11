@@ -23,7 +23,9 @@ cd main && conda run -n shanka-backend python -m tests.live.sample_frame --out /
 
 - 读真实 PDF 第 1/2/6 章（名称前缀匹配）→ 章内按固定 seed（20260811）分散取 20 块/章 →
   60 块 JSON；每块含 `chapter_name / start_page / end_page / file_id（占位空串）/ difficulty
-  （easy/medium/hard 循环）/ index / seed`。
+  / index / seed`。
+- 难度按章分配：每章 20 块 = easy 8 + medium 8 + hard 4 → 全局 easy/medium/hard =
+  24/24/12（计划冻结，build_frame 内置分布断言防漂移）。
 - 纯本地文件操作（pypdf 文本层 + 书签），无网络、无 OCR；seed 固定即结果确定。
 - 抽样框在 live 前由主 Agent 审阅固定（task-3 brief Step 2），driver 只消费不修改。
 
@@ -32,7 +34,8 @@ cd main && conda run -n shanka-backend python -m tests.live.sample_frame --out /
 ```bash
 cd main && conda run -n shanka-backend python -m tests.live.driver \
   --frame /tmp/r1-frame.json --db /tmp/r1-live.db --storage /tmp/r1-storage \
-  [--limit N] [--max-cost-yuan 5] [--max-total-yuan 10] [--dry-run]
+  [--limit N] [--max-cost-yuan 5] [--max-total-yuan 10] [--report PATH] [--allow-rerun] \
+  [--dry-run]
 ```
 
 正式链路（driver 单元流程 5 步）：
@@ -55,7 +58,9 @@ cd main && conda run -n shanka-backend python -m tests.live.driver \
 
 ## 输出
 
-- 报告 JSON：`<db>.report.json`（可 `--report` 指定）。每单元含
+- 报告 JSON：默认 `/tmp/r1-live-report.json`（可 `--report` 指定）。单次运行保护
+  （F3）：报告文件已存在 → 拒绝运行并报错退出，须 `--allow-rerun` 显式授权才覆盖
+  （正式样本只运行 1 次，实质修复后才允许重跑）。每单元含
   `task_id / model / fingerprint / fingerprints / tokens{prompt,cache_hit,cache_miss,output}
   / cost_yuan{cache_hit,cache_miss,output,total} / status / failures / duration_ms / wall_ms
   / planned_cards / inserted_cards / replay_ok / batches`；汇总含 `units_succeeded /
@@ -67,8 +72,12 @@ cd main && conda run -n shanka-backend python -m tests.live.driver \
 - 成本：`--max-cost-yuan`（默认 5 元/单元）与 `--max-total-yuan`（默认 10 元累计）——
   每单元后检查（含第 1 单元），超限立即停止并保留真实失败（`stop_reason` 记录
   `max_cost_yuan_exceeded` / `max_total_yuan_exceeded`）。
-- 单元失败（任务未 COMPLETED / 卡 Schema 违约 / 入库计数 ≠ 计划数 / 幂等重放失败）：
-  记为 FAILED 并继续后续单元（真实失败保留）；setup 阶段失败（上传/解析/建组/Key）直接退出。
+- canary（F2）：第 1 单元（index==1）= canary——失败立即停止，`stop_reason` 记录
+  `canary_failed`；其余单元失败（任务未 COMPLETED / 卡 Schema 违约 / 入库计数 ≠ 计划数 /
+  幂等重放失败）只记为 FAILED 并继续后续单元（真实失败保留）。
+- 单次运行保护（F3）：报告文件已存在 → 报错退出，`--allow-rerun` 显式授权才可覆盖
+  （正式样本只运行 1 次）。
+- setup 阶段失败（上传/解析/建组/Key）直接退出。
 - `--limit N`：只执行前 N 个单元（T4 分片执行用）。
 
 ## Key 安全（红线 4）

@@ -15,9 +15,14 @@ LOCAL-DONE 前不触网：默认 dry-run（httpx.MockTransport 注入，全流�
 超限立即停止并保留真实失败（报告 stop_reason）。价格用 estimate_cost_by_kind
 （effective_date = 当日 UTC）。
 
+canary 语义（F2）：第 1 单元（index==1）= canary，失败 → 立即停止，stop_reason =
+canary_failed；其余单元失败 → 记录 FAILED 后继续。单次运行保护（F3）：报告文件
+（--report，默认 /tmp/r1-live-report.json）已存在 → 拒绝运行，须 --allow-rerun 显式授权。
+
 用法：cd main && conda run -n shanka-backend python -m tests.live.driver \
   --frame /tmp/r1-frame.json --db /tmp/r1-live.db --storage /tmp/r1-storage \
-  [--limit N] [--max-cost-yuan 5] [--max-total-yuan 10] [--dry-run|--live]
+  [--limit N] [--max-cost-yuan 5] [--max-total-yuan 10] [--report PATH] [--allow-rerun] \
+  [--dry-run|--live]
 """
 
 import argparse
@@ -60,7 +65,6 @@ _DIFFICULTY_MAP = {"easy": "COMPACT", "medium": "BALANCED", "hard": "EXTENSIVE"}
 _DIFFICULTY_RATIO = {"basic": 0.4, "understanding": 0.4, "application": 0.2}
 _DRY_RUN_KEY = "sk-dry-run-fake-0000"  # 测试假值（与 tests/unit/test_deepseek_adapter.py 同款约定）
 _DRY_RUN_FINGERPRINT = "fp_dry_run_0001"
-_BATCH_CARDS = 3  # dry-run mock 每批合法卡数（= settings.batch_size 默认值）
 
 _TOKEN_KEYS = ("prompt", "cache_hit", "cache_miss", "output")
 
@@ -108,26 +112,35 @@ class RecordingClient:
         self._inner.close()
 
 
-def _dry_run_handler(request: httpx.Request) -> httpx.Response:
-    """dry-run mock transport：每批返回 batch_size 张合法卡 + usage + fingerprint。"""
-    cards = [
-        {"type": "QUESTION", "question": f"dryrun-q{i}", "answer": f"dryrun-a{i}"}
-        for i in range(_BATCH_CARDS)
-    ]
-    return httpx.Response(
-        200,
-        json={
-            "choices": [{"message": {"content": json.dumps({"cards": cards}, ensure_ascii=False)}}],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
-                "prompt_cache_hit_tokens": 2,
-                "prompt_cache_miss_tokens": 8,
+def _make_dry_run_handler(batch_size: int) -> Callable[[httpx.Request], httpx.Response]:
+    """dry-run mock transport 工厂：每批返回 batch_size 张合法卡 + usage + fingerprint。
+
+    M6：卡数从 Settings.batch_size 取（dry-run 入库计数校验与配置解耦，不再依赖模块常量）。
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cards = [
+            {"type": "QUESTION", "question": f"dryrun-q{i}", "answer": f"dryrun-a{i}"}
+            for i in range(batch_size)
+        ]
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps({"cards": cards}, ensure_ascii=False)}}
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_cache_hit_tokens": 2,
+                    "prompt_cache_miss_tokens": 8,
+                },
+                "model": "deepseek-v4-flash",
+                "system_fingerprint": _DRY_RUN_FINGERPRINT,
             },
-            "model": "deepseek-v4-flash",
-            "system_fingerprint": _DRY_RUN_FINGERPRINT,
-        },
-    )
+        )
+
+    return handler
 
 
 def make_unit_client(settings: Settings, api_key: str, *, live: bool) -> RecordingClient:
@@ -136,7 +149,9 @@ def make_unit_client(settings: Settings, api_key: str, *, live: bool) -> Recordi
         inner = DeepSeekClient(settings, api_key=api_key)
     else:
         inner = DeepSeekClient(
-            settings, transport=httpx.MockTransport(_dry_run_handler), api_key=api_key
+            settings,
+            transport=httpx.MockTransport(_make_dry_run_handler(settings.batch_size)),
+            api_key=api_key,
         )
     return RecordingClient(inner)
 
@@ -368,6 +383,12 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
                 json={"api_key": api_key},
                 headers={**headers, "Idempotency-Key": str(uuid.uuid4())},
             )
+            # M5：先查 HTTP 状态码（非 200/201 → 明确错误退出，含 masked Key 说明）
+            if resp.status_code not in (200, 201):
+                raise SystemExit(
+                    f"PUT /api-key 失败: HTTP {resp.status_code}（Key 未保存，仅以掩码 "
+                    f"{masked(api_key)} 呈现，明文未落盘未记录；响应: {resp.text[:300]}）"
+                )
             body = resp.json()
             report["api_key"] = {
                 "saved_via": "http",
@@ -530,6 +551,12 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
             report["units"].append(unit)
             total_cost += float(unit.get("cost_yuan", {}).get("total", 0.0))
 
+            # canary 语义（F2）：第 1 单元（index==1）= canary，失败即停（计划「canary 失败即停」）；
+            # 其余单元失败只记录 FAILED 后继续（真实失败保留在报告里）
+            if unit["status"] == "FAILED" and unit["index"] == 1:
+                stop_reason = "canary_failed"
+                break
+
             # 成本累计检查（canary 后从第 1 单元即检查；超限立即停止，保留真实失败）
             unit_cost = float(unit.get("cost_yuan", {}).get("total", 0.0))
             if unit_cost > args.max_cost_yuan:
@@ -599,7 +626,15 @@ def main() -> None:
     )
     parser.add_argument("--storage", type=Path, required=True, help="PDF 存储目录")
     parser.add_argument(
-        "--report", type=Path, default=None, help="报告 JSON 路径（默认 <db>.report.json）"
+        "--report",
+        type=Path,
+        default=Path("/tmp/r1-live-report.json"),
+        help="报告 JSON 路径（默认 /tmp/r1-live-report.json）",
+    )
+    parser.add_argument(
+        "--allow-rerun",
+        action="store_true",
+        help="允许覆盖已存在的报告文件（正式样本只运行 1 次；仅实质修复后显式授权才重跑）",
     )
     parser.add_argument("--max-cost-yuan", type=float, default=5.0, help="单单元成本上限（元）")
     parser.add_argument("--max-total-yuan", type=float, default=10.0, help="总成本上限（元）")
@@ -617,8 +652,12 @@ def main() -> None:
     args = parser.parse_args()
     if args.live and args.dry_run:
         raise SystemExit("--live 与 --dry-run 互斥")
-    if args.report is None:
-        args.report = str(Path(str(args.db)).with_suffix("")) + ".report.json"
+    # F3：单次运行保护——报告文件已存在 → 拒绝覆盖（正式样本只运行 1 次）
+    if args.report.exists() and not args.allow_rerun:
+        raise SystemExit(
+            f"报告已存在: {args.report}（正式样本只运行 1 次，拒绝覆盖；"
+            f"实质修复后可加 --allow-rerun 显式授权重跑）"
+        )
     run_driver(args)
 
 
