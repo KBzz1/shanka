@@ -13,6 +13,7 @@ AC-06-c 失败保留原卡 → 422 违约时原卡不动（b）+ 错误路径（
 生产缺省 None 构造真实 client）；mock transport 只返回假数据（红线 4）。
 """
 
+import base64
 import json
 import uuid
 from collections.abc import Callable, Iterator
@@ -23,7 +24,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
@@ -90,10 +91,13 @@ def _db_factory(db_path: Path) -> sessionmaker[Session]:
     return create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
 
 
-def _seed_card(db_path: Path, *, device_id: str) -> tuple[str, dict[str, object]]:
+def _seed_card(
+    db_path: Path, *, device_id: str, encrypted_key: str = _ENCRYPTED_TEST_KEY
+) -> tuple[str, dict[str, object]]:
     """devices + 牌组 + 真实加密 Key + GENERATED 卡（QUESTION, version v3）+ REVIEW 态（重写前状态）。
 
     返回 (card_id, before)：before 为原卡可迁移字段快照（「原卡全字段不变」断言基准）。
+    encrypted_key 可注入畸形值（P4b 解密失败路径）。
     """
     factory = _db_factory(db_path)
     with factory() as session:
@@ -102,7 +106,7 @@ def _seed_card(db_path: Path, *, device_id: str) -> tuple[str, dict[str, object]
         session.add(
             ApiKey(
                 device_id=device_id,
-                encrypted_key=_ENCRYPTED_TEST_KEY,
+                encrypted_key=encrypted_key,
                 status="AVAILABLE",
                 masked_key="sk-****",
                 updated_at=_NOW,
@@ -373,3 +377,93 @@ def test_acceptance_ac06_error_path_no_idempotency_record(
     assert resp.json()["front"] == "新问题？改进后"
     assert resp.json()["version"] == "v4"
     assert calls["n"] == 1
+
+
+def test_acceptance_ac06_api_key_not_set_422(
+    ctx: tuple[TestClient, Path, Settings],
+) -> None:
+    """T4 审查 P4a：设备未保存 API Key → POST rewrite → 422 API_KEY_NOT_SET
+    （chat 0 不触网、幂等表无记录、原卡保留）。"""
+    client, db_path, _ = ctx
+    device = _device()
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    with _db_factory(db_path)() as session:
+        session.execute(delete(ApiKey).where(ApiKey.device_id == device["X-Device-ID"]))
+        session.commit()
+    calls: dict[str, int] = {"n": 0}
+    _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
+    headers = {**device, **_idem()}
+
+    resp = client.post(f"/cards/{card_id}/rewrite", json={}, headers=headers)
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "API_KEY_NOT_SET"
+    assert calls["n"] == 0  # Key 解析失败在 chat 之前，不触网
+    with _db_factory(db_path)() as session:
+        card = session.get(Card, card_id)
+        assert card is not None
+        assert card.front == "旧正面"  # 原卡保留
+        assert card.version == "v3"
+    assert (
+        _idem_record(
+            db_path,
+            device_id=device["X-Device-ID"],
+            path=f"/cards/{card_id}/rewrite",
+            key=headers["Idempotency-Key"],
+        )
+        is None
+    )
+
+
+def test_acceptance_ac06_corrupted_encrypted_key_502(
+    ctx: tuple[TestClient, Path, Settings],
+) -> None:
+    """T4 审查 P4b：api_keys 表加密数据损坏（畸形 encrypted_key 解密失败）→
+    502 API_KEY_UNAVAILABLE（chat 0、幂等表无记录）。"""
+    client, db_path, _ = ctx
+    device = _device()
+    corrupt = base64.b64encode(b"\x00" * 12 + b"corrupted-ciphertext").decode("ascii")
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], encrypted_key=corrupt)
+    calls: dict[str, int] = {"n": 0}
+    _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
+    headers = {**device, **_idem()}
+
+    resp = client.post(f"/cards/{card_id}/rewrite", json={}, headers=headers)
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "API_KEY_UNAVAILABLE"
+    assert calls["n"] == 0  # 解密失败在 chat 之前，不触网
+    with _db_factory(db_path)() as session:
+        card = session.get(Card, card_id)
+        assert card is not None
+        assert card.front == "旧正面"  # 原卡保留
+        assert card.version == "v3"
+    assert (
+        _idem_record(
+            db_path,
+            device_id=device["X-Device-ID"],
+            path=f"/cards/{card_id}/rewrite",
+            key=headers["Idempotency-Key"],
+        )
+        is None
+    )
+
+
+def test_acceptance_ac06_cross_device_404(
+    ctx: tuple[TestClient, Path, Settings],
+) -> None:
+    """隔离（HTTP 层确认）：跨设备重写 → 404 CARD_NOT_FOUND（T3 已覆盖 service 层，
+    此处断言 HTTP 错误响应 code；查卡失败在 chat 之前——不暴露存在性）。"""
+    client, db_path, _ = ctx
+    device = _device()
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    calls: dict[str, int] = {"n": 0}
+    _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
+    other = _device()
+
+    resp = client.post(f"/cards/{card_id}/rewrite", json={}, headers={**other, **_idem()})
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "CARD_NOT_FOUND"
+    assert calls["n"] == 0
+    with _db_factory(db_path)() as session:
+        card = session.get(Card, card_id)
+        assert card is not None
+        assert card.version == "v3"  # 原卡无业务残留

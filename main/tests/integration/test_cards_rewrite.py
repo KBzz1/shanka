@@ -379,6 +379,110 @@ def test_rewrite_cross_device_404(session_factory: Callable[[], Session]) -> Non
     assert excinfo.value.code is ErrorCode.CARD_NOT_FOUND
 
 
+def test_rewrite_true_false_response_switches_type(
+    session_factory: Callable[[], Session],
+) -> None:
+    """T3 审查 Minor 1：QUESTION→TRUE_FALSE 类型切换——question/answer 清 None、
+    statement/answer_boolean(int)/explanation 填充、front/back 由 statement/explanation 派生、
+    Rubric 评分正常（statement/explanation 入评）。"""
+    with session_factory() as session:
+        seeded = _seed_card(session)
+        card_id = seeded.card_id
+    response = json.dumps(
+        {
+            "cards": [
+                {
+                    "type": "TRUE_FALSE",
+                    "statement": "珠穆朗玛峰是世界上最高的山峰。",
+                    "answer_boolean": True,
+                    "explanation": "珠穆朗玛峰海拔约 8848 米，超过地球上所有其他山峰，故判断正确。",
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    client, _ = _client_returning(response)
+    with session_factory() as session:
+        rewrite_card(
+            session,
+            device_id=_DEVICE,
+            card_id=card_id,
+            custom_requirements=None,
+            now=_NEW_NOW,
+            settings=_SETTINGS,
+            client_factory=lambda _api_key: client,
+        )
+        session.commit()
+    with session_factory() as session:
+        stored = session.get(Card, card_id)
+        assert stored is not None
+        rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
+        assert rs is not None
+        assert stored.card_type == "TRUE_FALSE"
+        assert stored.question is None  # 类型切换：旧类型字段清 None（不残留）
+        assert stored.answer is None
+        assert stored.statement == "珠穆朗玛峰是世界上最高的山峰。"
+        assert stored.answer_boolean == 1  # 响应 JSON bool → 落库 int
+        assert (
+            stored.explanation == "珠穆朗玛峰海拔约 8848 米，超过地球上所有其他山峰，故判断正确。"
+        )
+        assert stored.front == stored.statement  # front/back 由 statement/explanation 派生
+        assert stored.back == stored.explanation
+        assert stored.version == "v4"
+        # Rubric 评分正常（5 字段非 None 且总分 > 0）
+        assert stored.evidence_score is not None
+        assert stored.correctness_score is not None
+        assert stored.difficulty_score is not None
+        assert stored.learning_value_score is not None
+        assert stored.rubric_total_score is not None
+        assert stored.rubric_total_score > 0
+        # ReviewState 同正常路径原子重置
+        assert rs.state == "NEW"
+        assert rs.difficulty == 1.0
+        assert rs.reps == 0
+
+
+def test_rewrite_multi_card_response_takes_first(
+    session_factory: Callable[[], Session],
+) -> None:
+    """T3 审查 Minor 3：响应多卡取首张——{"cards": [卡A, 卡B]} → 替换内容为卡A（首张），
+    卡B 被忽略（重写单卡语义）。"""
+    with session_factory() as session:
+        seeded = _seed_card(session)
+        card_id = seeded.card_id
+    response = json.dumps(
+        {
+            "cards": [
+                {"type": "QUESTION", "question": "首张问题", "answer": "首张答案"},
+                {"type": "QUESTION", "question": "第二张问题", "answer": "第二张答案"},
+            ]
+        },
+        ensure_ascii=False,
+    )
+    client, _ = _client_returning(response)
+    with session_factory() as session:
+        rewrite_card(
+            session,
+            device_id=_DEVICE,
+            card_id=card_id,
+            custom_requirements=None,
+            now=_NEW_NOW,
+            settings=_SETTINGS,
+            client_factory=lambda _api_key: client,
+        )
+        session.commit()
+    with session_factory() as session:
+        stored = session.get(Card, card_id)
+        assert stored is not None
+        assert stored.front == "首张问题"  # 内容 = 首张
+        assert stored.back == "首张答案"
+        assert stored.question == "首张问题"
+        assert stored.answer == "首张答案"
+        assert stored.front != "第二张问题"  # 卡B 被忽略
+        assert stored.generation_item_id != "gen-old-0000"
+        assert stored.version == "v4"
+
+
 def test_rewrite_next_version_rule() -> None:
     r"""_next_version：^v(\d+)$ → 数字+1；其余（V1 手动卡 ISO 时间戳）→ v2。"""
     from services.cards.rewrite import _next_version
