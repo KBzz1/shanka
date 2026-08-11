@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（V5B 扩展） | 322 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8；四工具命令全绿（mypy 163 files） |
+| 自动化验证 | `DONE`（V6 扩展） | 348 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8 + V6 26；四工具命令全绿（mypy 169 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -223,11 +223,20 @@
 
 ### V6 — 单卡重写闭环
 
-**`TODO`｜依赖：V5B + V2｜覆盖：FR-13、接口 6.7/C-05、AC-06**
+**`DONE`｜依赖：V5B + V2｜覆盖：FR-13、接口 6.7/C-05、AC-06**
 
 同 card_id 原地替换、position 不变、version 递增、新 generation_item_id、Rubric 记录，原子重置 ReviewState；失败不改变内容/排程；来源不出响应。
 
 验收：成功、Schema/LLM 失败、并发、幂等重放/冲突、隔离和 AC-06。
+
+当前证据（2026-08-11，分支 codex/v6 合并回 main，9 commits e24749d..9893b73）：
+- 契约增补（兼容性）：`REWRITE_SCHEMA_INVALID` 422（errors.py 三处 + structure-contract ch7，守卫全等校验）；openapi rewrite 响应表补 400（BadRequest 组件）/502（内联，api-key 先例）——500 全仓不列（全局兜底惯例）。
+- rewrite prompt 资产：`agent_evolution/prompts/v1/rewrite.md`（原卡上下文 + 类型保持 + `{"cards":[单卡]}` 输出契约）+ manifest prompts.rewrite v1 + CHANGELOG（红线 5：asset_versions() 不漂移，仍取 generator）。
+- 用例 `services/cards/rewrite.py`：归属查卡（统一 404）→ Key（无 Key 422 API_KEY_NOT_SET / 解密失败 502 / 上游错误 500，明文仅注入 client）→ chat → 解析/校验（违约 422 REWRITE_SCHEMA_INVALID，原卡零写入）→ 原地替换（card_id/position/source/code/created_at 不变；内容字段更新含类型切换清残留；新 generation_item_id；target_difficulty/knowledge_point_ids 保留；Rubric 5 字段落卡，低分照常替换 AC-06；version 递增 vN→v(N+1)，非 vN（手动卡时间戳）→ v2；updated_at 递增）→ ReviewState 原子重置（NEW/0.0/1.0/due=now/reps=0/lapses=0/last_review=None/last_rating=None）→ flush 不 commit（幂等同事务，handler 接线）。
+- 共享提取：`services/generation/response_parse.py`（parse_cards_json/to_internal_card 自 batches.py 纯移动，批次路径零行为变化——全量回归兜底）；`services/generation/llm_metrics.py`（observe_llm_call 共享，rewrite chat 后上报 8.3 指标——final review I-1 修复）。
+- 路由 `POST /cards/{card_id}/rewrite`（main.py 装配）：V1 create_card 幂等接线同款（execute_idempotent + 同事务 commit；仅 2xx 落幂等记录；同键异 body 409；错误路径不 commit 无残留——T3 Minor 2 集成确认）；client_factory 经 app.state 注入（测试 mock transport，生产 None 构造真实 client）。
+- 验收：四工具全绿（348 passed、mypy 169 files）；AC-06 三条映射（可重写/仅 Schema 通过替换/失败保留）+ 幂等重放（chat 计数=1）/409 + 无 Key 422/解密失败 502/跨设备 404 HTTP 层 + 并发（同卡后写覆盖 v5 无脏读、复习×重写两序终态一致）+ 来源不出响应 + llm 指标断言；干净 DB alembic 迁移 + TestClient rewrite 全链路冒烟（200/v2/ReviewState 重置/healthz）。
+- 登记：R-18（version 递增格式分支：手动卡 ISO 时间戳 → "v2"；MANUAL/IMPORTED 卡重写后 generation_item_id 非空但部分唯一索引仅覆盖 GENERATED——uuid 随机无防重冲突，source 不变语义）；requestBody required:true vs 实现容忍缺省（接受现状——实现接受契约超集，前端不发空 body）；rewrite prompt 占位符 replace 顺序（卡内容含字面 `{back}` 等会被后续 replace 篡改——仅影响 prompt 输入不影响落库，概率极低，登记）。
 
 ### R1 — 本机契约回归、受控真实模型验证与交付
 
@@ -270,6 +279,8 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | R-11 | `RESOLVED` | structure-contract 3.8 Deck.source 为 `MANUAL/IMPORTED/GENERATED`，database-design 2.8 只列 `MANUAL/IMPORTED`——字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明 | V4 收口：任务创建走用户指定 deck_id（TaskCreateRequest），本期无 GENERATED 牌组创建路径；契约 3.8 枚举保留（未来自动归属牌组使用），database-design 2.8 派生遗漏说明已核对（V4-T7） |
 | R-14 | `OPEN` | openapi /samples 响应 items `$ref Card`（required 含 deck_id/position/created_at/updated_at），但样卡不入库、无这些字段 | V4 过渡（V4-T4 fix F-2）：handler 合成占位字段返回（deck_id=""/position=0/created_at/updated_at=请求时刻）；R1 契约修订定义轻量 `SampleCard` 组件（structure-contract 3.6/6.3）消除占位 |
 | R-17 | `ACCEPTED` | SQLite 单写者：batch chat 期间（BEGIN IMMEDIATE 写锁跨长事务，无 busy_timeout）cancel/resume 等写接口 → 500 database-locked；批次间隙 cancel 已修复（I-1 条件更新） | 单写者串行化是本阶段既定架构（database-design 事务边界）；生产 DB（PostgreSQL 等）/多实例时按行级锁自然消失，不引入重试或额外设施；V5B 修复只覆盖可确定路径（批次间隙），chat 期间 500 保持 8.3 统一错误码响应 |
+| R-18 | `ACCEPTED` | version 递增格式分支：V1 手动卡 version=ISO 时间戳，生成卡 version="v1"——重写递增规则统一为 ^v\d+$ → v(n+1)，非 vN 格式 → "v2" | V6 实现（_next_version 单测 5 例）；语义符合 database-design 2.9「变更版本，重写时递增」；R1 契约整理可考虑统一 version 语义（手动卡创建时即 v1），不阻塞 |
+| R-19 | `ACCEPTED` | MANUAL/IMPORTED 卡重写后 generation_item_id 非空，但部分唯一索引仅覆盖 GENERATED（source='GENERATED'）——「同一 generation_item_id 最多对应一张有效卡片」对非 GENERATED 卡无索引兜底 | V6 实现：重写一律分配新 uuid4（PRD 5.13），source 不变；uuid 随机无防重冲突风险；database-design 2.9「仅 GENERATED 卡」描述性说明随重写语义扩展登记 |
 
 新增冲突先登记；解决后保留结论并改 `RESOLVED`。
 
