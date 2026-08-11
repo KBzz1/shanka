@@ -2,9 +2,8 @@
 /.env
 # SDD 工作区（git-ignored scratch，ledger/brief/report/review-package）
 /.superpowers/
-# 运行时产物（F0 起）
-/main/shanka.db*
-/main/storage/
+# 运行时产物（F0 起；Task 3 起集中到 main/data/）
+/main/data/
 __pycache__/
 *.py[cod]
 .pytest_cache/
