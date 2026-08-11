@@ -18,7 +18,8 @@
 - 预估接口豁免幂等键(与 `/samples` 先例一致,契约 1.3);不需要 API Key;不落库、不出 Prometheus 指标(纯计算,spec 3.3 边界)。
 - 请求体字段名为 `chapter_ids`(与 TaskCreateRequest 一致,非 spec 草稿中的 `selected_chapters`)。
 - 知识点口径与 V4 规划完全一致:每章 3 × 密度系数(COMPACT=1/BALANCED=2/EXTENSIVE=3),每知识点一卡(契约 3.5、planning.py 同口径)。
-- 完成后更新 `docs/Progress.md`(Task 4)与 `docs/frontend/handoff/handoff-2026-08-12.md`(Task 5 交接文档收尾)。
+- 完成后更新 `docs/Progress.md`(Task 5)与 `docs/frontend/handoff/handoff-2026-08-12.md`(Task 6 交接文档收尾)。
+- **live 冒烟(Task 4)不进 pytest 套件**:自动化测试保持确定性与零网络(LOCAL-DONE 红线);真实调用只在验收时显式执行,固定 3 次、预算守卫 ¥0.5 封顶,从仓库根 `.env` 加载真实 Key。
 
 ---
 
@@ -497,7 +498,142 @@ cd /home/kbzz1/shanka_backend && git add main/app/api/tasks.py main/tests/integr
 
 ---
 
-### Task 4: Progress.md 更新 + 全量回归
+### Task 4: 价格预估 live 冒烟(轻量真实调用)
+
+> 目的:估算常量是离线校准值(1500/3300),必须用真实 DeepSeek 调用验证其贴近程度——每次验收执行一次,固定 **3 次**真实 chat(单知识点单元,不同难度),预算守卫 ¥0.5 封顶。**不进 pytest 套件**(确定性/零网络红线),本任务是显式验收步骤。
+
+**Files:**
+- Create: `main/scripts/live_estimate_smoke.py`
+
+**Interfaces:**
+- Consumes: `infra.llm.deepseek::DeepSeekClient(settings, api_key=...)`(构造注入,chat 空参)、`infra.llm.prompts::load_asset(section, name)` / `build_generation_prompt(prompt_asset, *, topic, chapter_name, difficulty, custom_requirements, card_schema)`、`services.generation.cost::estimate_cost_by_kind`、`services.generation.token_estimator` 常量(Task 1)
+- Produces: 退出码 0(完成)/2(缺 Key 或预算超限);打印实际 token 均值/金额/偏差对照
+
+- [ ] **Step 1: 写冒烟脚本**
+
+创建 `main/scripts/live_estimate_smoke.py`(脚本位于 main/scripts/,运行时 CWD=main/;仓库根 .env 手动注入——与 scripts/run.sh 的 `source ../.env` 同源):
+
+```python
+"""live_estimate_smoke.py:价格预估轻量冒烟(真实 DeepSeek 调用,每次验收执行一次)。
+
+对照:services/generation/token_estimator.py 估算常量(PROMPT_TOKENS_PER_KP=1500 /
+OUTPUT_TOKENS_PER_KP=3300)。3 个单知识点单元(不同难度)真实 chat,记录 prompt/output
+token,均值对照常量并报告偏差;实际金额对照预估区间(price_low/price_high 同口径)。
+
+纪律:不进 pytest 套件(自动化测试确定性零网络,LOCAL-DONE 红线);固定 3 次调用,
+预算守卫 ¥0.5 封顶(保险丝);从仓库根 .env 加载真实 Key。
+用法:cd main && conda run -n shanka-backend python scripts/live_estimate_smoke.py
+"""
+
+import os
+import sys
+from pathlib import Path
+
+MAIN_DIR = Path(__file__).resolve().parent  # main/
+sys.path.insert(0, str(MAIN_DIR))
+ROOT_ENV = MAIN_DIR.parent / ".env"
+MAX_COST_YUAN = 0.5
+SAMPLES: list[tuple[str, str, str]] = [
+    ("AI Agent 定义与核心能力", "第一章 引言", "BASIC"),
+    ("记忆与反思机制", "第二章 记忆", "UNDERSTANDING"),
+    ("多 Agent 协作与工具调用场景", "第三章 协作", "APPLICATION"),
+]
+
+
+def _load_root_env() -> None:
+    """仓库根 .env(DEEPSEEK_API_KEY)注入环境变量(与 scripts/run.sh 同源)。"""
+    if ROOT_ENV.exists():
+        for line in ROOT_ENV.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+
+
+def main() -> int:
+    _load_root_env()
+    from app.config import Settings
+    from infra.llm.deepseek import DeepSeekClient
+    from infra.llm.prompts import build_generation_prompt, load_asset
+    from services.generation.cost import estimate_cost_by_kind
+    from services.generation.token_estimator import (
+        OUTPUT_TOKENS_PER_KP,
+        PROMPT_TOKENS_PER_KP,
+    )
+
+    settings = Settings()
+    if not settings.deepseek_api_key:
+        print("缺少 DEEPSEEK_API_KEY(仓库根 .env);中止", file=sys.stderr)
+        return 2
+    client = DeepSeekClient(settings, api_key=settings.deepseek_api_key)
+    prompt_asset = load_asset("prompts", "generator")
+    card_schema = load_asset("schemas", "card")
+
+    print("=== 价格预估 live 冒烟(单知识点单元 x3,真实调用)===")
+    total_prompt = 0
+    total_output = 0
+    for topic, chapter, difficulty in SAMPLES:
+        prompt = build_generation_prompt(
+            prompt_asset,
+            topic=topic,
+            chapter_name=chapter,
+            difficulty=difficulty,
+            custom_requirements=None,
+            card_schema=card_schema,
+        )
+        result = client.chat(prompt)  # 明文 Key 构造时注入(executor 同款)
+        usage = result["usage"]
+        hit: int = int(usage.get("prompt_cache_hit_tokens") or 0)
+        miss: int = int(usage.get("prompt_cache_miss_tokens") or 0)
+        out: int = int(usage.get("completion_tokens") or 0)
+        total_prompt += hit + miss
+        total_output += out
+        print(f"{difficulty:<13} prompt={hit + miss:>5}(hit {hit}/miss {miss}) output={out:>5}")
+
+    avg_prompt = total_prompt / len(SAMPLES)
+    avg_output = total_output / len(SAMPLES)
+    # 实际金额:3 次均为新样本首调,保守按全 miss 口径
+    actual = estimate_cost_by_kind(0, total_prompt, total_output, effective_date="2026-08-12")
+    low = estimate_cost_by_kind(total_prompt, 0, total_output, effective_date="2026-08-12")
+    high = estimate_cost_by_kind(0, total_prompt, total_output, effective_date="2026-08-12")
+    print(f"均值 prompt={avg_prompt:.0f}(常量 {PROMPT_TOKENS_PER_KP}) "
+          f"output={avg_output:.0f}(常量 {OUTPUT_TOKENS_PER_KP})")
+    print(f"金额:实际(全 miss)¥{actual['total']:.4f} "
+          f"区间 ¥{low['total']:.4f}~¥{high['total']:.4f}")
+    if actual["total"] > MAX_COST_YUAN:
+        print(f"预算超限 ¥{actual['total']:.4f} > ¥{MAX_COST_YUAN};中止", file=sys.stderr)
+        return 2
+    prompt_drift = (avg_prompt - PROMPT_TOKENS_PER_KP) / PROMPT_TOKENS_PER_KP
+    output_drift = (avg_output - OUTPUT_TOKENS_PER_KP) / OUTPUT_TOKENS_PER_KP
+    print(f"偏差:prompt {prompt_drift:+.1%} output {output_drift:+.1%}")
+    if abs(prompt_drift) > 0.2 or abs(output_drift) > 0.2:
+        print("提示:偏差 >20%,评估是否校准 token_estimator 常量(离线校准,登记后修改)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+- [ ] **Step 2: 静态检查(不执行)**
+
+Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m ruff check scripts/live_estimate_smoke.py && conda run -n shanka-backend python -m mypy scripts/live_estimate_smoke.py`
+Expected: ruff 通过;mypy Success(若 mypy 报类型问题按提示修正——脚本在 main/ 下,mypy . 覆盖)
+
+- [ ] **Step 3: 执行冒烟(真实调用,3 次,预算 <¥0.5)**
+
+Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python scripts/live_estimate_smoke.py`
+Expected: 打印 3 行样本 usage + 均值/金额/偏差;退出码 0。**把输出原文记录到 Task 5 的 Progress R22 小节**(实际均值、偏差 %、金额)。若偏差 >20%:登记观察,不自动改常量(校准闭环:记录后人工决策)。
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /home/kbzz1/shanka_backend && git add main/scripts/live_estimate_smoke.py && git commit -m "feat: 价格预估 live 冒烟脚本(3 次真实调用,预算封顶,对照估算常量)"
+```
+
+---
+
+### Task 5: Progress.md 更新 + 全量回归
 
 **Files:**
 - Modify: `docs/Progress.md`
@@ -514,6 +650,7 @@ cd /home/kbzz1/shanka_backend && git add main/app/api/tasks.py main/tests/integr
 - **能力层**（services/generation/token_estimator.py）：token 用量估算模型——常量挂观测校准闭环（PROMPT_TOKENS_PER_KP=1500 / OUTPUT_TOKENS_PER_KP=3300，2026-08-12 校准自 R1 live 实测 1,427/3,263，向上取整偏保守；custom_requirements 每字符 ≈0.5）；输入映射与 V4 规划同口径（每章 3×密度系数，每知识点一卡）；区间估值复用 cost.py 价格档位公开入口（low=全命中 / high=全未命中，output 固定价），不重复定义价格。
 - **消费点**（POST /v1/tasks/estimate）：`{chapter_ids, generation_config}` → `{knowledge_point_count, estimated_card_count, price_low, price_high, currency}`；复用 validate_config（422）；纯计算、不落库、豁免幂等键、不需要 API Key。
 - **契约**：structure-contract 8.4 能力口径 + 6.4 接口行；openapi /tasks/estimate + CostEstimateRequest/Response 组件；schemas 守卫锚点，三处一致。
+- **live 冒烟**（Task 4 输出原文贴此）：3 次真实调用 prompt 均值 <N> / output 均值 <N>（常量 1500/3300，偏差 ±X%）；实际金额 ¥<N>(全 miss 口径)落在/超出区间 ¥<N>~¥<N>。
 - 验收实测：四工具全绿（<N> passed、mypy <N> files）；<边界用例数> 用例全绿；预估无副作用（任务表零写入）。
 ```
 
@@ -530,7 +667,7 @@ cd /home/kbzz1/shanka_backend && git add docs/Progress.md && git commit -m "docs
 
 ---
 
-### Task 5: 更新前端交接文档(handoff)
+### Task 6: 更新前端交接文档(handoff)
 
 > 收尾义务:价格预估接口上线后,前端交接文档必须同步,否则前端按旧文档对接会漏接新接口。
 
