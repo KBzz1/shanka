@@ -6,7 +6,7 @@ settings + client_factory（mock transport），生产缺省路径不在此验�
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -271,7 +271,7 @@ def test_executor_cancel_between_batches_preserves_cancelled(
         injected = False
 
         def refresh_with_cancel(
-            instance: Task, attribute_names: Any = None, with_for_update: Any = None
+            instance: object, attribute_names: Iterable[str] | None = None, with_for_update: Any = None
         ) -> None:
             nonlocal injected
             # 只匹配 executor 的 session.refresh(task)（批 commit 后）——_claim_next_batch 的
@@ -288,7 +288,7 @@ def test_executor_cancel_between_batches_preserves_cancelled(
                     cancel_session.commit()
             original_refresh(instance, attribute_names, with_for_update)
 
-        session.refresh = refresh_with_cancel
+        session.refresh = refresh_with_cancel  # type: ignore[method-assign]  # 测试注入：包装 refresh 注入批次间隙 cancel
         n = process_running_tasks(session, settings=_SETTINGS, client_factory=lambda _k: client)
         session.commit()  # 调用方最终 commit——旧实现会在此把 CANCELLED 覆盖回 COMPLETED（回归点）
         task = session.get(Task, task_id)
