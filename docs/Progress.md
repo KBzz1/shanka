@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（V4 扩展） | 289 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43；四工具命令全绿（mypy 148 files） |
+| 自动化验证 | `DONE`（V5B 扩展） | 321 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8；四工具命令全绿（mypy 163 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -206,11 +206,19 @@
 
 ### V5B — 任务恢复、取消与并发闭环
 
-**`TODO`｜依赖：V5A｜覆盖：FR-12/18、任务状态机、AC-05**
+**`DONE`｜依赖：V5A｜覆盖：FR-12/18、任务状态机、AC-05**
 
 在 V4 的唯一任务状态机上补 checkpoint/resume/cancel、RUNNING 心跳、30 分钟孤儿恢复和 DB 条件抢占；不建立第二套任务框架，不引入外部队列。
 
 验收：以磁盘 DB/文件存储注入崩溃并创建新 app/session/worker 恢复；并发 worker/resume 单执行者；完成批次和 generation_item_id 不重复；取消保留已入库卡；AC-05 通过。
+
+当前证据（2026-08-11，分支 codex/v5b 合并回 main，5 commits 6de2071..3fb2059 + fix 4d22b53）：
+- 心跳（4.1）：executor 批处理循环内每批后刷新 task.updated_at（SystemClock format_utc）——**批次事务粒度**（每批 commit：批次状态+游标+心跳同事务落库）；崩溃后已完成批次已提交、未完成批次 PENDING/FAILED 可恢复。
+- 批次级条件更新抢占（并发 worker 单执行者）：_claim_next_batch 用 `UPDATE ... WHERE status IN (PENDING, FAILED)`（免疫 identity map 陈旧快照死循环——fix 连带）；rowcount=0 → 下一条；已完成批次天然不可取。
+- 孤儿 RUNNING 恢复（4.1）：resume 条件更新扩展 `(PAUSED AND resumable=1) OR (RUNNING AND updated_at < now-30min)` → RUNNING；rowcount=0 → 409 TASK_STATE_CONFLICT（fresh RUNNING 409 / 过期 200 双侧测试）；orphan_timeout_minutes=30（Settings，handler 传参）。
+- 崩溃恢复（AC-05 四条）：SystemExit 崩溃模拟（批 2 前）→ 批 1 卡保留/游标 1→2/批 1 不重跑（calls 计数）/generation_item_id 不重复（5 卡互异 + duplicate_rate 0.5）；取消保留已入库卡（CANCELLED 终态不重试）。
+- 验收实测：四工具全绿（321 passed、mypy 163 files）；干净 venv 安装 + 迁移 OK；uvicorn 冒烟 healthz 200；边界 36 用例全绿；无明文泄漏。
+- 登记：AC-05 通过；内容级去重观察（AC-05-d 为 ID 级——PRD 语义已按 ID 级实现，DB 部分唯一索引兜底）；SQLite 下 rowcount=0 真实争抢不可构造（服务器 DB 语义验证——未来多实例）。
 
 ### V6 — 单卡重写闭环
 
