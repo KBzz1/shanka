@@ -23,7 +23,7 @@
 ### 3.1 架构
 
 ```text
-Android 前端 ──HTTPS──▶ api.<域名>（Cloudflare 边缘，自动 TLS）
+Android 前端 ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，自动 TLS）
                              │  Tunnel 出站长连接（无公网 IP / 开放端口）
                              ▼
                   cloudflared（WSL2 常驻，systemd）

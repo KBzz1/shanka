@@ -26,7 +26,7 @@ Android 前端 ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，DNS +
 1. 端口检测:启动前检查占用,被占用则换端口并同步 Tunnel 路由;FastAPI 监听端口为配置项(环境变量覆盖)。
 2. Cloudflare Zero Trust → Networks → Tunnels → 创建命名隧道 `shanka`,记录 Tunnel Token。
 3. WSL2 安装 cloudflared:向导无「WSL」选项(WSL 非系统,真实发行版为 Ubuntu),选 **Debian** apt 源即可(官方对 Ubuntu 的指令即用 Debian 源,deb 包 Debian/Ubuntu 通用);apt 源不顺时兜底:直接下载官方二进制 `cloudflared-linux-amd64` 放 `/usr/local/bin/cloudflared`。
-4. WSL2 常驻:`wsl.conf` 加 `[boot] systemd=true`;systemd 服务跑 `cloudflared tunnel run --token $CLOUDFLARED_SERVICE_INSTALL_TOKEN`,EnvironmentFile/包装脚本从根 `.env` 读取;后端由 `scripts/run.sh` 拉起(端口占用检测→换端口并同步 Tunnel 路由)。
+4. WSL2 常驻:`wsl.conf` 加 `[boot] systemd=true`;以 `cloudflared service install` 注册为 systemd 服务(非手写 unit,unit 文件权限加固为 600,令牌来自根 `.env` 的 `CLOUDFLARED_SERVICE_INSTALL_TOKEN`);后端由 `scripts/run.sh` 拉起(端口占用检测→换端口并同步 Tunnel 路由)。
 5. 公共主机名配置:`shanka.kbzz1.top` → `localhost:<port>`。
 6. TLS:边缘自动 HTTPS;回源走 Tunnel 内部加密,不暴露端口。
 7. 可选加固:WAF 自定义规则(限流);`/metrics` 只走 dev 子域名或加 Access。
