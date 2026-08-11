@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（V5B 扩展） | 321 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8；四工具命令全绿（mypy 163 files） |
+| 自动化验证 | `DONE`（V5B 扩展） | 322 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8；四工具命令全绿（mypy 163 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -217,8 +217,9 @@
 - 批次级条件更新抢占（并发 worker 单执行者）：_claim_next_batch 用 `UPDATE ... WHERE status IN (PENDING, FAILED)`（免疫 identity map 陈旧快照死循环——fix 连带）；rowcount=0 → 下一条；已完成批次天然不可取。
 - 孤儿 RUNNING 恢复（4.1）：resume 条件更新扩展 `(PAUSED AND resumable=1) OR (RUNNING AND updated_at < now-30min)` → RUNNING；rowcount=0 → 409 TASK_STATE_CONFLICT（fresh RUNNING 409 / 过期 200 双侧测试）；orphan_timeout_minutes=30（Settings，handler 传参）。
 - 崩溃恢复（AC-05 四条）：SystemExit 崩溃模拟（批 2 前）→ 批 1 卡保留/游标 1→2/批 1 不重跑（calls 计数）/generation_item_id 不重复（5 卡互异 + duplicate_rate 0.5）；取消保留已入库卡（CANCELLED 终态不重试）。
-- 验收实测：四工具全绿（321 passed、mypy 163 files）；干净 venv 安装 + 迁移 OK；uvicorn 冒烟 healthz 200；边界 36 用例全绿；无明文泄漏。
-- 登记：AC-05 通过；内容级去重观察（AC-05-d 为 ID 级——PRD 语义已按 ID 级实现，DB 部分唯一索引兜底）；SQLite 下 rowcount=0 真实争抢不可构造（服务器 DB 语义验证——未来多实例）。
+- 验收实测：四工具全绿（322 passed、mypy 163 files）；干净 venv 安装 + 迁移 OK；uvicorn 冒烟 healthz 200；边界 36 用例全绿；无明文泄漏。
+- 最终整支审查【有条件放行】→ I-1 修复（fix commit 43ff512 + scoped re-review approve）：批次间隙 cancel 不再被静默覆盖——批循环每批 commit 后 `session.refresh(task)`，`status != "RUNNING"` 即 break（停止处理、保留已入库卡）；COMPLETED 改条件更新 `WHERE status='RUNNING'`（rowcount=0 → 不覆盖、不观测）；新测试 `test_executor_cancel_between_batches_preserves_cancelled`（断言 CANCELLED/ended_at 保留、批 2 PENDING 未 claim、chat 停批 1、仅批 1 卡入库）。
+- 登记：AC-05 通过；内容级去重观察（AC-05-d 为 ID 级——PRD 语义已按 ID 级实现，DB 部分唯一索引兜底）；SQLite 下 rowcount=0 真实争抢不可构造（服务器 DB 语义验证——未来多实例）；chat 期间 cancel → 500 database-locked 为 SQLite 单写者固有代价（BEGIN IMMEDIATE 锁跨长事务，无 busy_timeout 重试）——登记 R-17，多实例/生产 DB 议题不阻塞。
 
 ### V6 — 单卡重写闭环
 
@@ -268,6 +269,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | R-10 | `RESOLVED` | 契约 1.3 要求"幂等键相同但请求体与首次不一致 → 409"，但 database-design 2.12 无 body 比对持久化载体 | F1 兼容性契约更新（AGENTS.md 版本管理规则）：database-design §2.12 新增 `request_body_hash` 列（首次请求体 SHA-256 hex）+ 规则段；ORM/增量迁移 0002/守卫三处同步（F1-T8） |
 | R-11 | `RESOLVED` | structure-contract 3.8 Deck.source 为 `MANUAL/IMPORTED/GENERATED`，database-design 2.8 只列 `MANUAL/IMPORTED`——字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明 | V4 收口：任务创建走用户指定 deck_id（TaskCreateRequest），本期无 GENERATED 牌组创建路径；契约 3.8 枚举保留（未来自动归属牌组使用），database-design 2.8 派生遗漏说明已核对（V4-T7） |
 | R-14 | `OPEN` | openapi /samples 响应 items `$ref Card`（required 含 deck_id/position/created_at/updated_at），但样卡不入库、无这些字段 | V4 过渡（V4-T4 fix F-2）：handler 合成占位字段返回（deck_id=""/position=0/created_at/updated_at=请求时刻）；R1 契约修订定义轻量 `SampleCard` 组件（structure-contract 3.6/6.3）消除占位 |
+| R-17 | `ACCEPTED` | SQLite 单写者：batch chat 期间（BEGIN IMMEDIATE 写锁跨长事务，无 busy_timeout）cancel/resume 等写接口 → 500 database-locked；批次间隙 cancel 已修复（I-1 条件更新） | 单写者串行化是本阶段既定架构（database-design 事务边界）；生产 DB（PostgreSQL 等）/多实例时按行级锁自然消失，不引入重试或额外设施；V5B 修复只覆盖可确定路径（批次间隙），chat 期间 500 保持 8.3 统一错误码响应 |
 
 新增冲突先登记；解决后保留结论并改 `RESOLVED`。
 
