@@ -20,7 +20,7 @@
 | 代码/测试目录骨架 | `DONE`（仅空壳） | 分层目录、单行占位模块、tests 目录、pyproject、pre-commit 存在 |
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
-| 自动化验证 | `DONE`（V6 扩展） | 348 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8 + V6 26；四工具命令全绿（mypy 169 files） |
+| 自动化验证 | `DONE`（R1 扩展） | 353 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8 + V6 26 + R1 5；四工具命令全绿（mypy 173 files） |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -240,15 +240,18 @@
 
 ### R1 — 本机契约回归、受控真实模型验证与交付
 
-**`TODO`｜依赖：V1、V2、V3A、V3B、V4、V5A、V5B、V6｜覆盖：PRD 7～10 的后端可本机验证部分、AC-01～11**
+**`DONE`｜依赖：V1、V2、V3A、V3B、V4、V5A、V5B、V6｜覆盖：PRD 7～10 的后端可本机验证部分、AC-01～11**
 
-只做跨闭环收敛，不在此补主体功能。先运行 contract/acceptance，通过 TestClient 或 localhost 核对路径、错误、脱敏、文件/DB 恢复、慢查询和 PRD 8 可本机采样指标，并清除 Mock/硬编码成功路径；全部本机门槛通过后才开放受控 DeepSeek live 验证。Cloudflare Tunnel、TLS 证书和 Android 真机联网仍不在本阶段执行。
-
-验收：四个工具命令及 AC-01～11 中属于后端职责的本机行为全通过；干净本机环境完成锁定安装、启动、迁移和重启恢复；通过 TestClient/localhost 完成 PDF 制卡、牌组、复习、看板、Key、重写及 healthz/readyz/metrics 验证。生产 DeepSeek adapter 必须完成；应用编排使用可控 fake，adapter 使用 mock HTTP transport 验证请求、超时、解析、错误码和脱敏。
-
-live 验证采用“有统计界限的分层独立生成单元”而非全书大跑：从本书第 1、2、6 章各确定 20 个分散文本块，共 60 个 generation unit，easy/medium/hard = 24/24/12；每个单元按正式链路独立执行，单元成功要求其最终响应 Schema 合法且入库、计数、幂等均正确，原始 attempt/retry 另行统计。第一个单元同时作为 canary；失败即停止，成功则继续同一次正式运行，不再增加单独 smoke。
-
-正式样本默认只运行 1 次，只有发生实质修复才允许完整重跑 1 次；每次硬上限 ¥5，总上限 ¥10，达到上限立即停止并保留真实失败。验证配置冻结为 `deepseek-v4-flash`、thinking disabled、JSON output，并记录实际 model、system_fingerprint、token、版本和当日价格配置。若 60/60 generation units 成功，在预先固定样本且近似独立的条件下可报告单侧 95% 失败率上界约 4.9%；若有失败则报告原始比例与精确区间，不得外推为全书或生产质量。人工质量复核从产出卡中按章节和难度分层抽 18 张，只作描述性报告；Rubric 仍只观测、不作为入库门槛。
+当前证据（2026-08-11，分支 codex/r1 合并回 main，10 commits 9ffaa09..65699d8 + live 报告）：
+- **本机门槛 1（契约回归）**：PRD 7-10 后端可本机验证 34 项核对清单（`test_acceptance_r1_paths.py`，32 项既有覆盖 + 2 缺口补：PDF 内容/Prompt 内容不落日志——AC-08 补齐，caplog INFO 级判别）；生产代码 mock 核对：无不允许项（仅 V4 样卡 fake 契约允许 + 测试注入点）。
+- **本机门槛 2（干净环境）**：conda 干净环境 Python 3.12.13 + `requirements-dev.lock` 锁定安装 ✓；alembic 迁移 13 表 ✓；uvicorn 启动 healthz/readyz/metrics 200 ✓；写入 + 幂等重放同 deck_id ✓；杀进程重启数据保留 ✓。
+- **live 设施**：adapter `trust_env=False`（直连绕过本机代理）+ `system_fingerprint` 透传；60 抽样框（seed 20260811，第 1/2/6 章各 20 块，24/24/12）；driver（正式链路 + 成本监控 + canary 即停 + 单次运行保护 + dry-run/live 分离），dry-run 60/60 + 停止条件专项验证。
+- **canary 失败 → 实质修复**：generator prompt v1 输出裸单卡对象与 V5A 解析器 `{"cards":[...]}` 契约断裂（mock 测试掩盖的遗留缺陷）→ **prompts/generator v1→v2**（输出包装 + 每知识点一卡批次语义，manifest/CHANGELOG/4 断言同步，353 passed 全绿）；诊断调用 3 次定位。
+- **live 正式运行（授权重跑 1 次）**：59/60 成功；失败单元 43 为上游系统级抖动（GENERATION_FAILED，批次停留 PROCESSING，非 Schema/我方缺陷）；总成本 **¥1.6351**（上限 ¥5/¥10 未触发）；tokens prompt 85,599（hit 68,224/miss 17,375）+ output 195,774；fingerprint 单一 `fp_a18b46594c_prod0820_fp8_kvcache_20260402`；60/60 幂等重放 ✓；315 卡 generation_item_id 无重复。
+- **统计（R-05 口径）**：失败率 1/60 = 1.67%，Wilson 95% 双侧 [0.29%, 8.86%]（scipy 非依赖用标准库 Wilson，Clopper-Pearson 接近）；完成率 98.3%（对照 8.1 ≥90% ✓）；仅描述固定抽样框 × 冻结模型，不外推。
+- **人工复核 18 张**（难度分层固定 seed）：18/18 无事实错误/前后不匹配；BASIC 定义清晰、UNDERSTANDING 判断题正确、APPLICATION 场景题质量高；2 张英文术语/题干（原文保留）、1 张答案简短——描述性记录。
+- **交付**：`docs/r1-live-report.md`（执行参数/统计/失败详情/复核/边界）；Progress F0-R1 全部 DONE。
+- 登记：R-03 generator v2（v1 裸单卡契约断裂修复）；R-20（live 实证：1/60 上游失败、成本 ¥1.635、fingerprint 冻结）；API_KEY_ENCRYPTION_KEY 未提供（driver 临时密钥，live DB 密文跨进程不可解——已知限制）。
 
 ## 5. 依赖关系与下一步
 
@@ -281,6 +284,8 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | R-17 | `ACCEPTED` | SQLite 单写者：batch chat 期间（BEGIN IMMEDIATE 写锁跨长事务，无 busy_timeout）cancel/resume 等写接口 → 500 database-locked；批次间隙 cancel 已修复（I-1 条件更新） | 单写者串行化是本阶段既定架构（database-design 事务边界）；生产 DB（PostgreSQL 等）/多实例时按行级锁自然消失，不引入重试或额外设施；V5B 修复只覆盖可确定路径（批次间隙），chat 期间 500 保持 8.3 统一错误码响应 |
 | R-18 | `ACCEPTED` | version 递增格式分支：V1 手动卡 version=ISO 时间戳，生成卡 version="v1"——重写递增规则统一为 ^v\d+$ → v(n+1)，非 vN 格式 → "v2" | V6 实现（_next_version 单测 5 例）；语义符合 database-design 2.9「变更版本，重写时递增」；R1 契约整理可考虑统一 version 语义（手动卡创建时即 v1），不阻塞 |
 | R-19 | `ACCEPTED` | MANUAL/IMPORTED 卡重写后 generation_item_id 非空，但部分唯一索引仅覆盖 GENERATED（source='GENERATED'）——「同一 generation_item_id 最多对应一张有效卡片」对非 GENERATED 卡无索引兜底 | V6 实现：重写一律分配新 uuid4（PRD 5.13），source 不变；uuid 随机无防重冲突风险；database-design 2.9「仅 GENERATED 卡」描述性说明随重写语义扩展登记 |
+| R-20 | `RESOLVED` | generator prompt v1 指令「输出一张卡片 JSON」= 裸单卡对象，但 V5A 解析器期望 `{"cards":[...]}` 数组包装——资产与解析契约断裂，mock 测试（返回包装格式）掩盖，live canary 首次 0 卡入库暴露 | R1 实质修复：prompts/generator v1→v2（输出 `{"cards":[...]}` + 规则 4 每知识点一卡批次语义），manifest/CHANGELOG/4 处 prompt_version 断言同步（353 passed）；诊断调用验证单知识点 1 卡、3 知识点 3 卡全合法；live 重跑 59/60 |
+| R-21 | `ACCEPTED` | live 实证记录：正式运行 59/60（单元 43 上游 GENERATION_FAILED 抖动，非我方缺陷）；总成本 ¥1.6351（上限 ¥5/¥10 内）；fingerprint 单一 fp_a18b46594c_prod0820_fp8_kvcache_20260402；API_KEY_ENCRYPTION_KEY 未在 .env 提供（driver 临时密钥，live DB 密文跨进程不可解） | 统计口径 R-05：失败率 1.67% + Wilson 95% [0.29%, 8.86%]，仅描述固定抽样框不外推；加密密钥由部署侧提供（本机运行时限制，不影响验证结论） |
 
 新增冲突先登记；解决后保留结论并改 `RESOLVED`。
 
