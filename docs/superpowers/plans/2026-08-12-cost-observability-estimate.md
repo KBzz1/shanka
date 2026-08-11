@@ -18,7 +18,7 @@
 - 预估接口豁免幂等键(与 `/samples` 先例一致,契约 1.3);不需要 API Key;不落库、不出 Prometheus 指标(纯计算,spec 3.3 边界)。
 - 请求体字段名为 `chapter_ids`(与 TaskCreateRequest 一致,非 spec 草稿中的 `selected_chapters`)。
 - 知识点口径与 V4 规划完全一致:每章 3 × 密度系数(COMPACT=1/BALANCED=2/EXTENSIVE=3),每知识点一卡(契约 3.5、planning.py 同口径)。
-- 完成后更新 `docs/frontend/handoff/handoff-2026-08-12.md` 与 `docs/Progress.md`(Task 4)。
+- 完成后更新 `docs/Progress.md`(Task 4)与 `docs/frontend/handoff/handoff-2026-08-12.md`(Task 5 交接文档收尾)。
 
 ---
 
@@ -497,33 +497,12 @@ cd /home/kbzz1/shanka_backend && git add main/app/api/tasks.py main/tests/integr
 
 ---
 
-### Task 4: 文档联动(handoff + Progress)+ 全量回归
+### Task 4: Progress.md 更新 + 全量回归
 
 **Files:**
-- Modify: `docs/frontend/handoff/handoff-2026-08-12.md`
 - Modify: `docs/Progress.md`
 
-- [ ] **Step 1: handoff-2026-08-12.md 更新**
-
-(a) §1 表格 `Mock AI / staging 测试环境` 行改为:
-
-```markdown
-| Mock AI / staging 测试环境 | ✅ 已关闭 | 方向变更:不做 mock/fake,全量走真实 API Key 联调;前端待办 #5 相应改写(见 §6) |
-```
-
-(b) §4 新增接口表格追加一行:
-
-```markdown
-| `POST /tasks/estimate` | 创建任务前价格预估(区间估值,单位元):请求 `{chapter_ids, generation_config}`;响应 `{knowledge_point_count, estimated_card_count, price_low, price_high, currency}`;纯计算不落库、豁免幂等键、无需 API Key | 豁免 |
-```
-
-(c) §6 前端待办 #5 改写为:
-
-```markdown
-5. **创建任务前价格预估**：调 `POST /tasks/estimate`(传已选章节 + 生成配置)展示「预计 ¥X ~ ¥Y」(price_low/price_high 单位元)；无需真实 Key 即可调用。
-```
-
-- [ ] **Step 2: Progress.md 更新**
+- [ ] **Step 1: Progress.md 更新**
 
 在 `## 4. 依赖驱动工作包` 末尾新增工作包小节(格式参照既有包,含验收实测记录——以 Task 1~3 实际测试输出为准):
 
@@ -546,5 +525,56 @@ Expected: 全部通过。
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /home/kbzz1/shanka_backend && git add docs/frontend/handoff/handoff-2026-08-12.md docs/Progress.md && git commit -m "docs: 价格预估接口对接说明(Mock AI 方向关闭)+ Progress 登记 R22"
+cd /home/kbzz1/shanka_backend && git add docs/Progress.md && git commit -m "docs: Progress 登记 R22(Agent 成本观测能力层 + 任务价格预估)"
+```
+
+---
+
+### Task 5: 更新前端交接文档(handoff)
+
+> 收尾义务:价格预估接口上线后,前端交接文档必须同步,否则前端按旧文档对接会漏接新接口。
+
+**Files:**
+- Modify: `docs/frontend/handoff/handoff-2026-08-12.md`
+
+- [ ] **Step 1: §1 联调状态总览——Mock AI 行关闭**
+
+`docs/frontend/handoff/handoff-2026-08-12.md` §1 表格 `Mock AI / staging 测试环境` 行改为:
+
+```markdown
+| Mock AI / staging 测试环境 | ✅ 已关闭 | 方向变更:不做 mock/fake,全量走真实 API Key 联调;前端待办 #5 相应改写(见 §6) |
+```
+
+- [ ] **Step 2: §4 新增接口表格——追加预估接口**
+
+§4 表格(`PATCH /decks/{deck_id}` 等 4 行之后)追加一行:
+
+```markdown
+| `POST /tasks/estimate` | 创建任务前价格预估(区间估值,单位元):请求 `{chapter_ids, generation_config}`(与创建任务同构子集);响应 `{knowledge_point_count, estimated_card_count, price_low, price_high, currency}`;纯计算不落库、豁免幂等键、无需 API Key | 豁免 |
+```
+
+- [ ] **Step 3: §6 前端待办清单——#5 改写**
+
+§6 前端待办 #5 改为:
+
+```markdown
+5. **创建任务前价格预估**：调 `POST /tasks/estimate`(传已选章节 + 生成配置)展示「预计 ¥X ~ ¥Y」(price_low=全部命中缓存的乐观下限,price_high=全部未命中的保守上限,单位元)；无需真实 Key 即可调用；创建任务前先给用户看到成本区间再确认。
+```
+
+- [ ] **Step 4: 新增 §7 价格预估对接说明**(文档末尾追加)
+
+```markdown
+## 7. 价格预估接口对接说明（2026-08-12 新增）
+
+- **用途**：创建任务前向用户展示预计花费（用户自持 Key，成本敏感）。
+- **语义**：纯计算、不落库、不消耗 Key/余额、豁免幂等键（`/samples` 先例）；`chapter_ids` 只做计数（归属校验在创建任务时）。
+- **区间含义**：`price_low` = 全部 prompt 命中缓存（乐观下限），`price_high` = 全部未命中（保守上限），真实成本落在区间内；`output` 按固定价。
+- **估算依据**：知识点数 = 章节数 × 3 × 密度系数（COMPACT=1/BALANCED=2/EXTENSIVE=3），每知识点一卡；单价常量在后端 `cost.py`（前端不硬编码价格）。
+- **错误**：`chapter_ids` 为空或 `generation_config` 非法 → 422（与创建任务同口径）。
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+cd /home/kbzz1/shanka_backend && git add docs/frontend/handoff/handoff-2026-08-12.md && git commit -m "docs: 前端交接——价格预估接口对接说明 + Mock AI 方向关闭"
 ```
