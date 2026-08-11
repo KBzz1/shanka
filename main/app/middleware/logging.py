@@ -44,6 +44,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             extra={
                 "request_id": getattr(request.state, "request_id", ""),
                 "device_id": getattr(request.state, "device_id", ""),
+                "error_code": getattr(request.state, "error_code", ""),
                 "method": request.method,
                 "path": request.url.path,
                 "status": status,

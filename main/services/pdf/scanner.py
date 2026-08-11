@@ -30,16 +30,31 @@ def validate_upload(
     page_count_hint: int | None,
     settings: Settings,
 ) -> None:
-    """三重校验 + 限制（6.1）：魔数/扩展名/MIME + ≤50MB + ≤500 页。"""
+    """三重校验 + 限制（6.1）：魔数/扩展名/MIME + ≤50MB + ≤500 页。
+
+    失败 message 细分到具体条件（2026-08-11 联调诊断：区分 400 的具体原因，
+    前端按 message/localization_key 提示，日志侧由请求日志 error_code 记录）。
+    """
     ok_ext = filename.lower().endswith(".pdf")
     ok_magic = magic.startswith(b"%PDF")
     ok_mime = content_type.lower() == "application/pdf"
     ok_size = size_bytes <= settings.pdf_max_size_bytes
     ok_pages = page_count_hint is None or page_count_hint <= settings.pdf_max_pages
     if not (ok_ext and ok_magic and ok_mime and ok_size and ok_pages):
-        raise AppError(
-            ErrorCode.PDF_UPLOAD_INVALID, "PDF 文件校验失败（扩展名/魔数/MIME/大小/页数）"
-        )
+        reasons = []
+        if not ok_ext:
+            reasons.append(f"扩展名非 .pdf（{filename!r}）")
+        if not ok_magic:
+            reasons.append("文件头非 %PDF")
+        if not ok_mime:
+            reasons.append(f"MIME 非 application/pdf（{content_type!r}）")
+        if not ok_size:
+            reasons.append(
+                f"超过 {settings.pdf_max_size_bytes // (1024 * 1024)}MB 限制（{size_bytes} bytes）"
+            )
+        if not ok_pages:
+            reasons.append(f"超过 {settings.pdf_max_pages} 页限制")
+        raise AppError(ErrorCode.PDF_UPLOAD_INVALID, "PDF 文件校验失败：" + "；".join(reasons))
 
 
 def process_pending(session: Session, *, storage: Any) -> int:
@@ -74,6 +89,17 @@ def process_pending(session: Session, *, storage: Any) -> int:
         row.status = "PARSED"
         row.error_code = None
     except AppError as exc:
+        # 2026-08-11 联调诊断：解析失败记日志（此前 AppError 路径无日志，前端无法对照）
+        logger.warning(
+            "pdf parse failed",
+            extra={
+                "error_code": exc.code.value,
+                # 不能叫 message：与 JSON formatter 的日志正文字段冲突（G101）
+                "error_message": str(exc),
+                "file_id": row.file_id,
+                "device_id": row.device_id,
+            },
+        )
         row.status = "FAILED"
         row.error_code = exc.code.value
     except Exception:  # noqa: BLE001

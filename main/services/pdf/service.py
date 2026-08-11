@@ -8,11 +8,11 @@
 import logging
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Chapter, PdfFile, Task
+from infra.db.models import Chapter, KnowledgePoint, PdfFile, Task
 from infra.storage.local import LocalStorage
 
 _NON_TERMINAL = ["PENDING", "RUNNING", "PAUSED"]
@@ -123,3 +123,23 @@ def update_chapter(
     if chapter.start_page > chapter.end_page:
         raise AppError(ErrorCode.VALIDATION_ERROR, "章节页码范围非法")
     return chapter
+
+
+def delete_chapter(session: Session, *, device_id: str, file_id: str, chapter_id: str) -> None:
+    """删除章节（structure-contract 6.1，契约 3.6 语义落地）。
+
+    仅 PARSED 后可删（同章节 PATCH 约束）；关联 knowledge_points.chapter_id 应用层
+    置 null（2.6 无 DB FK）；历史任务 selected_chapters 为快照，不受影响。
+    """
+    pdf = _owned_pdf(session, device_id=device_id, file_id=file_id)
+    if pdf.status != "PARSED":
+        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "PDF 尚未解析完成")
+    chapter = session.get(Chapter, chapter_id)
+    if chapter is None or chapter.file_id != file_id:
+        raise AppError(ErrorCode.CHAPTER_NOT_FOUND, "章节不存在")
+    session.execute(
+        update(KnowledgePoint)
+        .where(KnowledgePoint.chapter_id == chapter_id)
+        .values(chapter_id=None)
+    )
+    session.delete(chapter)

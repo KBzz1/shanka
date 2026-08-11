@@ -48,7 +48,7 @@ class _Group:
     output_tokens: int = 0
 
 
-@router.get("/quality-summary")
+@router.get("/quality-summary", response_model=dict[str, object])
 def quality_summary_endpoint(
     request: Request,
     session: Annotated[Session, Depends(get_db_session)],

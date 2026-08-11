@@ -193,14 +193,14 @@ def test_scanner_process_pending_no_toc_fails(
 
 
 def test_scanner_validate_upload_page_count_boundary() -> None:
-    """页数维度边界（T3 审查补覆盖）：=500 通过；501 → PDF_UPLOAD_INVALID；None 跳过。"""
+    """页数维度边界（T3 审查补覆盖）：=1000 通过；1001 → PDF_UPLOAD_INVALID；None 跳过。"""
     settings = Settings()
     validate_upload(
         filename="a.pdf",
         content_type="application/pdf",
         magic=b"%PDF-1.4",
         size_bytes=100,
-        page_count_hint=500,
+        page_count_hint=1000,
         settings=settings,
     )
     with pytest.raises(AppError) as excinfo:
@@ -209,7 +209,7 @@ def test_scanner_validate_upload_page_count_boundary() -> None:
             content_type="application/pdf",
             magic=b"%PDF-1.4",
             size_bytes=100,
-            page_count_hint=501,
+            page_count_hint=1001,
             settings=settings,
         )
     assert excinfo.value.code is ErrorCode.PDF_UPLOAD_INVALID
@@ -225,7 +225,7 @@ def test_scanner_validate_upload_page_count_boundary() -> None:
 
 
 def test_scanner_validate_upload_size_boundary_exact_max() -> None:
-    """大小边界（T3 审查补覆盖）：==50MB 通过（>50MB 已由 triple_check 覆盖）。"""
+    """大小边界（T3 审查补覆盖）：==上限（100MB）通过（超限已由 triple_check 覆盖）。"""
     settings = Settings()
     validate_upload(
         filename="a.pdf",
@@ -287,7 +287,7 @@ def test_scanner_validate_upload_triple_check(tmp_path: Path) -> None:
             filename="a.pdf",
             content_type="application/pdf",
             magic=b"%PDF-1.4",
-            size_bytes=51 * 1024 * 1024,
+            size_bytes=101 * 1024 * 1024,
             page_count_hint=None,
             settings=settings,
         )

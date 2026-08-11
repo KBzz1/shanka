@@ -37,6 +37,17 @@ class CardCreate(BaseModel):
     back: str = Field(min_length=1)
 
 
+class CardUpdateRequest(BaseModel):
+    """编辑卡片（openapi CardUpdateRequest；structure-contract 6.5）。
+
+    内容覆盖 + ReviewState 重置为新卡（2026-08-11 用户决策：与单卡重写同语义，
+    内容已变则旧记忆不适用）；version 递增供缓存刷新。
+    """
+
+    front: str = Field(min_length=1)
+    back: str = Field(min_length=1)
+
+
 class ImportCard(BaseModel):
     front: str = Field(min_length=1)
     back: str = Field(min_length=1)

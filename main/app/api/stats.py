@@ -12,13 +12,14 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.schemas.stats import StatsDashboard
 from infra.db.session import get_db_session
 from services.stats.service import dashboard
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 
 
-@router.get("/dashboard")
+@router.get("/dashboard", response_model=StatsDashboard)
 def dashboard_endpoint(
     request: Request,
     timezone: Annotated[str, Query(description="IANA 时区名称")],

@@ -11,7 +11,7 @@ info:
     列表接口 MVP 暂不分页;幂等重放返回首次成功结果(2xx,含 204)。
 
 servers:
-  - url: https://api.example.com/v1
+  - url: https://shanka.kbzz1.top
 
 security:
   - DeviceIdAuth: []
@@ -126,6 +126,21 @@ paths:
     parameters:
       - $ref: '#/components/parameters/FileId'
       - $ref: '#/components/parameters/ChapterId'
+    delete:
+      tags: [pdf]
+      summary: 删除章节(关联 knowledge_points.chapter_id 置 null;历史任务快照不受影响)
+      operationId: deleteChapter
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     patch:
       tags: [pdf]
       summary: 修改章节名称 / 起始页 / 结束页(PRD 4.1 第 3 步、AC-02)
@@ -418,6 +433,39 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [decks]
+      summary: 牌组改名(version 递增供缓存刷新)
+      operationId: renameDeck
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 64
+      responses:
+        '200':
+          description: 改名后的牌组(含真实进度)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     delete:
       tags: [decks]
       summary: 删除牌组及其卡片、复习状态与统计(重复提交安全返回;存在非终态任务引用时 409 TASK_IN_PROGRESS)
@@ -620,6 +668,60 @@ paths:
           $ref: '#/components/responses/RateLimited'
 
   # ---------- 单卡重写 ----------
+  /cards/{card_id}:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    patch:
+      tags: [decks]
+      summary: 编辑卡片(内容覆盖 + ReviewState 重置为新卡,与重写同语义;version 递增)
+      operationId: updateCard
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [front, back]
+              properties:
+                front:
+                  type: string
+                  minLength: 1
+                back:
+                  type: string
+                  minLength: 1
+      responses:
+        '200':
+          description: 编辑后的卡片
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      tags: [decks]
+      summary: 删除单卡(级联清理 review_states/review_events;重复提交安全返回)
+      operationId: deleteCard
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /cards/{card_id}/rewrite:
     post:
       tags: [decks]
@@ -725,7 +827,7 @@ paths:
 
   /healthz:
     servers:
-      - url: https://api.example.com
+      - url: https://shanka.kbzz1.top
     get:
       summary: 存活探针
       tags: [observability]
@@ -735,7 +837,7 @@ paths:
           description: 进程存活
   /readyz:
     servers:
-      - url: https://api.example.com
+      - url: https://shanka.kbzz1.top
     get:
       summary: 就绪探针
       tags: [observability]

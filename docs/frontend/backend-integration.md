@@ -9,7 +9,7 @@
 | 环境 | Base URL | 说明 |
 | --- | --- | --- |
 | 生产 | `https://shanka.kbzz1.top` | Cloudflare Tunnel 公网入口（自动 HTTPS）；实测移动网络延迟约 306ms，首连含 TLS 握手 1-3s 属正常 |
-| 本地联调 | `http://localhost:8000`（WSL2 内）/ `http://10.0.2.2:8000`（Android 模拟器） | 后端在 WSL2 中运行，启动方式：`/home/kbzz1/shanka_backend/scripts/run.sh` |
+| 本地联调 | `http://localhost:8000`（WSL2 内）/ `http://10.0.2.2:8000`（Android 模拟器） | 后端在 WSL2 中运行，启动方式：`/home/kbzz1/shanka_backend/scripts/run.sh`；8000 被**其他程序**占用时脚本自动换 8001（需同步 Cloudflare Tunnel 回源端口），本应用已在运行时幂等退出不重复启动 |
 
 部署架构（生产）：
 
@@ -20,6 +20,8 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
                     FastAPI（WSL2，端口 8000）
 ```
 
+> ⚠️ **当前路径实现状态（2026-08-11）**：契约按 `/v1/...` 规划路径（openapi `servers` 承担 `/v1` 前缀语义），但后端当前实现只注册**无前缀路由**（`/decks`、`/pdfs` 等，已实测）。**联调与生产当前请用无前缀路径**（`https://shanka.kbzz1.top/decks`）；`/v1` 前缀对齐实现为后续任务，落地后本文档路径恢复准确。
+
 - 全部接口**必须走 HTTPS**（契约 1.7）。
 - 探活：`GET /healthz`（存活）、`GET /readyz`（DB + 存储就绪，失败 503），豁免鉴权，可用于 App 的启动连通性检查。
 
@@ -29,7 +31,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 
 | 头 | 必填 | 说明 |
 | --- | --- | --- |
-| `X-Device-ID` | 所有接口（除 /healthz /readyz /metrics） | 客户端本地生成 **UUID v4** 作为匿名设备 ID，首次使用自动建立数据主体，无注册接口；所有资源按此 ID 隔离 |
+| `X-Device-ID` | 所有接口（除 /healthz /readyz /metrics /openapi.json） | 客户端本地生成 **UUID v4** 作为匿名设备 ID，首次使用自动建立数据主体，无注册接口；所有资源按此 ID 隔离 |
 | `Idempotency-Key` | 所有写操作 | 客户端生成 **UUID v4**；**`POST /v1/samples` 豁免**（样卡无副作用） |
 
 **设备 ID 等同于密码**：泄漏可被永久冒用且无找回途径（契约 1.1）。不要写日志、不要展示。
@@ -82,10 +84,11 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/v1/pdfs` | multipart 上传 PDF（≤50MB、≤500 页），返回 PdfFile（status=PENDING），**异步解析** |
+| POST | `/v1/pdfs` | multipart 上传 PDF（≤100MB、≤1000 页），字段名 **`file`**，返回 PdfFile（status=PENDING），**异步解析** |
 | GET | `/v1/pdfs` | 最近使用的 PDF 列表 |
 | GET | `/v1/pdfs/{file_id}` | 详情 + 章节列表；`PARSING` 时轮询（解析通常秒级完成） |
 | PATCH | `/v1/pdfs/{file_id}/chapters/{chapter_id}` | 修改章节名称/起始页/结束页 |
+| DELETE | `/v1/pdfs/{file_id}/chapters/{chapter_id}` | 删除章节（仅 PARSED 后可删；关联知识点 chapter_id 置空，历史任务快照不受影响） |
 | DELETE | `/v1/pdfs/{file_id}` | 删除；有非终态任务引用时 → `409 TASK_IN_PROGRESS` |
 
 - `PdfFile.status`：`PENDING` → `PARSING` → `PARSED` / `FAILED`；`FAILED` + `error_code`（`PDF_PARSE_FAILED` 文本层失败 / `PDF_TOC_MISSING` 无目录）——**前端应终止流程**，没有 AI 兜底。
@@ -98,6 +101,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | GET | `/v1/api-key/status` | 查询状态；未保存时 `200` + `status=UNKNOWN`、`masked_key=""` |
 
 - 校验结果一律经 `200 + ApiKey.status` 返回：`AVAILABLE` / `INVALID` / `INSUFFICIENT_BALANCE` / `UNKNOWN`（不产生 4xx 错误响应）。
+- **`INVALID` 校验结果不覆盖已保存的有效 Key**（防冒用者替换他人有效 Key）；只有 `AVAILABLE` 才覆盖旧 Key。因此用户输入错误 Key 后查询状态可能仍是 `AVAILABLE`（旧 Key 仍有效）——UI 提示"密钥无效"即可，不要引导重存。
 - 客户端**不得持久化 Key 明文**、UI 不展示完整 Key；Key 只经 HTTPS 上传。
 
 ### 3.3 样卡（FR-05）——生成预览
@@ -106,7 +110,21 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | --- | --- | --- |
 | POST | `/v1/samples` | 生成 3 张样卡（1 基础+1 理解+1 应用；2 问答+1 判断）；**豁免幂等键**，再次调用即重新生成 |
 
-请求体：`{ file_id, chapter_ids[], generation_config }`。样卡不入库、不参与统计；`card_id` 仅预览标识，不保证跨请求稳定。
+请求体：`{ file_id, chapter_ids[], generation_config }`（全必填，`chapter_ids` 至少 1 项）。样卡不入库、不参与统计；`card_id` 仅预览标识，不保证跨请求稳定。
+
+**生成配置 `generation_config`**（样卡与任务共用同一结构）：
+
+```json
+{
+  "quantity_tendency": "BALANCED",
+  "difficulty_ratio": { "basic": 0.4, "understanding": 0.4, "application": 0.2 },
+  "custom_requirements": "多给公式推导步骤"      // 可选，仅当前请求生效
+}
+```
+
+- `quantity_tendency`：`COMPACT`（精简）/ `BALANCED`（均衡）/ `EXTENSIVE`（充分覆盖），同一章节下 COMPACT 规划知识点数 ≤ BALANCED ≤ EXTENSIVE。
+- `difficulty_ratio`：三个键必填、**和为 1**；难度枚举为 `BASIC`（基础记忆）/ `UNDERSTANDING`（理解分析）/ `APPLICATION`（综合应用）。
+- 配置**不继承**：新任务需由客户端本地保存上次配置并显式携带。
 
 ### 3.4 任务（FR-06/07/12）——生成卡片
 
@@ -118,20 +136,40 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | POST | `/v1/tasks/{task_id}/cancel` | 取消（已生成卡片保留） |
 | GET | `/v1/tasks/{task_id}/batches` | 批次列表（联调/质量核验用，含 Rubric、token 用量、成本估算） |
 
+创建任务请求体（四字段全必填，请求中**不携带 API Key**，服务端使用已保存 Key）：
+
+```json
+{
+  "file_id": "<uuid>",
+  "deck_id": "<uuid>",             // 卡片归属牌组（新建或已有）
+  "chapter_ids": ["<uuid>"],
+  "generation_config": { /* 同 3.3 */ }
+}
+```
+
+- 任务 `FAILED`（系统级，仅 API Key 失效/上游持续不可用）时响应含 `failure_stage` + `error_code`（如 `API_KEY_NOT_SET`），前端据此展示失败原因。
+- `generated_card_count` 为已入库卡片数（失败/取消后保留，可继续复用）。
+
 ### 3.5 牌组与卡片（FR-03/14）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/v1/decks` | 牌组列表（含进度摘要：card_count / due_count / mastered / review_count / mastery_ratio） |
 | POST | `/v1/decks` | 新建 `{ name }` |
+| PATCH | `/v1/decks/{deck_id}` | 改名 `{ name }`（1-64 字符）；`version` 递增供缓存刷新；返回含真实进度 |
 | GET | `/v1/decks/{deck_id}` | 详情 + 进度 |
 | DELETE | `/v1/decks/{deck_id}` | 删除牌组及其卡片/复习状态/统计；被非终态任务引用 → 409 |
 | POST | `/v1/decks/{deck_id}/cards` | 手动新增 `{ front, back }` |
 | POST | `/v1/decks/{deck_id}/cards/import` | 批量导入 `{ cards: [{front, back}] }`，原子写入，返回逐张结果 |
+| PATCH | `/v1/cards/{card_id}` | 编辑 `{ front, back }`；**内容覆盖 + 复习状态重置为新卡**（与重写同语义，重新进入学习排程）；`version` 递增 |
+| DELETE | `/v1/cards/{card_id}` | 删除单卡（级联清理复习状态与复习事件） |
 | GET | `/v1/decks/{deck_id}/cards` | 自由刷题：全部卡片（不创建事件、不改排程） |
 
 - MVP 列表不分页，返回全量。
+- 批量导入**原子写入**：任一卡片校验失败 → 整体回滚并返回 `422 IMPORT_PARSE_ERROR`（不会出现部分成功）；全部成功 → `201` + `results: [{ index, status: CREATED, card_id }]` 逐条结果（`index` 对应请求 `cards` 下标）。`FAILED` 枚举为预留形态，当前实现不产生。
+- `Deck.version` / `Card.version` 为变更版本（重写/更新时递增），供客户端做本地缓存刷新判断；`Deck.source`（`MANUAL` / `IMPORTED` / `GENERATED`）与 `Card.source` 可用来区分卡片来源展示。
 - 卡片渲染：**`front` / `back` 为通用渲染字段（所有卡片必有）**；判断题另有结构化字段（`statement` / `answer_boolean` / `explanation`），本期可用 `front`/`back` 直接渲染，结构化字段留待判断题专用视图。
+- 生成卡附带 Rubric 质量分（`evidence_score` / `correctness_score` / `difficulty_score` / `learning_value_score` 各 0~3、`rubric_total_score` 0~12）与 `target_difficulty`——联调/质量核验视图用，普通卡片列表可不展示。
 
 ### 3.6 复习（FR-15）
 
@@ -140,11 +178,17 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | GET | `/v1/decks/{deck_id}/review` | 到期卡片队列（`due <= now`，按 due、position 稳定排序） |
 | POST | `/v1/review-events` | 提交评级（见 5.3），返回更新后的 ReviewState |
 
+- 队列项 = `Card` + 内嵌 `review_state`（ReviewState：`state` / `due` / `stability` / `difficulty` 等）——每张到期卡自带排程快照，前端直接渲染 `front`/`back`，无需额外请求。
+- 自由刷题（`GET /decks/{deck_id}/cards`）返回裸 `Card`（无 `review_state` 内嵌）。
+
 ### 3.7 单卡重写（FR-13）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/v1/cards/{card_id}/rewrite` | 重新生成该卡并**原地替换**（同一 `card_id`，position/列表位置不变）；复习状态重置 |
+
+- 重写失败（如新版本未过 Schema 校验 → `422 REWRITE_SCHEMA_INVALID`）时**原卡及原排程保留**；成功后 `updated_at` / `version` 递增。
+- 重写后 `front`/`back` 已变化，前端按"内容更新"刷新该卡即可，不要重建卡片条目。
 
 ### 3.8 数据看板（FR-16）
 
@@ -153,6 +197,14 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | GET | `/v1/stats/dashboard?timezone=Asia/Shanghai&weekly_goal=50` | 当前自然周看板；`weekly_goal` 为客户端本地保存的目标，可选 |
 
 - 分母为 0 的比率一律返回 `null`（不是 0%）；`has_data=false` 时展示空态。
+
+### 3.9 质量观测（联调/核验用，App 无需实现）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/v1/observability/quality-summary?group_by=model\|pdf\|difficulty&days=30` | 跨任务质量聚合：Rubric 各维平均分、覆盖/重复率、任务完成率、成本估算；按 `group_by` 分组 |
+
+- 按当前 `device_id` 隔离聚合；`/tasks/{task_id}/batches` 为单任务批次明细。App 不依赖此接口。
 
 ## 4. 关键状态机（前端需要理解的部分）
 
@@ -222,14 +274,19 @@ POST /v1/review-events
 | `DEVICE_ID_REQUIRED` / `DEVICE_ID_INVALID` | 401 | 生成/检查 X-Device-ID |
 | `RATE_LIMITED` | 429 | 按 `Retry-After` 等待后重试 |
 | `IDEMPOTENCY_CONFLICT` | 409 | 编码错误（同键不同体），检查重试逻辑 |
-| `PDF_UPLOAD_INVALID` | 400 | 提示文件不合规（非 PDF/损坏/超 50MB/超 500 页） |
+| `PDF_UPLOAD_INVALID` | 400 | 提示文件不合规（非 PDF/损坏/超 100MB/超 1000 页） |
 | `PDF_PARSE_FAILED` / `PDF_TOC_MISSING` | 422 | 提示解析失败/无目录，终止流程 |
 | `API_KEY_NOT_SET` | 422 | 引导用户先保存 API Key |
 | `API_KEY_UNAVAILABLE` | 502 | 上游校验不可用，稍后重试 |
-| `TASK_NOT_FOUND` / `DECK_NOT_FOUND` / `CARD_NOT_FOUND` | 404 | 按 localization_key 展示 |
+| `TASK_NOT_FOUND` / `DECK_NOT_FOUND` / `CARD_NOT_FOUND` / `PDF_NOT_FOUND` / `CHAPTER_NOT_FOUND` | 404 | 按 localization_key 展示 |
 | `TASK_STATE_CONFLICT` / `TASK_NOT_RESUMABLE` | 409 | 刷新任务状态后重试 |
 | `TASK_IN_PROGRESS` | 409 | 删除保护（有生成中的任务引用该资源） |
+| `GENERATION_ITEM_CONFLICT` | 409 | `generation_item_id` 已对应其他卡（罕见，视为编码错误） |
 | `REVIEW_EVENT_CONFLICT` | 409 | 同 client_event_id 但内容不一致（检查重试逻辑） |
+| `REVIEW_EVENT_INVALID` | 400 | 评级非法（rating 不在四档内等） |
+| `IMPORT_PARSE_ERROR` | 422 | 导入内容非法，逐行错误随响应返回（客户端预览阶段拦截为主） |
+| `REWRITE_SCHEMA_INVALID` | 422 | 单卡重写的新版本未过 Schema 校验（原卡保留） |
+| `GENERATION_FAILED` | 500 | 系统级生成失败（任务 FAILED 时展示） |
 | `VALIDATION_ERROR` | 400 | 请求结构/字段非法（含 device_timezone 非 IANA 时区） |
 | `INTERNAL_ERROR` | 500 | 服务端未预期错误，提示稍后重试 |
 
@@ -245,3 +302,5 @@ POST /v1/review-events
 6. **`/favicon.ico` 等非业务路径返回 401**：不在 App 请求范围内，忽略即可。
 7. **Key 脱敏**：响应里永远只有 `sk-****abcd` 形式，不要期待完整 Key 回传。
 8. **本地联调**：模拟器用 `http://10.0.2.2:8000` 访问宿主机 WSL2 后端；真机联调走生产地址。
+9. **批量导入逐行结果**：`results[].status` 逐条判断，`FAILED` 项带 `error`；成功项带 `card_id`。
+10. **接口来源**：`docs/Architecture/openapi.yaml`（机器契约）+ `docs/Architecture/structure-contract.md`（行为契约）为唯一权威，与后端仓库同目录（git main 分支）；生产/本地 `/openapi.json` 已豁免鉴权，可在线拉取校验。

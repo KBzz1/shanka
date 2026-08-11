@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.errors import AppError, ErrorCode
 from infra.db.models import Card, ReviewState
 from services.decks.service import _owned
 
@@ -21,6 +22,48 @@ def _card_id() -> str:
 def _next_position(session: Session, *, deck_id: str) -> int:
     max_pos = session.scalar(select(func.max(Card.position)).where(Card.deck_id == deck_id))
     return (max_pos or 0) + 1
+
+
+def _owned_card(session: Session, *, device_id: str, card_id: str) -> Card:
+    """归属查卡（PATCH/DELETE 单卡用；跨设备统一 404，契约 1.1）。"""
+    card = session.scalar(select(Card).where(Card.card_id == card_id, Card.device_id == device_id))
+    if card is None:
+        raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
+    return card
+
+
+def update_card(
+    session: Session, *, device_id: str, card_id: str, front: str, back: str, now: str
+) -> Card:
+    """编辑卡片（structure-contract 6.5；用户决策 2026-08-11：与重写同语义）。
+
+    内容覆盖 + ReviewState 重置为新卡初始值（内容已变，旧记忆不适用）；
+    version=now（与创建一致，天然递增；兼容 rewrite 的 v 数字转换逻辑）。
+    """
+    card = _owned_card(session, device_id=device_id, card_id=card_id)
+    card.front = front
+    card.back = back
+    card.version = now
+    card.updated_at = now
+    rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
+    if rs is not None:
+        rs.state = "NEW"
+        rs.stability = 0.0
+        rs.difficulty = 1.0
+        rs.due = now
+        rs.reps = 0
+        rs.lapses = 0
+        rs.last_review = None
+        rs.last_rating = None
+        rs.updated_at = now
+    return card
+
+
+def delete_card(session: Session, *, device_id: str, card_id: str) -> None:
+    """删除单卡（structure-contract 6.5）；review_states/review_events 由 FK ON DELETE
+    CASCADE 级联清理（engine 级 PRAGMA foreign_keys=ON）。"""
+    card = _owned_card(session, device_id=device_id, card_id=card_id)
+    session.delete(card)
 
 
 def _insert_card(

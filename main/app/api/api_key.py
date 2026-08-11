@@ -19,7 +19,7 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
-from app.schemas.api_key import ApiKeyPutRequest
+from app.schemas.api_key import ApiKey, ApiKeyPutRequest
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
 from infra.llm.crypto import key_from_settings
@@ -40,7 +40,7 @@ def _require_encryption_key(settings: Settings) -> bytes:
     return key
 
 
-@router.put("")
+@router.put("", response_model=ApiKey)
 def save_api_key_endpoint(
     request: Request,
     payload: ApiKeyPutRequest,
@@ -81,7 +81,7 @@ def save_api_key_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
-@router.get("/status")
+@router.get("/status", response_model=ApiKey)
 def api_key_status_endpoint(
     request: Request,
     session: Annotated[Session, Depends(get_db_session)],

@@ -2,7 +2,7 @@
 
 - 缺失/非法设备 ID → 401 DEVICE_ID_REQUIRED / DEVICE_ID_INVALID（1.4 错误响应）。
 - 首次见到自动建立 devices 行（first_seen_ip/user_agent/last_active_at）。
-- 探针与指标端点（/healthz /readyz /metrics）豁免（8.2/8.3）。
+- 探针、指标与接口文档端点（/healthz /readyz /metrics /openapi.json）豁免（8.2/8.3）。
 - 校验通过后 request.state.device_id 供后续中间件与 handler 使用。
 """
 
@@ -21,7 +21,7 @@ from infra.db.session import format_utc
 
 logger = logging.getLogger(__name__)
 
-_EXEMPT_PATHS = {"/healthz", "/readyz", "/metrics"}
+_EXEMPT_PATHS = {"/healthz", "/readyz", "/metrics", "/openapi.json"}
 
 
 def _validate_device_id(device_id: str) -> bool:

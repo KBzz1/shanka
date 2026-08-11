@@ -94,12 +94,12 @@ def test_pdfs_api_upload_invalid_extension_400(client: TestClient) -> None:
 
 
 def test_pdfs_api_upload_content_length_precheck_400(client: TestClient) -> None:
-    """final review I-1：伪造超大 Content-Length 头（61MB）+ 合法小 body → 400
+    """final review I-1：伪造超大 Content-Length 头（110MB > 100MB 上限）+ 合法小 body → 400
     PDF_UPLOAD_INVALID；BodyCaptureMiddleware 在读 body 前按头预检拒绝（不读 body）。"""
     resp = client.post(
         "/pdfs",
         files={"file": ("big.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**_device(), **_idem(), "Content-Length": "60000000"},
+        headers={**_device(), **_idem(), "Content-Length": "110000000"},
     )
     assert resp.status_code == 400
     body = resp.json()
@@ -219,3 +219,24 @@ def test_pdfs_api_patch_chapter_all_none_400(client: TestClient) -> None:
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_pdfs_api_delete_chapter_204_and_removed(client: TestClient, tmp_path: Path) -> None:
+    """删除章节：204 → 详情 chapters 不含该章；跨设备 404。"""
+    device = _device()
+    assert client.get("/pdfs", headers=device).status_code == 200  # 注册设备行（FK 前置）
+    pdf_id, chapter_id = _seed_parsed_pdf(tmp_path / "pdf_api.db", device["X-Device-ID"])
+    resp = client.delete(f"/pdfs/{pdf_id}/chapters/{chapter_id}", headers={**device, **_idem()})
+    assert resp.status_code == 204, resp.text
+    resp = client.get(f"/pdfs/{pdf_id}", headers=device)
+    assert resp.status_code == 200
+    assert all(c["chapter_id"] != chapter_id for c in resp.json()["chapters"])
+
+
+def test_pdfs_api_delete_chapter_cross_device_404(client: TestClient, tmp_path: Path) -> None:
+    """跨设备删除章节 → 404（统一 404 不暴露存在性）。"""
+    device = _device()
+    assert client.get("/pdfs", headers=device).status_code == 200
+    pdf_id, chapter_id = _seed_parsed_pdf(tmp_path / "pdf_api.db", device["X-Device-ID"])
+    resp = client.delete(f"/pdfs/{pdf_id}/chapters/{chapter_id}", headers={**_device(), **_idem()})
+    assert resp.status_code == 404

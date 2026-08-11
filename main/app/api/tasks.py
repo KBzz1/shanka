@@ -20,6 +20,8 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
+from app.schemas.tasks import Batch as BatchSchema
+from app.schemas.tasks import Task as TaskSchema
 from app.schemas.tasks import TaskCreateRequest
 from infra.clock import SystemClock
 from infra.db.models import Batch
@@ -40,7 +42,7 @@ def _now() -> str:
     return format_utc(SystemClock().now_utc())
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=TaskSchema)
 def create_task_endpoint(
     request: Request,
     payload: TaskCreateRequest,
@@ -76,7 +78,7 @@ def create_task_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
-@router.get("/{task_id}")
+@router.get("/{task_id}", response_model=TaskSchema)
 def get_task_endpoint(
     request: Request,
     task_id: str,
@@ -87,7 +89,7 @@ def get_task_endpoint(
     return JSONResponse(content=task_view(task))
 
 
-@router.get("/{task_id}/batches")
+@router.get("/{task_id}/batches", response_model=dict[str, list[BatchSchema]])
 def list_task_batches_endpoint(
     request: Request,
     task_id: str,
@@ -165,7 +167,7 @@ def _json_dict(raw: str | None) -> dict[str, int] | None:
     return data if isinstance(data, dict) else None
 
 
-@router.post("/{task_id}/resume")
+@router.post("/{task_id}/resume", response_model=TaskSchema)
 def resume_task_endpoint(
     request: Request,
     task_id: str,
@@ -199,7 +201,7 @@ def resume_task_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
-@router.post("/{task_id}/cancel")
+@router.post("/{task_id}/cancel", response_model=TaskSchema)
 def cancel_task_endpoint(
     request: Request,
     task_id: str,

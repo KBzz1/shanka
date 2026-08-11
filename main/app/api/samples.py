@@ -31,7 +31,7 @@ def _to_sample_card(card: dict[str, object]) -> SampleCard:
     )
 
 
-@router.post("")
+@router.post("", response_model=dict[str, list[SampleCard]])
 def generate_samples_endpoint(
     request: Request,
     payload: SampleRequest,

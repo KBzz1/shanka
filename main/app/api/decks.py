@@ -16,10 +16,10 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
-from app.schemas.decks import DeckCreate
+from app.schemas.decks import Deck, DeckCreate, DeckUpdateRequest
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
-from services.decks.service import create_deck, delete_deck, get_deck, list_decks
+from services.decks.service import create_deck, delete_deck, get_deck, list_decks, rename_deck
 
 router = APIRouter(prefix="/decks", tags=["decks"])
 
@@ -28,7 +28,7 @@ def _now() -> str:
     return format_utc(SystemClock().now_utc())
 
 
-@router.get("")
+@router.get("", response_model=dict[str, list[Deck]])
 def list_decks_endpoint(
     request: Request, session: Annotated[Session, Depends(get_db_session)]
 ) -> JSONResponse:
@@ -36,7 +36,7 @@ def list_decks_endpoint(
     return JSONResponse(content={"items": items})
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=Deck)
 def create_deck_endpoint(
     request: Request,
     payload: DeckCreate,
@@ -77,7 +77,7 @@ def create_deck_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
-@router.get("/{deck_id}")
+@router.get("/{deck_id}", response_model=Deck)
 def get_deck_endpoint(
     request: Request,
     deck_id: str,
@@ -85,6 +85,35 @@ def get_deck_endpoint(
 ) -> JSONResponse:
     data = get_deck(session, device_id=request.state.device_id, deck_id=deck_id, now=_now())
     return JSONResponse(content=data)
+
+
+@router.patch("/{deck_id}", response_model=Deck)
+def rename_deck_endpoint(
+    request: Request,
+    deck_id: str,
+    payload: DeckUpdateRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    device_id: str = request.state.device_id
+    key = get_idempotency_key(request)
+    path = f"/decks/{deck_id}"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        rename_deck(session, device_id=device_id, deck_id=deck_id, name=payload.name, now=_now())
+        # 返回真实进度视图（改名可能发生在有卡片的牌组上）
+        return 200, get_deck(session, device_id=device_id, deck_id=deck_id, now=_now())
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        device_id=device_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
 
 
 @router.delete("/{deck_id}", status_code=204)

@@ -81,7 +81,7 @@ def _task_executor_loop(
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
-    setup_logging(settings.log_level)
+    setup_logging(settings.log_level, settings.log_dir)
     engine = create_db_engine(settings.database_url)
     storage = LocalStorage(settings.storage_path)
 

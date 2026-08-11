@@ -10,12 +10,12 @@ router = APIRouter(tags=["observability"])
 logger = logging.getLogger(__name__)
 
 
-@router.get("/healthz", status_code=200)
+@router.get("/healthz", status_code=200, response_model=dict[str, str])
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/readyz")
+@router.get("/readyz", response_model=dict[str, str])
 def readyz(request: Request) -> JSONResponse:
     checks: dict[str, str] = {}
     db_ok = True

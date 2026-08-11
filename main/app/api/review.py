@@ -19,7 +19,7 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
-from app.schemas.review import ReviewEventRequest
+from app.schemas.review import ReviewEventRequest, ReviewQueueItem, ReviewState
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
 from services.review.service import review_queue, submit_review
@@ -31,7 +31,7 @@ def _now() -> str:
     return format_utc(SystemClock().now_utc())
 
 
-@router.get("/decks/{deck_id}/review")
+@router.get("/decks/{deck_id}/review", response_model=dict[str, list[ReviewQueueItem]])
 def get_review_queue_endpoint(
     request: Request,
     deck_id: str,
@@ -41,7 +41,7 @@ def get_review_queue_endpoint(
     return JSONResponse(content={"items": items})
 
 
-@router.post("/review-events")
+@router.post("/review-events", response_model=ReviewState)
 def submit_review_endpoint(
     request: Request,
     payload: ReviewEventRequest,

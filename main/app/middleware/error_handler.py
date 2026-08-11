@@ -20,11 +20,14 @@ logger = logging.getLogger("app.middleware.error_handler")
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
+        # 2026-08-11 联调诊断：错误码写入 request.state，请求日志可记录（此前仅 status）。
+        request.state.error_code = exc.code
         return JSONResponse(status_code=http_status(exc.code), content=exc.to_response())
 
     @app.exception_handler(RequestValidationError)
     def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         # 1.4 错误响应：VALIDATION_ERROR 400；message 不暴露内部细节
+        request.state.error_code = ErrorCode.VALIDATION_ERROR
         err = AppError(
             ErrorCode.VALIDATION_ERROR,
             "请求参数校验失败",

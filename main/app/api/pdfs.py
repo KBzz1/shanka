@@ -6,6 +6,7 @@ storage.save 在 handler 异步部分完成（execute_idempotent 之前）；biz
 路径无 /v1 前缀：/v1 语义由部署层 openapi servers url 承担（与 decks 同理）。
 """
 
+import logging
 from io import BytesIO
 from typing import Annotated, Any
 
@@ -21,13 +22,22 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
+from app.schemas.pdfs import Chapter as ChapterSchema
 from app.schemas.pdfs import ChapterUpdateRequest
+from app.schemas.pdfs import PdfFile as PdfFileSchema
 from infra.clock import SystemClock
 from infra.db.models import Chapter, PdfFile
 from infra.db.session import format_utc, get_db_session
 from infra.storage.local import LocalStorage
 from services.pdf.scanner import validate_upload
-from services.pdf.service import delete_pdf, get_pdf, list_pdfs, update_chapter, upload_pdf
+from services.pdf.service import (
+    delete_chapter,
+    delete_pdf,
+    get_pdf,
+    list_pdfs,
+    update_chapter,
+    upload_pdf,
+)
 
 router = APIRouter(prefix="/pdfs", tags=["pdf"])
 
@@ -65,7 +75,7 @@ def _pdf_view(pdf: PdfFile, chapters: list[dict[str, Any]] | None = None) -> dic
     }
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=PdfFileSchema)
 async def upload_pdf_endpoint(
     request: Request,
     file: Annotated[UploadFile, File()],
@@ -76,6 +86,17 @@ async def upload_pdf_endpoint(
     path = request.url.path
     settings: Settings = request.app.state.settings
     data = await file.read()
+    # 2026-08-11 联调诊断：记录上传特征（不记录 PDF 内容，红线 8.1）
+    logging.getLogger("app.api.pdfs").info(
+        "pdf upload received",
+        extra={
+            "request_id": getattr(request.state, "request_id", ""),
+            "device_id": request.state.device_id,
+            "size_bytes": len(data),
+            "content_type": file.content_type or "",
+            "file_name": file.filename or "",
+        },
+    )
     body_hash = request_body_hash(data)  # multipart 幂等 body 比对：文件内容 hash
     # 校验与存储写入在幂等外（handler 异步部分）：biz 只做 DB 元数据插入
     validate_upload(
@@ -113,7 +134,7 @@ async def upload_pdf_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
-@router.get("")
+@router.get("", response_model=dict[str, list[PdfFileSchema]])
 def list_pdfs_endpoint(
     request: Request, session: Annotated[Session, Depends(get_db_session)]
 ) -> JSONResponse:
@@ -121,7 +142,7 @@ def list_pdfs_endpoint(
     return JSONResponse(content={"items": items})
 
 
-@router.get("/{file_id}")
+@router.get("/{file_id}", response_model=PdfFileSchema)
 def get_pdf_endpoint(
     request: Request,
     file_id: str,
@@ -165,7 +186,36 @@ def delete_pdf_endpoint(
     return Response(status_code=status)
 
 
-@router.patch("/{file_id}/chapters/{chapter_id}")
+@router.delete("/{file_id}/chapters/{chapter_id}", status_code=204)
+def delete_chapter_endpoint(
+    request: Request,
+    file_id: str,
+    chapter_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> Response:
+    """删除章节（structure-contract 6.1）；关联知识点 chapter_id 置 null。"""
+    device_id: str = request.state.device_id
+    key = get_idempotency_key(request)
+    path = f"/pdfs/{file_id}/chapters/{chapter_id}"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        delete_chapter(session, device_id=device_id, file_id=file_id, chapter_id=chapter_id)
+        return 204, {}
+
+    _replayed, status, _body = execute_idempotent(
+        session,
+        device_id=device_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return Response(status_code=status)
+
+
+@router.patch("/{file_id}/chapters/{chapter_id}", response_model=ChapterSchema)
 def patch_chapter_endpoint(
     request: Request,
     file_id: str,

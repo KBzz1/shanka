@@ -19,3 +19,9 @@ class Deck(BaseModel):
 
 class DeckCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
+
+
+class DeckUpdateRequest(BaseModel):
+    """牌组改名（openapi DeckUpdateRequest；structure-contract 6.5）。"""
+
+    name: str = Field(min_length=1, max_length=64)

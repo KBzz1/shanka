@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     version: str = "0.1.0"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
+    log_dir: Path = Path("./data/logs")
     database_url: str = "sqlite:///./shanka.db"
     storage_path: Path = Path("./storage")
     # 限流阈值（structure-contract 1.6；可运维调整，客户端不得硬编码）
@@ -32,8 +33,9 @@ class Settings(BaseSettings):
     rate_limit_samples_per_hour: int = 20
     rate_limit_pdf_per_hour: int = 10
     # PDF 上传限制（structure-contract 6.1；可运维调整）
-    pdf_max_size_bytes: int = 50 * 1024 * 1024
-    pdf_max_pages: int = 500
+    # 100MB 与 Cloudflare 免费版上传上限对齐（2026-08-11 决策：教材扫描件常超 50MB）
+    pdf_max_size_bytes: int = 100 * 1024 * 1024
+    pdf_max_pages: int = 1000
     # PDF 扫描器后台循环间隔（lifespan daemon 线程轮询；测试不依赖，显式 scan_once）
     pdf_scan_interval_seconds: float = 1.0
     # 任务执行器后台循环间隔（lifespan daemon 线程轮询；测试不依赖，显式 scan_once）

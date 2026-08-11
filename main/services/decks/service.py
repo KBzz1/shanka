@@ -31,6 +31,15 @@ def create_deck(session: Session, *, device_id: str, name: str, now: str) -> Dec
     return deck
 
 
+def rename_deck(session: Session, *, device_id: str, deck_id: str, name: str, now: str) -> Deck:
+    """牌组改名（structure-contract 6.5）：version 递增供客户端缓存刷新。"""
+    deck = _owned(session, device_id=device_id, deck_id=deck_id)
+    deck.name = name
+    deck.version = now
+    deck.updated_at = now
+    return deck
+
+
 def _owned(session: Session, *, device_id: str, deck_id: str) -> Deck:
     deck = session.get(Deck, deck_id)
     if deck is None or deck.device_id != device_id:

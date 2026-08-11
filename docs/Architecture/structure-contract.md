@@ -309,7 +309,8 @@ PENDING → RUNNING ⇄ PAUSED → COMPLETED
    └─────────┴─────────┴──→ FAILED(系统级不可恢复)
 ```
 
-- `RUNNING ⇄ PAUSED`:中断 / 继续任务(PRD 4.3、FR-12)。恢复时仅处理未完成批次;`PAUSED → RUNNING` 为原子状态转移(条件更新 `status='PAUSED' AND resumable=1`),并发 resume 失败者返回 `409 TASK_STATE_CONFLICT`。
+- `RUNNING ⇄ PAUSED`:**PAUSED 为预留状态**——PRD 5.12 仅定义任务恢复，当前无 `pause` 端点与实现写入路径（实际只会出现 PENDING/RUNNING/COMPLETED/CANCELLED/FAILED）；前端「暂停生成」按钮为本地展示状态，不改变服务端 RUNNING。未来补暂停功能时按本状态机实现（`PAUSED → RUNNING` 原子转移 + `resumable` 抢占）。
+- 恢复(resume)时仅处理未完成批次;并发 resume 失败者返回 `409 TASK_STATE_CONFLICT`。
 - **孤儿 RUNNING 恢复**:worker 崩溃可能使任务滞留 `RUNNING`;`RUNNING` 带心跳(每批完成后更新 `updated_at`),心跳超时(30 分钟)后任务视为可恢复,允许 resume 抢占(条件更新 `status='RUNNING' AND updated_at < now-30min`)。
 - `FAILED`:仅系统级不可恢复错误(如 API Key 失效、上游持续不可用);保留已入库结果。批次级失败(Schema 重试达上限)不置 `FAILED` —— 该批 `SKIPPED`,任务继续处理其余批次(见 4.2)。
 - `CANCELLED`:用户取消,已入库卡片保留。
@@ -403,9 +404,10 @@ Scheduler(
 | GET | `/v1/pdfs` | 最近使用的 PDF 列表 | - |
 | GET | `/v1/pdfs/{file_id}` | 详情 + 章节列表;`PARSING` 时轮询 | - |
 | PATCH | `/v1/pdfs/{file_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页(PRD 4.1 第 3 步、AC-02;审核修复) | ✓ |
+| DELETE | `/v1/pdfs/{file_id}/chapters/{chapter_id}` | 删除章节(关联 `knowledge_points.chapter_id` 置 null,3.6;历史任务 `selected_chapters` 快照不受影响;仅 PARSED 后可删) | ✓ |
 | DELETE | `/v1/pdfs/{file_id}` | 删除文件元数据;存在非终态任务引用时返回 `409 TASK_IN_PROGRESS` | ✓ |
 
-上传限制:≤ 50MB、≤ 500 页;校验:文件魔数 + 扩展名 + MIME 三重检查,不合规 → `400 PDF_UPLOAD_INVALID`(审核修复,防解析 DoS)。
+上传限制:≤ 100MB、≤ 1000 页(2026-08-11 决策:与 CF 免费版上传上限对齐,教材扫描件常超 50MB);校验:文件魔数 + 扩展名 + MIME 三重检查,不合规 → `400 PDF_UPLOAD_INVALID`(审核修复,防解析 DoS)。
 
 ### 6.2 API Key(FR-17)
 
@@ -439,6 +441,7 @@ Scheduler(
 | --- | --- | --- | --- |
 | GET | `/v1/decks` | 牌组列表(含进度摘要) | - |
 | POST | `/v1/decks` | 新建牌组 `{ name }` | ✓ |
+| PATCH | `/v1/decks/{deck_id}` | 牌组改名 `{ name }`;`version` 递增供缓存刷新;返回含真实进度 | ✓ |
 | GET | `/v1/decks/{deck_id}` | 详情 + 进度(card_count / due_count / mastered / review_count / mastery_ratio) | - |
 | DELETE | `/v1/decks/{deck_id}` | 删除牌组及其卡片、复习状态与统计;重复提交安全返回;存在非终态任务引用时返回 `409 TASK_IN_PROGRESS` | ✓ |
 
@@ -446,8 +449,10 @@ Scheduler(
 列表接口 MVP 暂不分页:`GET /v1/decks` 与 `GET /v1/decks/{deck_id}/cards` 返回全量;单牌组卡片量超 1000 张后再引入分页。
 | POST | `/v1/decks/{deck_id}/cards` | 手动新增卡片 `{ front, back }`,分配 position | ✓ |
 | POST | `/v1/decks/{deck_id}/cards/import` | 批量导入 `{ cards: [{ front, back }] }`,原子写入,返回逐张结果 | ✓ |
+| PATCH | `/v1/cards/{card_id}` | 编辑卡片 `{ front, back }`(2026-08-11 决策:内容覆盖 + **ReviewState 重置为新卡**,与重写同语义;`version` 递增) | ✓ |
+| DELETE | `/v1/cards/{card_id}` | 删除单卡(级联清理 review_states / review_events;重复提交安全返回) | ✓ |
 
-导入规则:客户端负责文本解析与预览编辑;服务端仅接收最终确认列表;无法识别的行由客户端在预览阶段拦截(PRD 5.14)。
+导入规则:客户端负责文本解析与预览编辑;服务端仅接收最终确认列表;无法识别的行由客户端在预览阶段拦截(PRD 5.14)。失败整体回滚(`422 IMPORT_PARSE_ERROR`),不产生部分成功;`results` 仅在全成功时返回逐条 `CREATED` 结果,`FAILED` 枚举为预留形态(当前实现不产生)。
 
 ### 6.6 复习(FR-15)
 
@@ -494,7 +499,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 
 - 隔离口径：按当前 `device_id` 聚合（与业务数据同隔离）；跨设备聚合留给未来运营后台。
 - 成本汇总（O-6）：按"价格配置常量"换算 `cache_hit_tokens` / `cache_miss_tokens` / `output_tokens` 为估算金额，hit/miss/output 分开计价；价格常量取 DeepSeek 官方定价、标注生效日期，不固化进 DB。
-- `/healthz`（存活）、`/readyz`（就绪:DB 连接 + 存储可写，失败 503）、`/metrics`（Prometheus 文本）为运行观测基础端点，**豁免 X-Device-ID 鉴权**（探针/采集器无设备上下文）。
+- `/healthz`（存活）、`/readyz`（就绪:DB 连接 + 存储可写，失败 503）、`/metrics`（Prometheus 文本）、`/openapi.json`（接口文档，前端对接在线拉取）为运行观测基础端点，**豁免 X-Device-ID 鉴权**（探针/采集器无设备上下文）。
 
 ## 7. 错误码表
 
@@ -506,10 +511,11 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | | `INTERNAL_ERROR` | 500 | 未预期错误(内部细节仅进日志) |
 | 设备 | `DEVICE_ID_REQUIRED` | 401 | 缺 X-Device-ID |
 | | `DEVICE_ID_INVALID` | 401 | 设备 ID 格式非法 |
-| PDF | `PDF_UPLOAD_INVALID` | 400 | 非 PDF / 损坏 / 超限(50MB / 500 页) |
+| PDF | `PDF_UPLOAD_INVALID` | 400 | 非 PDF / 损坏 / 超限(100MB / 1000 页) |
 | | `PDF_PARSE_FAILED` | 422 | 文本层解析失败 |
 | | `PDF_TOC_MISSING` | 422 | 无可用目录结构(终止流程) |
 | | `PDF_NOT_FOUND` | 404 | 不存在或非本设备(统一 404,不暴露存在性) |
+| | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本设备(统一 404) |
 | API Key | `API_KEY_UNAVAILABLE` | 502 | 上游校验不可用,可重试 |
 | | `API_KEY_NOT_SET` | 422 | 样卡 / 任务启动时未保存 Key |
 | 任务 | `TASK_NOT_FOUND` | 404 | |
@@ -538,7 +544,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 
 ### 8.2 健康检查（O-2）
 
-`GET /healthz` 存活探针;`GET /readyz` 就绪探针(DB 连接 + 存储可写,失败 503);豁免 X-Device-ID 鉴权。
+`GET /healthz` 存活探针;`GET /readyz` 就绪探针(DB 连接 + 存储可写,失败 503);`GET /openapi.json` 接口文档;豁免 X-Device-ID 鉴权。
 
 ### 8.3 指标（O-3）
 

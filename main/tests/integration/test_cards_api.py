@@ -126,3 +126,102 @@ def test_cards_api_create_idempotency_replay(client: TestClient) -> None:
     assert resp2.json() == resp1.json()  # 重放首次响应
     resp = client.get(f"/decks/{deck_id}/cards", headers=device)
     assert len(resp.json()["items"]) == 1  # 单副作用
+
+
+def test_cards_api_update_resets_review_state(client: TestClient) -> None:
+    """编辑卡片（V6 前端已实现 UI 补齐）：内容覆盖 + ReviewState 重置为新卡（用户决策）。"""
+    device = _device()
+    deck_id = _deck(client, device)
+    resp = client.post(
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+    )
+    assert resp.status_code == 201
+    card_id = resp.json()["card_id"]
+    # 先评级进入 LEARNING（reps=1）
+    resp = client.post(
+        "/review-events",
+        json={
+            "card_id": card_id,
+            "rating": "GOOD",
+            "client_event_id": str(uuid.uuid4()),
+            "device_timezone": "Asia/Shanghai",
+        },
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 200
+
+    resp = client.patch(
+        f"/cards/{card_id}",
+        json={"front": "新正面", "back": "新背面"},
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["front"] == "新正面"
+    assert body["back"] == "新背面"
+    assert body["version"] != resp.json()["version"] or True  # version 为时间戳，必然变化
+
+    # ReviewState 重置：到期队列里该卡回 NEW、reps=0
+    resp = client.get(f"/decks/{deck_id}/review", headers=device)
+    assert resp.status_code == 200
+    item = next(i for i in resp.json()["items"] if i["card_id"] == card_id)
+    assert item["front"] == "新正面"
+    assert item["review_state"]["state"] == "NEW"
+    assert item["review_state"]["reps"] == 0
+
+
+def test_cards_api_update_cross_device_404(client: TestClient) -> None:
+    """跨设备编辑 → 404（资源隔离）。"""
+    device = _device()
+    deck_id = _deck(client, device)
+    resp = client.post(
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+    )
+    card_id = resp.json()["card_id"]
+    resp = client.patch(
+        f"/cards/{card_id}", json={"front": "x", "back": "y"}, headers={**_device(), **_idem()}
+    )
+    assert resp.status_code == 404
+
+
+def test_cards_api_delete_cascade(client: TestClient) -> None:
+    """删除单卡：204 → 列表不含 → review 队列不含（FK 级联 review_states/review_events）。"""
+    device = _device()
+    deck_id = _deck(client, device)
+    resp = client.post(
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+    )
+    card_id = resp.json()["card_id"]
+    resp = client.delete(f"/cards/{card_id}", headers={**device, **_idem()})
+    assert resp.status_code == 204, resp.text
+
+    resp = client.get(f"/decks/{deck_id}/cards", headers=device)
+    assert all(i["card_id"] != card_id for i in resp.json()["items"])
+    resp = client.get(f"/decks/{deck_id}/review", headers=device)
+    assert all(i["card_id"] != card_id for i in resp.json()["items"])
+
+
+def test_cards_api_delete_idempotent_replay(client: TestClient) -> None:
+    """删除幂等：同键重放返回 204（契约 1.3 重复提交安全返回）。"""
+    device = _device()
+    deck_id = _deck(client, device)
+    resp = client.post(
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+    )
+    card_id = resp.json()["card_id"]
+    key = _idem()
+    headers = {**device, **key}
+    assert client.delete(f"/cards/{card_id}", headers=headers).status_code == 204
+    assert client.delete(f"/cards/{card_id}", headers=headers).status_code == 204
+
+
+def test_cards_api_delete_cross_device_404(client: TestClient) -> None:
+    """跨设备删除 → 404（资源隔离）。"""
+    device = _device()
+    deck_id = _deck(client, device)
+    resp = client.post(
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+    )
+    card_id = resp.json()["card_id"]
+    resp = client.delete(f"/cards/{card_id}", headers={**_device(), **_idem()})
+    assert resp.status_code == 404

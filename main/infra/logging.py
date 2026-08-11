@@ -8,7 +8,9 @@ duration_ms）以扁平键输出。敏感红线（1.5/7.1）：API Key、完整 
 
 import json
 import logging
+import logging.handlers
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from infra.db.session import format_utc
@@ -37,10 +39,25 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(data, ensure_ascii=False)
 
 
-def setup_logging(level: str = "INFO") -> None:
-    handler = logging.StreamHandler()
-    handler.setFormatter(JSONFormatter())
+def setup_logging(level: str = "INFO", log_dir: Path | None = None) -> None:
+    """装配根 logger：stderr（默认）+ 可选滚动文件落盘（log_dir/app.log）。
+
+    落盘失败（如只读环境）静默降级 stderr，不阻断启动；日志内容遵守契约 8.1
+    红线（不记录请求体、API Key、PDF 内容）。
+    """
     root = logging.getLogger()
     root.handlers.clear()
-    root.addHandler(handler)
+    stream = logging.StreamHandler()
+    stream.setFormatter(JSONFormatter())
+    root.addHandler(stream)
+    if log_dir is not None:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_dir / "app.log", maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+            )
+            file_handler.setFormatter(JSONFormatter())
+            root.addHandler(file_handler)
+        except OSError:
+            pass  # 日志落盘失败不阻断启动（降级 stderr）
     root.setLevel(level.upper())

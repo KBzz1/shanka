@@ -199,3 +199,35 @@ def test_decks_api_delete_failed_retry_same_key_still_404(
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
     assert _idempotency_rows(tmp_path / "api.db") == 0  # 失败不落库，无重放路径
+
+
+def test_decks_api_rename_and_idempotent_replay(client: TestClient) -> None:
+    """牌组改名（V6 前端已实现 UI 补齐）：200 + version 递增；同键重放返回首次结果。"""
+    device = _device()
+    deck_id = _create_deck(client, device)
+    resp = client.get(f"/decks/{deck_id}", headers=device)
+    old_version = resp.json()["version"]
+
+    key = _idem()
+    headers = {**device, **key}
+    first = client.patch(f"/decks/{deck_id}", json={"name": "新名字"}, headers=headers)
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["name"] == "新名字"
+    assert body["version"] != old_version  # 缓存刷新信号
+
+    replay = client.patch(f"/decks/{deck_id}", json={"name": "新名字"}, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json() == body  # 重放返回首次响应
+
+    # 空名 → 400 VALIDATION_ERROR（契约第 7 章）
+    resp = client.patch(f"/decks/{deck_id}", json={"name": ""}, headers={**device, **_idem()})
+    assert resp.status_code == 400
+
+
+def test_decks_api_rename_cross_device_404(client: TestClient) -> None:
+    """跨设备改名 → 404（资源隔离，契约 1.1）。"""
+    device = _device()
+    deck_id = _create_deck(client, device)
+    resp = client.patch(f"/decks/{deck_id}", json={"name": "x"}, headers={**_device(), **_idem()})
+    assert resp.status_code == 404

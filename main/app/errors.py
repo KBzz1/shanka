@@ -24,6 +24,7 @@ class ErrorCode(StrEnum):
     PDF_PARSE_FAILED = "PDF_PARSE_FAILED"
     PDF_TOC_MISSING = "PDF_TOC_MISSING"
     PDF_NOT_FOUND = "PDF_NOT_FOUND"
+    CHAPTER_NOT_FOUND = "CHAPTER_NOT_FOUND"
     # API Key
     API_KEY_UNAVAILABLE = "API_KEY_UNAVAILABLE"
     API_KEY_NOT_SET = "API_KEY_NOT_SET"
@@ -55,6 +56,7 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.PDF_PARSE_FAILED: 422,
     ErrorCode.PDF_TOC_MISSING: 422,
     ErrorCode.PDF_NOT_FOUND: 404,
+    ErrorCode.CHAPTER_NOT_FOUND: 404,
     ErrorCode.API_KEY_UNAVAILABLE: 502,
     ErrorCode.API_KEY_NOT_SET: 422,
     ErrorCode.TASK_NOT_FOUND: 404,
@@ -84,6 +86,7 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.pdf_parse_failed",
         "error.pdf_toc_missing",
         "error.pdf_not_found",
+        "error.chapter_not_found",
         "error.api_key_unavailable",
         "error.api_key_not_set",
         "error.task_not_found",

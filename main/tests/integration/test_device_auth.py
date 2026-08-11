@@ -67,5 +67,7 @@ def test_device_auth_first_seen_registers_device_row(tmp_path: Path) -> None:
 def test_device_auth_probes_exempt(tmp_path: Path) -> None:
     with _new_client(tmp_path) as client:
         assert client.get("/healthz").status_code == 200
-        resp = client.get("/readyz")
+        assert client.get("/readyz").status_code == 200
+        # 接口文档豁免（无设备上下文可在线拉取，前端对接用）
+        resp = client.get("/openapi.json")
     assert resp.status_code == 200

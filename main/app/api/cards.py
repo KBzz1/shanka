@@ -8,7 +8,7 @@ rewrite 请求体同为内联 object（custom_requirements 可空，非 str → 
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -18,11 +18,18 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
-from app.schemas.cards import CardCreate, ImportResponse, ImportResult
+from app.schemas.cards import Card, CardCreate, CardUpdateRequest, ImportResponse, ImportResult
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
 from services.cards.rewrite import rewrite_card
-from services.cards.service import card_view, create_card, import_cards, list_cards
+from services.cards.service import (
+    card_view,
+    create_card,
+    delete_card,
+    import_cards,
+    list_cards,
+    update_card,
+)
 
 router = APIRouter(prefix="/decks/{deck_id}/cards", tags=["decks"])
 router_rewrite = APIRouter(prefix="/cards", tags=["decks"])
@@ -32,7 +39,7 @@ def _now() -> str:
     return format_utc(SystemClock().now_utc())
 
 
-@router.get("")
+@router.get("", response_model=dict[str, list[Card]])
 def list_cards_endpoint(
     request: Request,
     deck_id: str,
@@ -42,7 +49,7 @@ def list_cards_endpoint(
     return JSONResponse(content={"items": [card_view(c) for c in cards]})
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=Card)
 def create_card_endpoint(
     request: Request,
     deck_id: str,
@@ -77,7 +84,7 @@ def create_card_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
-@router.post("/import", status_code=201)
+@router.post("/import", status_code=201, response_model=ImportResponse)
 def import_cards_endpoint(
     request: Request,
     deck_id: str,
@@ -119,7 +126,71 @@ def import_cards_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
-@router_rewrite.post("/{card_id}/rewrite")
+@router_rewrite.patch("/{card_id}", response_model=Card)
+def update_card_endpoint(
+    request: Request,
+    card_id: str,
+    payload: CardUpdateRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """编辑卡片（structure-contract 6.5）：内容覆盖 + ReviewState 重置为新卡。"""
+    device_id: str = request.state.device_id
+    key = get_idempotency_key(request)
+    path = f"/cards/{card_id}"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        card = update_card(
+            session,
+            device_id=device_id,
+            card_id=card_id,
+            front=payload.front,
+            back=payload.back,
+            now=_now(),
+        )
+        return 200, card_view(card)
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        device_id=device_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router_rewrite.delete("/{card_id}", status_code=204)
+def delete_card_endpoint(
+    request: Request,
+    card_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> Response:
+    """删除单卡（structure-contract 6.5）；级联 review_states/review_events。"""
+    device_id: str = request.state.device_id
+    key = get_idempotency_key(request)
+    path = f"/cards/{card_id}"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        delete_card(session, device_id=device_id, card_id=card_id)
+        return 204, {}
+
+    _replayed, status, _body = execute_idempotent(
+        session,
+        device_id=device_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return Response(status_code=status)
+
+
+@router_rewrite.post("/{card_id}/rewrite", response_model=Card)
 def rewrite_card_endpoint(
     request: Request,
     card_id: str,
