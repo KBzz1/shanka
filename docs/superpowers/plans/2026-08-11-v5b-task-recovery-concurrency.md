@@ -1,8 +1,8 @@
 # V5B 任务恢复、取消与并发闭环 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
-**结果**：<主 Agent 整包验收通过后在此注明 V5B DONE 与证据位置>
+**结果**：V5B DONE（2026-08-11）。验收与证据见 docs/Progress.md 第 4 节 V5B 行（5 commits 6de2071..3fb2059 + fix 4d22b53，分支 codex/v5b）：321 用例全绿、四工具通过、干净安装+迁移、uvicorn 冒烟 healthz 200、边界 36 用例全绿、AC-05 通过。全任务 checklist 勾选完成。
 
 **Goal:** 在 V4/V5A 唯一任务状态机上补 checkpoint/resume/cancel 恢复语义：RUNNING 心跳（每批后刷新 updated_at）、30 分钟孤儿 RUNNING 抢占恢复、批次级与任务级 DB 条件更新抢占（并发 worker 单执行者）、崩溃恢复（新 app/session 从游标继续、已完成批次与 generation_item_id 不重复）、取消保留已入库卡，使 V5B 依据真实验收证据标记 DONE 且 AC-05 通过；不建立第二套任务框架、不引入外部队列。
 
@@ -40,7 +40,7 @@
 - Consumes: V5A executor/batches、Settings
 - Produces: `executor._execute_task` 每批后 `task.updated_at = now`（心跳——每批 completion 时取服务端时钟）；`batches.process_next_batch` 取批次改条件更新（`UPDATE batches SET status='PROCESSING' WHERE batch_id=? AND status='PENDING'`；rowcount=0 → 下一条/返回 0）；Settings `orphan_timeout_minutes: int = 30`；Task 2 孤儿恢复消费
 
-- [ ] **Step 1: 写失败集成测试 `main/tests/integration/test_concurrency.py`**
+- [x] **Step 1: 写失败集成测试 `main/tests/integration/test_concurrency.py`**
 
 ```python
 """V5B 并发/心跳集成测试：批次抢占单执行者/心跳刷新（真实 SQLite + mock transport）。"""
@@ -123,12 +123,12 @@ def test_concurrency_heartbeat_updates_updated_at(session_factory: Callable[[], 
 
 （说明：心跳的 now 取服务端时钟（SystemClock format_utc）——与 created_at 有可观测差异。process_next_batch 的 rowcount 抢占：条件更新后 rowcount=0 → 继续尝试下一条（循环内），全 0 → 返回 0。）
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cd /home/kbzz1/shanka_backend/main && conda run -n shanka-backend python -m pytest tests/integration/test_concurrency.py -v`
 Expected: FAIL（抢占/心跳未实现——n2 可能非 0、updated_at 未刷新）
 
-- [ ] **Step 3: 实现修改**
+- [x] **Step 3: 实现修改**
 
 ```python
 # batches.py：process_next_batch 取批次改条件更新
@@ -158,12 +158,12 @@ def _claim_next_batch(session: Session, *, task_id: str) -> Batch | None:
 #   task.updated_at = format_utc(SystemClock().now_utc())
 ```
 
-- [ ] **Step 4: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 4: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_concurrency.py tests/integration/test_tasks_executor.py tests/integration/test_batches.py -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add main/app/config.py main/services/generation/batches.py main/services/tasks/executor.py main/tests/integration/test_concurrency.py main/tests/integration/test_tasks_executor.py
@@ -182,7 +182,7 @@ git commit -m "feat(tasks): 心跳刷新 + 批次级条件更新抢占（并发�
 - Consumes: Task 1 Settings（orphan_timeout_minutes）
 - Produces: `resume_task` 条件更新扩展：`(status='PAUSED' AND resumable=1) OR (status='RUNNING' AND updated_at < now-30min)` → RUNNING；rowcount=0 → 409 TASK_STATE_CONFLICT；Task 3 崩溃恢复与 AC-05 验收消费
 
-- [ ] **Step 1: 写失败测试（追加到 `main/tests/integration/test_tasks_service.py`）**
+- [x] **Step 1: 写失败测试（追加到 `main/tests/integration/test_tasks_service.py`）**
 
 ```python
 def test_tasks_resume_orphan_running_after_timeout(session_factory: Callable[[], Session]) -> None:
@@ -223,7 +223,7 @@ def test_tasks_resume_running_fresh_conflicts(session_factory: Callable[[], Sess
     assert excinfo.value.code is ErrorCode.TASK_STATE_CONFLICT
 ```
 
-- [ ] **Step 2: 运行确认失败 → 实现 resume_task 扩展**
+- [x] **Step 2: 运行确认失败 → 实现 resume_task 扩展**
 
 ```python
 def resume_task(session: Session, *, device_id: str, task_id: str, now: str) -> Task:
@@ -247,12 +247,12 @@ def resume_task(session: Session, *, device_id: str, task_id: str, now: str) -> 
 
 （说明：orphan_cutoff = now - 30min 的 format_utc 字符串（字符串比较=时间序）。Settings orphan_timeout_minutes 经 session.info 或参数传入——**决策**：resume_task 签名加 `orphan_timeout_minutes: int = 30` 参数（默认与 Settings 一致；handler 传 settings 值）。）
 
-- [ ] **Step 3: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 3: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_tasks_service.py -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add main/services/tasks/service.py main/tests/integration/test_tasks_service.py
@@ -270,7 +270,7 @@ git commit -m "feat(tasks): 孤儿 RUNNING 恢复（心跳超时 30 分钟抢占
 - Consumes: Task 1/2 全部产物
 - Produces: AC-05 四条验收映射（中断保留/游标继续/已完成批次不重复/generation_item_id 不重复）
 
-- [ ] **Step 1: 写验收测试 `main/tests/acceptance/test_acceptance_ac05.py`**
+- [x] **Step 1: 写验收测试 `main/tests/acceptance/test_acceptance_ac05.py`**
 
 ```python
 """验收测试：AC-05 任务恢复与幂等（PRD；迁移 schema + HTTP + mock transport + 崩溃模拟）。"""
@@ -282,12 +282,12 @@ git commit -m "feat(tasks): 孤儿 RUNNING 恢复（心跳超时 30 分钟抢占
 # 场景 2（取消保留）：任务运行中 cancel → CANCELLED + 已入库卡保留
 ```
 
-- [ ] **Step 2: 运行确认通过 + ruff/mypy + 全量**
+- [x] **Step 2: 运行确认通过 + ruff/mypy + 全量**
 
 Run: `conda run -n shanka-backend python -m pytest tests/acceptance/ -v && conda run -n shanka-backend python -m pytest && conda run -n shanka-backend python -m ruff format . && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 3: 提交**
+- [x] **Step 3: 提交**
 
 ```bash
 git add main/tests/acceptance/test_acceptance_ac05.py
@@ -301,16 +301,16 @@ git commit -m "test(acceptance): AC-05 任务恢复与幂等验收映射（崩�
 **Files:**
 - 验证：全部 V5B 产物；不新增代码
 
-- [ ] **Step 1: 四工具命令全绿**
+- [x] **Step 1: 四工具命令全绿**
 
 Run（均在 `main/`）: `python --version`、`python -m pytest`、`python -m ruff check .`、`python -m ruff format --check .`、`python -m mypy .`
 Expected: 全绿
 
-- [ ] **Step 2: 干净环境安装 + 迁移**
+- [x] **Step 2: 干净环境安装 + 迁移**
 
 （venv + alembic upgrade 验证）
 
-- [ ] **Step 3: uvicorn 冒烟（不触网路径——路由可达 + 空态）**
+- [x] **Step 3: uvicorn 冒烟（不触网路径——路由可达 + 空态）**
 
 ```bash
 cd /home/kbzz1/shanka_backend/main
@@ -323,12 +323,12 @@ kill %1
 ```
 Expected: healthz 200
 
-- [ ] **Step 4: 关键边界复核（收证据）**
+- [x] **Step 4: 关键边界复核（收证据）**
 
 Run: `conda run -n shanka-backend python -m pytest tests/integration/test_concurrency.py tests/integration/test_tasks_service.py tests/acceptance/ -v`
 Expected: 全绿；记录关键用例名（并发单执行者、心跳刷新、孤儿恢复、AC-05）
 
-- [ ] **Step 5: 无明文泄漏抽查**
+- [x] **Step 5: 无明文泄漏抽查**
 
 Run: `grep -rn "sk-" main/app main/services main/infra --include="*.py" || true`
 Expected: 无真实泄漏
@@ -341,13 +341,13 @@ Expected: 无真实泄漏
 - Modify: `docs/Progress.md`
 - Modify: `docs/superpowers/plans/2026-08-11-v5b-task-recovery-concurrency.md`（标题下「结果」）
 
-- [ ] **Step 1: 更新 `docs/Progress.md`**
+- [x] **Step 1: 更新 `docs/Progress.md`**
 
 - 第 4 节 V5B 行：`TODO` → `DONE`，证据填写：心跳、孤儿 RUNNING 恢复（30 分钟）、批次级条件更新抢占（并发单执行者）、崩溃恢复（游标继续/防重）、取消保留卡、AC-05 通过。
 - 第 1 节状态基线：自动化验证测试数更新。
 - 计划文件标题下「结果」注明 V5B DONE 与证据位置。
 
-- [ ] **Step 2: 提交**
+- [x] **Step 2: 提交**
 
 ```bash
 git add docs/Progress.md docs/superpowers/plans/2026-08-11-v5b-task-recovery-concurrency.md
