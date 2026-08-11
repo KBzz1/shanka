@@ -9,6 +9,7 @@
   解密失败 API_KEY_UNAVAILABLE（502）；响应解析/Schema 违约 REWRITE_SCHEMA_INVALID（422，
   保留原卡不做任何写）；LLM 调用异常由 adapter 抛 GENERATION_FAILED/API_KEY_UNAVAILABLE。
 - Rubric 只观测（AC-06：低分照常替换）：score_card 5 字段落卡，不影响替换结果。
+- 8.3 观测：chat 成功后 observe_llm_call 上报（批次生成与单卡重写共用 llm_metrics）。
 - 事务归 services：本函数不做 commit，调用方（handler 幂等包装）commit。
 """
 
@@ -26,6 +27,7 @@ from infra.db.models import ApiKey, Card, ReviewState
 from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from infra.llm.prompts import load_asset
+from services.generation.llm_metrics import observe_llm_call
 from services.generation.response_parse import parse_cards_json, to_internal_card
 from services.generation.rubric import score_card
 from services.generation.schema_validator import load_card_schema, validate_card
@@ -129,6 +131,7 @@ def rewrite_card(
         result = client.chat(_build_rewrite_prompt(card, custom_requirements=custom_requirements))
     finally:
         client.close()
+    observe_llm_call(result)  # 8.3：单卡重写 chat 的 llm 指标上报（final review Important 1）
     cards = parse_cards_json(result["content"])
     if not cards:
         raise AppError(ErrorCode.REWRITE_SCHEMA_INVALID, "重写响应格式不符")

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY, generate_latest
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -123,12 +124,28 @@ def _client_returning(content: str) -> tuple[DeepSeekClient, list[str]]:
             200,
             json={
                 "choices": [{"message": {"content": content}}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_cache_hit_tokens": 2,
+                    "prompt_cache_miss_tokens": 8,
+                },
                 "model": "deepseek-v4-flash",
             },
         )
 
     return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler)), captured
+
+
+def _metric_value(name: str, fragments: list[str]) -> float:
+    """Prometheus 文本中指定 name+label 片段的数值（label 顺序不敏感）；不存在返回 0。"""
+    for line in generate_latest(REGISTRY).decode().splitlines():
+        if not line.startswith(f"{name}{{"):
+            continue
+        labels = line.split("{", 1)[1].split("}", 1)[0]
+        if all(frag in labels for frag in fragments):
+            return float(line.split()[-1])
+    return 0.0
 
 
 def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> None:
@@ -492,3 +509,43 @@ def test_rewrite_next_version_rule() -> None:
     assert _next_version("v9") == "v10"
     assert _next_version("v0") == "v1"
     assert _next_version("2026-08-11T00:00:00.000Z") == "v2"
+
+
+def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> None:
+    """final review Important 1：rewrite 的 chat 调用上报 8.3 llm 指标——成功一次 →
+    llm_requests_total{model="deepseek-v4-flash", http_status="200"} +1、
+    llm_tokens_total 按 usage（cache_hit=2 + cache_miss=8 + output=5）。
+    断言用 before/after 差值（REGISTRY 全局共享，批次路径可能已 inc 同 label）。"""
+    with session_factory() as session:
+        seeded = _seed_card(session)
+        card_id = seeded.card_id
+    client, _ = _client_returning(_rewrite_cards_json())
+    before_requests = _metric_value(
+        "llm_requests_total", ['model="deepseek-v4-flash"', 'http_status="200"']
+    )
+    before_tokens = {
+        kind: _metric_value("llm_tokens_total", [f'kind="{kind}"'])
+        for kind in ("cache_hit", "cache_miss", "output")
+    }
+    with session_factory() as session:
+        rewrite_card(
+            session,
+            device_id=_DEVICE,
+            card_id=card_id,
+            custom_requirements=None,
+            now=_NEW_NOW,
+            settings=_SETTINGS,
+            client_factory=lambda _api_key: client,
+        )
+        session.commit()
+    after_requests = _metric_value(
+        "llm_requests_total", ['model="deepseek-v4-flash"', 'http_status="200"']
+    )
+    after_tokens = {
+        kind: _metric_value("llm_tokens_total", [f'kind="{kind}"'])
+        for kind in ("cache_hit", "cache_miss", "output")
+    }
+    assert after_requests - before_requests == 1
+    assert after_tokens["cache_hit"] - before_tokens["cache_hit"] == 2
+    assert after_tokens["cache_miss"] - before_tokens["cache_miss"] == 8
+    assert after_tokens["output"] - before_tokens["output"] == 5

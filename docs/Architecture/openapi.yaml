@@ -645,6 +645,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -655,6 +657,12 @@ paths:
           $ref: '#/components/responses/Unprocessable'
         '429':
           $ref: '#/components/responses/RateLimited'
+        '502':
+          description: 上游校验不可用(API_KEY_UNAVAILABLE),可重试
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   # ---------- 质量观测 ----------
   /tasks/{task_id}/batches:

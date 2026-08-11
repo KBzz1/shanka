@@ -9,6 +9,9 @@
   同事务原子推进 → 返回处理批次数（0 = 无）。
 - Schema 是唯一入库门槛；Rubric 只观测（Task 3：SUCCEEDED 时 score_card 落
   Card 评分字段 + batch_quality 落 Batch 质量列，不影响入库决策）。
+- 8.3 llm 指标上报统一走 llm_metrics.observe_llm_call：本模块是批次生成编排点（每批
+  一次 chat，usage 落 Batch 观测列）；单卡重写是另一 chat 编排点
+  （services/cards/rewrite.py）——两处共用同一上报（final review Important 1）。
 - Key 解密在 executor（仅 infra/llm 路径）：本模块接收已构造带 Key 的 DeepSeekClient。
 """
 
@@ -27,12 +30,8 @@ from app.errors import AppError, ErrorCode
 from infra.db.models import Batch, Card, KnowledgePoint, ReviewState, Task
 from infra.llm.deepseek import DeepSeekClient
 from infra.llm.prompts import asset_versions, load_asset
-from infra.metrics import (
-    BATCH_RETRY_TOTAL,
-    LLM_REQUEST_DURATION_SECONDS,
-    LLM_REQUESTS_TOTAL,
-    LLM_TOKENS_TOTAL,
-)
+from infra.metrics import BATCH_RETRY_TOTAL
+from services.generation.llm_metrics import observe_llm_call as _observe_llm_call
 from services.generation.response_parse import (
     parse_cards_json as _parse_cards,
 )
@@ -203,28 +202,6 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         batch.ended_at = now
     session.flush()
     return 1
-
-
-def _observe_llm_call(result: dict[str, Any]) -> None:
-    """8.3 llm 指标上报（本模块是 chat 的唯一用例编排点，与落 Batch 观测列同处）：
-    llm_requests_total(model, http_status) / llm_request_duration_seconds(model) /
-    llm_tokens_total(kind: cache_hit/cache_miss/output)。缺失字段不计数（observe 0 亦无意义）。
-    """
-    model = str(result.get("model") or "unknown")
-    LLM_REQUESTS_TOTAL.labels(model=model, http_status=str(result.get("http_status") or 0)).inc()
-    duration_ms = result.get("duration_ms")
-    if isinstance(duration_ms, (int, float)):
-        LLM_REQUEST_DURATION_SECONDS.labels(model=model).observe(duration_ms / 1000.0)
-    usage = result.get("usage")
-    if isinstance(usage, dict):
-        for kind, key in (
-            ("cache_hit", "prompt_cache_hit_tokens"),
-            ("cache_miss", "prompt_cache_miss_tokens"),
-            ("output", "completion_tokens"),
-        ):
-            tokens = usage.get(key)
-            if isinstance(tokens, int) and tokens > 0:
-                LLM_TOKENS_TOTAL.labels(kind=kind).inc(tokens)
 
 
 def _insert_valid_cards(
