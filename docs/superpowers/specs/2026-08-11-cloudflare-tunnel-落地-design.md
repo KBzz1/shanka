@@ -41,7 +41,7 @@ Android 前端 ──HTTPS──▶ api.<域名>（Cloudflare 边缘，自动 TL
 | `API_KEY_ENCRYPTION_KEY` | PUT /api-key 加密密钥（database-design 2.2，需要时启用） |
 | `DATABASE_URL` | `sqlite:///./data/shanka.db`（相对 uvicorn CWD=`main/`） |
 | `STORAGE_PATH` | `./data/storage`（同上） |
-| `TUNNEL_TOKEN` | 本次新增：Cloudflare 隧道 `shanka` 令牌 |
+| `CLOUDFLARED_SERVICE_INSTALL_TOKEN` | 本次新增：隧道 `shanka` 服务安装令牌 |
 
 运行前 `set -a; source ../.env; set +a` 注入进程环境变量（既有工作流），`app/config.py` 零改动。
 
@@ -59,14 +59,14 @@ Android 前端 ──HTTPS──▶ api.<域名>（Cloudflare 边缘，自动 TL
 ### 3.5 Cloudflare 侧
 
 1. Zero Trust → Networks → Tunnels → 创建命名隧道 **`shanka`**。
-2. 记录 Tunnel Token → 写入根 `.env` 的 `TUNNEL_TOKEN`（不入仓库）。
-3. 公共主机名：`api.<域名>` → `http://localhost:8000`（默认端口，随 3.4 可配置）。
+2. 记录 Tunnel Token → 写入根 `.env` 的 `CLOUDFLARED_SERVICE_INSTALL_TOKEN`（不入仓库）。
+3. 公共主机名：`shanka.kbzz1.top` → `http://localhost:8000`（默认端口，随 3.4 可配置）。
 
 ### 3.6 cloudflared 安装（WSL2 = Ubuntu 24.04）
 
 - Cloudflare 向导没有「WSL」选项（WSL 不是系统，真实发行版是 Ubuntu）——选 **Debian**（官方对 Ubuntu 的安装指令即用 Debian apt 源，deb 包 Debian/Ubuntu 通用）。
 - 兜底（apt 源不顺时）：直接下载官方 Linux 二进制 `cloudflared-linux-amd64` 放 `/usr/local/bin/cloudflared`，任何发行版通用。
-- 常驻：`wsl.conf` 加 `[boot] systemd=true`；systemd 服务跑 `cloudflared tunnel run --token $TUNNEL_TOKEN`（EnvironmentFile/包装脚本从根 .env 读）。
+- 常驻：`wsl.conf` 加 `[boot] systemd=true`；以 `cloudflared service install` 注册为 systemd 服务（非手写 unit，令牌来自根 `.env` 的 `CLOUDFLARED_SERVICE_INSTALL_TOKEN`）。
 
 ### 3.7 验收与加固
 
@@ -89,7 +89,7 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
       API_KEY_ENCRYPTION_KEY: ${API_KEY_ENCRYPTION_KEY}
   cloudflared:  # 官方镜像 cloudflare/cloudflared
-    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_SERVICE_INSTALL_TOKEN}
 ```
 
 ### 4.2 代码零改动依据
@@ -100,7 +100,7 @@ services:
 
 1. 打包：`main/data/`（数据库 + PDF）+ 根 `.env`（全部凭据）。
 2. 新机器：`docker compose up`。
-3. 隧道无需重建：同一 `TUNNEL_TOKEN` 在新机器运行即接管出站连接；DNS/主机名配置在 Cloudflare 侧不变。
+3. 隧道无需重建：同一 `CLOUDFLARED_SERVICE_INSTALL_TOKEN` 在新机器运行即接管出站连接；DNS/主机名配置在 Cloudflare 侧不变。
 
 ### 4.4 YAGNI 边界
 
