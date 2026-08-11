@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from infra.db.models import Base, KnowledgePoint, Task
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Task
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -39,7 +39,7 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_task(session: Session, *, device_id: str) -> str:
+def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "COMPACT") -> str:
     from infra.db.models import ApiKey, Chapter, Device, PdfFile
     from services.decks.service import create_deck
     from services.tasks.service import create_task
@@ -87,7 +87,7 @@ def _seed_task(session: Session, *, device_id: str) -> str:
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config={
-            "quantity_tendency": "COMPACT",
+            "quantity_tendency": quantity_tendency,
             "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
         },
         now="2026-08-10T00:00:00.000Z",
@@ -158,3 +158,59 @@ def test_concurrency_heartbeat_updates_updated_at(session_factory: Callable[[], 
     assert task.updated_at is not None and created_at is not None
     assert task.updated_at > created_at  # 心跳刷新（批处理后时间推进）
     assert task.status == "COMPLETED"
+
+
+def test_concurrency_batch_commit_survives_crash(
+    session_factory: Callable[[], Session],
+) -> None:
+    """批次事务粒度：批 2 处理中崩溃（SystemExit）→ 批 1 已落库（卡+心跳+SUCCEEDED）。
+
+    崩溃模拟：mock transport 第 2 次 chat 抛 SystemExit（BaseException——绕过 executor 的
+    except Exception）→ 批 2 的 claim/心跳同事务回滚，任务保持 RUNNING；批 1 的
+    批次状态+游标+心跳已随批次事务提交（与单次最终 commit 的差异点——Task 3 恢复语义：
+    已完成批次保留、未完成批次 PENDING 可恢复）。
+    """
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_task(session, device_id=device, quantity_tendency="BALANCED")
+    with session_factory() as session:
+        seeded = session.get(Task, task_id)
+        assert seeded is not None
+        created_at = seeded.created_at
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise SystemExit("模拟崩溃：批 2 处理中断")
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": _valid_cards_json()}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+    crashed = False
+    with session_factory() as session:
+        try:
+            process_running_tasks(session, settings=_SETTINGS, client_factory=lambda _k: client)
+        except SystemExit:
+            crashed = True
+            session.rollback()  # 崩溃连接释放写锁（等价于进程死亡）
+    assert crashed
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+        batches = session.scalars(
+            select(Batch).where(Batch.task_id == task_id).order_by(Batch.batch_index)
+        ).all()
+        cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
+    assert calls == 2  # 批 1 成功、批 2 崩溃
+    assert task.status == "RUNNING"  # 终态未落库（崩溃发生在 COMPLETED 之前）
+    assert task.updated_at is not None and created_at is not None
+    assert task.updated_at > created_at  # 批 1 心跳已随批提交
+    assert [b.status for b in batches] == ["SUCCEEDED", "PENDING"]  # 批 1 已提交；批 2 claim 回滚
+    assert len(cards) == 3  # 批 1 卡片已提交（崩溃不丢已完成批次）

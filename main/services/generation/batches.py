@@ -78,8 +78,10 @@ def plan_batches(
 def _claim_next_batch(session: Session, *, task_id: str) -> Batch | None:
     """条件更新抢占：PENDING/FAILED → PROCESSING（原子转移，并发 worker 单执行者）。
 
-    V5B：select 取候选后改条件更新（WHERE status = 候选状态）；rowcount=0 → 已被其他
-    worker 抢占 → 继续取下一条（循环内）；全 0/无候选 → None（调用方返回 0）。
+    V5B：select 取候选后改条件更新（WHERE status IN (PENDING, FAILED)——不用
+    candidate.status（expire_on_commit=False 下 identity map 陈旧快照，另一 worker 置
+    FAILED 后恒 rowcount=0 → 死循环））；rowcount=0 → 已被其他 worker 抢占 → 继续取下一条
+    （循环内）；全 0/无候选 → None（调用方返回 0）。
     FAILED 必未达重试上限（达上限当次已置 SKIPPED）。
     """
     while True:
@@ -98,7 +100,10 @@ def _claim_next_batch(session: Session, *, task_id: str) -> Batch | None:
             CursorResult[Any],
             session.execute(
                 update(Batch)
-                .where(Batch.batch_id == candidate.batch_id, Batch.status == candidate.status)
+                .where(
+                    Batch.batch_id == candidate.batch_id,
+                    Batch.status.in_(["PENDING", "FAILED"]),
+                )
                 .values(status="PROCESSING")
             ),
         )
