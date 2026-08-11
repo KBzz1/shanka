@@ -3,8 +3,11 @@
 - validate_key：GET /user/balance，401→INVALID、200+is_available→AVAILABLE、200+is_available=false→
   INSUFFICIENT_BALANCE、429/5xx/网络→AppError(API_KEY_UNAVAILABLE)；200 畸形 body（非 JSON/数组）→
   API_KEY_UNAVAILABLE（上游异常口径，不逃逸为 500）；
-- chat：POST /chat/completions（thinking 开关/JSON output/usage 映射/错误映射）；
+- chat：POST /chat/completions（thinking 开关/JSON output/usage 映射/system_fingerprint 透传/错误映射）；
 - thinking 参数以 DeepSeek 官方 API 为准：启用时 `body["thinking"] = {"type": "enabled"}`，禁用时不带该键。
+- R1 live 加固：客户端构造 trust_env=False（不继承 shell 代理——HTTP_PROXY=127.0.0.1:7897 时直连；
+  不可直接断言私有属性，用"构造无代理依赖的说明性用例"锁定行为）；
+  chat 返回透传 system_fingerprint（上游无该字段 → None，R1 driver 按单元记录）。
 """
 
 import json
@@ -156,6 +159,66 @@ def test_adapter_chat_thinking_enabled() -> None:
     client = DeepSeekClient(_settings(deepseek_thinking=True), transport=_mock_transport(handler))
     client.chat("p", "sk-test")
     assert captured["json"]["thinking"] == {"type": "enabled"}  # DeepSeek 官方 thinking 参数
+
+
+def test_adapter_chat_passthrough_system_fingerprint() -> None:
+    """R1 live：上游响应含 system_fingerprint → chat 返回同值透传（driver 按单元记录）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "answer"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                "model": "deepseek-v4-flash",
+                "system_fingerprint": "fp_r1_live_0001",
+            },
+        )
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    result = client.chat("p", "sk-test")
+    assert result["system_fingerprint"] == "fp_r1_live_0001"
+
+
+def test_adapter_chat_missing_system_fingerprint_is_none() -> None:
+    """R1 live：上游响应无 system_fingerprint 字段 → chat 返回 None（不抛错、不伪造）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "answer"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    result = client.chat("p", "sk-test")
+    assert result["system_fingerprint"] is None
+
+
+def test_adapter_chat_independent_of_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R1 live 加固说明性用例：构造与代理环境无关的客户端（trust_env=False 直连）。
+
+    trust_env 不可直接断言（httpx 私有属性，跨版本脆弱）——本用例为"无代理依赖"的行为
+    锚点：即使环境注入指向死端口的 HTTP_PROXY/HTTPS_PROXY，mock transport 路径照常工作，
+    生产路径因 trust_env=False 同样不读取代理环境（本机 HTTP_PROXY=127.0.0.1:7897）。
+    """
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "answer"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    result = client.chat("p", "sk-test")
+    assert result["content"] == "answer"
 
 
 def test_adapter_chat_malformed_response() -> None:

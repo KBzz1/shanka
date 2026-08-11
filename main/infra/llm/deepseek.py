@@ -1,11 +1,12 @@
 """DeepSeek 正式 adapter（红线 4：Key 明文只在本模块调用路径；异常脱敏）。
 
 - validate_key：GET /user/balance → AVAILABLE/INVALID/INSUFFICIENT_BALANCE；上游不可用（含 200 畸形 body）抛 API_KEY_UNAVAILABLE；
-- chat：POST /chat/completions（thinking 开关 + JSON output + 超时）→ usage 映射；
+- chat：POST /chat/completions（thinking 开关 + JSON output + 超时）→ usage 映射 + system_fingerprint 透传；
 - 错误映射：validate 401→INVALID、chat 401→API_KEY_UNAVAILABLE（Key 已保存但可能失效）、429/5xx→API_KEY_UNAVAILABLE、
   解析失败→GENERATION_FAILED；日志仅上游状态码/异常类型（不记录异常链、不引用 Key 明文）。
 - thinking 参数（DeepSeek 官方 API）：启用时请求体 `"thinking": {"type": "enabled"}`，禁用时不携带。
-- transport 可注入（mock 测试）；生产用默认 httpx。
+- trust_env=False：不继承 shell 代理（本机 HTTP_PROXY=127.0.0.1:7897，直连不绕代理）；transport 可注入（mock 测试）。
+- R1 live：chat 返回 `system_fingerprint`（上游可能无此字段 → None），driver 按单元透传记录。
 """
 
 import logging
@@ -39,6 +40,7 @@ class DeepSeekClient:
             base_url=_BASE_URL,
             timeout=settings.deepseek_timeout_seconds,
             transport=transport,
+            trust_env=False,  # R1 live：直连不继承 shell 代理（HTTP_PROXY=127.0.0.1:7897 时直连）
         )
 
     def close(self) -> None:
@@ -116,6 +118,7 @@ class DeepSeekClient:
                 "prompt_cache_miss_tokens": usage.get("prompt_cache_miss_tokens"),
             },
             "model": data.get("model") or self.settings.deepseek_model,
+            "system_fingerprint": data.get("system_fingerprint"),  # 上游可能无此字段 → None
             "http_status": resp.status_code,
             "duration_ms": duration_ms,
         }
