@@ -2,7 +2,7 @@
 
 - plan_batches：知识点按 batch_size 分组建 Batch（PENDING，batch_index 从 1 起）+ 游标初始化；
 - process_next_batch：条件更新抢占下一个可处理批次（PENDING 或 FAILED，FAILED 必未达重试上限，
-  WHERE status=候选状态 原子转 PROCESSING，rowcount=0 → 下一条/0 → 并发单执行者）→
+  WHERE status IN (PENDING, FAILED) 原子转 PROCESSING，rowcount=0 → 下一条/0 → 并发单执行者）→
   adapter.chat（Prompt 组装）→ 响应 JSON 解析 → 逐卡 Schema 校验 → 合法卡入库（V1 模式 +
   generation_item_id 防重）→ SUCCEEDED（≥1 合法卡）/ FAILED（0 合法卡，retry+1）/ 重试达上限
   （retry_count >= limit，共 3 次尝试）→ SKIPPED → 游标 completed_batch_count 与批次状态/计数

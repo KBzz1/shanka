@@ -13,9 +13,10 @@ process_next_batch 直至无待处理批次；V5B：每批完成后心跳刷新 
 import logging
 from collections.abc import Callable
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
@@ -152,15 +153,29 @@ def _execute_task(
         # V5B 心跳：每批完成后刷新 task.updated_at（服务端时钟 format_utc）并提交——批次事务粒度
         # （批次状态+游标+心跳同事务落库，长任务中间状态可观测，孤儿判据不误判；崩溃后已完成批次
         # 已提交、未完成批次 PENDING/FAILED 可恢复——与 Task 3 崩溃恢复语义一致）
+        # final review I-1：每批 commit 后复查任务状态——expire_on_commit=False 下 identity map
+        # 停留 RUNNING，批次间隙被 cancel 落库 CANCELLED 后不再抢占下一批（停止处理，保留已入库卡）
         while process_next_batch(session, task_id=task.task_id, client=client) > 0:
             task.updated_at = format_utc(SystemClock().now_utc())
             session.commit()
+            session.refresh(task)
+            if task.status != "RUNNING":
+                break
     finally:
         client.close()
-    task.status = "COMPLETED"
-    task.ended_at = task.updated_at  # 最后心跳值（循环内每批刷新）
-    task.resumable = 0
-    _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
+    # 终态条件更新（final review I-1）：不覆盖批次间隙已落库的 CANCELLED——WHERE status='RUNNING'
+    # 原子转移，rowcount=0 → 状态已被他方转移（取消等）→ 跳过 COMPLETED 落库与观测
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(Task)
+            .where(Task.task_id == task.task_id, Task.status == "RUNNING")
+            .values(status="COMPLETED", ended_at=task.updated_at, resumable=0)
+        ),
+    )
+    if result.rowcount == 1:
+        session.refresh(task)
+        _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
 
 
 def scan_once(

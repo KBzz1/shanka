@@ -8,6 +8,7 @@ import json
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -16,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from infra.db.models import Base, Card, KnowledgePoint, Task
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Task
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -233,3 +234,72 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
     assert task.ended_at == task.updated_at
     assert len(cards) == 3  # 第 1 批已入库卡保留（4.1）
     assert after - before == 1.0  # 8.3：系统级失败也计数
+
+
+def test_executor_cancel_between_batches_preserves_cancelled(
+    session_factory: Callable[[], Session],
+) -> None:
+    """V5B final review I-1：批次间隙 cancel → 批 2 不处理（CANCELLED 不被 COMPLETED 覆盖）。
+
+    复现：批 1 commit 后（复查前）另一连接在批次间隙落库 CANCELLED（cancel handler 同款写入）
+    → executor 每批 commit 后 session.refresh 复查 → 不再抢占批 2。
+    断言：任务保持 CANCELLED（ended_at 不被覆盖）+ 无批 2 卡入库 + chat 调用停在批 1。
+    注入点：包装 executor session 的 refresh——首次复查（批 1 commit 后）前执行 cancel
+    （此刻 executor 无打开事务，另一连接写入无锁冲突——单线程确定性，不依赖调度时序；
+    BEGIN IMMEDIATE 并发写入冲突属已知限制，另行登记，本用例覆盖批次间隙成功路径）。
+    """
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_task(session, device_id=device, quantity_tendency="BALANCED")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": _valid_cards_json()}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+    client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+    with session_factory() as session:
+        original_refresh = session.refresh
+        injected = False
+
+        def refresh_with_cancel(
+            instance: Task, attribute_names: Any = None, with_for_update: Any = None
+        ) -> None:
+            nonlocal injected
+            # 只匹配 executor 的 session.refresh(task)（批 commit 后）——_claim_next_batch 的
+            # refresh(candidate) 刷新 Batch 对象且 executor 持写事务，此时注入 cancel 会走
+            # BEGIN IMMEDIATE 锁冲突路径（锁 500 已知限制），非本用例目标（批次间隙成功路径）
+            if not injected and isinstance(instance, Task):
+                injected = True
+                with session_factory() as cancel_session:
+                    task_row = cancel_session.get(Task, task_id)
+                    assert task_row is not None
+                    task_row.status = "CANCELLED"
+                    task_row.ended_at = "2026-08-11T00:00:00.000Z"
+                    task_row.updated_at = "2026-08-11T00:00:00.000Z"
+                    cancel_session.commit()
+            original_refresh(instance, attribute_names, with_for_update)
+
+        session.refresh = refresh_with_cancel
+        n = process_running_tasks(session, settings=_SETTINGS, client_factory=lambda _k: client)
+        session.commit()  # 调用方最终 commit——旧实现会在此把 CANCELLED 覆盖回 COMPLETED（回归点）
+        task = session.get(Task, task_id)
+        assert task is not None and task.deck_id is not None
+        cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
+        batches = session.scalars(
+            select(Batch).where(Batch.task_id == task_id).order_by(Batch.batch_index)
+        ).all()
+    assert n == 1
+    assert calls == 1  # 批 2 未被抢占 → 无第二次 chat 调用
+    assert task.status == "CANCELLED"  # 不被 COMPLETED 覆盖
+    assert task.ended_at == "2026-08-11T00:00:00.000Z"  # 取消侧 ended_at 不被覆盖
+    assert [b.status for b in batches] == ["SUCCEEDED", "PENDING"]  # 批 2 未 claim（保留 PENDING）
+    assert len(cards) == 3  # 仅批 1 卡入库（BALANCED 6 知识点 → 2 批 × 3 卡）
