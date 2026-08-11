@@ -11,8 +11,8 @@
 | 难度 | easy/medium/hard = 24/24/12（quantity_tendency COMPACT/BALANCED/EXTENSIVE） |
 | canary | 单元 1；失败即停（stop_reason=canary_failed） |
 | 成本上限 | 单次 ¥5 / 总计 ¥10（driver 每单元后检查） |
-| 运行次数 | 2 次（首次 canary 失败 → 实质修复 → 授权重跑 1 次） |
-| 真实调用 | 仅正式运行；诊断调用 3 次（canary 失败根因定位） |
+| 运行次数 | 3 次 live 驱动运行：live1 canary 失败（v1 契约断裂 0/3）→ 修复 1 → live2 canary 失败（v2「恰好 1 张」与批次语义冲突 1/3）→ 修复 2 → live3 正式 59/60（**正式 60 单元样本仅运行 1 次**，符合边界） |
+| 真实调用 | 3 次 canary/诊断性 chat（live1/live2 canary + 3 次诊断定位）+ 正式运行；总成本 ¥1.7436（含 canary/诊断，总上限 ¥10 内） |
 
 ## 2. 结果统计（正式运行，live3）
 
@@ -25,9 +25,9 @@
 | 总成本 | **¥1.6351**（上限 ¥5/¥10 ✓ 未触发停止条件） |
 | tokens | prompt 85,599（cache_hit 68,224 / cache_miss 17,375）+ output 195,774 |
 | system_fingerprint | 单一：`fp_a18b46594c_prod0820_fp8_kvcache_20260402`（冻结验证 ✓） |
-| 单元耗时 | 均值 28.6s / 中位 27.0s / 最慢 66.0s |
+| 单元耗时 | 均值 28.6s / 中位 26.6s / 最慢 66.0s |
 | 幂等 | 60/60 replay_ok（同幂等键重放同响应，无重复执行） |
-| 入库 | 315 卡（59 单元计划数全匹配；generation_item_id 无重复） |
+| 入库 | **321 卡**（324 计划 − 失败单元 43 的 3；59 成功单元计划数全匹配；generation_item_id 重复 0） |
 
 失败单元 43（第 6 章 COMPACT）：批次 1 停留 PROCESSING、http_status=None → **adapter 系统级失败（GENERATION_FAILED，上游请求错误/超时）**，executor 按 4.1 标记任务 FAILED 并保留已入库结果；非 Schema 违约、非我方缺陷（第 6 章 20 块中仅 1 块触发，随机上游抖动）。
 
@@ -37,12 +37,15 @@
 - 该区间**仅描述本书 3 章固定抽样框在此模型/配置下的单元级失败**，不外推全书/生产质量。
 - 8.1 其余指标：重复入库率 0%（live 实证）；断点续传/PDF 解析成功率由本机回归（AC-05/AC-01）覆盖。
 
-## 4. canary 失败与实质修复（运行 1 → 运行 2）
+## 4. canary 失败与实质修复（live1 → live2 → live3）
 
 | 运行 | 结果 | 根因 | 修复 |
 | --- | --- | --- | --- |
-| 运行 1（canary） | 0/3 卡 | **generator prompt v1 指令输出裸单卡对象**，V5A 解析器 `parse_cards_json` 期望 `{"cards":[...]}` 包装——资产与解析契约断裂（V5A 遗留，mock 测试掩盖） | `prompts/generator v1 → v2`（输出 `{"cards":[...]}`）+ 规则 4「每知识点一张卡」（批次语义），manifest/CHANGELOG/4 处断言同步；诊断调用验证 3 卡全合法 |
-| 运行 2（正式） | 59/60 | 单元 43 上游抖动 | 无（非我方缺陷，按 8.1 报告真实失败） |
+| live1（canary） | 0/3 卡 | **generator prompt v1 指令输出裸单卡对象**，V5A 解析器 `parse_cards_json` 期望 `{"cards":[...]}` 包装——资产与解析契约断裂（V5A 遗留，mock 测试掩盖） | 修复 1：`prompts/generator v1 → v2` 输出 `{"cards":[...]}` 包装（manifest/CHANGELOG/4 处断言同步；诊断调用验证单知识点 1 卡合法） |
+| live2（canary 复验） | 1/3 卡 | 修复 1 后 v2 规则 4「**恰好一张卡片对象**」与批次语义冲突——批次 3 知识点应输出 3 卡，模型只输出 1 张 | 修复 2：v2 规则 4 改「每知识点一张卡」（诊断调用验证 3 知识点 → 3 卡全合法） |
+| live3（正式） | 59/60 | 单元 43 上游抖动（GENERATION_FAILED） | 无（非我方缺陷，按 8.1 报告真实失败） |
+
+正式 60 单元样本仅 live3 运行 1 次（live1/live2 均在 canary 阶段停止）。
 
 ## 5. 人工复核（描述性，非门槛）
 
@@ -55,7 +58,8 @@
 
 ## 6. 边界与未验证
 
-- 本验证仅覆盖：固定 3 章抽样框 × 冻结模型 × 单次运行；不覆盖全书/其他模型/生产负载。
+- 本验证仅覆盖：固定 3 章抽样框 × 冻结模型 × 正式样本单次运行（含 canary/诊断性调用共 ¥1.74）；不覆盖全书/其他模型/生产负载。
+- 统计口径说明：区间为 **Wilson 双侧**（scipy 非依赖，标准库实现）；单侧 95% 上界约 7.1~7.7%（Wilson 双侧上界 8.86% 为保守值）。
 - 外部范围（R-06）：Cloudflare Tunnel、TLS 证书、Android 真机联网不在本期执行。
 - OCR/扫描版 PDF（AC-01 排除项）未验证。
 - 多实例/生产 DB（PostgreSQL）行级锁语义未验证（R-17 登记）。

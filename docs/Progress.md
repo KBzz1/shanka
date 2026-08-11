@@ -242,13 +242,13 @@
 
 **`DONE`｜依赖：V1、V2、V3A、V3B、V4、V5A、V5B、V6｜覆盖：PRD 7～10 的后端可本机验证部分、AC-01～11**
 
-当前证据（2026-08-11，分支 codex/r1 合并回 main，10 commits 9ffaa09..65699d8 + live 报告）：
-- **本机门槛 1（契约回归）**：PRD 7-10 后端可本机验证 34 项核对清单（`test_acceptance_r1_paths.py`，32 项既有覆盖 + 2 缺口补：PDF 内容/Prompt 内容不落日志——AC-08 补齐，caplog INFO 级判别）；生产代码 mock 核对：无不允许项（仅 V4 样卡 fake 契约允许 + 测试注入点）。
-- **本机门槛 2（干净环境）**：conda 干净环境 Python 3.12.13 + `requirements-dev.lock` 锁定安装 ✓；alembic 迁移 13 表 ✓；uvicorn 启动 healthz/readyz/metrics 200 ✓；写入 + 幂等重放同 deck_id ✓；杀进程重启数据保留 ✓。
+当前证据（2026-08-11，分支 codex/r1 合并回 main，8 commits 9ffaa09..ea8dff0 + live 报告）：
+- **本机门槛 1（契约回归）**：PRD 7-10 后端可本机验证核对清单（`test_acceptance_r1_paths.py`，27 数据行：25 项既有覆盖 + 2 缺口补：PDF 内容/Prompt 内容不落日志——AC-08 补齐，caplog INFO 级判别）；生产代码 mock 核对：无不允许项（仅 V4 样卡 fake 契约允许 + 测试注入点）。
+- **本机门槛 2（干净环境）**：干净 venv（python3.12 venv 不可用 → conda 干净环境 Python 3.12.13）+ `requirements-dev.lock` 锁定安装 ✓；alembic 迁移 13 表 ✓；uvicorn 启动 healthz/readyz/metrics 200 ✓；写入 + 幂等重放同 deck_id ✓；杀进程重启数据保留 ✓。
 - **live 设施**：adapter `trust_env=False`（直连绕过本机代理）+ `system_fingerprint` 透传；60 抽样框（seed 20260811，第 1/2/6 章各 20 块，24/24/12）；driver（正式链路 + 成本监控 + canary 即停 + 单次运行保护 + dry-run/live 分离），dry-run 60/60 + 停止条件专项验证。
-- **canary 失败 → 实质修复**：generator prompt v1 输出裸单卡对象与 V5A 解析器 `{"cards":[...]}` 契约断裂（mock 测试掩盖的遗留缺陷）→ **prompts/generator v1→v2**（输出包装 + 每知识点一卡批次语义，manifest/CHANGELOG/4 断言同步，353 passed 全绿）；诊断调用 3 次定位。
-- **live 正式运行（授权重跑 1 次）**：59/60 成功；失败单元 43 为上游系统级抖动（GENERATION_FAILED，批次停留 PROCESSING，非 Schema/我方缺陷）；总成本 **¥1.6351**（上限 ¥5/¥10 未触发）；tokens prompt 85,599（hit 68,224/miss 17,375）+ output 195,774；fingerprint 单一 `fp_a18b46594c_prod0820_fp8_kvcache_20260402`；60/60 幂等重放 ✓；315 卡 generation_item_id 无重复。
-- **统计（R-05 口径）**：失败率 1/60 = 1.67%，Wilson 95% 双侧 [0.29%, 8.86%]（scipy 非依赖用标准库 Wilson，Clopper-Pearson 接近）；完成率 98.3%（对照 8.1 ≥90% ✓）；仅描述固定抽样框 × 冻结模型，不外推。
+- **canary 失败 → 实质修复（两轮）**：live1 canary 0/3——generator v1 输出裸单卡对象与 V5A 解析器 `{"cards":[...]}` 契约断裂（mock 掩盖的遗留缺陷）→ 修复 1：prompts/generator v1→v2（输出包装）；live2 canary 复验 1/3——v2 规则 4「恰好一张」与批次语义冲突 → 修复 2：规则 4「每知识点一张卡」（诊断调用 3 次定位验证，manifest/CHANGELOG/4 断言同步，353 passed 全绿）。
+- **live 正式运行（live3，正式样本仅 1 次）**：59/60 成功；失败单元 43 为上游系统级抖动（GENERATION_FAILED，批次停留 PROCESSING，非 Schema/我方缺陷）；正式运行成本 **¥1.6351**（含 canary/诊断全战役 ¥1.7436，上限 ¥5/¥10 未触发）；tokens prompt 85,599（hit 68,224/miss 17,375）+ output 195,774；fingerprint 单一 `fp_a18b46594c_prod0820_fp8_kvcache_20260402`；60/60 幂等重放 ✓；**321 卡** generation_item_id 无重复。
+- **统计（R-05 口径）**：失败率 1/60 = 1.67%，Wilson 95% 双侧 [0.29%, 8.86%]（scipy 非依赖用标准库 Wilson，单侧上界约 7.1~7.7%，Clopper-Pearson 接近）；完成率 98.3%（对照 8.1 ≥90% ✓）；仅描述固定抽样框 × 冻结模型，不外推。
 - **人工复核 18 张**（难度分层固定 seed）：18/18 无事实错误/前后不匹配；BASIC 定义清晰、UNDERSTANDING 判断题正确、APPLICATION 场景题质量高；2 张英文术语/题干（原文保留）、1 张答案简短——描述性记录。
 - **交付**：`docs/r1-live-report.md`（执行参数/统计/失败详情/复核/边界）；Progress F0-R1 全部 DONE。
 - 登记：R-03 generator v2（v1 裸单卡契约断裂修复）；R-20（live 实证：1/60 上游失败、成本 ¥1.635、fingerprint 冻结）；API_KEY_ENCRYPTION_KEY 未提供（driver 临时密钥，live DB 密文跨进程不可解——已知限制）。
