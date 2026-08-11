@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from app.middleware.idempotency import (
     execute_idempotent,
     get_idempotency_key,
@@ -174,9 +175,16 @@ def resume_task_endpoint(
     key = get_idempotency_key(request)
     path = request.url.path
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+    settings: Settings = request.app.state.settings
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        task = resume_task(session, device_id=device_id, task_id=task_id, now=_now())
+        task = resume_task(
+            session,
+            device_id=device_id,
+            task_id=task_id,
+            now=_now(),
+            orphan_timeout_minutes=settings.orphan_timeout_minutes,
+        )
         return 200, task_view(task)
 
     _replayed, status, body = execute_idempotent(

@@ -264,3 +264,56 @@ def test_tasks_resume_paused(session_factory: Callable[[], Session]) -> None:
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         resume_task(session, device_id=device, task_id=task_id, now="2026-08-11T02:00:00.000Z")
     assert excinfo.value.code is ErrorCode.TASK_STATE_CONFLICT
+
+
+def test_tasks_resume_orphan_running_after_timeout(session_factory: Callable[[], Session]) -> None:
+    """孤儿 RUNNING（updated_at 超 30 分钟）→ resume 抢占恢复（4.1）。"""
+    device = _uuid()
+    with session_factory() as session:
+        ctx = _seed_context(session, device_id=device)
+        session.commit()
+    with session_factory() as session:
+        task = create_task(
+            session,
+            device_id=device,
+            file_id=ctx["file_id"],
+            deck_id=ctx["deck_id"],
+            chapter_ids=ctx["chapter_ids"],
+            config=_config(),
+            now="2026-08-11T00:00:00.000Z",
+        )
+        session.flush()
+        # 模拟孤儿：RUNNING + updated_at 3 小时前
+        task.updated_at = "2026-08-10T21:00:00.000Z"
+        session.commit()
+        task_id = task.task_id
+    with session_factory() as session:
+        result = resume_task(
+            session, device_id=device, task_id=task_id, now="2026-08-11T00:30:00.000Z"
+        )
+        session.commit()
+    assert result.status == "RUNNING"
+    assert result.resumable == 0
+
+
+def test_tasks_resume_running_fresh_conflicts(session_factory: Callable[[], Session]) -> None:
+    """新鲜 RUNNING（心跳内）→ resume 409 TASK_STATE_CONFLICT。"""
+    device = _uuid()
+    with session_factory() as session:
+        ctx = _seed_context(session, device_id=device)
+        session.commit()
+    with session_factory() as session:
+        task = create_task(
+            session,
+            device_id=device,
+            file_id=ctx["file_id"],
+            deck_id=ctx["deck_id"],
+            chapter_ids=ctx["chapter_ids"],
+            config=_config(),
+            now="2026-08-11T00:00:00.000Z",
+        )
+        session.commit()
+        task_id = task.task_id
+    with session_factory() as session, pytest.raises(AppError) as excinfo:
+        resume_task(session, device_id=device, task_id=task_id, now="2026-08-11T00:10:00.000Z")
+    assert excinfo.value.code is ErrorCode.TASK_STATE_CONFLICT

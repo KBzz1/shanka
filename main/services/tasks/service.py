@@ -6,6 +6,7 @@ Task 创建与 KnowledgePoint 规划同事务（KnowledgePoint 与 Task 同事�
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import select, update
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from infra.db.models import ApiKey, Chapter, PdfFile, Task
+from infra.db.session import format_utc
 from infra.metrics import GENERATION_TASKS_TOTAL
 from services.decks.service import _owned as _owned_deck
 from services.generation.planning import plan_knowledge_points
@@ -22,6 +24,19 @@ from services.generation.validate import validate_config
 
 def _uuid4() -> str:
     return str(uuid.uuid4())
+
+
+_UTC_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"  # database-design 0：UTC、恒 3 位毫秒
+
+
+def _parse_utc(value: str) -> datetime:
+    """format_utc 输出（database-design 0 恒 3 位毫秒 Z）→ aware UTC datetime。"""
+    return datetime.strptime(value, _UTC_FORMAT).replace(tzinfo=UTC)
+
+
+def _format_cutoff(now: str, minutes: int) -> str:
+    """now - minutes 的 format_utc 字符串（database-design 0 定长格式，字符串比较=时间序）。"""
+    return format_utc(_parse_utc(now) - timedelta(minutes=minutes))
 
 
 def _owned_task(session: Session, *, device_id: str, task_id: str) -> Task:
@@ -145,17 +160,33 @@ def cancel_task(session: Session, *, device_id: str, task_id: str, now: str) -> 
     return task
 
 
-def resume_task(session: Session, *, device_id: str, task_id: str, now: str) -> Task:
-    """DB 条件更新抢占（4.1）：PAUSED AND resumable=1 → RUNNING；否则 409 TASK_STATE_CONFLICT。
+def resume_task(
+    session: Session,
+    *,
+    device_id: str,
+    task_id: str,
+    now: str,
+    orphan_timeout_minutes: int = 30,
+) -> Task:
+    """DB 条件更新抢占（4.1）：PAUSED AND resumable=1，或孤儿 RUNNING（心跳超时）→ RUNNING；否则 409。
 
-    SQLAlchemy update 的 rowcount 对 SQLite 有效（数据库级行数，非客户端估算）。
+    orphan_cutoff = now - orphan_timeout_minutes 的 format_utc 字符串（字符串比较=时间序，
+    database-design 0 定长格式）；孤儿判据 `RUNNING AND updated_at < cutoff` 由心跳批次
+    事务（每批 commit）保证 updated_at 真实反映最后心跳。resume 后 resumable 保持 0
+    （RUNNING 继续执行无需再 resume）。SQLAlchemy update 的 rowcount 对 SQLite 有效
+    （数据库级行数，非客户端估算）。
     """
     task = _owned_task(session, device_id=device_id, task_id=task_id)
+    orphan_cutoff = _format_cutoff(now, orphan_timeout_minutes)
     result: CursorResult[Any] = cast(
         CursorResult[Any],
         session.execute(
             update(Task)
-            .where(Task.task_id == task_id, Task.status == "PAUSED", Task.resumable == 1)
+            .where(
+                Task.task_id == task_id,
+                ((Task.status == "PAUSED") & (Task.resumable == 1))
+                | ((Task.status == "RUNNING") & (Task.updated_at < orphan_cutoff)),
+            )
             .values(status="RUNNING", updated_at=now)
         ),
     )
