@@ -1,7 +1,7 @@
 {
   "prompts": {
     "planner": { "version": "v1", "path": "prompts/v1/planner.md" },
-    "generator": { "version": "v1", "path": "prompts/v1/generator.md" },
+    "generator": { "version": "v2", "path": "prompts/v2/generator.md" },
     "rewrite": { "version": "v1", "path": "prompts/v1/rewrite.md" }
   },
   "schemas": {

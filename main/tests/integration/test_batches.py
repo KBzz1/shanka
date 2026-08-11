@@ -213,5 +213,5 @@ def test_batches_usage_and_versions_recorded(session_factory: Callable[[], Sessi
     assert batch.cache_miss_tokens == 8
     assert batch.output_tokens == 5
     assert batch.model == "deepseek-v4-flash"
-    assert batch.prompt_version == "v1" and batch.schema_version == "v1"
+    assert batch.prompt_version == "v2" and batch.schema_version == "v1"  # generator v2（R1 canary 修复）
     assert batch.http_status == 200

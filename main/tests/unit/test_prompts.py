@@ -29,7 +29,7 @@ def test_prompts_load_asset_missing_raises_internal_error() -> None:
 
 def test_prompts_asset_versions_match_manifest() -> None:
     versions = asset_versions()
-    assert versions["prompt_version"] == "v1"
+    assert versions["prompt_version"] == "v2"  # generator v2（R1 canary 修复）
     assert versions["schema_version"] == "v1"
     assert versions["rubric_version"] == "v1"
 

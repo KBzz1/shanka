@@ -7,3 +7,4 @@
 
 ## 2026-08-11
 - 新增 prompts/v1/rewrite.md（V6 单卡重写，manifest prompts.rewrite v1）；generator/planner 不变。
+- **prompts/generator v1 → v2（R1 canary 修复）**：输出指令改为 `{"cards": [单张卡片对象]}`（与 V5A 批次解析器 `parse_cards_json` 的数组包装契约一致；v1 指令输出裸单卡对象导致真实模型响应 0 卡入库）。manifest prompts.generator → v2。
