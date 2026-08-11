@@ -38,6 +38,7 @@ class ErrorCode(StrEnum):
     CARD_NOT_FOUND = "CARD_NOT_FOUND"
     GENERATION_ITEM_CONFLICT = "GENERATION_ITEM_CONFLICT"
     IMPORT_PARSE_ERROR = "IMPORT_PARSE_ERROR"
+    REWRITE_SCHEMA_INVALID = "REWRITE_SCHEMA_INVALID"
     # 复习
     REVIEW_EVENT_INVALID = "REVIEW_EVENT_INVALID"
     REVIEW_EVENT_CONFLICT = "REVIEW_EVENT_CONFLICT"
@@ -65,6 +66,7 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.CARD_NOT_FOUND: 404,
     ErrorCode.GENERATION_ITEM_CONFLICT: 409,
     ErrorCode.IMPORT_PARSE_ERROR: 422,
+    ErrorCode.REWRITE_SCHEMA_INVALID: 422,
     ErrorCode.REVIEW_EVENT_INVALID: 400,
     ErrorCode.REVIEW_EVENT_CONFLICT: 409,
 }
@@ -93,6 +95,7 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.card_not_found",
         "error.generation_item_conflict",
         "error.import_parse_error",
+        "error.rewrite_schema_invalid",
         "error.review_event_invalid",
         "error.review_event_conflict",
     }

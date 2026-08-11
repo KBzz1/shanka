@@ -502,6 +502,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | | `CARD_NOT_FOUND` | 404 | |
 | | `GENERATION_ITEM_CONFLICT` | 409 | `generation_item_id` 已对应其他卡 |
 | | `IMPORT_PARSE_ERROR` | 422 | 导入内容非法(逐行错误随响应返回;客户端预览阶段已拦截为主) |
+| | `REWRITE_SCHEMA_INVALID` | 422 | 单卡重写的新版本未通过 Schema 校验(原卡保留) |
 | 复习 | `REVIEW_EVENT_INVALID` | 400 | 评级非法 |
 | | `REVIEW_EVENT_CONFLICT` | 409 | 同 `client_event_id` 但 `card_id` / `rating` 与首次不一致 |
 
