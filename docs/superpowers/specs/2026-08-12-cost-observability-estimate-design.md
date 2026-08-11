@@ -21,9 +21,12 @@
 
 ### 3.1 token 用量估算模型（新增 `token_estimator.py`）
 
-估算常量集中定义，注释登记来源与校准条件；换模型/换书籍时单点校准：
+**校准闭环（与 8.3/6.2 观测联动，非接口拍脑袋参数）**：估算常量 = 对既有观测数据
+（Batch 表 cache_hit/miss/output 实际 token，8.3 Cache 指标）的**离线校准值**——
+常量集中定义、注释登记校准日期与依据；未来观测数据变化（换模型/换书籍/实际用量漂移）
+时**单点重新校准常量**，接口消费方零改动。此为演进路径，本期不做自动校准（YAGNI）。
 
-| 常量 | 值 | 来源 |
+| 常量 | 值 | 校准依据 |
 | --- | --- | --- |
 | `PROMPT_TOKENS_PER_KP` | 1500 | R1 live 实测 1,427/单元（85,599/60），向上取整偏保守 |
 | `OUTPUT_TOKENS_PER_KP` | 3300 | R1 live 实测 3,263/单元（195,774/60），向上取整偏保守 |
@@ -37,11 +40,21 @@
 
 ### 3.2 区间估算
 
-- `price_low` = 全部 prompt 命中缓存 + output 固定价 → `estimate_cost_by_kind(prompt_tokens, 0, output_tokens)`
-- `price_high` = 全部未命中 + output 固定价 → `estimate_cost_by_kind(0, prompt_tokens, output_tokens)`
+- 区间边界复用 8.3 Cache 指标口径（hit/miss 概念，不新造）：`price_low` = 全部 prompt 命中缓存（hit ratio 100%）+ output 固定价 → `estimate_cost_by_kind(prompt_tokens, 0, output_tokens)`；`price_high` = 全部未命中（hit ratio 0%）+ output 固定价 → `estimate_cost_by_kind(0, prompt_tokens, output_tokens)`
 - 复用 `cost.py` 公开入口（生效日期取档），不触碰私有 `_price_for`、不重复定义价格
+- 实际 hit 率介于 0%~100% 之间，真实成本落在区间内——区间即对 8.3 hit ratio 不确定性的显式表达
 
-### 3.3 价格档位模型（现有 `cost.py`，保持不动）
+### 3.3 与既有观测的边界（防重复实现）
+
+| 既有资产 | spec 的关系 |
+| --- | --- |
+| Batch 表 usage 观测列（6.2 请求层数据） | 不动：事后实际 token，spec 只读不写 |
+| `llm_metrics.py`（8.3 指标上报） | 不动：spec 不出指标 |
+| `quality-summary` 成本汇总（6.10/8.4 事后） | 不动：事后核算，spec 不并入 |
+| `GET /tasks/{id}/batches` cost_estimate | 不动：事后单任务核算，spec 不重复 |
+| `cost.py` 价格档位（8.4） | 复用公开入口，不重复定义价格
+
+### 3.4 价格档位模型（现有 `cost.py`，保持不动）
 
 - 价格常量、按生效日期取档、事后核算（`estimate_cost` / `estimate_cost_by_kind`）不修改
 - 演进性：价格调整只改 cost.py 档位；模型/书籍变化只校准 token_estimator 常量；新消费点（预算告警、任务详情预估、动态 hit 率校准）复用两模块
