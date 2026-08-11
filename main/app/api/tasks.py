@@ -21,12 +21,14 @@ from app.middleware.idempotency import (
     request_body_hash,
 )
 from app.schemas.tasks import Batch as BatchSchema
+from app.schemas.tasks import CostEstimateRequest, CostEstimateResponse, TaskCreateRequest
 from app.schemas.tasks import Task as TaskSchema
-from app.schemas.tasks import TaskCreateRequest
 from infra.clock import SystemClock
 from infra.db.models import Batch
 from infra.db.session import format_utc, get_db_session
 from services.generation.cost import estimate_cost
+from services.generation.token_estimator import estimate_price_range
+from services.generation.validate import validate_config
 from services.tasks.service import (
     cancel_task,
     create_task,
@@ -199,6 +201,26 @@ def resume_task_endpoint(
     )
     session.commit()
     return JSONResponse(status_code=status, content=body)
+
+
+@router.post("/estimate", response_model=CostEstimateResponse)
+def estimate_task_cost_endpoint(
+    request: Request,
+    payload: CostEstimateRequest,
+) -> JSONResponse:
+    """任务价格预估(6.x/spec 4):纯计算、无副作用、豁免幂等键、不需要 API Key。
+
+    章节数 = len(chapter_ids) 纯计数(不做归属校验——创建任务时才校验);
+    generation_config 复用 validate_config(422);金额按当天价格档位取档。
+    """
+    validate_config(payload.generation_config.model_dump())
+    result = estimate_price_range(
+        chapter_count=len(payload.chapter_ids),
+        quantity_tendency=payload.generation_config.quantity_tendency,
+        custom_requirements=payload.generation_config.custom_requirements,
+        effective_date=format_utc(SystemClock().now_utc())[:10],
+    )
+    return JSONResponse(content=result)
 
 
 @router.post("/{task_id}/cancel", response_model=TaskSchema)

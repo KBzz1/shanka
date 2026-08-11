@@ -16,7 +16,7 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task
+from infra.db.models import ApiKey, Chapter, Device, KnowledgePoint, PdfFile, Task
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -274,3 +274,99 @@ def test_tasks_resume_200_then_409(ctx: tuple[TestClient, Path]) -> None:
     resp = client.post(f"/tasks/{task_id}/resume", headers={**device, **_idem()})
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "TASK_STATE_CONFLICT"
+
+
+def test_tasks_estimate_returns_price_range(ctx: tuple[TestClient, Path]) -> None:
+    client, _ = ctx
+    device = _device()
+    resp = client.post(
+        "/tasks/estimate",
+        json={
+            "chapter_ids": [_uuid() for _ in range(2)],
+            "generation_config": {
+                "quantity_tendency": "EXTENSIVE",
+                "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            },
+        },
+        headers=device,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 2 章 EXTENSIVE = 18 知识点(V4 口径),每知识点一卡
+    assert body["knowledge_point_count"] == 18
+    assert body["estimated_card_count"] == 18
+    assert body["currency"] == "CNY"
+    assert 0 < body["price_low"] <= body["price_high"]
+
+
+def test_tasks_estimate_empty_chapters_400(ctx: tuple[TestClient, Path]) -> None:
+    # 空章节:请求结构非法 → 400 VALIDATION_ERROR(struct-contract 1.4;422 系 Task 2 文档笔误,见 task-3-report)
+    client, _ = ctx
+    resp = client.post(
+        "/tasks/estimate",
+        json={
+            "chapter_ids": [],
+            "generation_config": {
+                "quantity_tendency": "BALANCED",
+                "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            },
+        },
+        headers=_device(),
+    )
+    assert resp.status_code == 400
+
+
+def test_tasks_estimate_invalid_config_400(ctx: tuple[TestClient, Path]) -> None:
+    # 非法配置:validate_config 统一判 400 VALIDATION_ERROR(与 6.3 /samples 同)
+    client, _ = ctx
+    resp = client.post(
+        "/tasks/estimate",
+        json={
+            "chapter_ids": [_uuid()],
+            "generation_config": {
+                "quantity_tendency": "BOGUS",
+                "difficulty_ratio": {"basic": 1.0, "understanding": 0.0, "application": 0.0},
+            },
+        },
+        headers=_device(),
+    )
+    assert resp.status_code == 400
+
+
+def test_tasks_estimate_no_side_effects(ctx: tuple[TestClient, Path]) -> None:
+    # 无需 API Key(纯计算);预估不落库:任务/批次/知识点表零写入
+    client, db_path = ctx
+    device = _device()
+    resp = client.post(
+        "/tasks/estimate",
+        json={
+            "chapter_ids": [_uuid()],
+            "generation_config": {
+                "quantity_tendency": "COMPACT",
+                "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            },
+        },
+        headers=device,
+    )
+    assert resp.status_code == 200, resp.text
+    factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+    with factory() as session:
+        assert session.scalar(select(Task).where(Task.device_id == device["X-Device-ID"])) is None
+        assert session.scalar(select(KnowledgePoint)) is None
+
+
+def test_tasks_estimate_without_idempotency_key(ctx: tuple[TestClient, Path]) -> None:
+    # 豁免幂等键(spec 4:/samples 先例):不带 Idempotency-Key 正常 200
+    client, _ = ctx
+    resp = client.post(
+        "/tasks/estimate",
+        json={
+            "chapter_ids": [_uuid()],
+            "generation_config": {
+                "quantity_tendency": "COMPACT",
+                "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            },
+        },
+        headers=_device(),
+    )
+    assert resp.status_code == 200, resp.text
