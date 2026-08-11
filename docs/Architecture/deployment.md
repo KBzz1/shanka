@@ -48,6 +48,10 @@ Android 前端 ──HTTPS──▶ api.<domain>（Cloudflare 边缘，DNS + 自
 ## 7. 运维注意
 - cloudflared 常驻与自启;Tunnel Token 为敏感凭据,统一放仓库根 `.env`(`DEEPSEEK_API_KEY` 同款:权限 600、git 忽略,不入仓库),systemd/脚本从 `.env` source,禁止散落各处。
 - 延迟/连通性实测记录处(迁移决策输入)。
+- 实测记录(2026-08-11):
+  - 本机 WSL2 curl:0.485/0.571/0.575s(首连 1.550s 含 TLS 握手;`--noproxy '*'` 直连 https://shanka.kbzz1.top/healthz,三次重复)。
+  - 真机移动网络:306 ms(Android 移动网络,浏览器网络面板,healthz 200)。
+  - 结论:阶梯 1 可用(Tunnel + CF 边缘,零成本)——306ms 略高于预期上限 250ms,但低频短请求 + 前端 Room 缓存下无感知差异,MVP 继续;若后续体验卡顿再评估阶梯 2(灰云 + 香港 VPS)。
 
 ## 8. Docker 演进(可选迁移形态,实施边界外)
 当需要把「后端 + 网络层」整体迁移到另一台电脑时,docker compose 双服务:
