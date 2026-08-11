@@ -112,9 +112,10 @@ def test_acceptance_ac03_sample_cards(client: TestClient) -> None:
     # AC-03-c：2 张普通问答 + 1 张判断题
     assert sum(1 for c in cards if c["card_type"] == "QUESTION") == 2
     assert sum(1 for c in cards if c["card_type"] == "TRUE_FALSE") == 1
-    # openapi Card required 字段齐全（F-2 fix：handler 合成 deck_id/position/created_at/updated_at）
+    # R-14：SampleCard 轻量组件（structure-contract 3.13）——无落库/归属/版本占位字段
     for c in cards:
-        assert {"deck_id", "position", "created_at", "updated_at"} <= set(c)
+        assert {"card_id", "front", "back", "card_type"} <= set(c)
+        assert {"deck_id", "position", "created_at", "updated_at"} & set(c) == set()
     # AC-03-d：不入牌组不统计——样卡不落库（cards/review_states 无行），统计自然不含样卡
     app = cast(FastAPI, client.app)
     with app.state.session_factory() as session:

@@ -234,7 +234,7 @@ paths:
                     minItems: 3
                     maxItems: 3
                     items:
-                      $ref: '#/components/schemas/Card'
+                      $ref: '#/components/schemas/SampleCard'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1070,6 +1070,36 @@ components:
         generation_config:
           $ref: '#/components/schemas/GenerationConfig'
       description: 接受样卡后创建任务;请求中不携带 API Key,服务端使用已保存 Key
+
+    SampleCard:
+      type: object
+      required: [card_id, front, back, card_type]
+      properties:
+        card_id:
+          type: string
+          format: uuid
+        front:
+          type: string
+        back:
+          type: string
+        code:
+          type: string
+        card_type:
+          type: string
+          enum: [QUESTION, TRUE_FALSE]
+        question:
+          type: string
+        answer:
+          type: string
+        statement:
+          type: string
+        answer_boolean:
+          type: boolean
+        explanation:
+          type: string
+        target_difficulty:
+          type: string
+          enum: [BASIC, UNDERSTANDING, APPLICATION]
 
     SampleRequest:
       type: object

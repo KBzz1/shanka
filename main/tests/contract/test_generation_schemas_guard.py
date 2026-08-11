@@ -7,7 +7,7 @@ generation_config 为 $ref GenerationConfig（object）——守卫 array-of-obj
 enum 值集（既有口径），值集一致性由 structure-contract 状态机契约承载。
 """
 
-from app.schemas.samples import SampleRequest
+from app.schemas.samples import SampleCard, SampleRequest
 from app.schemas.tasks import KnowledgePoint, TaskCreateRequest
 from app.schemas.tasks import Task as TaskView
 from tests.contract.support import check_schema_consistency, load_openapi, openapi_schema
@@ -29,6 +29,11 @@ def test_sample_request_schema_openapi_consistent() -> None:
     violations = check_schema_consistency(
         SampleRequest, openapi_schema("SampleRequest"), load_openapi()
     )
+    assert violations == []
+
+
+def test_sample_card_schema_openapi_consistent() -> None:
+    violations = check_schema_consistency(SampleCard, openapi_schema("SampleCard"), load_openapi())
     assert violations == []
 
 

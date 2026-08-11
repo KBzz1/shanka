@@ -105,11 +105,10 @@ def test_samples_post_three_cards_without_idempotency_key(
     assert {c["target_difficulty"] for c in cards} == {"BASIC", "UNDERSTANDING", "APPLICATION"}
     assert sum(1 for c in cards if c["card_type"] == "QUESTION") == 2
     assert sum(1 for c in cards if c["card_type"] == "TRUE_FALSE") == 1
-    # F-2：openapi Card required 字段齐全（deck_id/position/created_at/updated_at 由 handler 合成）
+    # R-14：SampleCard 轻量组件（structure-contract 3.13）——无落库/归属/版本占位字段
     for c in cards:
-        assert {"deck_id", "position", "created_at", "updated_at"} <= set(c)
-        assert c["deck_id"] == "" and c["position"] == 0
-        assert c["created_at"] and c["updated_at"]
+        assert {"card_id", "front", "back", "card_type"} <= set(c)
+        assert {"deck_id", "position", "created_at", "updated_at"} & set(c) == set()
     # 样卡不入库
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:

@@ -279,6 +279,25 @@
 
 **分母为 0 的比率一律返回 `null`**,不得以 0% 冒充(PRD 5.16)。
 
+### 3.13 SampleCard
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `card_id` | uuid | ✓ | 样卡预览标识（不入库,不保证跨请求稳定） |
+| `front` / `back` | string | ✓ | 通用渲染字段(所有卡片) |
+| `code` | string | ✗ | 卡片编号 |
+| `card_type` | enum | ✓ | `QUESTION` / `TRUE_FALSE` |
+| `question` / `answer` | string | ✗ | 仅 `QUESTION` 卡 |
+| `statement` | string | ✗ | 仅 `TRUE_FALSE` 卡 |
+| `answer_boolean` | bool | ✗ | 仅 `TRUE_FALSE` 卡 |
+| `explanation` | string | ✗ | 仅 `TRUE_FALSE` 卡 |
+| `target_difficulty` | enum | ✗ | `BASIC` / `UNDERSTANDING` / `APPLICATION` |
+
+与 Card 的差异：删去落库/归属/版本语义字段（deck_id、position、source、
+generation_item_id、knowledge_point_ids、Rubric 四维与总分、version、created_at、
+updated_at）——样卡不入库、不参与统计与 Rubric（PRD 5.5 数据规则），仅承载
+前端预览所需结构。
+
 ## 4. 状态机
 
 ### 4.1 Task
@@ -403,7 +422,7 @@ Scheduler(
 | --- | --- | --- | --- |
 | POST | `/v1/samples` | 生成 3 张样卡(1 基础 + 1 理解 + 1 应用;2 问答 + 1 判断);重新生成即再次调用 | - |
 
-请求体:`{ file_id, chapter_ids[], generation_config }`。样卡不入库、不参与统计(响应直接返回卡片结构)。
+请求体:`{ file_id, chapter_ids[], generation_config }`。样卡不入库、不参与统计(响应返回 SampleCard 轻量组件,见 3.13)。
 
 ### 6.4 任务(FR-06/07/12)
 

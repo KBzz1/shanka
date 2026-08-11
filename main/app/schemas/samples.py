@@ -23,3 +23,23 @@ class SampleRequest(BaseModel):
     file_id: str
     chapter_ids: list[str] = Field(min_length=1)
     generation_config: GenerationConfig
+
+
+class SampleCard(BaseModel):
+    """样卡轻量组件（structure-contract 3.13；openapi SampleCard）。
+
+    与 Card 的差异：删去落库/归属/版本语义字段——样卡不入库、不参与统计与
+    Rubric（PRD 5.5 数据规则），仅承载前端预览所需结构。
+    """
+
+    card_id: str
+    front: str
+    back: str
+    code: str | None = None
+    card_type: str
+    question: str | None = None
+    answer: str | None = None
+    statement: str | None = None
+    answer_boolean: bool | None = None
+    explanation: str | None = None
+    target_difficulty: str | None = None
