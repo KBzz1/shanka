@@ -271,7 +271,9 @@ def test_executor_cancel_between_batches_preserves_cancelled(
         injected = False
 
         def refresh_with_cancel(
-            instance: object, attribute_names: Iterable[str] | None = None, with_for_update: Any = None
+            instance: object,
+            attribute_names: Iterable[str] | None = None,
+            with_for_update: Any = None,
         ) -> None:
             nonlocal injected
             # 只匹配 executor 的 session.refresh(task)（批 commit 后）——_claim_next_batch 的
