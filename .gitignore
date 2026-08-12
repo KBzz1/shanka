@@ -15,3 +15,5 @@ __pycache__/
 
 # Claude Code 插件技能（本地安装，非项目文件）
 /.claude/skills/
+# 前端联调工作区（Shanka 仓库克隆，独立 git 历史，不入后端仓库）
+/frontend-app/
