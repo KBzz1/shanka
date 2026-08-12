@@ -37,3 +37,17 @@
 1. 前端代码修改 → 在 `frontend-app/`（前端仓库）内提交并推送 `git push origin main`。
 2. 前端开发者 `git pull` 获取修改。
 3. 后端仓库不含前端代码（`.gitignore` 排除 `frontend-app/`），前后端各自的 git 历史互不干扰。
+
+## 6. 首次联调检查清单
+
+- [ ] 后端启动：`./scripts/run.sh` → `curl localhost:8000/healthz` 返回 200（本机链路已实测；端口被占自动换 8001，模拟器地址同步改为 `http://10.0.2.2:8001`）
+- [ ] Windows 侧：Android Studio 打开 `\\wsl$\<发行版>\home\kbzz1\shanka_backend\frontend-app\Front`（首次打开会下载 Gradle 依赖，较慢属正常）
+- [ ] 运行目标：启动 AVD 模拟器（或真机 USB 调试），App 的 debug 后端地址指向 `http://10.0.2.2:8000`
+- [ ] 链路实测：模拟器内访问 `GET http://10.0.2.2:8000/healthz` 返回 200
+- [ ] 请求头就绪：`X-Device-ID`（全部接口）+ `Idempotency-Key`（写操作，`POST /samples` 豁免）
+
+## 7. 联调数据说明
+
+- 联调产生的业务数据（牌组/卡片/PDF/任务/统计）与加密 API Key 全部落在后端 `main/shanka.db`（SQLite，git 忽略）。
+- 需要干净起点时：停止后端 → 备份该文件（如 `cp main/shanka.db main/shanka.db.bak`）→ 删除原文件 → 重启后端（空库自动迁移建表）；删除后设备需重新 `PUT /api-key` 保存密钥。
+- 设备 ID 即数据主体：模拟器/真机每次使用的 `X-Device-ID` 决定看到哪份数据，联调时建议固定一个测试 UUID 便于对照日志。
