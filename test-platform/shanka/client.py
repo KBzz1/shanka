@@ -20,6 +20,14 @@ _PACE_DEFAULT = 0.3  # 契约 1.6:IP 5 req/s,节奏化避免平台自身触发�
 _MAX_RETRY = 3
 
 
+def _parse_json(raw: str) -> Any:
+    """解析 JSON 响应体;非 JSON(如网关 502 HTML 页)返回 None,不阻断调用方。"""
+    try:
+        return json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        return None
+
+
 @dataclass
 class Response:
     status: int
@@ -70,15 +78,18 @@ class ShankaClient:
                     raw = resp.read().decode()
                     status = resp.status
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
-                    payload = json.loads(raw) if raw else None
+                    payload = _parse_json(raw)
                     break
             except urllib.error.HTTPError as e:
                 body_raw = e.read().decode()
                 status = e.code
                 resp_headers = {k.lower(): v for k, v in e.headers.items()}
-                payload = json.loads(body_raw) if body_raw else None
+                payload = _parse_json(body_raw)
                 if e.code == 429 and attempt < _MAX_RETRY:
-                    wait = int(e.headers.get("Retry-After", "2")) + 1
+                    try:
+                        wait = int(e.headers.get("Retry-After", "2")) + 1
+                    except ValueError:  # Retry-After 非整数时按默认节奏等待
+                        wait = 2
                     time.sleep(wait)
                     continue
                 break
