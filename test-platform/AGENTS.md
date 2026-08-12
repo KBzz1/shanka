@@ -18,7 +18,7 @@ test-platform/
 ## 用法命令
 
 - 调度入口：`./test-platform/runner/run.sh --environment local|prod --suite quick|full|live [--scenario NAME] [--confirm-cost] [--confirm-prod] [--device-id UUID]`
-- 套件：`quick` = 0 次 LLM 调用纯无 Key 冒烟；`full` = 非生成场景 + api_key（合计 1 次校验调用，域场景实装后扩展）；`live` = 完整制卡流程（真实生成，触发成本闸门）。
+- 套件：`quick` = 0 次 LLM 调用纯无 Key 冒烟；`full` = 非生成场景 + api_key（合计 1 次校验调用，域场景实装后扩展）；`live` = 完整制卡流程（真实生成，触发成本闸门）。**live 套件需固定 `--device-id` 运行（随机设备无预置 PDF——后端按设备隔离数据，live_flow 复用已解析 PDF 须与预置数据同设备）**。
 - 单场景直跑：`cd test-platform && python3 scenarios/baseline/api_smoke.py [--base-url] [--device-id] [--pace]`；退出码 = 失败步骤数（0 = 全绿）。
 - 平台自测：`cd test-platform && python3 -m pytest tests/`（stdlib 测试，不依赖 main 环境）。
 

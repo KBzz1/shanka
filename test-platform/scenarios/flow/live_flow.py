@@ -98,7 +98,9 @@ def main(argv: list[str] | None = None) -> int:
     pdfs = [p for p in _body(r).get("items", []) if p.get("status") == "PARSED"]
     check("存在已解析 PDF", bool(pdfs), f"parsed={len(pdfs)}")
     if not pdfs:
-        raise SystemExit("无已解析 PDF,请先准备已解析 PDF 再运行")
+        raise SystemExit(
+            f"无已解析 PDF(设备 {c.device_id[:8]}),请固定 --device-id 运行以复用预置数据,或先上传解析 PDF"
+        )
     file_id = pdfs[0]["file_id"]
     r = c.request("GET", f"/pdfs/{file_id}", step="pdf-detail")
     check("GET /pdfs/{file_id} -> 200", r.status == 200, f"({r.status})")
