@@ -206,7 +206,7 @@ def resume_task_endpoint(
 @router.post("/estimate", response_model=CostEstimateResponse)
 def estimate_task_cost_endpoint(
     payload: CostEstimateRequest,
-) -> JSONResponse:
+) -> CostEstimateResponse:
     """任务价格预估(6.x/spec 4):纯计算、无副作用、豁免幂等键、不需要 API Key。
 
     章节数 = len(chapter_ids) 纯计数(不做归属校验——创建任务时才校验);
@@ -217,9 +217,9 @@ def estimate_task_cost_endpoint(
         chapter_count=len(payload.chapter_ids),
         quantity_tendency=payload.generation_config.quantity_tendency,
         custom_requirements=payload.generation_config.custom_requirements,
-        effective_date=format_utc(SystemClock().now_utc())[:10],
+        effective_date=SystemClock().now_utc().date().isoformat(),
     )
-    return JSONResponse(content=result)
+    return CostEstimateResponse(**result)
 
 
 @router.post("/{task_id}/cancel", response_model=TaskSchema)

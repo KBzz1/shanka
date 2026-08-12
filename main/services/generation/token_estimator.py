@@ -7,7 +7,7 @@
 
 from typing import Any
 
-from services.generation.cost import estimate_cost_by_kind
+from services.generation.cost import estimate_cost
 
 # 校准常量(2026-08-12,R1 live 实测 deepseek-v4-flash;向上取整偏保守)
 PROMPT_TOKENS_PER_KP = 1500  # 实测 1,427/单元(85,599/60)
@@ -49,16 +49,16 @@ def estimate_price_range(
     复用 cost.py 公开入口(生效日期取档),不触碰私有 _price_for、不重复定义价格。
     """
     tokens = estimate_tokens(chapter_count, quantity_tendency, custom_requirements)
-    low = estimate_cost_by_kind(
+    low = estimate_cost(
         tokens["prompt_tokens"], 0, tokens["output_tokens"], effective_date=effective_date
     )
-    high = estimate_cost_by_kind(
+    high = estimate_cost(
         0, tokens["prompt_tokens"], tokens["output_tokens"], effective_date=effective_date
     )
     return {
         "knowledge_point_count": tokens["knowledge_point_count"],
         "estimated_card_count": tokens["estimated_card_count"],
-        "price_low": low["total"],
-        "price_high": high["total"],
+        "price_low": low,
+        "price_high": high,
         "currency": "CNY",
     }

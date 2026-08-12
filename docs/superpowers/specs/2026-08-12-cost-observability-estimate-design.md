@@ -64,7 +64,7 @@
 | 项 | 值 |
 | --- | --- |
 | 方法/路径 | `POST /v1/tasks/estimate` |
-| 请求体 | `{ "selected_chapters": [uuid...], "generation_config": GenerationConfig }`，与 `POST /tasks` 同构，校验复用（空数组/非法 config → 422）（2026-08-12 修订：校验失败为 400 VALIDATION_ERROR，与库内错误码表一致；原 422 作废——实施裁决） |
+| 请求体 | `{ "selected_chapters": [uuid...], "generation_config": GenerationConfig }`，与 `POST /tasks` 同构，校验复用（空数组/非法 config → 422）（2026-08-12 修订：字段名为 `chapter_ids`（与 TaskCreateRequest 一致）；校验失败为 400 VALIDATION_ERROR，与库内错误码表一致；原 selected_chapters/422 作废——实施裁决） |
 | 响应 | `{ "knowledge_point_count": int, "estimated_card_count": int, "price_low": float, "price_high": float, "currency": "CNY" }` |
 | 语义 | 无副作用、不落库、豁免幂等键（`/samples` 先例）、不需要 API Key（纯计算） |
 | 前端展示 | 「预计 ¥0.04 ~ ¥0.08」（price_low/price_high 单位元） |
@@ -79,7 +79,7 @@
 ## 6. 测试
 
 - 估算模型单元：密度系数×章节数确定性、区间单调 low≤high、token 常量、custom 增量
-- 接口集成：空章节/非法 config 422、无 Key 可用、无副作用（预估后无表写入）、设备隔离语义
+- 接口集成：空章节/非法 config 400（2026-08-12 修订：原 422 作废——实施裁决）、无 Key 可用、无副作用（预估后无表写入）、设备隔离语义
 - 守卫：预估 schema ↔ openapi 一致
 - 全量回归：现有 366+ 测试不得破坏
 
