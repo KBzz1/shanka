@@ -315,6 +315,10 @@ paths:
                 $ref: '#/components/schemas/CostEstimateResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /tasks/{task_id}:
     parameters:
@@ -1206,6 +1210,7 @@ components:
             format: uuid
         generation_config:
           $ref: '#/components/schemas/GenerationConfig'
+      description: 价格预估请求(与 TaskCreateRequest 同构子集——仅章节+配置;纯计算,豁免幂等键)
     CostEstimateResponse:
       type: object
       required: [knowledge_point_count, estimated_card_count, price_low, price_high, currency]
@@ -1220,6 +1225,7 @@ components:
           type: number
         currency:
           type: string
+      description: 价格预估响应(区间估值,单位元 CNY;price_low=全命中/price_high=全未命中)
 
     SampleCard:
       type: object

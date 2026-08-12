@@ -205,7 +205,6 @@ def resume_task_endpoint(
 
 @router.post("/estimate", response_model=CostEstimateResponse)
 def estimate_task_cost_endpoint(
-    request: Request,
     payload: CostEstimateRequest,
 ) -> JSONResponse:
     """任务价格预估(6.x/spec 4):纯计算、无副作用、豁免幂等键、不需要 API Key。

@@ -37,6 +37,7 @@ def _load_root_env() -> None:
 def main() -> int:
     _load_root_env()
     from app.config import Settings
+    from infra.clock import SystemClock
     from infra.llm.deepseek import DeepSeekClient
     from infra.llm.prompts import build_generation_prompt, load_asset
     from services.generation.cost import estimate_cost_by_kind
@@ -76,15 +77,17 @@ def main() -> int:
 
     avg_prompt = total_prompt / len(SAMPLES)
     avg_output = total_output / len(SAMPLES)
+    effective_date = SystemClock().now_utc().date().isoformat()
     # 实际金额:3 次均为新样本首调,保守按全 miss 口径
-    actual = estimate_cost_by_kind(0, total_prompt, total_output, effective_date="2026-08-12")
-    low = estimate_cost_by_kind(total_prompt, 0, total_output, effective_date="2026-08-12")
-    high = estimate_cost_by_kind(0, total_prompt, total_output, effective_date="2026-08-12")
+    actual = estimate_cost_by_kind(0, total_prompt, total_output, effective_date=effective_date)
+    low = estimate_cost_by_kind(total_prompt, 0, total_output, effective_date=effective_date)
     print(
         f"均值 prompt={avg_prompt:.0f}(常量 {PROMPT_TOKENS_PER_KP}) "
         f"output={avg_output:.0f}(常量 {OUTPUT_TOKENS_PER_KP})"
     )
-    print(f"金额:实际(全 miss)¥{actual['total']:.4f} 区间 ¥{low['total']:.4f}~¥{high['total']:.4f}")
+    print(
+        f"金额:实际(全 miss)¥{actual['total']:.4f} 区间 ¥{low['total']:.4f}~¥{actual['total']:.4f}"
+    )
     if actual["total"] > MAX_COST_YUAN:
         print(f"预算超限 ¥{actual['total']:.4f} > ¥{MAX_COST_YUAN};中止", file=sys.stderr)
         return 2

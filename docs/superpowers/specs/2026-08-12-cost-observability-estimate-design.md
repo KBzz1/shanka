@@ -64,7 +64,7 @@
 | 项 | 值 |
 | --- | --- |
 | 方法/路径 | `POST /v1/tasks/estimate` |
-| 请求体 | `{ "selected_chapters": [uuid...], "generation_config": GenerationConfig }`，与 `POST /tasks` 同构，校验复用（空数组/非法 config → 422） |
+| 请求体 | `{ "selected_chapters": [uuid...], "generation_config": GenerationConfig }`，与 `POST /tasks` 同构，校验复用（空数组/非法 config → 422）（2026-08-12 修订：校验失败为 400 VALIDATION_ERROR，与库内错误码表一致；原 422 作废——实施裁决） |
 | 响应 | `{ "knowledge_point_count": int, "estimated_card_count": int, "price_low": float, "price_high": float, "currency": "CNY" }` |
 | 语义 | 无副作用、不落库、豁免幂等键（`/samples` 先例）、不需要 API Key（纯计算） |
 | 前端展示 | 「预计 ¥0.04 ~ ¥0.08」（price_low/price_high 单位元） |
@@ -74,7 +74,7 @@
 - `structure-contract.md`：8.4 成本估算附近新增「token 用量估算模型」能力口径（常量来源/密度映射/区间定义）；6.x 新增 `POST /tasks/estimate` 接口（请求/响应/错误码）
 - `openapi.yaml`：新增路径 + `CostEstimateResponse` 组件
 - `app/schemas/tasks.py`：预估请求/响应模型（守卫锚点）
-- 错误码：无新增（422 VALIDATION_ERROR 复用现有口径）
+- 错误码：无新增（422 VALIDATION_ERROR 复用现有口径）（2026-08-12 修订：校验失败为 400 VALIDATION_ERROR，与库内错误码表一致；原 422 作废——实施裁决）
 
 ## 6. 测试
 
