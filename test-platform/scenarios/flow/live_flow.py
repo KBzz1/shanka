@@ -23,6 +23,7 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from shanka import logging as shlogging
 from shanka.cleanup import DataScope
 from shanka.client import Response, ShankaClient
 from shanka.report import check, summary
@@ -82,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
     api_key = _load_env_key()
     # 任务生成期后端事件循环阻塞,轮询请求需长超时(默认 30s 不足)
     c = ShankaClient(args.base_url, device_id=args.device_id, timeout=60)
+    # 请求事件需含 device_id(日志规范);runner 随机设备时注入的是空串,此处回写实际设备
+    shlogging.set_context(suite=SUITE, scenario=NAME, device_id=c.device_id)
     scope = DataScope(c)
 
     # 1. API Key 保存(幂等)与状态

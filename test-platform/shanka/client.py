@@ -115,7 +115,7 @@ class ShankaClient:
                 if isinstance(err, dict):
                     err_code = str(err.get("code", ""))
             shlogging.event(
-                "WARN" if status >= 400 else "INFO",
+                "WARN" if (status == 0 or status >= 400) else "INFO",
                 "request complete",
                 step=step,
                 method=method,

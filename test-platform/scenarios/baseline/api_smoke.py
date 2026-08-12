@@ -22,6 +22,7 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+from shanka import logging as shlogging
 from shanka.client import ShankaClient
 from shanka.report import check, summary
 
@@ -39,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     c = ShankaClient(args.base_url, device_id=args.device_id, pace=args.pace)
+    # 请求事件需含 device_id(日志规范);runner 随机设备时注入的是空串,此处回写实际设备
+    shlogging.set_context(suite=SUITE, scenario=NAME, device_id=c.device_id)
 
     # 1. 探针(豁免鉴权)
     r = c.request("GET", "/healthz", step="healthz")
@@ -95,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
     st2, body2 = _post_with_key("/decks", {"name": deck_name}, key)
     check("幂等重放非 409", st2 in (200, 201), f"({st2})")
     check("幂等重放同 deck_id", body2.get("deck_id") == body1.get("deck_id"))
+    # 创建与重放各自落库的 deck_id 全量登记(重放键与创建键不同,按 C-04 语义另建牌组)
+    created_ids = {i for i in (deck_id, body1.get("deck_id"), body2.get("deck_id")) if isinstance(i, str)}
 
     # 5. 详情核对
     if deck_id:
@@ -142,7 +147,14 @@ def main(argv: list[str] | None = None) -> int:
     r = c.request("GET", "/healthz", step="healthz-after")
     check("窗口过后恢复 200", r.status == 200, f"({r.status})")
 
-    return summary()
+    failed = summary()
+
+    # 9. 清理创建的 smoke-* 牌组(spec 数据策略:默认随机设备不留残留;清理失败仅 WARN,不影响退出码)
+    for did in sorted(created_ids):
+        r = c.request("DELETE", f"/decks/{did}", idempotent=True, step="deck-cleanup")
+        if r.status not in (200, 204):
+            shlogging.event("WARN", "清理 smoke 牌组失败", deck_id=did, status=r.status)
+    return failed
 
 
 if __name__ == "__main__":

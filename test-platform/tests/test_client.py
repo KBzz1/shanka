@@ -59,6 +59,11 @@ class Handler(BaseHTTPRequestHandler):
         self._record_headers()
         self._respond(201, {"deck_id": "deck-1"})
 
+    def do_PUT(self) -> None:
+        HITS[self.path] = HITS.get(self.path, 0) + 1
+        self._record_headers()
+        self._respond(200, {"status": "ok"})
+
     def log_message(self, *args):  # 静默访问日志
         pass
 
@@ -99,6 +104,21 @@ class ClientTest(unittest.TestCase):
         r = c.request("POST", "/decks", body={"name": "x"}, idempotent=True, step="deck")
         self.assertEqual(r.status, 201)
         self.assertNotEqual(REQ_HEADERS["/decks"]["Idempotency-Key"], "")
+
+    def test_api_key_put_not_logged(self) -> None:
+        """红线 4:非 api-key 路径落事件,PUT /api-key 不落(凭据脱敏)。"""
+        c = ShankaClient(f"http://127.0.0.1:{self.port}", pace=0)
+        log_path = Path(self.tmp.name) / "t.log"
+        n_before = len(log_path.read_text().splitlines())
+        r = c.request("POST", "/decks", body={"name": "x"}, step="deck")
+        self.assertEqual(r.status, 201)
+        n_post = len(log_path.read_text().splitlines())
+        self.assertGreater(n_post, n_before)  # 非 api-key 路径有请求事件
+        r = c.request("PUT", "/api-key", body={"api_key": "sk-test-secret"}, step="api-key")
+        self.assertEqual(r.status, 200)
+        log = log_path.read_text()
+        self.assertEqual(len(log.splitlines()), n_post)  # PUT /api-key 不新增事件
+        self.assertNotIn("sk-test-secret", log)  # 明文永不落日志
 
     def test_non_json_response_is_tolerated(self) -> None:
         c = ShankaClient(f"http://127.0.0.1:{self.port}", pace=0)
