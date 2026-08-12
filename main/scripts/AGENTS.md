@@ -1,6 +1,7 @@
 # AGENTS.md
 
-API 连通性冒烟脚本（`smoke_api.py`）：对运行中服务的 HTTP 实链路验证——探针、鉴权（X-Device-ID 必须）、牌组 CRUD、幂等重放（C-04）、错误响应结构、openapi 契约、metrics。
+原 API 连通性冒烟脚本 `smoke_api.py` 已迁移至 `test-platform/scenarios/baseline/api_smoke.py`（2026-08-12）。
 
-- 用法见脚本 docstring（`python scripts/smoke_api.py [--base-url] [--device-id]`）；退出码 = 失败步骤数。
-- 不含任何真实密钥（生成链路需 PUT /api-key）；与单元/集成测试层（`main/tests/`）独立，只验证运行中实例。
+- 日常冒烟走测试平台：后端运行中执行 `cd test-platform && python3 scenarios/baseline/api_smoke.py [--base-url] [--device-id]`（由 `test-platform/runner/run.sh` 调度）；退出码 = 失败步骤数。
+- 本目录保留 `live_estimate_smoke.py`（R1 历史验收资产，不动）；部署脚本 run.sh/stop.sh 在仓库根 `scripts/`。
+- 冒烟脚本不含任何真实密钥（生成链路需 PUT /api-key）；与单元/集成测试层（`main/tests/`）独立，只验证运行中实例。
