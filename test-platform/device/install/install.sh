@@ -25,7 +25,7 @@ fi
 [ -n "$ADB" ] || { echo "未找到 adb,请用 --adb 指定(Windows 侧: \$env:LOCALAPPDATA\\Android\\Sdk\\platform-tools\\adb.exe)" >&2; exit 2; }
 [ -f "$APK" ] || { echo "APK 不存在: $APK(先跑 device/build/build_apk.sh)" >&2; exit 1; }
 
-DEVICES="$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}')"
+DEVICES="$("$ADB" devices | tr -d '\r' | awk 'NR>1 && $2=="device" {print $1}')"
 if [ -z "$DEVICES" ]; then
   echo "未检测到已连接设备,跳过安装(可先执行: $ADB devices)"
   exit 0
