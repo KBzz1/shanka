@@ -63,3 +63,13 @@
 
 - 验证命令：手机浏览器打开 `https://shanka.kbzz1.top/healthz` 或（reverse 后）`http://localhost:8000/healthz`，返回 `{"status":"ok"}` 即链路通；后端 `main/data/logs/app.log` 有对应 request complete 记录可核对。
 - 前端代码改动在 `frontend-app/`（前端仓库）内提交并推送 GitHub，前端开发者拉取后生效。
+
+## 9. 自动化测试平台
+
+- 位置：`test-platform/`（独立顶层目录，零依赖纯 stdlib，不依赖 main 的 conda 环境）。
+- 常用命令：
+  - `./test-platform/runner/run.sh --suite quick` — 无 Key 冒烟（后端需运行中）
+  - `./test-platform/runner/run.sh --suite live [--confirm-cost]` — 完整制卡流程（真实生成，消耗 DeepSeek 余额）
+  - `./test-platform/device/build/build_apk.sh` — WSL2 编译前端 debug APK
+  - `./test-platform/device/install/install.sh` — 安装 APK 到已连真机
+- 分层/场景地图/日志规范/新增场景指引见 `test-platform/AGENTS.md`；设计见 `docs/superpowers/specs/2026-08-12-test-platform-design.md`。

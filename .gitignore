@@ -17,3 +17,6 @@ __pycache__/
 /.claude/skills/
 # 前端联调工作区（Shanka 仓库克隆，独立 git 历史，不入后端仓库）
 /frontend-app/
+
+# 测试平台运行时日志（JSON Lines，可观测性产物）
+/test-platform/logs/

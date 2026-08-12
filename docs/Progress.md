@@ -21,6 +21,7 @@
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
 | 自动化验证 | `DONE`（R14 扩展） | 354 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8 + V6 26 + R1 5 + R14 1（守卫）；四工具命令全绿（mypy 174 files） |
+| test-platform/ | `DONE`（第一期实现） | 测试平台独立顶层目录（2026-08-12 建立：shanka/ 核心库、scenarios/ 两场景、runner/ 调度与闸门、device/ 真机脚本）；端到端验收为 SDD Task 8；设计/计划见 superpowers/specs/2026-08-12-test-platform-design.md、superpowers/plans/2026-08-12-test-platform.md |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
