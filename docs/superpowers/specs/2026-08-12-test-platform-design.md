@@ -12,18 +12,22 @@
 - 用户决策：live 生成每次联调 1-2 次调用可接受；**批量调用必须确认**；测试平台独立于 `main/tests/`；架构先行，不堆砌。
 - 仓库约束：依赖与 lint 唯一事实源 `main/pyproject.toml`（本平台因此**零依赖纯 stdlib**）；`.env` 凭据红线（Key 仅从 `.env` 读、不落命令行/日志）；`docs/AGENTS.md` 主目录结构变更需登记 Progress.md。
 
-## 3. 架构（v3 + 自审修正）
+## 3. 架构（v3 + 自审修正 + 日志设计）
 
 ```text
 test-platform/                     # 顶层独立目录(git 跟踪)
-├── README.md                      # 平台说明:分层/用法/场景地图/新增场景指引
+├── AGENTS.md                      # 平台说明(用 agent-md-maintenance 技能撰写):
+│                                  #   分层/用法/场景地图/新增场景指引/日志规范
 ├── shanka/                        # 核心库(纯 stdlib,零依赖)
 │   ├── __init__.py
-│   ├── client.py                  # HTTP 抽象:设备头/幂等键/429重试/请求节奏/脱敏日志/超时
+│   ├── client.py                  # HTTP 抽象:设备头/幂等键/429重试/请求节奏/脱敏/超时
 │   ├── cost.py                    # 成本护栏:阈值常量 + 聚合校验函数
 │   ├── cleanup.py                 # 数据策略:随机设备/固定设备 + 场景结束清理
 │   ├── environments.py            # 环境:local(localhost:8000) / prod(shanka.kbzz1.top)
-│   └── report.py                  # 统一报告:PASS/FAIL 步骤 + 退出码(失败步骤数)
+│   ├── report.py                  # 统一报告:PASS/FAIL 步骤 + 退出码(失败步骤数)
+│   └── logging.py                 # JSON Lines 日志:run_id 上下文/字段规范/脱敏
+├── logs/                          # 运行时日志输出(git 忽略)
+│   └── test-platform.log          #   JSON Lines,固定路径,每行一个事件
 ├── scenarios/
 │   ├── baseline/
 │   │   ├── __init__.py
@@ -39,8 +43,21 @@ test-platform/                     # 顶层独立目录(git 跟踪)
     │   └── build_apk.sh           # WSL2 编译 debug APK(SDK 路径参数化)
     ├── install/
     │   └── install.sh             # adb 安装到已连真机;无设备则提示跳过
-    └── README.md                  # instrumented 测试执行命令(connectedAndroidTest)
+    └── AGENTS.md                  # 真机层说明:instrumented 测试执行命令(connectedAndroidTest)
 ```
+
+### 日志与可观测性（日志是平台可观测性的核心环节）
+
+- **输出**:`test-platform/logs/test-platform.log`(JSON Lines,固定路径,追加式;与后端 `main/data/logs/app.log` 分离但格式同构,一套工具可读);console 同步输出便于实时 tail。`logs/` 为运行时产物,git 忽略。
+- **事件字段**（每行一个 JSON 事件,对齐后端 app.log 风格）:
+  - 必选:`timestamp`(UTC ISO8601)/ `level`(INFO/WARN/ERROR)/ `run_id`(一次 run.sh 全套共用一个 UUID)/ `message`
+  - 请求事件另含:`suite` / `scenario` / `step` / `request_id`(后端 X-Request-ID 响应头)/ `device_id` / `method` / `path` / `status` / `duration_ms` / `error_code`
+- **可观测性联动**:
+  - `run_id`:一次运行的全套日志共用,按 run 整体拉取/归档;
+  - `request_id`:与后端 app.log 同 request_id 交叉核对——一条测试请求从测试平台发起 → 后端中间件 → 业务处理 → 响应,全链路可查(与后端 `X-Request-ID` 约定一致,见 backend-integration.md 2.3 自查方法);
+  - 错误事件:仅记 `error_code`,不落明文。
+- **脱敏(对齐仓库红线 4)**:`PUT /api-key` 的请求体与响应永不落日志;任何事件不得出现 API Key 明文、设备 ID 仅以 `device_id` 字段出现（不混入 message）。
+- **实现归属**:`shanka/logging.py` 提供 JSON 行输出、run_id 上下文管理、字段校验与脱敏;所有场景经 `logging.py` 记录请求事件,不直接 print 到日志文件。
 
 ### 核心原则
 
@@ -83,17 +100,19 @@ test-platform/                     # 顶层独立目录(git 跟踪)
 
 ## 6. 第一期交付物
 
-1. `test-platform/` 全目录（README + shanka/ 五模块 + runner/ + device/ + 两个场景）
-2. `live_flow.py`：从 /tmp/flow_smoke.py 正式化——参数化（--base-url/--device-id/--skip-generate）、LLM_CALLS 声明、清理、报告
-3. `runner/run.sh` + `suites.py`：quick/full/live 套件与成本闸门
-4. `device/build/build_apk.sh`、`device/install/install.sh`
-5. `main/scripts/AGENTS.md` 更新 + `docs/frontend/local-dev.md` 增「自动化测试平台」章节
-6. Progress.md 登记 test-platform/（主目录结构变更）
+1. `test-platform/` 全目录（AGENTS.md + shanka/ 六模块 + logs/ + runner/ + device/ + 两个场景）
+2. `test-platform/AGENTS.md`：用 agent-md-maintenance 技能撰写（分层/用法/场景地图/新增场景指引/日志规范）；`device/AGENTS.md` 同理
+3. `live_flow.py`：从 /tmp/flow_smoke.py 正式化——参数化（--base-url/--device-id/--skip-generate）、LLM_CALLS 声明、清理、报告、经 logging.py 输出事件
+4. `runner/run.sh` + `suites.py`：quick/full/live 套件与成本闸门
+5. `device/build/build_apk.sh`、`device/install/install.sh`
+6. `main/scripts/AGENTS.md` 更新 + `docs/frontend/local-dev.md` 增「自动化测试平台」章节
+7. Progress.md 登记 test-platform/（主目录结构变更）;仓库根 .gitignore 加 `test-platform/logs/`
 
 ## 7. 验收
 
-- 零依赖：`python3 test-platform/runner/... ` 不需要 main 的 conda 环境即可跑（stdlib 导入验证）。
+- 零依赖：`python3` 直接运行平台脚本（stdlib 导入验证），不需要 main 的 conda 环境。
 - quick 套件在本地后端运行中全绿（退出码 0）；live 套件默认跳过生成可跑通、真实生成需 `--confirm-cost`。
+- 日志：运行后 `logs/test-platform.log` 生成 JSON Lines;含 run_id/request_id;`PUT /api-key` 相关事件无 Key 明文（grep 校验）;与后端 app.log 同 request_id 可交叉定位。
 - 迁移后 `main/scripts/` 无残留引用；mypy/ruff 不扫 test-platform（不在 main/pyproject 范围）。
 - 真机：build_apk.sh 产出 APK；install.sh 在设备连接时安装成功。
 
