@@ -51,3 +51,15 @@
 - 联调产生的业务数据（牌组/卡片/PDF/任务/统计）与加密 API Key 全部落在后端 `main/shanka.db`（SQLite，git 忽略）。
 - 需要干净起点时：停止后端 → 备份该文件（如 `cp main/shanka.db main/shanka.db.bak`）→ 删除原文件 → 重启后端（空库自动迁移建表）；删除后设备需重新 `PUT /api-key` 保存密钥。
 - 设备 ID 即数据主体：模拟器/真机每次使用的 `X-Device-ID` 决定看到哪份数据，联调时建议固定一个测试 UUID 便于对照日志。
+
+## 8. 真机（USB）联调（2026-08-12 实测）
+
+手机 USB 直插 Windows 侧，`adb devices` 可见后即可联调。两种模式：
+
+| 模式 | 地址 | 适用 |
+| --- | --- | --- |
+| 公网（零改动） | App 真机默认 `https://shanka.kbzz1.top`（`RemoteFlashcards.kt` 的 `defaultBaseUrl()`：debug 非模拟器即生产地址） | 真机验收、随时可用；实测 healthz 200（含隧道耗时 ~0.8s） |
+| 本地 USB（快速迭代） | Windows 侧 `adb reverse tcp:8000 tcp:8000` 后，手机访问 `http://localhost:8000`；需将 `defaultBaseUrl()` 的 debug 真机分支改为 `http://localhost:8000` | 高频联调反馈，不走公网 |
+
+- 验证命令：手机浏览器打开 `https://shanka.kbzz1.top/healthz` 或（reverse 后）`http://localhost:8000/healthz`，返回 `{"status":"ok"}` 即链路通；后端 `main/data/logs/app.log` 有对应 request complete 记录可核对。
+- 前端代码改动在 `frontend-app/`（前端仓库）内提交并推送 GitHub，前端开发者拉取后生效。
