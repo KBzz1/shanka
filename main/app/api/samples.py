@@ -43,6 +43,6 @@ def generate_samples_endpoint(
         device_id=request.state.device_id,
         file_id=payload.file_id,
         chapter_ids=payload.chapter_ids,
-        config=payload.generation_config.model_dump(),
+        config=payload.generation_config,
     )
     return JSONResponse(content={"sample_cards": [_to_sample_card(c).model_dump() for c in cards]})

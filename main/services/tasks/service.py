@@ -14,6 +14,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from app.schemas.samples import GenerationConfig
 from infra.db.models import ApiKey, Chapter, PdfFile, Task
 from infra.db.session import format_utc
 from infra.metrics import GENERATION_TASKS_TOTAL
@@ -77,7 +78,7 @@ def create_task(
     file_id: str,
     deck_id: str,
     chapter_ids: list[str],
-    config: dict[str, Any],
+    config: GenerationConfig,
     now: str,
 ) -> Task:
     """创建任务：校验归属/配置/已保存 Key（无 → API_KEY_NOT_SET 422）→ 建 Task（RUNNING
@@ -121,7 +122,7 @@ def create_task(
         status="RUNNING",
         stage="GENERATING",
         selected_chapters=json.dumps(chapter_snapshot, ensure_ascii=False),
-        generation_config=json.dumps(config, ensure_ascii=False),
+        generation_config=json.dumps(config.model_dump(), ensure_ascii=False),
         generated_card_count=0,
         resumable=0,
         created_at=now,
@@ -134,7 +135,7 @@ def create_task(
         session,
         task_id=task.task_id,
         chapter_ids=chapter_ids,
-        quantity_tendency=config["quantity_tendency"],
+        quantity_tendency=config.quantity_tendency,
     )
     session.add_all(kps)
     return task

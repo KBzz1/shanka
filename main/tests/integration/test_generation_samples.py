@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from app.schemas.samples import DifficultyRatio, GenerationConfig
 from infra.db.models import Base, Card, Chapter, Device, PdfFile
 from infra.db.session import create_db_engine, create_session_factory
 from services.generation.samples import generate_samples
@@ -64,11 +65,11 @@ def _seed_pdf(session: Session, *, device_id: str) -> tuple[str, list[str]]:
     return pdf.file_id, chapter_ids
 
 
-def _config(quantity: str = "BALANCED") -> dict[str, object]:
-    return {
-        "quantity_tendency": quantity,
-        "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
-    }
+def _config(quantity: str = "BALANCED") -> GenerationConfig:
+    return GenerationConfig(
+        quantity_tendency=quantity,
+        difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+    )
 
 
 def test_samples_generates_three_not_persisted(session_factory: Callable[[], Session]) -> None:
@@ -122,17 +123,17 @@ def test_samples_validate_config() -> None:
     validate_config(_config())  # 合法
     with pytest.raises(AppError) as excinfo:
         validate_config(
-            {
-                "quantity_tendency": "BALANCED",
-                "difficulty_ratio": {"basic": 0.5, "understanding": 0.5, "application": 0.2},
-            }
+            GenerationConfig(
+                quantity_tendency="BALANCED",
+                difficulty_ratio=DifficultyRatio(basic=0.5, understanding=0.5, application=0.2),
+            )
         )
     assert excinfo.value.code is ErrorCode.VALIDATION_ERROR
     with pytest.raises(AppError) as excinfo:
         validate_config(
-            {
-                "quantity_tendency": "HUGE",
-                "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
-            }
+            GenerationConfig(
+                quantity_tendency="HUGE",
+                difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+            )
         )
     assert excinfo.value.code is ErrorCode.VALIDATION_ERROR

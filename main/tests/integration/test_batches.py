@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.schemas.samples import DifficultyRatio, GenerationConfig
 from infra.db.models import Base, Batch, Card, KnowledgePoint, Task
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.deepseek import DeepSeekClient
@@ -69,10 +70,10 @@ def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> 
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
-        config={
-            "quantity_tendency": "COMPACT",
-            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
-        },
+        config=GenerationConfig(
+            quantity_tendency="COMPACT",
+            difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+        ),
         now="2026-08-11T00:00:00.000Z",
     )
     session.commit()

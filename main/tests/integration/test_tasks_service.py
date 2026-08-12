@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from app.schemas.samples import DifficultyRatio, GenerationConfig
 from infra.db.models import ApiKey, Base, Chapter, Device, KnowledgePoint, PdfFile, Task
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
@@ -91,11 +92,11 @@ def _seed_context(session: Session, *, device_id: str, with_key: bool = True) ->
     }
 
 
-def _config(tendency: str = "BALANCED") -> dict[str, str | dict[str, float]]:
-    return {
-        "quantity_tendency": tendency,
-        "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
-    }
+def _config(tendency: str = "BALANCED") -> GenerationConfig:
+    return GenerationConfig(
+        quantity_tendency=tendency,
+        difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+    )
 
 
 def test_tasks_create_runs_and_plans(session_factory: Callable[[], Session]) -> None:

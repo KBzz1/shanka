@@ -8,7 +8,8 @@ from app.config import Settings
 
 
 def test_settings_defaults() -> None:
-    settings = Settings()
+    # _env_file=None：纯默认值断言，不受仓库根 .env 加载影响（显式传参构造约定）
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.app_name == "shanka-backend"
     assert settings.version == "0.1.0"
     assert settings.environment == "development"
@@ -30,7 +31,7 @@ def test_settings_defaults() -> None:
 
 def test_settings_env_var_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
-    assert Settings().database_url == "sqlite:///:memory:"
+    assert Settings(_env_file=None).database_url == "sqlite:///:memory:"  # type: ignore[call-arg]
 
 
 def test_settings_explicit_kwargs_win_over_env(monkeypatch: pytest.MonkeyPatch) -> None:

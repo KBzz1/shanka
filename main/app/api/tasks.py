@@ -62,7 +62,7 @@ def create_task_endpoint(
             file_id=payload.file_id,
             deck_id=payload.deck_id,
             chapter_ids=payload.chapter_ids,
-            config=payload.generation_config.model_dump(),
+            config=payload.generation_config,
             now=_now(),
         )
         session.flush()
@@ -212,7 +212,7 @@ def estimate_task_cost_endpoint(
     章节数 = len(chapter_ids) 纯计数(不做归属校验——创建任务时才校验);
     generation_config 复用 validate_config(400);金额按当天价格档位取档。
     """
-    validate_config(payload.generation_config.model_dump())
+    validate_config(payload.generation_config)
     result = estimate_price_range(
         chapter_count=len(payload.chapter_ids),
         quantity_tendency=payload.generation_config.quantity_tendency,

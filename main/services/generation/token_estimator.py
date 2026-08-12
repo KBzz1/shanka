@@ -8,14 +8,12 @@
 from typing import Any
 
 from services.generation.cost import estimate_cost
+from services.generation.planning import knowledge_point_count
 
 # 校准常量(2026-08-12,R1 live 实测 deepseek-v4-flash;向上取整偏保守)
 PROMPT_TOKENS_PER_KP = 1500  # 实测 1,427/单元(85,599/60)
 OUTPUT_TOKENS_PER_KP = 3300  # 实测 3,263/单元(195,774/60)
 CUSTOM_REQ_TOKENS_PER_CHAR = 0.5  # 约定:custom_requirements 每字符约 0.5 token
-
-_DENSITY_MULTIPLIER = {"COMPACT": 1, "BALANCED": 2, "EXTENSIVE": 3}
-_BASE_CHUNKS_PER_CHAPTER = 3  # 与 planning._BASE_CHUNKS 同口径(每章基础分块数)
 
 
 def estimate_tokens(
@@ -24,8 +22,7 @@ def estimate_tokens(
     custom_requirements: str | None,
 ) -> dict[str, int]:
     """输入参数 → 预计 token(与 V4 规划同口径:每章 3×密度系数知识点,每知识点一卡)。"""
-    multiplier = _DENSITY_MULTIPLIER.get(quantity_tendency, _DENSITY_MULTIPLIER["BALANCED"])
-    kp_count = chapter_count * _BASE_CHUNKS_PER_CHAPTER * multiplier
+    kp_count = knowledge_point_count(chapter_count, quantity_tendency)
     prompt_tokens = kp_count * PROMPT_TOKENS_PER_KP
     if custom_requirements:
         prompt_tokens += int(len(custom_requirements) * CUSTOM_REQ_TOKENS_PER_CHAR)
@@ -55,9 +52,10 @@ def estimate_price_range(
     high = estimate_cost(
         0, tokens["prompt_tokens"], tokens["output_tokens"], effective_date=effective_date
     )
+    kp_count = tokens["knowledge_point_count"]
     return {
-        "knowledge_point_count": tokens["knowledge_point_count"],
-        "estimated_card_count": tokens["estimated_card_count"],
+        "knowledge_point_count": kp_count,
+        "estimated_card_count": kp_count,
         "price_low": low,
         "price_high": high,
         "currency": "CNY",

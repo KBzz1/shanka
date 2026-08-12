@@ -1,11 +1,10 @@
 """samples.py：样卡 service（6.3/AC-03）。"""
 
-from typing import Any
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from app.schemas.samples import GenerationConfig
 from infra.db.models import Chapter, PdfFile
 from services.generation.fake import generate_card
 from services.generation.validate import validate_config
@@ -24,7 +23,7 @@ def generate_samples(
     device_id: str,
     file_id: str,
     chapter_ids: list[str],
-    config: dict[str, Any],
+    config: GenerationConfig,
 ) -> list[dict[str, object]]:
     validate_config(config)
     pdf = _owned_pdf(session, device_id=device_id, file_id=file_id)
@@ -38,16 +37,24 @@ def generate_samples(
     first = by_id[chapter_ids[0]]
     return [
         generate_card(
-            "样卡主题-基础", first.name, "BASIC", config.get("custom_requirements"), "sample"
+            "样卡主题-基础",
+            first.name,
+            "BASIC",
+            config.custom_requirements,
+            "sample",
         ),
         generate_card(
             "样卡主题-理解",
             first.name,
             "UNDERSTANDING",
-            config.get("custom_requirements"),
+            config.custom_requirements,
             "sample",
         ),
         generate_card(
-            "样卡主题-应用", first.name, "APPLICATION", config.get("custom_requirements"), "sample"
+            "样卡主题-应用",
+            first.name,
+            "APPLICATION",
+            config.custom_requirements,
+            "sample",
         ),
     ]

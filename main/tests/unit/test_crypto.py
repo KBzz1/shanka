@@ -47,4 +47,5 @@ def test_crypto_key_from_settings() -> None:
 
 def test_crypto_key_from_settings_invalid_returns_none() -> None:
     assert key_from_settings(Settings(api_key_encryption_key="not-hex")) is None
-    assert key_from_settings(Settings()) is None
+    # _env_file=None：不受仓库根 .env 的 API_KEY_ENCRYPTION_KEY 加载影响
+    assert key_from_settings(Settings(_env_file=None)) is None  # type: ignore[call-arg]

@@ -5,17 +5,16 @@ OUTPUT_TOKENS_PER_KP=3300)。3 个单知识点单元(不同难度)真实 chat,�
 token,均值对照常量并报告偏差;实际金额对照预估区间(price_low/price_high 同口径)。
 
 纪律:不进 pytest 套件(自动化测试确定性零网络,LOCAL-DONE 红线);固定 3 次调用,
-预算守卫 ¥0.5 封顶(保险丝);从仓库根 .env 加载真实 Key。
+预算守卫 ¥0.5 封顶(保险丝);真实 Key 经 Settings env_file 从仓库根 .env 加载
+(env_file=(".env", "../.env"),与 scripts/run.sh source ../.env 同源)。
 用法:cd main && conda run -n shanka-backend python scripts/live_estimate_smoke.py
 """
 
-import os
 import sys
 from pathlib import Path
 
 MAIN_DIR = Path(__file__).resolve().parent.parent  # main/
 sys.path.insert(0, str(MAIN_DIR))
-ROOT_ENV = MAIN_DIR.parent / ".env"
 MAX_COST_YUAN = 0.5
 SAMPLES: list[tuple[str, str, str]] = [
     ("AI Agent 定义与核心能力", "第一章 引言", "BASIC"),
@@ -24,18 +23,7 @@ SAMPLES: list[tuple[str, str, str]] = [
 ]
 
 
-def _load_root_env() -> None:
-    """仓库根 .env(DEEPSEEK_API_KEY)注入环境变量(与 scripts/run.sh 同源)。"""
-    if ROOT_ENV.exists():
-        for line in ROOT_ENV.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                key, _, value = line.partition("=")
-                os.environ.setdefault(key.strip(), value.strip())
-
-
 def main() -> int:
-    _load_root_env()
     from app.config import Settings
     from infra.clock import SystemClock
     from infra.llm.deepseek import DeepSeekClient

@@ -12,3 +12,6 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 /.claude/worktrees/
+
+# Claude Code 插件技能（本地安装，非项目文件）
+/.claude/skills/

@@ -5,8 +5,9 @@
 - `DEEPSEEK_API_KEY` → `deepseek_api_key`（`repr=False`，仅 infra/llm 调用路径可读取）
 - `API_KEY_ENCRYPTION_KEY` → `api_key_encryption_key`（`repr=False`，仅 infra/llm 调用路径可解密）
 
-运行位置约定：开发/验收在 `main/` 下运行（env_file=".env" 相对工作目录，
-仓库根 .env 不存在于 main/，故测试不会意外加载）；测试一律显式传参构造。
+运行位置约定：开发/验收在 `main/` 下运行（env_file 相对工作目录：
+".env" = main/.env、"../.env" = 仓库根 .env（优先级更高，run.sh source ../.env 同源））。
+测试一律显式传参构造（断言默认值处用 `Settings(_env_file=None)`，不受仓库根 .env 加载影响）。
 """
 
 from pathlib import Path
@@ -17,7 +18,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # extra="ignore"：仓库根 .env 含 run.sh 运维变量（如 CLOUDFLARED_SERVICE_INSTALL_TOKEN），
+    # 不属于 Settings 字段，必须忽略而非 forbid。
+    model_config = SettingsConfigDict(
+        env_file=(".env", "../.env"), env_file_encoding="utf-8", extra="ignore"
+    )
 
     app_name: str = "shanka-backend"
     version: str = "0.1.0"

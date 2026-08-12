@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.schemas.samples import DifficultyRatio, GenerationConfig
 from infra.db.models import Base, Batch, Card, KnowledgePoint, Task
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
@@ -24,7 +25,8 @@ from infra.llm.deepseek import DeepSeekClient
 from services.tasks.executor import process_running_tasks
 from services.tasks.service import create_task
 
-_SETTINGS = Settings(api_key_encryption_key="aa" * 32)
+# _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
+_SETTINGS = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
 _TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
 assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
@@ -82,10 +84,10 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
-        config={
-            "quantity_tendency": quantity_tendency,
-            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
-        },
+        config=GenerationConfig(
+            quantity_tendency=quantity_tendency,
+            difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+        ),
         now="2026-08-11T00:00:00.000Z",
     )
     session.commit()

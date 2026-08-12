@@ -194,7 +194,7 @@ def test_scanner_process_pending_no_toc_fails(
 
 def test_scanner_validate_upload_page_count_boundary() -> None:
     """页数维度边界（T3 审查补覆盖）：=1000 通过；1001 → PDF_UPLOAD_INVALID；None 跳过。"""
-    settings = Settings()
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]  # 默认值断言：不受仓库根 .env 加载影响
     validate_upload(
         filename="a.pdf",
         content_type="application/pdf",
@@ -226,7 +226,7 @@ def test_scanner_validate_upload_page_count_boundary() -> None:
 
 def test_scanner_validate_upload_size_boundary_exact_max() -> None:
     """大小边界（T3 审查补覆盖）：==上限（100MB）通过（超限已由 triple_check 覆盖）。"""
-    settings = Settings()
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]  # 默认值断言：不受仓库根 .env 加载影响
     validate_upload(
         filename="a.pdf",
         content_type="application/pdf",
@@ -238,7 +238,7 @@ def test_scanner_validate_upload_size_boundary_exact_max() -> None:
 
 
 def test_scanner_validate_upload_triple_check(tmp_path: Path) -> None:
-    settings = Settings()
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]  # 默认值断言：不受仓库根 .env 加载影响
     # 合法
     validate_upload(
         filename="a.pdf",

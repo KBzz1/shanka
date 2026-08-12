@@ -16,6 +16,15 @@ _DENSITY = {"COMPACT": 1, "BALANCED": 2, "EXTENSIVE": 3}
 _BASE_CHUNKS = 3  # 每章基础分块数（确定性；真实文本分块 V5A 接入）
 
 
+def knowledge_point_count(chapter_count: int, quantity_tendency: str) -> int:
+    """知识点数（5.4.1 口径）：每章基础分块 3 × 密度系数，未知密度回落 BALANCED。
+
+    规划与估算（token_estimator）共用的公共入口——密度映射/分块规则变更时单点修改。
+    """
+    density = _DENSITY.get(quantity_tendency, 2)
+    return chapter_count * _BASE_CHUNKS * density
+
+
 def plan_knowledge_points(
     session: Session, *, task_id: str, chapter_ids: list[str], quantity_tendency: str
 ) -> list[KnowledgePoint]:
@@ -24,11 +33,11 @@ def plan_knowledge_points(
     topic 用"第X章-知识点N"确定性命名；source_chunk_id 含 chapter_id。
     R-13 注释：真实分块（章节文本抽取）在 V5A 或后续接入，V4 规划结构正确。
     """
-    density = _DENSITY.get(quantity_tendency, 2)
+    chunks_per_chapter = knowledge_point_count(1, quantity_tendency)
     chapters = session.scalars(select(Chapter).where(Chapter.chapter_id.in_(chapter_ids))).all()
     kps: list[KnowledgePoint] = []
     for ch in chapters:
-        for i in range(_BASE_CHUNKS * density):
+        for i in range(chunks_per_chapter):
             kps.append(
                 KnowledgePoint(
                     knowledge_point_id=str(uuid.uuid4()),
