@@ -434,7 +434,7 @@ Scheduler(
 | GET | `/v1/tasks/{task_id}` | 长任务轮询:状态、stage、已生成数、批次进度、失败码、是否可继续(FR-18) | - |
 | POST | `/v1/tasks/{task_id}/resume` | 断点续传,仅处理未完成批次 | ✓ |
 | POST | `/v1/tasks/{task_id}/cancel` | 取消任务 | ✓ |
-| POST | `/v1/tasks/estimate` | 创建任务前价格预估(区间估值,单位元):请求 `{chapter_ids, generation_config}`(空章节/非法配置 → 422,校验与 POST /tasks 同);响应 `{knowledge_point_count, estimated_card_count, price_low, price_high, currency}`;纯计算、不落库、**豁免幂等键**(与 6.3 /samples 同)、不需要 API Key | 豁免 |
+| POST | `/v1/tasks/estimate` | 创建任务前价格预估(区间估值,单位元):请求 `{chapter_ids, generation_config}`(空章节/非法配置 → 400 VALIDATION_ERROR,校验与 POST /tasks 同);响应 `{knowledge_point_count, estimated_card_count, price_low, price_high, currency}`;纯计算、不落库、**豁免幂等键**(与 6.3 /samples 同)、不需要 API Key | 豁免 |
 
 ### 6.5 牌组与卡片(FR-03/14)
 

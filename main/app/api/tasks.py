@@ -211,7 +211,7 @@ def estimate_task_cost_endpoint(
     """任务价格预估(6.x/spec 4):纯计算、无副作用、豁免幂等键、不需要 API Key。
 
     章节数 = len(chapter_ids) 纯计数(不做归属校验——创建任务时才校验);
-    generation_config 复用 validate_config(422);金额按当天价格档位取档。
+    generation_config 复用 validate_config(400);金额按当天价格档位取档。
     """
     validate_config(payload.generation_config.model_dump())
     result = estimate_price_range(

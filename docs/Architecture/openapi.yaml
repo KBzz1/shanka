@@ -313,8 +313,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CostEstimateResponse'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
+        '400':
+          $ref: '#/components/responses/BadRequest'
 
   /tasks/{task_id}:
     parameters:

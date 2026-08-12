@@ -80,10 +80,11 @@ def main() -> int:
     actual = estimate_cost_by_kind(0, total_prompt, total_output, effective_date="2026-08-12")
     low = estimate_cost_by_kind(total_prompt, 0, total_output, effective_date="2026-08-12")
     high = estimate_cost_by_kind(0, total_prompt, total_output, effective_date="2026-08-12")
-    print(f"均值 prompt={avg_prompt:.0f}(常量 {PROMPT_TOKENS_PER_KP}) "
-          f"output={avg_output:.0f}(常量 {OUTPUT_TOKENS_PER_KP})")
-    print(f"金额:实际(全 miss)¥{actual['total']:.4f} "
-          f"区间 ¥{low['total']:.4f}~¥{high['total']:.4f}")
+    print(
+        f"均值 prompt={avg_prompt:.0f}(常量 {PROMPT_TOKENS_PER_KP}) "
+        f"output={avg_output:.0f}(常量 {OUTPUT_TOKENS_PER_KP})"
+    )
+    print(f"金额:实际(全 miss)¥{actual['total']:.4f} 区间 ¥{low['total']:.4f}~¥{high['total']:.4f}")
     if actual["total"] > MAX_COST_YUAN:
         print(f"预算超限 ¥{actual['total']:.4f} > ¥{MAX_COST_YUAN};中止", file=sys.stderr)
         return 2
