@@ -212,12 +212,13 @@ _console = False
 
 
 def init_logger(run_id: str, log_path: Path | None = None, console: bool = False) -> None:
-    """全局初始化一次;log_path 为 None 时仅 console。追加式,不截断。"""
+    """全局初始化一次;log_path 为 None 时仅 console。追加式,不截断;目录自动创建。"""
     global _run_id, _file, _console
     with _lock:
         _run_id = run_id
         _console = console
         if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
             _file = open(log_path, "a", encoding="utf-8")
 
 
@@ -670,13 +671,13 @@ def main(argv: list[str] | None = None) -> int:
     check("GET /readyz -> 200", r.status == 200, f"({r.status})")
 
     # 2. 鉴权:无 X-Device-ID 必须 401(不经 client 的设备头,直连)
-    raw = urllib.request.urlopen(c.base_url + "/decks", timeout=15)
     try:
-        check("GET /decks 无设备头 -> 401", raw.status == 401, f"({raw.status})")
+        with urllib.request.urlopen(c.base_url + "/decks", timeout=15) as resp:
+            status = resp.status
     except urllib.error.HTTPError as e:
-        check("GET /decks 无设备头 -> 401", e.code == 401, f"({e.code})")
-    finally:
-        raw.close()
+        status = e.code
+        e.close()
+    check("GET /decks 无设备头 -> 401", status == 401, f"({status})")
 
     # 3. 业务链路:列表 / 创建 / 详情
     r = c.request("GET", "/decks", step="deck-list")
@@ -692,11 +693,9 @@ def main(argv: list[str] | None = None) -> int:
     check("创建返回 name", r.json.get("name") == deck_name)
 
     # 4. 幂等重放(C-04):同幂等键重放 -> 原结果不 409
-    #    (client 每次自动新键,此处手动同键重放)
+    #    (client 每次自动新键会掩盖同键语义,此处手工构造同键两次 POST)
     import uuid as _uuid
     key = str(_uuid.uuid4())
-    r1 = c.request("POST", "/decks", body={"name": deck_name}, idempotent=False, step="deck-create-1")
-    # 用相同 Idempotency-Key 重放:通过原始 urllib 手工构造
     def _post_with_key(path: str, body: dict, idem_key: str):
         import json as _json
         import urllib.request as _ur
@@ -812,6 +811,7 @@ git commit -m "feat(test-platform): baseline/api_smoke 迁移——httpx 改 Sha
 - 参数:`--base-url`(默认 localhost:8000)、`--device-id`(默认随机)、`--skip-generate`(跳过 POST /tasks 与评级,到样卡为止)、`--keep`(不清理创建的牌组)
 - 步骤:
   1. 从 `.env` 读 `DEEPSEEK_API_KEY`(正则解析;缺失则报错退出);`PUT /api-key`(idempotent)→ `GET /api-key/status` 断言 `AVAILABLE`
+  - 客户端实例:`ShankaClient(base_url, device_id=..., timeout=60)`(任务生成期事件循环阻塞时轮询请求需长超时,默认 30s 不足)
   2. `GET /pdfs` 选第一个 `PARSED` 的 PDF;无则报错"请先准备已解析 PDF";`GET /pdfs/{id}` 取章节列表,断言非空
   3. 选前 2 章 → `POST /samples`(不幂等)断言 200 且响应数组非空
   4. `--skip-generate` 时到此结束(skip 提示后返回 0);否则:`DataScope.create_deck("联调测试牌组")` → `POST /tasks`(idempotent)断言 201 → 轮询 `GET /tasks/{id}` 至终态(间隔 5s,单次超时 60s,上限 10 分钟,`run_id` 由 runner 注入)
@@ -1110,8 +1110,7 @@ git commit -m "feat(test-platform): device 真机层——build_apk(WSL2 编译�
 - Modify: `main/scripts/AGENTS.md`(更新为冒烟已迁移说明)
 - Modify: `docs/frontend/local-dev.md`(增「自动化测试平台」章节)
 - Modify: `docs/Progress.md`(登记 test-platform/ 主目录结构变更)
-- Modify: `.gitignore`(追加 `test-platform/logs/`)
-- Create: `test-platform/logs/.gitkeep`(保证日志目录入 git,内容在 gitignore 内)
+- Modify: `.gitignore`(追加 `test-platform/logs/`;目录由 logging.py init_logger 自动 mkdir,无需 .gitkeep)
 
 - [ ] **Step 1: 调用 agent-md-maintenance 技能撰写两份 AGENTS.md**
 
@@ -1181,8 +1180,10 @@ Expected: api_smoke 全 PASS,退出码 0;`logs/test-platform.log` 生成 JSON Li
 
 - [ ] **Step 3: 闸门行为验证**
 
-Run: `cd test-platform && ./runner/run.sh --suite live`
-Expected: 拒绝(需 --confirm-cost?live 合计 3 不超阈值,应放行——验证:prod 环境拒绝):`./runner/run.sh --environment prod --suite quick` 必须被拒绝(未带 --confirm-prod),退出码 1
+Run: `cd test-platform && ./runner/run.sh --environment prod --suite quick`
+Expected: 拒绝执行(未带 --confirm-prod),退出码 1
+Run: `cd test-platform && python3 -c "from runner.suites import llm_total; assert llm_total('live')==3, llm_total('live'); print('live 合计 3,未超阈值,默认放行')"`
+Expected: 打印放行断言(不触发真实生成;实跑放 Task 8 Step 5)
 
 - [ ] **Step 4: 日志可观测性核对**
 
