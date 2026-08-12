@@ -4,6 +4,8 @@
 /.superpowers/
 # 运行时产物（F0 起；Task 3 起集中到 main/data/）
 /main/data/
+# 运行时 SQLite（config 默认 database_url=sqlite:///./shanka.db，CWD=main/ 时落在 main/）
+/main/shanka.db
 __pycache__/
 *.py[cod]
 .pytest_cache/
