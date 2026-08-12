@@ -263,6 +263,16 @@
 - **测试**：守卫新增 `test_sample_card_schema_openapi_consistent`（5 passed）；samples 集成 + AC-03 占位断言 → SampleCard 断言（先红后绿 TDD）；顺带修复 base 遗留的 2 处 ruff format 漂移（test_acceptance_ac04_ac07.py:293、test_batches.py:216——R1 canary v1→v2 改长行时引入，main 验收在行变长前）。
 - **验收实测**：四工具全绿（**354 passed**、ruff check、ruff format 213 files、mypy 174 files——主 Agent 亲自复跑）；审查两轮（契约合规 ✅ + 代码质量 ✅ → Important-1 openapi null 声明修复 + Minor-1/2 → scoped re-review ✅ 无残留）。
 
+### R22 — Agent 成本观测能力层 + 任务价格预估接口
+
+**`DONE`｜依赖：V5A｜覆盖：契约 8.4 扩展、6.4、红线 1｜2026-08-12**
+
+- **能力层**（services/generation/token_estimator.py）：token 用量估算模型——常量挂观测校准闭环（PROMPT_TOKENS_PER_KP=1500 / OUTPUT_TOKENS_PER_KP=3300，2026-08-12 校准自 R1 live 实测 1,427/3,263，向上取整偏保守；custom_requirements 每字符 ≈0.5）；输入映射与 V4 规划同口径（每章 3×密度系数，每知识点一卡）；区间估值复用 cost.py 价格档位公开入口（low=全命中 / high=全未命中，output 固定价），不重复定义价格。
+- **消费点**（POST /v1/tasks/estimate）：`{chapter_ids, generation_config}` → `{knowledge_point_count, estimated_card_count, price_low, price_high, currency}`；复用 validate_config（400）；纯计算、不落库、豁免幂等键、不需要 API Key。
+- **契约**：structure-contract 8.4 能力口径 + 6.4 接口行；openapi /tasks/estimate + CostEstimateRequest/Response 组件；schemas 守卫锚点，三处一致。
+- **live 冒烟**（Task 4 输出原文贴此）：3 次真实调用 prompt 均值 811 / output 均值 1126（常量 1500/3300，偏差 −45.9%/−65.9%）；实际金额 ¥0.0319（全 miss 口径）落在区间 ¥0.0282~¥0.0319；偏差 >20% 按校准闭环纪律登记观察（常量不自动修改，待人工决策；另观察每次调用 ~384 token 前缀缓存命中，估算按全 miss 保守口径未建模缓存）。
+- 验收实测：四工具全绿（378 passed、mypy 178 files）；10 用例全绿（5 unit token_estimator + 5 integration estimate）；预估无副作用（任务表零写入）。
+
 ## 5. 依赖关系与下一步
 
 ```text
