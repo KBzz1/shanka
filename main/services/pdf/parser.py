@@ -33,6 +33,13 @@ class ChapterInfo(TypedDict):
     end_page: int
 
 
+class PageText(TypedDict):
+    """单页完整文本（页码 1-based；空页 content="" 保留）。"""
+
+    page_number: int
+    content: str
+
+
 def extract_text_ok(path: Path) -> bool:
     """文本层探测：抽样页（前 5 页）可提取非空文本。不抛异常，失败返回 False。"""
     try:
@@ -116,3 +123,29 @@ def parse_pdf(path: Path) -> tuple[str, list[ChapterInfo]]:
         chapters.append(ChapterInfo(name=name, start_page=start, end_page=end))
 
     return text_sample[: _TEXT_SAMPLE_LIMIT + 1], chapters
+
+
+def extract_pages(path: Path) -> list[PageText]:
+    """提取完整页文本：一页一行（spec §4.1），page_number 1-based。
+
+    规则：逐页 `extract_text() or ""`（空页 content="" 保留）；总页数 0 或全部
+    页文本为空 → PDF_PARSE_FAILED；单页提取异常按空页处理（与 parse_pdf 抽样
+    语义一致）。章节解析与文本样例走 parse_pdf，此处不做目录解析。
+    """
+    if not path.exists():
+        raise AppError(ErrorCode.PDF_PARSE_FAILED, "PDF 文件不存在")
+    try:
+        reader = PdfReader(str(path))
+    except Exception as exc:
+        raise AppError(ErrorCode.PDF_PARSE_FAILED, "PDF 无法打开") from exc
+
+    pages: list[PageText] = []
+    for page_number, page in enumerate(reader.pages, start=1):
+        try:
+            content = page.extract_text() or ""
+        except Exception:  # noqa: BLE001  # 单页提取异常按空页处理（与 parse_pdf 抽样语义一致）
+            content = ""
+        pages.append(PageText(page_number=page_number, content=content))
+    if not pages or not any(p["content"].strip() for p in pages):
+        raise AppError(ErrorCode.PDF_PARSE_FAILED, "PDF 无可提取文本层")
+    return pages

@@ -2,7 +2,8 @@
 
 状态机：PENDING → PARSING → PARSED / FAILED(error_code)。
 - 单进程 MVP：PENDING/PARSING 均视为可处理（进程崩溃后 PARSING 残留，重启重新解析）；
-- 重复解析幂等：处理前清理该 file_id 的既有 chapters；
+- 重复解析幂等：处理前清理该 file_id 的既有 chapters 与 text_chunks 再重建；
+- PARSED 时完整页文本一页一行落 text_chunks（spec §4.1，与章节解耦）；
 - 失败不删除原始文件（5.1）；FAILED 行不再重试（终态）。
 """
 
@@ -15,8 +16,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
+from infra.clock import SystemClock
 from infra.db.models import Chapter, PdfFile
-from services.pdf.parser import parse_pdf
+from infra.db.session import format_utc
+from services.pdf.parser import extract_pages, parse_pdf
+from services.pdf.text_chunks import persist_text_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +75,18 @@ def process_pending(session: Session, *, storage: Any) -> int:
     session.flush()
     try:
         path = storage.open(row.storage_key)
-        _text_sample, chapters = parse_pdf(path)  # 文本样例仅确认文本层存在，不落库（AC-08）
+        _text_sample, chapters = parse_pdf(
+            path
+        )  # 文本样例仅确认文本层存在，不落日志/不落库（AC-08）
+        # 完整页文本是功能数据（spec §4.1 AC-08 改准）：一页一行落 text_chunks，
+        # 与章节解耦（页文本不随章节编辑重建）；重解析先清理再重建（幂等）
+        pages = extract_pages(path)
+        persist_text_chunks(
+            session,
+            file_id=row.file_id,
+            pages=pages,
+            now=format_utc(SystemClock().now_utc()),
+        )
         # 幂等：清理既有 chapters 再插入
         for old in session.scalars(select(Chapter).where(Chapter.file_id == row.file_id)).all():
             session.delete(old)
