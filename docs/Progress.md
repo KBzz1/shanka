@@ -2,7 +2,7 @@
 
 本文是后续 Goal 的唯一进度与状态地图，不建立并列计划或看板。需求权威为 [PRD v2.1](PRD/V2.1/prd_v2_1.md)，实现以 [Architecture](Architecture/AGENTS.md) 的防漂移规则为准。Superpowers plan 只细化当前一个工作包的实施步骤，不定义项目状态，也不替代正式契约。
 
-最后事实审计：2026-08-12。
+最后事实审计：2026-08-13。
 
 ## 1. 状态与事实基线
 
@@ -274,6 +274,18 @@
 - **live 冒烟**（Task 4 输出原文贴此）：3 次真实调用 prompt 均值 811 / output 均值 1126（常量 1500/3300，偏差 −45.9%/−65.9%）；实际金额 ¥0.0319（全 miss 口径）落在区间 ¥0.0282~¥0.0319；偏差 >20% 按校准闭环纪律登记观察（常量不自动修改，待人工决策；另观察每次调用 ~384 token 前缀缓存命中，估算按全 miss 保守口径未建模缓存）。
 - 验收实测：四工具全绿（378 passed、mypy 178 files）；10 用例全绿（5 unit token_estimator + 5 integration estimate）；预估无副作用（任务表零写入）。
 
+### LLM-P1 — LLM 链路升级（生成批=单元、规划/评分真实 LLM、账本权威、估算删除）
+
+**`DONE`｜依赖：V3A、V4、V5A、V5B、V6、R22｜覆盖：spec 2026-08-12-llm-pipeline-upgrade §3～§13、R-03｜2026-08-13**
+
+设计权威：`docs/superpowers/specs/2026-08-12-llm-pipeline-upgrade-design.md`（FROZEN）；执行计划：`docs/superpowers/plans/2026-08-12-llm-pipeline-upgrade.md`（17 任务，superpowers:subagent-driven-development 逐任务 implementer + reviewer 双审）。任务包：`docs/llm-account-long-run-v1/`。
+
+当前证据（2026-08-13，main 分支 18 commits 8cd0cb5..57442b7 + frontend-app 仓库 2a9f6b7）：
+- **17 任务全部 review-clean**：T1 迁移 0003+ORM（text_chunks/llm_call_attempts 新表、knowledge_points/batches/tasks 新列，空库往返+alembic check 零漂移）→ T2 硬上限 Settings（9 字段）→ T3 页文本解析持久化（一页一行、确定性 chunk_id）→ T4 预算与三层最大余数配额 → T5 资产 v3/v2+manifest 扩展 → T6 adapter retryable 分类 → T7 llm_call_attempts 账本服务层 → T8 任务创建 PENDING+PLANNING+预算校验 → T9 规划执行（CAS 抢占/快照冻结/账本恢复/空单元三分支/指纹漂移 fail fast）→ T10 生成批=单元（锚定校验/页文本输入/账本同事务/SOURCE_INSUFFICIENT 不重试）→ T11 SCORING 阶段（确定性分层抽样/合批/回写守卫 STALE_SCORING_INPUT/非阻塞）→ T12 quality-summary 分母/归因/成本口径 → T13 估算删除（端点/token_estimator/planning.py 全删）→ T14 契约同步（structure-contract 3.4~3.7/3.10/4.1/6.x/8.5、PRD 5.4.1/5.6/5.7、database-design 2.5~2.7/2.13/2.14、openapi、守卫 44/44）→ T15 前端（阶段文案/空结果/跳过提示/SCORING 卡访问，嵌套仓库本地提交）→ T16 V4/V5A/V6 测试新语义更新+全量归零 → T17 canary+完成口径。
+- **本地实现证据（LOCAL_IMPLEMENTATION_DONE）**：全量 **496 passed / 0 failed**；`ruff check .`、`ruff format --check .`（247 files）、`mypy .`（196 source files）四工具全绿（主 Agent 2026-08-13 亲自复跑）；契约守卫 44/44（schema↔openapi、ORM↔database-design、错误码、localization、manifest↔运行时版本）；账本同事务崩溃恢复经 executor 端到端判别测试；验收意图 AC-04/AC-05/AC-07 保全核验（reviewer 逐条核对无断言弱化）。
+- **受控真实 canary（PRODUCTION_VALIDATED）**：单任务 Planner→Generator→Scoring 全链路真实 DeepSeek（`.env` Key，权限 600），**连续 3 次全 PASS**——规划规范化结果落库（3 单元锚定 QUESTION×3 + TRUE_FALSE 样例）、生成 3 卡锚定正确、评分 3/3 回写（总分 8~12）、账本 7 行/次全 SUCCESS、cost ≈ ¥0.015~0.029/次（累计全战役 ≈ ¥0.06，上限 ¥3 未触发）；canary 发现 2 个 mock 掩盖缺陷并修复：① adapter 内部 HTTP 重试（429/5xx/网络/超时 ×1，SDK 等价，账本 attempt 语义不变——SCORING 不重试语义下瞬时抖动曾致评分全灭）；② thinking 禁用显式携带（上游默认启用 reasoning 挤掉 content 空响应，实测 5/5 复现，`"thinking": {"type": "disabled"}` 后 2/2 正常）。两修复均 TDD + 判别测试 + 全量回归。
+- 登记：R-03 RESOLVED（见第 6 节）；PRD 5.4.2 行 231/238 残留冲突（spec §12 范围外，偏差已登记 V2.2 收敛）；R-22 估算链路随本包删除。
+
 ## 5. 依赖关系与下一步
 
 ```text
@@ -292,7 +304,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | --- | --- | --- | --- |
 | R-01 | `RESOLVED` | 要求校验 localization_key↔文案清单，但正式契约未指定清单 | 唯一位置 = `app/errors.py`（ErrorCode 注册表 + LOCALIZATION_KEYS 显式清单），派生规则 `"error." + 错误码.lower()`；`test_localization_guard` 校验派生集合与清单全等（F0-T4/T6，已实测） |
 | R-02 | `RESOLVED` | Conda 环境已创建且当前依赖已安装，但 pyproject 无 build backend/package discovery，`pip install -e .[dev]` 因多顶层包失败；实现依赖和锁也未补齐 | hatchling build backend + wheel packages 四包；pip-tools 锁定为唯一锁定方式，`requirements-dev.lock`（46 钉版本）干净环境复现通过；依赖仍只维护在 pyproject（F0-T1） |
-| R-03 | `PLANNED` | agent v1 已版本化，但 CHANGELOG 明确待 V4/V5A 精修 | 修改须新版本目录 + manifest + CHANGELOG，不原地改 v1；**LLM 链路升级工作包覆盖（PLANNED）**：完成本地实现与契约守卫后仍不关闭，须通过受控真实三链路（Planner→Generator→Scoring）canary 才能改 RESOLVED |
+| R-03 | `RESOLVED` | agent v1 已版本化，但 CHANGELOG 明确待 V4/V5A 精修 | 修改须新版本目录 + manifest + CHANGELOG，不原地改 v1；**LLM 链路升级工作包覆盖**：2026-08-13 本地实现与契约守卫完成（496 passed + 守卫 44/44 + 四工具全绿），受控真实三链路（Planner→Generator→Scoring）canary 连续 3 次全 PASS（每任务 7 次调用全 SUCCESS、评分 3/3 回写、成本 ≈¥0.06 上限 ¥3 未触发）→ RESOLVED |
 | R-04 | `ACCEPTED` | metrics 是运行端点，但有意不进业务 OpenAPI | F1/R1 直接测试，不强行写入 OpenAPI |
 | R-05 | `ACCEPTED` | PRD 成功率/恢复率不能由单测或 60 个受控 generation units 完整证明；相同书籍/模型也限制独立性 | R1 只对预先固定抽样框中的单元失败率作带条件统计界限；另报重试、18 张描述性人工复核和自动化，不外推全书/生产质量 |
 | R-06 | `RESOLVED` | deployment.md 描述未来 Cloudflare/HTTPS 真机入口，但当前阶段明确只做本机模拟 | Tunnel、TLS、公网和真机联网属于当前 Goal 之外的后续部署；不得阻塞 F0～R1 DONE，代码只保留可配置监听和反向代理兼容性；**2026-08-11 部署工作包完成**：Cloudflare Tunnel 落地（隧道 shanka、公共主机名 shanka.kbzz1.top、cloudflared systemd 常驻、scripts/run.sh、main/data/ 集中），公网 healthz/readyz 200、真机移动网络实测 306ms（阶梯 1 可用）；设计/计划/实测记录见 superpowers/specs、superpowers/plans、frontend/backend-integration.md |

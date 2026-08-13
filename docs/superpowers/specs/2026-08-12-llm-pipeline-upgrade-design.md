@@ -1,6 +1,6 @@
 # LLM 链路升级设计（LLM Pipeline Upgrade）
 
-日期：2026-08-12｜状态：FROZEN（用户审阅并优化后定稿，2026-08-12）
+日期：2026-08-12｜状态：FROZEN（用户审阅并优化后定稿，2026-08-12）；2026-08-13 实施完成——17 任务按本规格实现并全部 review-clean，受控真实 canary 3/3 PASS（见 docs/Progress.md LLM-P1），规格不再修改
 
 ## 1. 背景与目标
 
@@ -32,7 +32,9 @@
 **不做**（登记，另行工作包）：
 
 - 加密改造（每用户密钥/信封加密——后续工作包，现状环境变量单密钥保持）。
-- DeepSeek 模型、thinking 与 `response_format=json_object` 请求形态冻结不变；允许适配层最小扩展上游状态/`retryable` 元数据，以区分 401 与 429/5xx，除此之外不重构适配层。
+- DeepSeek 模型、thinking 与 `response_format=json_object` 冻结不变；允许适配层做两项最小
+  扩展：① system/user 双消息和按链路 `max_tokens`；②上游状态/`retryable` 元数据，以区分
+  401 与 429/5xx。除此之外不重构适配层。
 - `card.schema.json` v1（单卡校验保持）。
 - 每单元 2/4 卡（"覆盖范围 + 练习深度"是 PRD 变更候选，需同步 PRD/前端文案/数量校验，另行工作包）。
 
@@ -77,7 +79,9 @@
 | APPLICATION | QUESTION（默认） | 开放性问题（场景化提问，答案多角度分析） | 默认形态 |
 | APPLICATION | TRUE_FALSE（允许） | **场景判断题** | ① 需应用规则/概念才能判断（不能是事实换皮）；② 结论可明确二值化；③ `explanation` 给出判断依据 |
 
-校验层不做语义拦截（无法可靠判断"是否事实换皮"）——由 Prompt 约束 + Rubric 观测（正确答案/证据维度分数反映）。
+校验层不做语义拦截（无法可靠判断“是否事实换皮”）——由 Prompt 约束 + Rubric 观测。
+事实换皮但内容正确、有据时，主要降低 `difficulty_score` / `learning_value_score`；只有场景加入
+无来源条件时才降低 `evidence_score`，结论错误时才降低 `correctness_score`，不得混淆四维含义。
 
 ### 3.4 密度与单元预算（决策拍板：密度只控制预算）
 
@@ -85,8 +89,8 @@
   live 验证过的“一生成单元一张卡”语义；乘法放大消除；批部分成功歧义同步消除。
 - 单元预算公式保持 V4 可测口径：`每章基础单元预算 3 × 密度系数`（COMPACT=1 /
   BALANCED=2 / EXTENSIVE=3）→ 2 章 6/12/18。预算语义 = **上限**（PRD
-  5.4.1“不代表固定卡片数量”）：planner 输出可少于预算（内容不足），超限按 priority
-  截断。
+  5.4.1“不代表固定卡片数量”）：planner 输出可少于预算（内容不足），超限按 Planner
+  `units` 数组顺序截断。
 - 只能承诺**预算上限**满足 COMPACT < BALANCED < EXTENSIVE；Planner 允许少产出，
   因此不同任务实际单元数不承诺严格单调，禁止在验收中把随机输出数量当成确定性关系。
 - 预算与真实页数/字符数解耦（真实文本只影响规划输入与引用，不影响预算公式）。这是
@@ -102,8 +106,8 @@
 3. **子配额**：超长章节拆多次调用时，按各规划分组的 `char_count` 占比分配子配额（最大余数法）。
 
 约束：每次调用只拿自己的子配额（不得把整章配额重复发给每个调用）；Planner 若对某
-难度超配额，代码按该难度内 `priority`（并列按原数组顺序）确定性截断，不因“多给了合法
-单元”重试整次调用；实际输出允许少于配额；实际难度分布记录观测（不强制补满）。
+难度超配额，代码按该难度单元在输出数组中的相对顺序确定性截断，不因“多给了合法单元”
+重试整次调用；实际输出允许少于配额；实际难度分布记录观测（不强制补满）。
 
 ## 4. 按文件页码持久化文本（`text_chunks`）
 
@@ -144,21 +148,29 @@
 
 ### 5.1 版本布局（保留 v1/v2，审计链完整）
 
-| 资产 | 现状 | 新版本 |
+| 资产 | 旧入口 | 已落地并登记的入口 |
 | --- | --- | --- |
-| `prompts/` planner | v1（死资产） | `prompts/v3/planner.md`（激活） |
-| generator | v1/v2（v2 仅包装修复） | `prompts/v3/generator.md`（继承 v2 包装指令） |
-| rewrite | v1 | `prompts/v3/rewrite.md`（内容升级） |
-| `rubrics/` main + scoring-prompt | v1（scoring 死资产） | `rubrics/v2/rubric.md` + `scoring-prompt.md`（正式激活，分别进入 manifest） |
-| `schemas/` card | v1（保持） | 新增 `schemas/v2/planner-output.schema.json`、`scoring-output.schema.json` |
+| `prompts/` planner | v1（死资产） | `prompts/v3/planner.md` |
+| generator | v1/v2（v2 仅包装修复） | `prompts/v3/generator.md`（继承 v2 JSON 包装） |
+| rewrite | v1 | `prompts/v3/rewrite.md` |
+| scoring | v1（死资产） | `rubrics/v2/scoring-prompt.md`，入口名 `prompts.scoring` |
+| `rubrics/` main | v1 | `rubrics/v2/rubric.md` |
+| `schemas/` | card v1 | card v1 保持；新增 generator-output / planner-output / scoring-output v2 |
 
 - manifest：generator v2→v3、planner v1→v3、rewrite v1→v3、rubrics.main v1→v2，
   新增 `prompts.scoring`（路径指向 `rubrics/v2/scoring-prompt.md`）、
-  `schemas.planner_output`、`schemas.scoring_output` 三个显式入口；CHANGELOG 追加。运行时禁止
+  `schemas.generator_output`、`schemas.planner_output`、`schemas.scoring_output` 四个显式
+  入口；CHANGELOG 追加。运行时禁止
   通过相对路径绕过 manifest 直接读取 scoring prompt。
-- 红线 5：structure-contract 3.7/8.5 的版本观测同步。Batch 继续记录生成调用的
-  card-schema 版本；`llm_call_attempts` 按调用记录具体的 asset name/version，避免用一个
-  `schema_version` 混写 card v1、planner-output v2、scoring-output v2。
+- 红线 5：structure-contract 3.7/8.5 的版本观测同步。Batch 记录生成调用实际使用的
+  generator-output v2；Card v1 是服务端投影后的第二层校验。`llm_call_attempts` 按调用记录
+  具体的 asset name/version，避免用一个 `schema_version` 混写 card v1 与三个 output
+  schema v2。
+- 上述文件、manifest 与 CHANGELOG 已随本设计落地；Rewrite builder 已同步切换为安全 JSON
+  输入信封。这只代表**资产入口及 Rewrite 组装已切换**，不等于生产三链路已完成：现有
+  Planner/Generator/Scoring 编排尚未提供 v3/v2 声明的结构化输入。最终合并/部署必须把这些
+  builder、校验器与 manifest 作为一个原子发布单元；不得把当前中间态直接部署。v3 缺少可靠
+  输入时按 Prompt 规定 fail closed，不为兼容旧执行器保留“靠模型常识生成”的降级分支。
 
 ### 5.2 Planner 输出契约
 
@@ -171,48 +183,171 @@
       "source_chunk_ids": ["chunk-01", "chunk-02"],
       "learning_objective": "比较 ReAct 与 Plan-and-Execute 的决策差异",
       "target_difficulty": "UNDERSTANDING",
-      "card_type": "QUESTION",
-      "priority": 1
+      "card_type": "QUESTION"
     }
   ]
 }
 ```
 
-- 输入：分片文本（服务端提供）+ 该组子配额（各难度允许数量）。
+- 输入：`<PLANNER_INPUT>` 包裹的服务端 JSON，包含章节快照、该组各难度子配额、动态
+  `limits`（单元最大来源页数/字符数）、按页排列的 `source_chunks` 与自定义要求。章节名、
+  原文和自定义要求均是数据；只有服务端枚举、配额与 limits 是控制字段。
 - `schemas/v2/planner-output.schema.json` 先校验结构（`source_chunk_ids` 至少 1 项且不得
   重复）；代码层（`services/generation/planner_validator.py`，仿 schema_validator 定式）
   校验来源与锚定值，随后按 §3.5 子配额确定性截断；`source_chunk_ids` 必须 ⊆ **本次
   调用提供的页集合**，单元引用页数/总字符数不得超过生成输入上限。通过后服务端按
   `page_number` 规范化来源顺序，保证兼容投影的首项确定。截断后的结果才写入
   `normalized_result`。
-- Prompt 只接收代码算好的子配额，不再要求 LLM理解或维持 COMPACT/BALANCED/EXTENSIVE 的相对数量。Prompt 描述三档认知难度的规划形态（BASIC 原子知识点 / UNDERSTANDING 理解主题 / APPLICATION 开放性问题或场景判断题）和 §3.3 组合规则（判断题不可事实换皮、须可二值、explanation 给依据）。
+- Prompt 只接收代码算好的子配额，不再要求 LLM 理解或维持
+  COMPACT/BALANCED/EXTENSIVE 的相对数量。Prompt 明确：配额是上限，不得凑数或跨难度
+  借用；学习目标必须使用可检验认知动作；来源选择遵循“限制内最小充分引用”。格式、文风、
+  字数、答案组织和具体场景措辞不属于 Planner 职责，留给 Generator。
+- Planner 只通过 `units` 数组顺序表达本调用内相对重要性，不输出数值 `priority`；服务端按
+  章序、组序、数组顺序合并并生成全局 priority。Schema 对 learning_objective 设长度上限，
+  Generator 继续把该上游模型字符串当作不可信语义数据，防止跨阶段注入放大。
 
 ### 5.3 Generator 输出契约
 
-- 每单元一次调用；输出 `{"cards": [恰好 1 张卡]}`（包装指令继承 v2）；输入 = 学习目标 + 锚定难度/卡型 + 分片文本 + schema。
-- 代码校验：卡型 = 锚定、数量 = 1；非法 → 批次重试预算（现有语义）。
-  `target_difficulty` 是生成输入和服务端落库锚点，不要求模型在 card JSON 中回传；
-  card schema v1 不含该字段，难度是否真正匹配由 Rubric 观测，不能伪称结构校验能够判断。
-- `card.schema.json` v1 保持（单卡校验）。
+模型输出使用独立的 `schemas/v2/generator-output.schema.json`，根包装与单卡语义字段只有一套
+权威，避免 v1→v2 曾出现的“Prompt 要 cards 包装、追加 Schema 却描述裸 Card”冲突：
+
+```json
+{"cards":[{"type":"QUESTION","question":"……？","answer":"……"}]}
+```
+
+或：
+
+```json
+{"cards":[{"type":"TRUE_FALSE","statement":"……","answer_boolean":false,"explanation":"……"}]}
+```
+
+- 每单元一次调用。`<GENERATOR_INPUT>` 只给模型完成制卡所需的学习目标、锚定难度/卡型、
+  有序 `{page_number, content}` 来源与自定义表达偏好；`generation_unit_id`、chunk_id、账本 ID
+  等关联元数据不进入模型输入。
+- 模型不重复生成数据库兼容投影字段：QUESTION 只输出 `type/question/answer`；TRUE_FALSE
+  只输出 `type/statement/answer_boolean/explanation`。服务端在输出 Schema 与锚定校验通过后
+  确定性派生 QUESTION 的 `front=question, back=answer`，以及 TRUE_FALSE 的
+  `front=statement, back=explanation`，再用 `card.schema.json` v1 校验最终持久化对象。
+- `target_difficulty` 是生成输入和服务端落库锚点，不要求模型回传；内容是否真正达到目标
+  难度由 Rubric 观测，不能伪称结构校验能够判断。
+- **安全弃权**：来源确实不足时唯一合法结果是 `{"cards":[]}`。这是通过 Generator Output
+  Schema 的显式业务弃权，直接把单元记为 SKIPPED（内部原因 `SOURCE_INSUFFICIENT`），不做
+  相同输入的无意义重试；非 JSON、Schema 非法、卡型不符或多卡才进入生成重试预算。
+- Prompt 规定精炼、准确、自然、无模板化元话语的教材文风；题干使用纯文本并给出中英文
+  长度软目标，BASIC / UNDERSTANDING / APPLICATION 答案逐级允许更充分但分别设上限目标，
+  APPLICATION 最多 3 个必要要点。长度是质量目标，不得优先于事实准确与必要条件；本期只做
+  canary 观测，不把软目标伪装成 Schema 硬校验。
+- Prompt 内置 3 个稳定短例：BASIC 问答、APPLICATION 场景判断、安全弃权。示例只校准
+  粒度/文风/根包装，不使用真实教材事实，并位于动态输入之前以参与 Prompt Cache。
 
 ### 5.4 Scoring 输出契约
 
 ```json
-{"scores": [{"generation_item_id": "...", "evidence_score": 2, "correctness_score": 3, "difficulty_score": 2, "learning_value_score": 2, "rubric_total_score": 9}]}
+{"scores":[{"generation_item_id":"...","evidence_score":2,"correctness_score":3,"difficulty_score":2,"learning_value_score":2}]}
 ```
 
+- 输入为顶层去重 `source_chunks` + `items`；每个 item 只用 `source_chunk_ids` 引用顶层页，
+  并携带 generation_item_id、卡片内容、学习目标、锚定难度与卡型。对 item_i，Judge 只能
+  使用其引用集合 S_i；同批其他页和其他卡不得为它补证或提示答案。
 - `schemas/v2/scoring-output.schema.json` 校验；代码层额外保证返回
-  `generation_item_id` 集合与本次请求集合完全相等、无重复/无越权 ID，四维各 0~3，
-  `rubric_total_score` 必须等于四维之和。缺项、多项或总分不一致时整次评分记 FAILED，
-  不落部分分数。
+  `generation_item_id` 集合与本次请求集合完全相等、无重复/无越权 ID，四维各 0~3。模型不
+  输出派生总分；服务端校验四维后确定性计算并落库 `rubric_total_score`，不能因概率模型的
+  加法失误让整批语义评分作废。缺项、多项或 ID 不守恒时整次评分记 FAILED，不落部分分数。
+- Rubric 明确“来源不足但未反驳”时 correctness=1，明确错误/矛盾才为 0；事实换皮主要落在
+  difficulty/learning_value，保持四维可解释性。生产不保存自由文本理由，离线校准可使用独立
+  诊断 Prompt。
 - 基础类（BASIC/UNDERSTANDING）合批时多卡一次调用（数组）；应用类逐卡。
 
-### 5.5 输出校验层
+### 5.5 Rewrite 输入与输出契约
 
-`planner_validator.py` / `scoring_validator.py`（仿 `schema_validator.py` 定式）：加载
-manifest schema 资产 + 代码规则（数量/锚定/来源/分数范围）。Generator 复用
-`validate_card`（单卡）并校验卡型与数量；难度由服务端落规划锚定值，语义匹配由 Rubric
-观测。
+- 输入为 `<REWRITE_INPUT>` 包裹的服务端 JSON：card_id/version、原卡全部内容、可空的
+  target_difficulty、可空的来源页和自定义要求；不再将原卡字段直接 `.replace()` 进模板。
+- 始终输出 `{"cards":[恰好 1 张卡]}`；卡型、核心学习主题、原命题含义、布尔真值与目标
+  难度均不可改变。自定义要求只能调整措辞、详略、语气或呈现重点，冲突部分忽略。
+- 有来源时继续受来源约束；无来源时只能在原卡事实边界内重写。遇到无法仅凭现有信息安全
+  修复的事实疑点，不得自行猜一个新答案。
+- Rewrite 同样输出 Generator Output v2 的最小语义字段，服务端确定性投影 front/back 后再以
+  Card v1 校验；代码额外要求恰好一张。空数组、多卡、换型或额外字段均按
+  REWRITE_SCHEMA_INVALID 保留原卡。
+
+### 5.6 输出校验层
+
+`planner_validator.py` / `generator_validator.py` / `scoring_validator.py`（仿
+`schema_validator.py` 定式）加载 manifest output schema，再执行动态代码规则。三个 output
+schema v2 负责根包装、结构、必填、枚举、类型、范围和禁止额外字段；代码负责配额、来源
+子集、limits、锚定卡型、卡数、ID 守恒和派生总分。Generator/Rewrite 通过 output schema 后
+才做 Card v1 投影与第二次校验；禁止先过滤非法数组成员、丢弃额外字段或自动补齐后再把原始
+非法响应降格为合法结果。Prompt 规则不是安全边界。
+
+### 5.7 Prompt 组装与不可信输入隔离
+
+DeepSeek 使用 system/user 双消息与 `response_format={"type":"json_object"}`；model/thinking
+保持现值。system 只承载可版本化的稳定资产，user 只承载本次动态 JSON：
+
+| 链路 | system message（稳定） | user message（动态） |
+| --- | --- | --- |
+| Planner | planner v3 → 原始 planner-output schema v2 | `<PLANNER_INPUT>{safe_json}</PLANNER_INPUT>` |
+| Generator | generator v3（内含短例）→ 原始 generator-output schema v2 | `<GENERATOR_INPUT>{safe_json}</GENERATOR_INPUT>` |
+| Rewrite | rewrite v3 → 原始 generator-output schema v2 | `<REWRITE_INPUT>{safe_json}</REWRITE_INPUT>` |
+| Scoring | scoring-prompt v2 → rubric v2（内含校准例）→ 原始 scoring-output schema v2 | `<SCORING_INPUT>{safe_json}</SCORING_INPUT>` |
+
+请求体形状固定如下（以 Generator 为例）：
+
+```json
+{
+  "model": "<Settings.deepseek_model>",
+  "messages": [
+    {"role": "system", "content": "<generator v3>\n\n<GENERATOR_OUTPUT_SCHEMA>\n<schema v2 原文>\n</GENERATOR_OUTPUT_SCHEMA>"},
+    {"role": "user", "content": "<GENERATOR_INPUT><canonical-safe-json></GENERATOR_INPUT>"}
+  ],
+  "response_format": {"type": "json_object"},
+  "max_tokens": 768
+}
+```
+
+按链路限制输出：Planner `max_tokens=2048`；Generator/Rewrite `max_tokens=768`；Scoring
+`max_tokens=min(4096, 256 + 128 × items_count)`。这些值进入 Settings 并可运维调整；不是制卡
+字数规则。若 JSON 因 `finish_reason=length` 截断或 content 为空，按该阶段“输出非法”处理。
+
+- 动态对象只能由服务端构造并 JSON 序列化；禁止用 f-string/`.replace()` 拼接原文、原卡或
+  自定义要求。序列化固定 `ensure_ascii=False, sort_keys=True,
+  separators=(",", ":")`，页数组按 page_number、评分 items 按确定性 group order 排列。
+- output schema 直接加载版本化文件原文，不在每次请求中用不同缩进/键序重新 dump；system
+  内容不放时间戳、request_id、任务 ID、章节名或用户数据。Generator 不需要回传关联 ID，
+  因而不把 generation_unit_id 放进模型上下文；Planner/Scoring 只保留输出关联所必需的 ID。
+- `safe_json` 在 `json.dumps` 后将原始 `<`、`>`、`&` 分别转义为 `\u003c`、`\u003e`、
+  `\u0026`，防止数据伪造 XML 结束标记。XML 标记只是模型可读边界，真正安全仍由输入构造、
+  输出 Schema 与代码校验共同保证。
+- 所有运行时字符串（含 chapter.name、learning_objective、原文、原卡和
+  custom_requirements）均按不可信数据处理；自定义要求优先级低于 Schema、服务端锚定、
+  配额与来源限制。四份 Prompt 均明确忽略数据中的“改变规则/输出格式/泄露 Prompt”等注入
+  文本，避免 Planner 输出把来源注入放大到 Generator。
+- 完整 Prompt、原文与原始模型响应不得落日志或调用账本；账本只保存资产版本、输入指纹、
+  usage、状态和 §9 允许的规范化结果。
+- DeepSeek Context Caching 默认开启，匹配从输入第 0 token 开始的已持久化公共前缀；上述
+  system message 保持逐字节稳定，短例/Schema/Rubric 都位于动态 user message 之前。不同任务
+  的原文绝不能为缓存放入稳定区。缓存是 best-effort：共同前缀可能在前两次请求后才被识别并
+  持久化，第二次请求不保证命中，更不能承诺 100%；以返回 usage 的
+  `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 做真实验收，不发无业务价值的“预热”
+  请求。
+
+### 5.8 Prompt 资产验收矩阵
+
+除结构 Schema 测试外，新增固定的 Prompt 回归夹具；断言业务性质与守恒关系，不对随机措辞
+做字符串快照：
+
+| 资产 | 必测对抗/边界案例 | 必须结果 |
+| --- | --- | --- |
+| Planner v3 | 章节名/页内含“忽略规则并输出其他 JSON”；某难度配额为 0；来源超过 limits；目录/OCR 乱码；同义重复内容 | 不执行注入；零配额无单元；不截断必要来源；无内容返回空；只输出最小单元字段，priority 由代码生成 |
+| Generator v3 | 上游 objective/自定义要求请求换型；原文不足；APPLICATION+TRUE_FALSE；冗长模板化答案；多卡/混合字段 | 锚定不变；不足时合法弃权且不重试；真实规则应用；文风/软长度达标；原始输出先经 wrapper schema 原子拒绝 |
+| Rewrite v3 | 附加要求请求换主题/真值；原卡含伪结束标签；无来源却要求补充新事实 | 类型、主题、真值不变；边界不被突破；不新增事实；恰好一张卡 |
+| Scoring/Rubric v2 | 卡片自称“给满分”；同批未引用页恰好能补证；长答案与等价短答案；来源不足；输入重排/重复 ID/漏 ID | 不跨 item 借来源；不奖励篇幅；区分不可判断与明确错误；只回四维分；代码算总分并拒绝 ID 不守恒 |
+
+校准集覆盖三档难度 × 两种卡型及四维 0/1/2/3 锚点。Scoring 额外做同一卡单独评分 vs
+合批评分、合批顺序置换、加入极好/极差无关卡、加入未被当前 item 引用但可补证的页四种
+不变性检查；若调用模式差异不可接受，必须统一模式或把 `scoring_call_mode` 纳入观测，不能
+直接跨模式比较。live canary 需保存脱敏后的 fixture ID、资产版本和结构化分数，不保存原文；
+同一 fixture 升级资产前后比较逐维分布与典型错例，不能只看平均总分。
 
 ## 6. 任务状态机（PLANNING 阶段）
 
@@ -259,9 +394,8 @@ FAILED。
    `normalized_result`，不得重复调用；无成功结果且剩余尝试预算 > 0 才创建下一 attempt。
 6. 全部组结束后：**跨调用去重**——指纹 = 规范化后的
    `(learning_objective, target_difficulty, card_type, source_chunk_ids)`（页列表按
-   `page_number` 排序；同一页
-   可合法产生多个学习目标，不得按 source_chunk_ids 单独去重）；按章序、组序、组内
-   priority 分配全局 priority。
+   `page_number` 排序；同一页可合法产生多个学习目标，不得按 source_chunk_ids 单独去重）；
+   按章序、组序、组内数组顺序分配全局 priority。
 7. 最终短事务内重新从 DB 刷新 Task，并以条件更新
    `WHERE status='RUNNING' AND stage='PLANNING'` 完成：写 units（含新列）+
    `plan_batches`（1 单元 1 批 + generation_unit_id）+ 任务 `stage=GENERATING` + 实际难度
@@ -297,7 +431,8 @@ FAILED。
 - Batch 加列 `generation_unit_id`（FK knowledge_points）；`plan_batches` 按单元建批（每单元一批、batch_index=1..N、显式外键）；**删除 offset 反推逻辑**（batches.py 按 `(batch_index-1)*batch_size` 取 kp 的代码）。
 - 新批次代码保证 `generation_unit_id` 必填，并增加
   `UNIQUE(task_id, generation_unit_id)`；迁移列为 NULL 仅用于兼容旧批次。
-- 每单元 1 卡 → 部分成功歧义消除：SUCCEEDED = 恰好 1 张合法卡；0 张 → 重试/SKIPPED（现有语义不变）。
+- 每单元 1 卡 → 部分成功歧义消除：SUCCEEDED = 恰好 1 张合法卡；合法显式空数组 =
+  `SOURCE_INSUFFICIENT` 并直接 SKIPPED；非法响应或锚定不符才进入重试，耗尽后 SKIPPED。
 - 观测字段语义文档化：`coverage_rate` = 该单元是否产出合法卡（0/1），不再恒定 1.0；distribution 字段为单值。quality-summary 按下述 §8/§9 新分母与归因规则调整，不沿用旧实现原样聚合。
 - `Card.target_difficulty` 由规划锚定落库（`_record_rubric` 轮换删除；`target_difficulty` 不再在评分时补写）。
 - `Batch.retry_count`、Batch token/版本列保留为生成阶段兼容投影；生成调用的尝试数、
@@ -323,8 +458,10 @@ FAILED。
   SCORING 期间编辑）时，整组结果记 FAILED（内部原因 `STALE_SCORING_INPUT`）且不写旧分数，
   不重试。评分阶段最终转 COMPLETED 也必须使用
   `WHERE status='RUNNING' AND stage='SCORING'` 条件更新，不能覆盖并发 cancel。
-- 评分结果校验（scoring-output schema + 分数范围）后落 Card 5 字段 + 批次质量字段（`_record_rubric` 改造为 LLM 输出解析 + 锚定难度，删除轮换）。
-- Rubric 观测组合规则（§3.3）：场景判断题的"事实换皮/依据缺失"由 correctness/evidence 分数反映，不做语义拦截。
+- 评分结果校验（scoring-output schema + 分数范围）后由代码计算总分，再落 Card 5 字段 +
+  批次质量字段（`_record_rubric` 改造为 LLM 输出解析 + 锚定难度，删除轮换）。
+- Rubric 观测组合规则（§3.3）：事实换皮主要降低 difficulty/learning_value；缺少当前 item
+  来源才降低 evidence，结论错误才降低 correctness；不做语义入库拦截。
 - quality-summary 的各评分均只以对应字段非 NULL 的卡为分母，新增
   `eligible_card_count`、`scored_card_count`、`sampling_rate`；未被抽中的 NULL 不得按 0 分
   计入。difficulty 分组通过 `Batch.generation_unit_id → GenerationUnit.target_difficulty`
@@ -401,6 +538,9 @@ FAILED。
   Generator 原文输入，避免 Planner 合法但下游上下文超限。
 - `scoring_max_cards_per_call` / `scoring_max_input_chars`：限制合批评分大小；拆分后的实际
   调用仍受 `max_scoring_calls_per_task` 控制。
+- `planner_max_output_tokens=2048`、`generator_max_output_tokens=768`、
+  `rewrite_max_output_tokens=768`、`scoring_max_output_tokens=4096`：实现 §5.7 的 JSON 截断
+  防线；Scoring 每次仍按 item 数计算更小的实际值。
 
 ## 11. 数据库迁移（0003）
 
@@ -421,13 +561,13 @@ FAILED。
 | structure-contract 3.10 | ReviewState difficulty 描述 0~10 → **1~10**（对齐 database-design/ORM CHECK） |
 | structure-contract 6.10 | 补 quality-summary 分组键定义：model = batch.model；pdf = task.file_id；**difficulty = Batch.generation_unit_id 对应单元的 target_difficulty**（不能只依赖 Card，否则 SKIPPED 批次丢失）；补评分样本分母、sampling_rate、rubric_version 与 generation-stage-only 成本口径 |
 | structure-contract 3.5/3.6 | `selected_chapters` 两阶段语义（PENDING 为创建快照、首次 PLANNING 抢占原子刷新并冻结）+ 生成单元概念（3.1）、双维锚定（3.2）、组合规则（3.3）、密度预算与配额（3.4/3.5） |
-| structure-contract 3.7/8.5 | 批=单元观测语义（§7）、llm_call_attempts 账本（§9）、scoring 阶段；各调用记录具体 prompt/schema/rubric asset name + version |
+| structure-contract 3.7/8.5 | 批=单元观测语义（§7）、llm_call_attempts 账本（§9）、scoring 阶段；Generator/Planner/Scoring output schema v2 与 Card v1 分开登记；各调用记录具体 prompt/schema/rubric asset name + version |
 | PRD 5.4.1 | 密度 = 单元预算（上限），删除"密度影响知识点数量"的可测口径表述 → 预算公式口径 |
 | PRD 5.6 | 生成单元概念、card_type/target_difficulty 锚定、综合应用=开放性问题/场景判断题（非原子聚合） |
 | PRD 5.7 | 题型由规划锚定（不再生成期自动选择）；"内容严格依据原文分片"由 text_chunks 输入落实 |
 | database-design | 2.5 tasks（含 selected_chapters 两阶段语义及 SCORING 枚举）/ 2.6 knowledge_points / 2.7 batches 列变更 + 新表 text_chunks（一页一行、与章节解耦）、llm_call_attempts |
 | openapi | KnowledgePoint/Batch/Task schema 更新（stage/failure_stage 增加 SCORING，selected_chapters 注明两阶段语义）、`/tasks/estimate` 删除、CostEstimate 组件删除 |
-| DeepSeek 错误契约 | 模型/thinking/JSON object 不变；适配层向服务层区分 401 非重试与 429/5xx/网络 retryable |
+| DeepSeek 调用契约 | 模型/thinking/JSON object 不变；稳定 system + 动态 user、按链路 max_tokens；适配层向服务层区分 401 非重试与 429/5xx/网络 retryable |
 | 前端源代码 | 直接修改 `frontend-app/Front/`：删除 estimate 调用/价格 UI，接 PLANNING/GENERATING/SCORING、空结果和部分跳过展示；不维护 `docs/frontend/handoff/*`，不执行远端 fork/push |
 | 红线 5 | manifest ↔ structure-contract 版本一致 |
 | R-03 | 本工作包覆盖（**PLANNED**——完成本地实现与守卫后仍不关闭，须通过 §13 的受控真实三链路 canary 才能改 RESOLVED） |
@@ -443,16 +583,22 @@ FAILED。
   提交后再修改 → 该任务继续使用已冻结规划快照；孤儿恢复不重复刷新；抢占前章节被删除
   → FAILED 且不发 Planner 请求。
 - 配额算法：预算 6 / 40/40/20 → 3/2/1 确定性；章分发、子配额（char_count 占比）、
-  并列余数固定顺序；Planner 对单一难度超配额时按 priority 稳定截断且不重试。
+  并列余数固定顺序；Planner 对单一难度超配额时按输出数组顺序稳定截断且不重试。
 - 规划状态机：CAS1（PENDING→RUNNING）、CAS2（孤儿接管，非孤儿拒绝）、取消（最终
   条件更新失败则整事务不写 units）、账本调用前 STARTED、调用中崩溃→UNKNOWN、成功结果
   持久与恢复复用、尝试预算不重置、input fingerprint 漂移拒绝、空单元三分支
   （NO_GENERATION_UNITS / FAILED+PLANNING / 部分成功+skipped 计数）、硬上限 FAILED。
 - 分批规划：分组拆分（char 预算）、跨调用指纹去重（同分片多目标合法、重复指纹去重）、全局 priority 分配。
-- 锚定校验：卡型=锚定、数量=1、来源 ⊆ 本调用页集合、单元来源页数/字符数上限；
-  target_difficulty 由服务端锚定落库、Rubric 观测匹配度，不要求 card JSON 回传。
-- Scoring：按层确定性哈希抽样、合批/逐卡、卡片+锚定+引用页输入、去重后输入大小拆组、
-  上限缩减、返回 ID 集合与总分守卫、调用前 cancel 守卫、SCORING 阶段状态机、条件完成、
+- 锚定与模型输出校验：Planner 来源 ⊆ 本调用页集合、单元来源页数/字符数上限；Generator
+  Output 根对象、0/1 卡、两卡型精确字段集合、卡型=锚定；原始非法多项不得经过过滤/投影后
+  被接受；合法空数组直接 SOURCE_INSUFFICIENT/SKIPPED，非法响应才重试。Card front/back
+  确定性投影后通过 v1；target_difficulty 由服务端锚定落库，不要求模型回传。
+- Prompt/API：system 资产逐字节稳定、user 动态数据在后；所有运行时字符串注入测试；三链路
+  请求体均含 JSON 指令/完整根输出示例/合理 max_tokens；Generator 文风、纯文本、软长度和
+  三个短例经固定 canary 验证。连续至少 3 个同版本不同动态输入请求记录 hit/miss，验证可观测
+  到稳定前缀命中；因上游 best-effort 不把“第二次必命中”写成测试断言。
+- Scoring：按层确定性哈希抽样、合批/逐卡、卡片+锚定+引用页输入、item 级来源隔离、去重后输入大小拆组、
+  上限缩减、返回 ID 集合守卫、代码派生总分、调用前 cancel 守卫、SCORING 阶段状态机、条件完成、
   Card.version 漂移拒绝、失败不阻塞；NULL 不按 0 分，评分分母/sampling_rate 正确，SKIPPED
   批次仍按单元难度计 coverage。
 - llm_call_attempts：全阶段调用前占位、attempt 唯一约束、孤儿 UNKNOWN、Planner 规范化结果
@@ -473,6 +619,15 @@ R-03 改为 RESOLVED。更大样本 live 报告可放后续 R 级工作包。
 - R-03：本工作包覆盖（PLANNED）；仅本地工具/Mock 验收后仍保持 PLANNED，受控真实三链路 canary 通过后才 RESOLVED。
 - 加密改造（每用户密钥/信封加密）：后续工作包。
 - 每单元 2/4 卡（练习深度）：PRD 变更候选，另行工作包。
+- FSRS 只依据用户的 AGAIN/HARD/GOOD/EASY 评级更新同一张卡的 `due/stability/difficulty`，
+  本工作包不会在“快遗忘”时调用 LLM 重新出题。若后续做错题变式/薄弱点强化，应是独立
+  Adaptive Practice 工作包：由 lapses/连续 AGAIN 等明确策略触发，继续锚定原 generation
+  unit 与来源页，生成有 lineage 的变式卡，并设置冷却、去重和任务调用上限；不得把它隐含
+  进 FSRS 排程器。
+- 超长章节按 char_count 分发各难度子配额是 v2.1 的确定性 MVP 取舍：某类高价值内容可能
+  集中在拿到该难度 0 配额的分组，单组 Prompt 无法补救。真实 canary 必须覆盖“定义页很多、
+  应用规则只在末组”的反例并记录漏召回；若不能接受，应另开章节级 candidate→consolidate
+  规划工作包，而不是让 Planner 越权跨配额或在 Prompt 中假装解决跨组不可见问题。
 - R-17（SQLite 单写者）不变：规划 LLM 调用在事务外，长调用不持写锁；评分阶段同。
 - Planner 合法规范化结果写入调用账本，恢复时复用；禁止只暂存进程内后在崩溃时重复付费调用。账本不保存完整原文、Prompt 或原始响应。
 - 场景判断题语义依赖 Prompt + Rubric 观测，不做代码语义拦截（登记为观测性约束）。
