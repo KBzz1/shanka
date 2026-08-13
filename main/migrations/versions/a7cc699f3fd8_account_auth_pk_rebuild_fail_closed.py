@@ -79,8 +79,8 @@ def upgrade() -> None:
     # 保留（旧设备域幂等缓存不跨身份空间重放；SQLite 多 NULL 不冲突）。
     # 跨设备旧行 (path, idempotency_key) 相同也不会冲突：SQLite 对 PK/UNIQUE 中的
     # NULL 视为互异，两行 (NULL, path, idempotency_key) 均保留并存（实测探针证伪
-    # "冲突即失败"旧表述）；跨设备同键去重实际由保留的
-    # UNIQUE (device_id, path, idempotency_key) 兜底。
+    # "冲突即失败"旧表述）；同设备重放去重由保留的
+    # UNIQUE (device_id, path, idempotency_key) 继续兜底（跨设备同键本就允许并存）。
     with op.batch_alter_table("idempotency_keys") as batch_op:
         batch_op.add_column(sa.Column("user_id", sa.String(), nullable=True))
         batch_op.create_primary_key("pk_idempotency_keys", ["user_id", "path", "idempotency_key"])
