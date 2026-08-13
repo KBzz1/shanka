@@ -188,15 +188,24 @@ def _aggregate(
 
 
 def _unit_difficulties(session: Session, rows: Sequence[Any]) -> dict[str, str]:
-    """批次 → 单元 target_difficulty 预取映射（difficulty 归因经 unit 锚定，spec §8）。"""
+    """批次 → 单元 target_difficulty 预取映射（difficulty 归因经 unit 锚定，spec §8）。
+
+    与卡片查询同款按 _CARD_QUERY_CHUNK 分块（SQLite 变量数上限兜底：窗口内单元数
+    无上限约束，单次大 IN 会触发 "too many SQL variables"）。
+    """
     unit_ids = {row.Batch.generation_unit_id for row in rows}
     unit_ids.discard(None)
     if not unit_ids:
         return {}
-    units = session.scalars(
-        select(KnowledgePoint).where(KnowledgePoint.knowledge_point_id.in_(unit_ids))
-    ).all()
-    return {u.knowledge_point_id: u.target_difficulty or _UNKNOWN for u in units}
+    by_id: dict[str, str] = {}
+    ordered = sorted(unit_ids)
+    for i in range(0, len(ordered), _CARD_QUERY_CHUNK):
+        chunk = ordered[i : i + _CARD_QUERY_CHUNK]
+        for unit in session.scalars(
+            select(KnowledgePoint).where(KnowledgePoint.knowledge_point_id.in_(chunk))
+        ).all():
+            by_id[unit.knowledge_point_id] = unit.target_difficulty or _UNKNOWN
+    return by_id
 
 
 def _group_key(

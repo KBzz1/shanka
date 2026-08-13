@@ -18,11 +18,14 @@ import json
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
+from app.api.observability import _unit_difficulties
 from app.config import Settings
 from app.main import create_app
 from infra.db.models import Batch, Card, Device, KnowledgePoint, PdfFile, Task
@@ -302,3 +305,42 @@ def test_summary_sampling_rate_and_rubric_version(ctx: tuple[TestClient, Path]) 
     assert group["scored_card_count"] == 1
     assert group["sampling_rate"] == 0.5
     assert group["cost_estimate"]["scope"] == "generation-stage-only"
+
+
+def test_unit_difficulties_chunks_large_in_query(ctx: tuple[TestClient, Path]) -> None:
+    """>500 个单元 id 的难度预取按 _CARD_QUERY_CHUNK 分块（SQLite 变量数上限兜底）：
+    501 个 id → ≥2 次 ORM 执行（修复前恒为 1 次大 IN），且映射完整、归因正确。"""
+    _, db_path = ctx
+    device = _device()
+    file_id, _deck_id = _seed_base(db_path, device_id=device["X-Device-ID"])
+    task_id = _seed_task(db_path, device_id=device["X-Device-ID"], file_id=file_id)
+    unit_ids = [f"unit-{i}" for i in range(501)]
+    with _session(db_path) as session:
+        session.add_all(
+            KnowledgePoint(
+                knowledge_point_id=uid,
+                task_id=task_id,
+                source_chunk_id="c1",
+                topic=uid,
+                priority=1,
+                status="PROCESSED",
+                target_difficulty="BASIC",
+                card_type="QUESTION",
+            )
+            for uid in unit_ids
+        )
+        session.commit()
+
+    executions = 0
+
+    def _count_execute(*args: object, **kwargs: object) -> None:
+        nonlocal executions
+        executions += 1
+
+    rows = [SimpleNamespace(Batch=SimpleNamespace(generation_unit_id=uid)) for uid in unit_ids]
+    with _session(db_path) as session:
+        event.listen(session, "do_orm_execute", _count_execute)
+        mapping = _unit_difficulties(session, rows)
+
+    assert executions >= 2  # 501 个 id 须 ≥2 次分块查询（单次大 IN 违反 SQLite 变量数上限）
+    assert mapping == {uid: "BASIC" for uid in unit_ids}
