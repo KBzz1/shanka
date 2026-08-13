@@ -190,8 +190,8 @@ def _save_dry_run_key(
 ) -> None:
     """dry-run Key 直插：用户域 Core 直写（与 services/api_key/service.py save_key 同款）。
 
-    ApiKey 的 ORM mapper 身份键仍为过渡 device_id（P3 遗留，T5 移除），用户域行对 ORM
-    不可见——直插必须走 Core；device_id=NULL（DESIGN §5.2：新写入不得生成 device_id）。
+    device_id=NULL（DESIGN §5.2：新写入不得生成 device_id）；测试直插走 Core 列投影避免
+    加载完整 ORM 实例（与 tests/integration/test_api_key_service.py 同款）。
     P4-4 review MAJOR-1：T4 前此处走 ORM device 域行，T4 后 devices 无注册行（FK 无匹配
     → IntegrityError）且 create_task/executor 按 user_id 查 Key（device 域行不可见）。
     """

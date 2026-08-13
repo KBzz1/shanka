@@ -34,7 +34,7 @@ from app.errors import AppError, ErrorCode, http_status
 
 logger = logging.getLogger(__name__)
 
-_EXEMPT_DEVICE_PATHS = {"/healthz", "/readyz", "/metrics"}
+_EXEMPT_PROBE_PATHS = {"/healthz", "/readyz", "/metrics"}
 _AUTH_PATHS = {"/auth/register", "/v1/auth/register", "/auth/login", "/v1/auth/login"}
 
 
@@ -136,7 +136,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         P4-3：POST /auth/register|/auth/login 增加 auth 维度（键=IP）；login 用户名桶
         在 auth service 内（body 于 BodyCapture 内层，本层不可读——裁决）。
         """
-        if request.url.path in _EXEMPT_DEVICE_PATHS:
+        if request.url.path in _EXEMPT_PROBE_PATHS:
             return None
         method = request.method
         path = request.url.path

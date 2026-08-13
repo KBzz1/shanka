@@ -1,6 +1,6 @@
 """质量聚合观测（structure-contract 6.10；openapi /observability/quality-summary）。
 
-按当前 device 隔离聚合（跨设备聚合留给运营后台）：SQL 拉取窗口内批次（join Task），
+按当前 user_id 隔离聚合（跨用户聚合留给运营后台）：SQL 拉取窗口内批次（join Task），
 按 group_by 分组聚合——Rubric 各维平均（批次卡片经 generated_item_ids ↔
 Card.generation_item_id 关联，各维度只以对应字段非 NULL 的卡为分母，NULL 不计 0 分）、
 覆盖/重复率均值（SKIPPED 批次 coverage=0 计入分母）、任务完成率（COMPLETED/总数）、
