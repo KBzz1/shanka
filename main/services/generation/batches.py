@@ -176,7 +176,9 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     batch.model = result.get("model")
     batch.http_status = result.get("http_status")
     batch.duration_ms = result.get("duration_ms")
-    batch.prompt_version = versions["prompt_version"]
+    batch.prompt_version = versions["generator_prompt_version"]
+    # Batch.schema_version 记录生成调用实际使用的 generator-output schema v2（spec §5.1），
+    # 不是 Card 持久化 schema v1（card_schema_version）——后者是服务端投影后的第二层校验
     batch.schema_version = versions["schema_version"]
     # 状态机（4.2）：SUCCEEDED（≥1 合法卡）/ FAILED（0 合法卡，retry+1）/ 重试达上限 → SKIPPED
     task.generated_card_count += len(inserted)

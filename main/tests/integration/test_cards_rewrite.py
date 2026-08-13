@@ -169,8 +169,9 @@ def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> No
         replaced_id = card.card_id
     assert replaced_id == card_id
     assert len(captured) == 1
-    assert "附加要求：用更简洁的语言" in captured[0]
+    assert '"custom_requirements":"用更简洁的语言"' in captured[0]
     assert "请严格按以下 JSON Schema 输出：" in captured[0]
+    assert "<REWRITE_INPUT>" in captured[0] and "</REWRITE_INPUT>" in captured[0]
     assert "旧正面" in captured[0] and "旧背面" in captured[0]
     with session_factory() as session:
         stored = session.get(Card, card_id)

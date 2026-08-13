@@ -1,8 +1,9 @@
-"""agent 资产加载与 Prompt 组装（Architecture AGENTS.md 6/红线 5）。
+"""agent 资产加载、版本观测与安全 Prompt 数据序列化（红线 5）。
 
-- manifest.json 为唯一版本入口：prompts.planner/generator、schemas.card、rubrics.main；
+- manifest.json 为唯一版本入口：Planner/Generator/Rewrite/Scoring Prompt、输出 Schema 与
+  Rubric；
 - 资产路径相对 agent_evolution/；加载时校验存在；
-- Prompt = 稳定前缀（资产，系统指令）+ 动态后缀（topic/chapter/difficulty/custom/JSON schema）；
+- v3 动态输入由 ``safe_json_dumps`` 确定性序列化并转义信封边界字符；
 - 完整 Prompt 不落日志（红线 4/AC-08）。
 """
 
@@ -39,12 +40,58 @@ def load_asset(section: str, name: str) -> str:
 
 
 def asset_versions() -> dict[str, str]:
+    """manifest 全部资产版本（spec §5.1 版本布局）。
+
+    扩展键供调用级观测（Task 7 起 llm_call_attempts 按调用记录具体 asset name/version，
+    避免用一个 schema_version 混写 card v1 与三个 output schema v2）；保留兼容键
+    prompt_version（=generator prompt）与 schema_version（=generator-output schema，
+    Batch.schema_version 语义）供既有消费者。
+    """
     manifest = load_manifest()
+    prompts = manifest["prompts"]
+    schemas = manifest["schemas"]
     return {
-        "prompt_version": manifest["prompts"]["generator"]["version"],
-        "schema_version": manifest["schemas"]["card"]["version"],
+        "generator_prompt_version": prompts["generator"]["version"],
+        "planner_prompt_version": prompts["planner"]["version"],
+        "rewrite_prompt_version": prompts["rewrite"]["version"],
+        "scoring_prompt_version": prompts["scoring"]["version"],
+        "card_schema_version": schemas["card"]["version"],
+        "planner_output_schema_version": schemas["planner_output"]["version"],
+        "scoring_output_schema_version": schemas["scoring_output"]["version"],
         "rubric_version": manifest["rubrics"]["main"]["version"],
+        # 兼容键（旧消费者）
+        "prompt_version": prompts["generator"]["version"],
+        "schema_version": schemas["generator_output"]["version"],
     }
+
+
+def load_schema_asset(name: str) -> dict[str, Any]:
+    """加载 manifest schemas 节 JSON Schema 资产并解析为 dict（spec §5.6 输出校验层）。
+
+    供 planner/generator/scoring validator 加载原始 output schema v2（本文件不承担
+    业务校验，只负责版本化加载与解析失败兜底）。
+    """
+    try:
+        data = json.loads(load_asset("schemas", name))
+        assert isinstance(data, dict)
+        return data
+    except AppError:
+        raise
+    except Exception as exc:
+        raise AppError(
+            ErrorCode.INTERNAL_ERROR, f"agent 资产 Schema 解析失败: schemas/{name}"
+        ) from exc
+
+
+def safe_json_dumps(payload: object) -> str:
+    """确定性序列化不可信 Prompt 数据，并转义可伪造输入信封边界的字符。"""
+    rendered = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return rendered.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
 
 
 def build_generation_prompt(
@@ -56,7 +103,7 @@ def build_generation_prompt(
     custom_requirements: str | None,
     card_schema: str,
 ) -> str:
-    """稳定前缀（资产）+ 动态后缀。返回完整 prompt（调用方保证不落日志）。"""
+    """旧链路兼容 builder；v3 正式链路按设计使用稳定 system + 动态 user。"""
     parts = [prompt_asset.strip(), f"主题：{topic}", f"章节：{chapter_name}", f"难度：{difficulty}"]
     if custom_requirements:
         parts.append(f"自定义要求：{custom_requirements}")

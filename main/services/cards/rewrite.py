@@ -13,7 +13,6 @@
 - 事务归 services：本函数不做 commit，调用方（handler 幂等包装）commit。
 """
 
-import json
 import re
 import uuid
 from collections.abc import Callable
@@ -26,7 +25,7 @@ from app.errors import AppError, ErrorCode
 from infra.db.models import ApiKey, Card, ReviewState
 from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
-from infra.llm.prompts import load_asset
+from infra.llm.prompts import load_asset, safe_json_dumps
 from services.generation.llm_metrics import observe_llm_call
 from services.generation.response_parse import parse_cards_json, to_internal_card
 from services.generation.rubric import score_card
@@ -60,31 +59,42 @@ def _resolve_api_key(session: Session, *, device_id: str, settings: Settings) ->
 
 
 def _build_rewrite_prompt(card: Card, *, custom_requirements: str | None) -> str:
-    """rewrite 资产填充原卡字段（类型结构化字段按 card_type 选填）→ 拼接 JSON Schema 要求。
-
-    完整 Prompt 不落日志（红线 4/AC-08）。资产含字面 JSON 花括号，用 replace 而非 format 填充。
-    """
+    """稳定 v3 资产 + Generator Output Schema + 安全 JSON 动态信封；完整 Prompt 不落日志。"""
     if card.card_type == "TRUE_FALSE":
-        structured = (
-            f"- 陈述（statement）：{card.statement}\n"
-            f"- 判断（answer_boolean）：{card.answer_boolean}\n"
-            f"- 解释（explanation）：{card.explanation}"
-        )
+        structured: dict[str, object] = {
+            "type": card.card_type,
+            "front": card.front,
+            "back": card.back,
+            "statement": card.statement,
+            "answer_boolean": (None if card.answer_boolean is None else bool(card.answer_boolean)),
+            "explanation": card.explanation,
+        }
     else:
-        structured = f"- 问题（question）：{card.question}\n- 答案（answer）：{card.answer}"
-    prompt = (
-        load_asset("prompts", "rewrite")
-        .replace("{card_type}", card.card_type)
-        .replace("{front}", card.front)
-        .replace("{back}", card.back)
-        .replace("{structured_fields}", structured)
+        structured = {
+            "type": card.card_type,
+            "front": card.front,
+            "back": card.back,
+            "question": card.question,
+            "answer": card.answer,
+        }
+    payload: dict[str, object] = {
+        "card_id": card.card_id,
+        "version": card.version,
+        "card": structured,
+        "target_difficulty": card.target_difficulty,
+        "source_chunks": [],
+        "custom_requirements": custom_requirements,
+    }
+    schema = load_asset("schemas", "generator_output").strip()
+    return "\n".join(
+        [
+            load_asset("prompts", "rewrite").strip(),
+            f"请严格按以下 JSON Schema 输出：\n{schema}",
+            "<REWRITE_INPUT>",
+            safe_json_dumps(payload),
+            "</REWRITE_INPUT>",
+        ]
     )
-    if custom_requirements:
-        prompt += f"\n附加要求：{custom_requirements}"
-    prompt += (
-        f"\n请严格按以下 JSON Schema 输出：\n{json.dumps(load_card_schema(), ensure_ascii=False)}"
-    )
-    return prompt
 
 
 def rewrite_card(

@@ -138,7 +138,7 @@ def test_batches_plan_and_process_all(session_factory: Callable[[], Session]) ->
     assert len(cards) > 0
     assert all(c.source == "GENERATED" for c in cards)
     # T3 审查 carry-forward：SUCCEEDED 批次 Rubric 值断言（AC-04/07；仅观测不影响入库）
-    assert all(b.rubric_version == "v1" for b in batches)
+    assert all(b.rubric_version == "v2" for b in batches)
     assert all(
         c.evidence_score is not None
         and c.correctness_score is not None
@@ -214,7 +214,5 @@ def test_batches_usage_and_versions_recorded(session_factory: Callable[[], Sessi
     assert batch.cache_miss_tokens == 8
     assert batch.output_tokens == 5
     assert batch.model == "deepseek-v4-flash"
-    assert (
-        batch.prompt_version == "v2" and batch.schema_version == "v1"
-    )  # generator v2（R1 canary 修复）
+    assert batch.prompt_version == "v3" and batch.schema_version == "v2"
     assert batch.http_status == 200

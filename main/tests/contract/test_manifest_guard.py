@@ -16,7 +16,12 @@ def test_manifest_asset_versions_and_paths_valid() -> None:
     assets = [
         ("prompts", "planner"),
         ("prompts", "generator"),
+        ("prompts", "rewrite"),
+        ("prompts", "scoring"),
         ("schemas", "card"),
+        ("schemas", "generator_output"),
+        ("schemas", "planner_output"),
+        ("schemas", "scoring_output"),
         ("rubrics", "main"),
     ]
     for section, name in assets:
@@ -31,7 +36,7 @@ def test_manifest_versions_match_structure_contract_declarations() -> None:
     prompt_versions = {entry["version"] for entry in manifest["prompts"].values()}
     expected = {
         "prompt_version": prompt_versions,
-        "schema_version": {manifest["schemas"]["card"]["version"]},
+        "schema_version": {entry["version"] for entry in manifest["schemas"].values()},
         "rubric_version": {manifest["rubrics"]["main"]["version"]},
     }
     declared = extract_version_declarations(STRUCTURE_CONTRACT_PATH.read_text(encoding="utf-8"))

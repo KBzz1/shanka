@@ -1,13 +1,26 @@
 {
   "prompts": {
-    "planner": { "version": "v1", "path": "prompts/v1/planner.md" },
-    "generator": { "version": "v2", "path": "prompts/v2/generator.md" },
-    "rewrite": { "version": "v1", "path": "prompts/v1/rewrite.md" }
+    "planner": { "version": "v3", "path": "prompts/v3/planner.md" },
+    "generator": { "version": "v3", "path": "prompts/v3/generator.md" },
+    "rewrite": { "version": "v3", "path": "prompts/v3/rewrite.md" },
+    "scoring": { "version": "v2", "path": "rubrics/v2/scoring-prompt.md" }
   },
   "schemas": {
-    "card": { "version": "v1", "path": "schemas/v1/card.schema.json" }
+    "card": { "version": "v1", "path": "schemas/v1/card.schema.json" },
+    "generator_output": {
+      "version": "v2",
+      "path": "schemas/v2/generator-output.schema.json"
+    },
+    "planner_output": {
+      "version": "v2",
+      "path": "schemas/v2/planner-output.schema.json"
+    },
+    "scoring_output": {
+      "version": "v2",
+      "path": "schemas/v2/scoring-output.schema.json"
+    }
   },
   "rubrics": {
-    "main": { "version": "v1", "path": "rubrics/v1/rubric.md" }
+    "main": { "version": "v2", "path": "rubrics/v2/rubric.md" }
   }
 }

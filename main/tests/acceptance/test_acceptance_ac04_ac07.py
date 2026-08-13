@@ -289,10 +289,8 @@ def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]
         assert item["cache_miss_tokens"] == 8
         assert item["output_tokens"] == 5
         # AC-07-a：整批质量统计（仅观测，随 rubrics 落库）
-        assert item["rubric_version"] == "v1"
-        assert (
-            item["prompt_version"] == "v2" and item["schema_version"] == "v1"
-        )  # generator v2（R1 canary 修复）
+        assert item["rubric_version"] == "v2"
+        assert item["prompt_version"] == "v3" and item["schema_version"] == "v2"
         assert item["model"] == "deepseek-v4-flash"
         assert item["http_status"] == 200
         assert item["coverage_rate"] == 1.0

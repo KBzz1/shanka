@@ -200,9 +200,9 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
     assert first["output_tokens"] == 5
     # 版本/model/http_status/duration
     assert first["model"] == "deepseek-v4-flash"
-    assert first["prompt_version"] == "v2"  # generator v2（R1 canary 修复）
-    assert first["schema_version"] == "v1"
-    assert first["rubric_version"] == "v1"
+    assert first["prompt_version"] == "v3"
+    assert first["schema_version"] == "v2"
+    assert first["rubric_version"] == "v2"
     assert first["http_status"] == 200
     assert isinstance(first["duration_ms"], int)
     assert first["request_id"] is None  # carry-forward 决策：视图保留字段，R1 live 上游 id 透传
