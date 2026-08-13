@@ -334,6 +334,16 @@
 - **SDD 过程**：6 任务 × implementer + reviewer；T4 边界调整裁决（Key 写侧提前吸收、T5 收缩）；6 轮 fix round 全部 scoped re-review clean。
 - 遗留登记：driver report["device_id"] 字段与 dry-run mock 形状（P7 平台裁决）；write 桶 60s 窗口 clock 注入（后续）。
 
+### ACC-P5 — LLM 后台 user_id 接续（判别锁定，不改 LLM 语义）
+
+**`DONE`｜依赖：ACC-P4｜覆盖：DESIGN §6、WORKER_PROMPT 目标二 §4｜2026-08-14**
+
+当前证据（2026-08-14，main 分支 commit 8a54b96）：
+- **判别测试 6 个**（`tests/integration/test_background_user_continuity.py`，零种子直写真实链路）：logout 后任务继续（executor 扫描 COMPLETED 6 卡、新登录可读）；session 过期后任务继续（DB 回拨 expires_at → 401 → 后台仍跑完）；代码级判别 services/tasks+generation 源码零 Authorization/principal/request.state/auth_sessions（防回归）；operation_key 纯任务域（planning:/generating:/scoring: 前缀不含 user/session 维度）+ 账本行 user_id==task.user_id、device_id NULL + 重复扫描行数守恒（CAS 不依赖 session）；跨用户任务 404 + quality-summary 隔离；/metrics 无身份聚合。
+- **资产只读核对**：P4/P5 期间 agent_evolution 零提交（git log 实测）；manifest 守卫随全量绿。
+- **验证（主 Agent 2026-08-14 实测）**：全量 **563 passed / 0 failed**（557+6）；`ruff check .` 全过；`ruff format --check .` 272 files；`mypy .` Success（219 source files）。
+- 执行方式：主 Worker 直接执行（验证型阶段，P2 先例）；P4 已完成归属接线（executor Key 查找/账本/观测 user_id），P5 零生产逻辑改动。
+
 ## 5. 依赖关系与下一步
 
 ```text

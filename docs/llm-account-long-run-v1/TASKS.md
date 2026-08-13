@@ -84,10 +84,10 @@ legacy claim 部分不在本包范围**，用户 2026-08-13 决策）；行为�
 
 ### P5 LLM 后台 user_id 接续
 
-- [ ] tasks.user_id 为后台执行身份；executor 不持有 bearer token
-- [ ] llm_call_attempts / API Key / quality-summary / observability 按 user_id；匿名 /metrics 无身份聚合
-- [ ] logout/session expiry 后任务继续；operation_key/fingerprint/CAS/配额不依赖 session
-- [ ] v3/v2 资产只读消费，不修改语义/版本
+- [x] tasks.user_id 为后台执行身份；executor 不持有 bearer token
+- [x] llm_call_attempts / API Key / quality-summary / observability 按 user_id；匿名 /metrics 无身份聚合
+- [x] logout/session expiry 后任务继续；operation_key/fingerprint/CAS/配额不依赖 session
+- [x] v3/v2 资产只读消费，不修改语义/版本
 
 ### P6 Android
 

@@ -4,11 +4,11 @@
 
 - Goal ID：`shanka-llm-account-long-run-v1`
 - Goal：先完成 LLM 链路升级（17 任务，P1），再完成账号登录替代 X-Device-ID（PRD V2.2，P2–P8）。
-- 当前状态：`P4_DONE`（后端切换完成：auth 端点 + Argon2id + opaque token + Bearer/AuthPrincipal + 全链路 user_id 归属 + X-Device-ID 退出，557/0 四工具全绿；进入 P5 LLM 后台 user_id 接续）
+- 当前状态：`P5_DONE`（LLM 后台 user_id 接续完成：后台零 session 依赖判别锁定 + logout/过期后任务继续 + 跨用户 404 + metrics 无身份 + 资产只读核对，563/0 四工具全绿；进入 P6 Android）
 - 设计：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/DESIGN.md`（引用两份上游设计）
 - 启动提示词：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/WORKER_PROMPT.md`
 - 任务地图：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/TASKS.md`
-- 最后更新：2026-08-14 Asia/Shanghai（P4_DONE）
+- 最后更新：2026-08-14 Asia/Shanghai（P5_DONE）
 
 ## 现场快照（2026-08-13 接管时）
 
@@ -104,6 +104,20 @@
 - **SDD 过程**：6 任务 × implementer + 任务级 reviewer；T4 边界调整裁决（Key 写侧提前、T5 收缩）；fix rounds 6 轮全部 scoped re-review clean。
 - **遗留登记（不阻塞）**：driver report["device_id"] 字段（reviewer 判定不违反 §4.5，P7 test-platform 裁决）；RateLimitMiddleware write 桶 60s 窗口 clock 注入留后续（ip 桶已注入）；tests/live driver dry-run mock 按请求区分 planner/generator 形状（P7 平台裁决）。
 
+## P5 完成记录（2026-08-14，全部为真实命令/证据）
+
+- **提交**：main 分支 commit 8a54b96（`tests/integration/test_background_user_continuity.py` 新建 230 行，6 个判别测试）。
+- **判别锁定（DESIGN §6 / WORKER_PROMPT 目标二 §4 冻结语义，全部真实链路非 mock 断言）**：
+  - logout 后任务继续：register→Key→PDF→牌组→任务→logout(204)→executor 扫描→COMPLETED 6 卡→新登录可读；
+  - session 过期后任务继续：DB 回拨 expires_at→401→executor 仍跑完→新登录可读；
+  - 代码级判别：services/tasks + services/generation 源码零 Authorization/Bearer/principal/request.state/auth_sessions 命中（防未来回归）；
+  - operation_key 纯任务域（planning:/generating:/scoring: 前缀，不含 user/session 维度）+ 账本行 user_id==task.user_id、device_id NULL + 重复扫描账本行数守恒（CAS 不依赖 session）；
+  - 跨用户：GET /tasks/{他人任务} 404、quality-summary 不含他人 task_id；
+  - /metrics 无身份聚合（不含 user_id/username/session_id 字样）。
+- **资产只读核对**：P4/P5 期间（1e52f96..HEAD）agent_evolution 零提交（git log 实测）；manifest 守卫随全量测试绿。
+- **验证（主 Worker 2026-08-14 实测）**：全量 **563 passed / 0 failed**（557 + 6 新增）；`ruff check .` 全过；`ruff format --check .` 272 files；`mypy .` Success（219 source files）。
+- **执行方式**：主 Worker 直接执行（验证型阶段，P2 先例）；P4 已把归属接线完成（executor Key 查找/账本/观测 user_id），P5 零生产逻辑改动。
+
 ## 阶段账本
 
 | 阶段 | 状态 | 证据/下一步 |
@@ -113,7 +127,7 @@
 | P2 契约 V2.2 | `DONE` | 见上 P2 完成记录：PRD V2.2 + 四契约文档原子同步 + 500/0 四工具全绿 |
 | P3 数据地基 | `DONE` | 见上 P3 完成记录：5 commits 3464e9c..89ce41d、Alembic 链 3 revisions、508/0 四工具全绿、fail-closed、旧行守恒 |
 | P4 后端切换 | `DONE` | 见上 P4 完成记录：11 commits、auth 四端点 + Bearer + 全链路 user_id、X-Device-ID 退出、557/0 四工具全绿 |
-| P5 LLM 后台 user_id 接续 | `PENDING` | 归属改造，不改 LLM 语义 |
+| P5 LLM 后台 user_id 接续 | `DONE` | 见上 P5 完成记录：6 判别测试（logout/过期继续、session 零依赖、跨用户 404、metrics 无身份）+ 资产只读，563/0 四工具全绿 |
 | P6 Android | `PENDING` | 登录态、Bearer、401 处理 |
 | P7 test-platform v2 | `PENDING` | auth/isolation/core/live/ledger 场景 |
 | P8 总验收 | `PENDING` | 全量工具链、迁移副本、canary、WORKER_REPORT.md |
