@@ -37,7 +37,7 @@ from typing import Any, cast
 
 import httpx
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
@@ -183,6 +183,28 @@ def migrate_db(db_path: Path) -> sessionmaker[Session]:
     command.upgrade(cfg, "head")
     engine = create_db_engine(f"sqlite:///{db_path}")
     return create_session_factory(engine)
+
+
+def _save_dry_run_key(
+    session: Session, *, user_id: str, api_key: str, encryption_key: bytes
+) -> None:
+    """dry-run Key 直插：用户域 Core 直写（与 services/api_key/service.py save_key 同款）。
+
+    ApiKey 的 ORM mapper 身份键仍为过渡 device_id（P3 遗留，T5 移除），用户域行对 ORM
+    不可见——直插必须走 Core；device_id=NULL（DESIGN §5.2：新写入不得生成 device_id）。
+    P4-4 review MAJOR-1：T4 前此处走 ORM device 域行，T4 后 devices 无注册行（FK 无匹配
+    → IntegrityError）且 create_task/executor 按 user_id 查 Key（device 域行不可见）。
+    """
+    session.execute(
+        insert(ApiKey).values(
+            user_id=user_id,
+            device_id=None,
+            encrypted_key=encrypt_key(api_key, encryption_key),
+            status="AVAILABLE",
+            masked_key=masked(api_key),
+            updated_at=format_utc(datetime.now(UTC)),
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +358,9 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
             reg = client.post(
                 "/auth/login", json={"username": "live-driver", "password": "live-driver-pass-1"}
             )
-        headers["Authorization"] = f"Bearer {reg.json()['access_token']}"
+        reg_body = reg.json()
+        headers["Authorization"] = f"Bearer {reg_body['access_token']}"
+        user_id = reg_body["user"]["user_id"]  # dry-run Key 直插与任务归属同用户（P4-4）
         # ---- 1. 上传真实 PDF → 解析（V3A 三重校验）→ 抽样块章节注入（DB 直插）----
         pdf_path = Path(args.pdf)
         with pdf_path.open("rb") as f:
@@ -386,7 +410,7 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
         deck_id = resp.json()["deck_id"]
         report["deck_id"] = deck_id
 
-        # ---- 3. Key 保存（live：PUT /api-key 正式链路；dry-run：DB 直插避免触网）----
+        # ---- 3. Key 保存（live：PUT /api-key 正式链路；dry-run：user 域 DB 直插避免触网）----
         if live:
             resp = client.put(
                 "/api-key",
@@ -413,15 +437,7 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
             if enc_key is None:
                 raise SystemExit("API_KEY_ENCRYPTION_KEY 不是合法 32 字节 hex")
             with session_factory() as session:
-                session.add(
-                    ApiKey(
-                        device_id=device_id,
-                        encrypted_key=encrypt_key(api_key, enc_key),
-                        status="AVAILABLE",
-                        masked_key=masked(api_key),
-                        updated_at=format_utc(datetime.now(UTC)),
-                    )
-                )
+                _save_dry_run_key(session, user_id=user_id, api_key=api_key, encryption_key=enc_key)
                 session.commit()
             report["api_key"] = {
                 "saved_via": "db-seed",
