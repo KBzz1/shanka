@@ -327,6 +327,16 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
 
     app = create_app(settings)
     with TestClient(app) as client:
+        # 双头过渡窗口（P4-2）：注册/登录 live 驱动账号（测试假凭据，非敏感信息）→
+        # Bearer + X-Device-ID 双头；report 不记录 token/密码。
+        reg = client.post(
+            "/auth/register", json={"username": "live-driver", "password": "live-driver-pass-1"}
+        )
+        if reg.status_code == 409:
+            reg = client.post(
+                "/auth/login", json={"username": "live-driver", "password": "live-driver-pass-1"}
+            )
+        headers["Authorization"] = f"Bearer {reg.json()['access_token']}"
         # ---- 1. 上传真实 PDF → 解析（V3A 三重校验）→ 抽样块章节注入（DB 直插）----
         pdf_path = Path(args.pdf)
         with pdf_path.open("rb") as f:

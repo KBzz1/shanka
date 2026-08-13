@@ -21,6 +21,7 @@ from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.main import create_app
 from infra.db.session import create_db_engine
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -68,6 +69,7 @@ def _make_client(
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
         api_key_encryption_key=encryption_key,
     )
     monkeypatch.setattr(FakeClient, "validate_calls", 0)
@@ -91,8 +93,9 @@ def client_without_encryption_key(
     yield from _make_client(tmp_path, monkeypatch, encryption_key=None)
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -109,7 +112,7 @@ def _api_key_rows(db_path: Path) -> list[tuple[str, str]]:
 
 def test_api_key_put_available_saves_and_status_returns(client: TestClient, tmp_path: Path) -> None:
     """PUT 校验通过 → 200 AVAILABLE + 脱敏 + updated_at；落库；GET status 一致且无明文。"""
-    device = _device()
+    device = _device(client)
     resp = client.put("/api-key", json={"api_key": "sk-test123456"}, headers={**device, **_idem()})
     assert resp.status_code == 200
     body = resp.json()
@@ -137,7 +140,7 @@ def test_api_key_put_invalid_returns_status_and_not_saved(
 ) -> None:
     """校验失败 → 200 INVALID（不落库不覆盖）；GET status → UNKNOWN。"""
     monkeypatch.setattr(sys.modules[__name__], "_FAKE_STATUS", "INVALID")
-    device = _device()
+    device = _device(client)
     resp = client.put("/api-key", json={"api_key": "sk-bad"}, headers={**device, **_idem()})
     assert resp.status_code == 200
     assert resp.json()["status"] == "INVALID"
@@ -153,7 +156,7 @@ def test_api_key_put_insufficient_returns_status_and_not_saved(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(sys.modules[__name__], "_FAKE_STATUS", "INSUFFICIENT_BALANCE")
-    device = _device()
+    device = _device(client)
     resp = client.put("/api-key", json={"api_key": "sk-low"}, headers={**device, **_idem()})
     assert resp.status_code == 200
     assert resp.json()["status"] == "INSUFFICIENT_BALANCE"
@@ -169,7 +172,7 @@ def test_api_key_put_upstream_unavailable_502_and_client_closed(
         "_FAKE_ERROR",
         AppError(ErrorCode.API_KEY_UNAVAILABLE, "DeepSeek 上游不可用"),
     )
-    device = _device()
+    device = _device(client)
     resp = client.put("/api-key", json={"api_key": "sk-x"}, headers={**device, **_idem()})
     assert resp.status_code == 502
     assert resp.json()["error"]["code"] == "API_KEY_UNAVAILABLE"
@@ -179,21 +182,21 @@ def test_api_key_put_upstream_unavailable_502_and_client_closed(
 
 def test_api_key_put_missing_idempotency_key_400(client: TestClient) -> None:
     """写接口强制 Idempotency-Key（契约 1.3）：缺失 → 400 VALIDATION_ERROR。"""
-    resp = client.put("/api-key", json={"api_key": "sk-x"}, headers=_device())
+    resp = client.put("/api-key", json={"api_key": "sk-x"}, headers=_device(client))
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_api_key_put_missing_api_key_field_400(client: TestClient) -> None:
     """请求体缺 api_key（Pydantic 必填）→ 400 VALIDATION_ERROR（F1 统一校验响应）。"""
-    resp = client.put("/api-key", json={}, headers={**_device(), **_idem()})
+    resp = client.put("/api-key", json={}, headers={**_device(client), **_idem()})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_api_key_put_empty_api_key_400(client: TestClient) -> None:
     """请求体 api_key 为空串（min_length=1）→ 400 VALIDATION_ERROR，不触达校验/落库。"""
-    resp = client.put("/api-key", json={"api_key": ""}, headers={**_device(), **_idem()})
+    resp = client.put("/api-key", json={"api_key": ""}, headers={**_device(client), **_idem()})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
     assert FakeClient.validate_calls == 0
@@ -204,7 +207,7 @@ def test_api_key_put_idempotent_replay_does_not_revalidate(
 ) -> None:
     """同 key 同 body 重放：返回首次响应且校验不重复（重放时 fn 不执行）。"""
     monkeypatch.setattr(sys.modules[__name__], "_FAKE_STATUS", "AVAILABLE")
-    device = _device()
+    device = _device(client)
     headers = {**device, **_idem()}
     resp1 = client.put("/api-key", json={"api_key": "sk-test123456"}, headers=headers)
     assert resp1.status_code == 200
@@ -217,7 +220,7 @@ def test_api_key_put_idempotent_replay_does_not_revalidate(
 
 def test_api_key_put_idempotency_conflict_409(client: TestClient) -> None:
     """同 key 异 body → 409 IDEMPOTENCY_CONFLICT。"""
-    device = _device()
+    device = _device(client)
     headers = {**device, **_idem()}
     resp = client.put("/api-key", json={"api_key": "sk-first"}, headers=headers)
     assert resp.status_code == 200
@@ -228,7 +231,7 @@ def test_api_key_put_idempotency_conflict_409(client: TestClient) -> None:
 
 def test_api_key_status_unknown_when_not_saved(client: TestClient) -> None:
     """未保存 Key → 200 UNKNOWN + masked_key 空串 + updated_at null（openapi required 字段存在）。"""
-    resp = client.get("/api-key/status", headers=_device())
+    resp = client.get("/api-key/status", headers=_device(client))
     assert resp.status_code == 200
     body = resp.json()
     assert body == {"status": "UNKNOWN", "masked_key": "", "updated_at": None}
@@ -237,7 +240,9 @@ def test_api_key_status_unknown_when_not_saved(client: TestClient) -> None:
 def test_api_key_put_missing_encryption_key_500(client_without_encryption_key: TestClient) -> None:
     """加密密钥缺失（配置错误）→ 500 INTERNAL_ERROR（_require_encryption_key）。"""
     resp = client_without_encryption_key.put(
-        "/api-key", json={"api_key": "sk-x"}, headers={**_device(), **_idem()}
+        "/api-key",
+        json={"api_key": "sk-x"},
+        headers={**_device(client_without_encryption_key), **_idem()},
     )
     assert resp.status_code == 500
     assert resp.json()["error"]["code"] == "INTERNAL_ERROR"
@@ -247,6 +252,8 @@ def test_api_key_status_without_encryption_key_still_works(
     client_without_encryption_key: TestClient,
 ) -> None:
     """GET status 不解密：无加密密钥时传空 bytes 无碍 → 200 UNKNOWN。"""
-    resp = client_without_encryption_key.get("/api-key/status", headers=_device())
+    resp = client_without_encryption_key.get(
+        "/api-key/status", headers=_device(client_without_encryption_key)
+    )
     assert resp.status_code == 200
     assert resp.json()["status"] == "UNKNOWN"

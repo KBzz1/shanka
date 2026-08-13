@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.conftest import auth_headers
 
 
 @pytest.fixture
@@ -27,8 +28,9 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -77,7 +79,7 @@ def test_pdfs_api_upload_invalid_magic_400(client: TestClient) -> None:
     resp = client.post(
         "/pdfs",
         files={"file": ("a.pdf", b"not a pdf", "application/pdf")},
-        headers={**_device(), **_idem()},
+        headers={**_device(client), **_idem()},
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "PDF_UPLOAD_INVALID"
@@ -87,7 +89,7 @@ def test_pdfs_api_upload_invalid_extension_400(client: TestClient) -> None:
     resp = client.post(
         "/pdfs",
         files={"file": ("a.txt", _pdf_bytes(), "application/pdf")},
-        headers={**_device(), **_idem()},
+        headers={**_device(client), **_idem()},
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "PDF_UPLOAD_INVALID"
@@ -99,7 +101,7 @@ def test_pdfs_api_upload_content_length_precheck_400(client: TestClient) -> None
     resp = client.post(
         "/pdfs",
         files={"file": ("big.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**_device(), **_idem(), "Content-Length": "110000000"},
+        headers={**_device(client), **_idem(), "Content-Length": "110000000"},
     )
     assert resp.status_code == 400
     body = resp.json()
@@ -108,7 +110,7 @@ def test_pdfs_api_upload_content_length_precheck_400(client: TestClient) -> None
 
 
 def test_pdfs_api_upload_accepts_and_lists(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     resp = client.post(
         "/pdfs",
         files={"file": ("book.pdf", _pdf_bytes(), "application/pdf")},
@@ -126,7 +128,7 @@ def test_pdfs_api_upload_accepts_and_lists(client: TestClient) -> None:
 
 
 def test_pdfs_api_get_detail_and_404(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     file_id = client.post(
         "/pdfs",
         files={"file": ("b.pdf", _pdf_bytes(), "application/pdf")},
@@ -134,14 +136,14 @@ def test_pdfs_api_get_detail_and_404(client: TestClient) -> None:
     ).json()["file_id"]
     resp = client.get(f"/pdfs/{file_id}", headers=device)
     assert resp.status_code == 200
-    other = _device()
+    other = _device(client)
     resp = client.get(f"/pdfs/{file_id}", headers=other)
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "PDF_NOT_FOUND"
 
 
 def test_pdfs_api_delete_204_and_storage_cleaned(client: TestClient, tmp_path: Path) -> None:
-    device = _device()
+    device = _device(client)
     file_id = client.post(
         "/pdfs",
         files={"file": ("c.pdf", _pdf_bytes(), "application/pdf")},
@@ -157,7 +159,7 @@ def test_pdfs_api_delete_204_and_storage_cleaned(client: TestClient, tmp_path: P
 
 def test_pdfs_api_patch_chapter_requires_parsed(client: TestClient) -> None:
     """非 PARSED 时 PATCH → 409（裁决）；PARSED 后 PATCH 成功由扫描器链路覆盖（Task 5 或本测试手动置 PARSED）。"""
-    device = _device()
+    device = _device(client)
     file_id = client.post(
         "/pdfs",
         files={"file": ("d.pdf", _pdf_bytes(), "application/pdf")},
@@ -174,7 +176,7 @@ def test_pdfs_api_patch_chapter_requires_parsed(client: TestClient) -> None:
 
 def test_pdfs_api_patch_chapter_partial_name_only(client: TestClient, tmp_path: Path) -> None:
     """部分更新（fix round 1）：只传 name → 200，start/end 保持。"""
-    device = _device()
+    device = _device(client)
     assert client.get("/pdfs", headers=device).status_code == 200  # 注册设备行（FK 前置）
     pdf_id, chapter_id = _seed_parsed_pdf(tmp_path / "pdf_api.db", device["X-Device-ID"])
     resp = client.patch(
@@ -190,7 +192,7 @@ def test_pdfs_api_patch_chapter_partial_name_only(client: TestClient, tmp_path: 
 
 def test_pdfs_api_patch_chapter_partial_start_page_only(client: TestClient, tmp_path: Path) -> None:
     """部分更新（fix round 1）：只传 start_page → 200，end/name 保持。"""
-    device = _device()
+    device = _device(client)
     assert client.get("/pdfs", headers=device).status_code == 200  # 注册设备行（FK 前置）
     pdf_id, chapter_id = _seed_parsed_pdf(tmp_path / "pdf_api.db", device["X-Device-ID"])
     resp = client.patch(
@@ -206,7 +208,7 @@ def test_pdfs_api_patch_chapter_partial_start_page_only(client: TestClient, tmp_
 
 def test_pdfs_api_patch_chapter_all_none_400(client: TestClient) -> None:
     """部分更新（fix round 1）：全 None → 400 VALIDATION_ERROR（先于状态裁决）。"""
-    device = _device()
+    device = _device(client)
     file_id = client.post(
         "/pdfs",
         files={"file": ("e.pdf", _pdf_bytes(), "application/pdf")},
@@ -223,7 +225,7 @@ def test_pdfs_api_patch_chapter_all_none_400(client: TestClient) -> None:
 
 def test_pdfs_api_delete_chapter_204_and_removed(client: TestClient, tmp_path: Path) -> None:
     """删除章节：204 → 详情 chapters 不含该章；跨设备 404。"""
-    device = _device()
+    device = _device(client)
     assert client.get("/pdfs", headers=device).status_code == 200  # 注册设备行（FK 前置）
     pdf_id, chapter_id = _seed_parsed_pdf(tmp_path / "pdf_api.db", device["X-Device-ID"])
     resp = client.delete(f"/pdfs/{pdf_id}/chapters/{chapter_id}", headers={**device, **_idem()})
@@ -235,8 +237,10 @@ def test_pdfs_api_delete_chapter_204_and_removed(client: TestClient, tmp_path: P
 
 def test_pdfs_api_delete_chapter_cross_device_404(client: TestClient, tmp_path: Path) -> None:
     """跨设备删除章节 → 404（统一 404 不暴露存在性）。"""
-    device = _device()
+    device = _device(client)
     assert client.get("/pdfs", headers=device).status_code == 200
     pdf_id, chapter_id = _seed_parsed_pdf(tmp_path / "pdf_api.db", device["X-Device-ID"])
-    resp = client.delete(f"/pdfs/{pdf_id}/chapters/{chapter_id}", headers={**_device(), **_idem()})
+    resp = client.delete(
+        f"/pdfs/{pdf_id}/chapters/{chapter_id}", headers={**_device(client), **_idem()}
+    )
     assert resp.status_code == 404

@@ -4,6 +4,7 @@
 时钟经 infra.clock 注入，服务代码只能通过 Clock 接口取时间。
 """
 
+import weakref
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,3 +61,36 @@ def db_engine(tmp_path: Path) -> Engine:
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     command.upgrade(cfg, "head")
     return create_db_engine(f"sqlite:///{db_path}")
+
+
+# 双头过渡窗口（P4-2）：已注册用户的 Bearer token 模块级缓存。键 (id(client), username)——
+# id(client) 区分不同 DB 的 client（每个测试函数独立临时库）；命中缓存直接返回，避免每
+# 次构造 headers 重复 Argon2id 计算（~100ms/次，无缓存全量 +100s 级）。
+# 值带 weakref：client 对象 GC 后地址可被新 client 复用——weakref 已死则视为未命中
+# 重新注册，杜绝「新 client 拿到旧库 token」的 401 污染。
+_AUTH_TOKEN_CACHE: dict[tuple[int, str], tuple[weakref.ReferenceType[TestClient], str]] = {}
+
+
+def auth_headers(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """register 或 login 后返回 Bearer + 过渡期 X-Device-ID 双头。
+
+    缓存语义：同一 (client, username) 只做一次 register/login（token 会话为该测试
+    client 的 DB 持有）；文件内 logout 撤销语义的测试请用文件内 helper（test_auth.py
+    `_auth_headers` 每次重建会话，不经本缓存）。
+    """
+    cache_key = (id(client), username)
+    entry = _AUTH_TOKEN_CACHE.get(cache_key)
+    token = entry[1] if entry is not None and entry[0]() is client else None
+    if token is None:
+        r = client.post("/auth/register", json={"username": username, "password": password})
+        if r.status_code == 409:  # 同库同用户名已注册（跨 client 重放/共享库场景）
+            r = client.post("/auth/login", json={"username": username, "password": password})
+        assert r.status_code in (200, 201), r.text
+        token = r.json()["access_token"]
+        _AUTH_TOKEN_CACHE[cache_key] = (weakref.ref(client), token)
+    return {
+        "Authorization": f"Bearer {token}",
+        "X-Device-ID": "11111111-1111-4111-8111-111111111111",
+    }

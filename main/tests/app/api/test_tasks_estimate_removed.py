@@ -21,6 +21,7 @@ from app.config import Settings
 from app.main import create_app
 from infra.db.models import Base
 from infra.db.session import create_db_engine, create_session_factory
+from tests.conftest import auth_headers
 
 
 @pytest.fixture
@@ -37,6 +38,8 @@ def test_estimate_endpoint_removed(tmp_path: Path, session_factory: sessionmaker
         storage_path=tmp_path / "storage",
     )
     client = TestClient(create_app(settings))
+    # 双头过渡窗口：Bearer + X-Device-ID（create_all 已含 users/auth_sessions 表）
+    headers = auth_headers(client)
     resp = client.post(
         "/tasks/estimate",
         json={
@@ -46,7 +49,7 @@ def test_estimate_endpoint_removed(tmp_path: Path, session_factory: sessionmaker
                 "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
             },
         },
-        headers={"X-Device-ID": str(uuid.uuid4())},
+        headers={**headers, "X-Device-ID": str(uuid.uuid4())},
     )
     # brief 期望 404;运行时为 405:/tasks/{task_id}(GET) 路径模式仍匹配 /tasks/estimate
     assert resp.status_code in {404, 405}

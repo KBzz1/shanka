@@ -26,6 +26,7 @@ from infra.llm.deepseek import DeepSeekClient
 from services.decks.service import create_deck
 from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.executor import scan_once as scan_tasks
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -127,8 +128,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -235,7 +237,7 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
 ) -> None:
     """GET /tasks/{task_id}/batches：状态/retry/质量/usage/版本/model/http_status/duration/cost。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     task_id, _file_id = _run_task(client, db_path, device=device)
     resp = client.get(f"/tasks/{task_id}/batches", headers=device)
     assert resp.status_code == 200
@@ -272,7 +274,7 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
 ) -> None:
     """GET /observability/quality-summary：Rubric 均分/覆盖/重复率/完成率/成本，group_by 三种分组。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     task_id, file_id = _run_task(client, db_path, device=device)
     _ = task_id  # 完成任务存在即可（聚合跨任务）
 
@@ -326,10 +328,10 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
 def test_quality_summary_isolates_by_device(ctx: tuple[TestClient, Path]) -> None:
     """6.10 隔离口径：quality-summary 按当前 device 聚合；批次列表跨设备 404。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     task_id, _file_id = _run_task(client, db_path, device=device)
 
-    other = _device()
+    other = _device(client)
     resp = client.get("/observability/quality-summary", headers=other)
     assert resp.status_code == 200
     assert resp.json()["groups"] == []  # 其他设备不可见
@@ -343,7 +345,7 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
     """8.3：mock transport 驱动全管线（规划 2 次 + 生成 6 次 + 评分 5 次）后
     /metrics 文本含 llm/generation/batch 指标（差值断言）。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     before = client.get("/metrics").text
     _run_task(client, db_path, device=device)
     after = client.get("/metrics").text
@@ -392,7 +394,7 @@ def test_cancel_metric_counts_transition_once(ctx: tuple[TestClient, Path]) -> N
     （execute_idempotent 快照，不重跑 biz）均不重复 inc（差值断言）。
     """
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201  # 任务创建即 RUNNING（未跑 executor）

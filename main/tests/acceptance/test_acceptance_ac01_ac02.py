@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from services.pdf.scanner import scan_once
+from tests.conftest import auth_headers
 
 SAMPLE = Path("/home/kbzz1/shanka_backend/res/AI-Agents-in-Depth-zh-CN.pdf")
 
@@ -48,8 +49,9 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -60,7 +62,7 @@ def test_acceptance_ac01_sample_book_parses_to_chapters(client: TestClient, tmp_
     """AC-01-1：可提取文本层 + 可识别目录的 PDF 进入章节确认流程（PARSED + 章节列表）。"""
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _device()
+    device = _device(client)
     with SAMPLE.open("rb") as f:
         resp = client.post(
             "/pdfs",
@@ -82,7 +84,7 @@ def test_acceptance_ac01_sample_book_parses_to_chapters(client: TestClient, tmp_
 
 def test_acceptance_ac01_no_toc_stops_flow(client: TestClient) -> None:
     """AC-01-2：无可用目录 → FAILED + PDF_TOC_MISSING（流程停止）。"""
-    device = _device()
+    device = _device(client)
     resp = client.post(
         "/pdfs",
         files={"file": ("notoc.pdf", b"%PDF-1.4 broken", "application/pdf")},
@@ -101,7 +103,7 @@ def test_acceptance_ac02_chapter_patch(client: TestClient, tmp_path: Path) -> No
     """AC-02-1：修改章节名称（PARSED 后；部分更新——未提供字段保持不变）。"""
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _device()
+    device = _device(client)
     with SAMPLE.open("rb") as f:
         file_id = client.post(
             "/pdfs",

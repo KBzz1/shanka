@@ -20,6 +20,7 @@ from app.main import create_app
 from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -38,6 +39,7 @@ def _make_client(tmp_path: Path, *, max_units: int) -> tuple[TestClient, Path]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环
         max_generation_units_per_task=max_units,
     )
@@ -63,8 +65,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -131,7 +134,7 @@ def _payload(seed: dict[str, object], *, tendency: str = "COMPACT") -> dict[str,
 def test_tasks_create_201_pending_planning_view(ctx: tuple[TestClient, Path]) -> None:
     """POST /tasks → 201 PENDING+PLANNING：started_at/total_batch_count 为空、快照完整、新字段。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -153,7 +156,7 @@ def test_tasks_create_201_pending_planning_view(ctx: tuple[TestClient, Path]) ->
 def test_tasks_create_budget_exceeded_400(ctx_strict: tuple[TestClient, Path]) -> None:
     """预算超上限（5 章 COMPACT=15 > 5）→ 400 VALIDATION_ERROR，不创建任务（spec §10）。"""
     client, db_path = ctx_strict
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"], chapter_count=5)
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 400

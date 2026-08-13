@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from infra.logging import JSONFormatter
+from tests.conftest import auth_headers
 
 
 class _CapturingHandler(logging.Handler):
@@ -71,7 +72,7 @@ def test_request_logging_emits_json_line(
 
 
 def test_request_logging_error_path_logs_internal_error(
-    app: FastAPI, captured_logs: list[dict[str, object]]
+    app: FastAPI, captured_logs: list[dict[str, object]], tmp_path: Path
 ) -> None:
     def _boom() -> None:
         raise RuntimeError("boom")
@@ -79,13 +80,18 @@ def test_request_logging_error_path_logs_internal_error(
     app.add_api_route("/boom", _boom, methods=["GET"])
     # raise_server_exceptions=False：Starlette 对未处理异常先发 500 再重抛
     # （ServerErrorMiddleware 语义），测试关注 500 与 ERROR 日志而非重抛。
-    # 非豁免路径需携带合法 X-Device-ID（Task 6 设备鉴权中间件；devices 表未建
-    # 表时注册静默失败不阻断，恰好覆盖注册降级路径）。
+    # 双头过渡窗口（P4-2）：非豁免路径需携带合法 Bearer + X-Device-ID；Bearer 经
+    # auth 中间件 → auth_sessions 查询需表结构。用 create_all 而非 alembic upgrade：
+    # alembic env.py 的 fileConfig 会再次禁用 captured_logs 目标 logger。
+    from infra.db.models import Base
+
+    Base.metadata.create_all(app.state.engine)
     with TestClient(app, raise_server_exceptions=False) as client:
-        resp = client.get("/boom", headers={"X-Device-ID": "123e4567-e89b-12d3-a456-426614174000"})
+        resp = client.get("/boom", headers=auth_headers(client))
     assert resp.status_code == 500
     assert len(captured_logs) >= 1
-    entry = captured_logs[0]
+    # auth_headers 注册请求先产生 INFO 访问日志；取末条（/boom 的 ERROR 行）
+    entry = captured_logs[-1]
     assert entry["level"] == "ERROR"
     assert entry["error_code"] == "INTERNAL_ERROR"
     assert "boom" in str(entry["message"])

@@ -43,6 +43,7 @@ from services.decks.service import create_deck
 from services.generation.batches import _stable_uuid
 from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.executor import scan_once as scan_tasks
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/acceptance/ → 仓库根
 
@@ -65,6 +66,7 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path, Settings]]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环，显式 scan_once
     )
     with TestClient(create_app(settings)) as client:
@@ -75,8 +77,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -263,7 +266,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     """AC-05 a-d：批 2 前崩溃 → 卡保留 + resume 孤儿从游标继续 + 批 1 不重跑 +
     generation_item_id 防重。"""
     client, db_path, settings = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -418,7 +421,7 @@ def test_acceptance_ac05_cancel_keeps_inserted_cards(
 ) -> None:
     """场景 2（取消保留）：任务运行中 cancel → CANCELLED + 已入库卡保留，取消后不再处理。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201

@@ -15,6 +15,7 @@ from sqlalchemy import text
 from app.config import Settings
 from app.main import create_app
 from infra.db.session import create_db_engine
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -29,13 +30,18 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     cfg = Config(str(REPO_ROOT / "main" / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     command.upgrade(cfg, "head")
-    settings = Settings(database_url=f"sqlite:///{db_path}", storage_path=tmp_path / "storage")
+    settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
+    )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -57,7 +63,7 @@ def _idempotency_rows(db_path: Path) -> int:
 
 def test_decks_api_create_and_list(client: TestClient) -> None:
     """POST /decks 创建（201 + 全字段）→ GET /decks 列表 / GET /decks/{id} 可见。"""
-    device = _device()
+    device = _device(client)
     resp = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()})
     assert resp.status_code == 201
     body = resp.json()
@@ -82,16 +88,16 @@ def test_decks_api_create_and_list(client: TestClient) -> None:
 
 def test_decks_api_get_cross_device_404(client: TestClient) -> None:
     """跨设备访问 → 404 DECK_NOT_FOUND（资源归属隔离）。"""
-    device = _device()
+    device = _device(client)
     deck_id = _create_deck(client, device)
-    resp = client.get(f"/decks/{deck_id}", headers=_device())
+    resp = client.get(f"/decks/{deck_id}", headers=_device(client))
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
 
 
 def test_decks_api_delete(client: TestClient) -> None:
     """DELETE 204 → 再 GET 404；不同 key 重复删除 → 404。"""
-    device = _device()
+    device = _device(client)
     deck_id = _create_deck(client, device)
     resp = client.delete(f"/decks/{deck_id}", headers={**device, **_idem()})
     assert resp.status_code == 204
@@ -103,7 +109,7 @@ def test_decks_api_delete(client: TestClient) -> None:
 
 def test_decks_api_delete_blocked_by_running_task(client: TestClient, tmp_path: Path) -> None:
     """删除保护：进行中任务引用该牌组 → 409 TASK_IN_PROGRESS（AppError → HTTP 映射）。"""
-    device = _device()
+    device = _device(client)
     deck_id = _create_deck(client, device)
     engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
     with engine.begin() as conn:
@@ -129,14 +135,14 @@ def test_decks_api_delete_blocked_by_running_task(client: TestClient, tmp_path: 
 
 def test_decks_api_create_requires_idempotency_key(client: TestClient) -> None:
     """写接口强制 Idempotency-Key（契约 1.3）：缺失 → 400 VALIDATION_ERROR。"""
-    resp = client.post("/decks", json={"name": "D"}, headers=_device())
+    resp = client.post("/decks", json={"name": "D"}, headers=_device(client))
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_decks_api_idempotency_replay_and_conflict(client: TestClient, tmp_path: Path) -> None:
     """同设备同 key 同 body：单副作用 + 重放原响应；同 key 异 body：409。"""
-    device = _device()
+    device = _device(client)
     key = _idem()
     headers = {**device, **key}
     resp1 = client.post("/decks", json={"name": "D"}, headers=headers)
@@ -156,7 +162,7 @@ def test_decks_api_idempotency_replay_and_conflict(client: TestClient, tmp_path:
 
 def test_decks_api_idempotency_new_app_session_replays(client: TestClient, tmp_path: Path) -> None:
     """新 app/session（同库）：DB 持久化幂等记录跨会话生效 → 重放原响应。"""
-    device = _device()
+    device = _device(client)
     key = _idem()
     headers = {**device, **key}
     first = client.post("/decks", json={"name": "D"}, headers=headers)
@@ -172,7 +178,7 @@ def test_decks_api_idempotency_new_app_session_replays(client: TestClient, tmp_p
 
 def test_decks_api_delete_idempotent_replay(client: TestClient, tmp_path: Path) -> None:
     """DELETE 成功后同 key 重放 → 204（重复提交安全返回，不 404）；不同 key 再删 → 404。"""
-    device = _device()
+    device = _device(client)
     key = _idem()
     deck_id = _create_deck(client, device)
     resp = client.delete(f"/decks/{deck_id}", headers={**device, **key})
@@ -190,7 +196,7 @@ def test_decks_api_delete_failed_retry_same_key_still_404(
     client: TestClient, tmp_path: Path
 ) -> None:
     """失败（404）不落幂等记录：同 (device, path, key) 重试仍 404，库中无记录。"""
-    device = _device()
+    device = _device(client)
     key = _idem()
     headers = {**device, **key}
     deck_id = str(uuid.uuid4())
@@ -203,7 +209,7 @@ def test_decks_api_delete_failed_retry_same_key_still_404(
 
 def test_decks_api_rename_and_idempotent_replay(client: TestClient) -> None:
     """牌组改名（V6 前端已实现 UI 补齐）：200 + version 递增；同键重放返回首次结果。"""
-    device = _device()
+    device = _device(client)
     deck_id = _create_deck(client, device)
     resp = client.get(f"/decks/{deck_id}", headers=device)
     old_version = resp.json()["version"]
@@ -227,7 +233,9 @@ def test_decks_api_rename_and_idempotent_replay(client: TestClient) -> None:
 
 def test_decks_api_rename_cross_device_404(client: TestClient) -> None:
     """跨设备改名 → 404（资源隔离，契约 1.1）。"""
-    device = _device()
+    device = _device(client)
     deck_id = _create_deck(client, device)
-    resp = client.patch(f"/decks/{deck_id}", json={"name": "x"}, headers={**_device(), **_idem()})
+    resp = client.patch(
+        f"/decks/{deck_id}", json={"name": "x"}, headers={**_device(client), **_idem()}
+    )
     assert resp.status_code == 404

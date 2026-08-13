@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -27,13 +28,18 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     cfg = Config(str(REPO_ROOT / "main" / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     command.upgrade(cfg, "head")
-    settings = Settings(database_url=f"sqlite:///{db_path}", storage_path=tmp_path / "storage")
+    settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
+    )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -47,7 +53,7 @@ def _deck(client: TestClient, device: dict[str, str]) -> str:
 
 
 def test_cards_api_create_and_list(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards",
@@ -69,7 +75,7 @@ def test_cards_api_create_and_list(client: TestClient) -> None:
 
 
 def test_cards_api_import_atomic_and_per_item_results(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards/import",
@@ -88,7 +94,7 @@ def test_cards_api_import_atomic_and_per_item_results(client: TestClient) -> Non
 
 
 def test_cards_api_import_empty_cards_422(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards/import", json={"cards": []}, headers={**device, **_idem()}
@@ -98,12 +104,12 @@ def test_cards_api_import_empty_cards_422(client: TestClient) -> None:
 
 
 def test_cards_api_cross_device_404(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards",
         json={"front": "f", "back": "b"},
-        headers={**_device(), **_idem()},
+        headers={**_device(client), **_idem()},
     )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
@@ -111,7 +117,7 @@ def test_cards_api_cross_device_404(client: TestClient) -> None:
 
 def test_cards_api_create_idempotency_replay(client: TestClient) -> None:
     """卡片创建同 key 同 body：单副作用 + 重放原响应（与牌组同一条幂等接线路径）。"""
-    device = _device()
+    device = _device(client)
     key = _idem()
     deck_id = _deck(client, device)
     headers = {**device, **key}
@@ -130,7 +136,7 @@ def test_cards_api_create_idempotency_replay(client: TestClient) -> None:
 
 def test_cards_api_update_resets_review_state(client: TestClient) -> None:
     """编辑卡片（V6 前端已实现 UI 补齐）：内容覆盖 + ReviewState 重置为新卡（用户决策）。"""
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
@@ -172,21 +178,23 @@ def test_cards_api_update_resets_review_state(client: TestClient) -> None:
 
 def test_cards_api_update_cross_device_404(client: TestClient) -> None:
     """跨设备编辑 → 404（资源隔离）。"""
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
     )
     card_id = resp.json()["card_id"]
     resp = client.patch(
-        f"/cards/{card_id}", json={"front": "x", "back": "y"}, headers={**_device(), **_idem()}
+        f"/cards/{card_id}",
+        json={"front": "x", "back": "y"},
+        headers={**_device(client), **_idem()},
     )
     assert resp.status_code == 404
 
 
 def test_cards_api_delete_cascade(client: TestClient) -> None:
     """删除单卡：204 → 列表不含 → review 队列不含（FK 级联 review_states/review_events）。"""
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
@@ -203,7 +211,7 @@ def test_cards_api_delete_cascade(client: TestClient) -> None:
 
 def test_cards_api_delete_idempotent_replay(client: TestClient) -> None:
     """删除幂等：同键重放返回 204（契约 1.3 重复提交安全返回）。"""
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
@@ -217,11 +225,11 @@ def test_cards_api_delete_idempotent_replay(client: TestClient) -> None:
 
 def test_cards_api_delete_cross_device_404(client: TestClient) -> None:
     """跨设备删除 → 404（资源隔离）。"""
-    device = _device()
+    device = _device(client)
     deck_id = _deck(client, device)
     resp = client.post(
         f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
     )
     card_id = resp.json()["card_id"]
-    resp = client.delete(f"/cards/{card_id}", headers={**_device(), **_idem()})
+    resp = client.delete(f"/cards/{card_id}", headers={**_device(client), **_idem()})
     assert resp.status_code == 404

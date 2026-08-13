@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -29,13 +30,18 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
     cfg = Config(str(REPO_ROOT / "main" / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     command.upgrade(cfg, "head")
-    settings = Settings(database_url=f"sqlite:///{db_path}", storage_path=tmp_path / "storage")
+    settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
+    )
     with TestClient(create_app(settings)) as test_client:
         yield test_client
 
 
-def _headers(device_id: str, key: str | None = None) -> dict[str, str]:
-    headers = {"X-Device-ID": device_id}
+def _headers(client: TestClient, device_id: str, key: str | None = None) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 指定 X-Device-ID。"""
+    headers = {**auth_headers(client), "X-Device-ID": device_id}
     if key is not None:
         headers["Idempotency-Key"] = key
     return headers
@@ -46,7 +52,7 @@ def test_stats_api_review_counts_into_dashboard(client: TestClient) -> None:
     device = str(uuid.uuid4())
     # 1. 建牌组
     resp = client.post(
-        "/decks", json={"name": "统计回归"}, headers=_headers(device, str(uuid.uuid4()))
+        "/decks", json={"name": "统计回归"}, headers=_headers(client, device, str(uuid.uuid4()))
     )
     assert resp.status_code == 201, resp.text
     deck_id = resp.json()["deck_id"]
@@ -54,7 +60,7 @@ def test_stats_api_review_counts_into_dashboard(client: TestClient) -> None:
     resp = client.post(
         f"/decks/{deck_id}/cards",
         json={"front": "q", "back": "a"},
-        headers=_headers(device, str(uuid.uuid4())),
+        headers=_headers(client, device, str(uuid.uuid4())),
     )
     assert resp.status_code == 201, resp.text
     card_id = resp.json()["card_id"]
@@ -67,12 +73,12 @@ def test_stats_api_review_counts_into_dashboard(client: TestClient) -> None:
             "client_event_id": str(uuid.uuid4()),
             "device_timezone": "Asia/Shanghai",
         },
-        headers=_headers(device, str(uuid.uuid4())),
+        headers=_headers(client, device, str(uuid.uuid4())),
     )
     assert resp.status_code == 200, resp.text
     # 4. 看板立即计入
     resp = client.get(
-        "/stats/dashboard?timezone=Asia/Shanghai&weekly_goal=50", headers=_headers(device)
+        "/stats/dashboard?timezone=Asia/Shanghai&weekly_goal=50", headers=_headers(client, device)
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -85,7 +91,7 @@ def test_stats_api_review_counts_into_dashboard(client: TestClient) -> None:
 def test_stats_api_empty_has_data_false(client: TestClient) -> None:
     """空设备看板 has_data=false（前端空态判定）。"""
     resp = client.get(
-        "/stats/dashboard?timezone=Asia/Shanghai", headers=_headers(str(uuid.uuid4()))
+        "/stats/dashboard?timezone=Asia/Shanghai", headers=_headers(client, str(uuid.uuid4()))
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()

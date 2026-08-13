@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api import (
     api_key,
+    auth,
     cards,
     decks,
     metrics,
@@ -22,6 +23,7 @@ from app.api import (
     tasks,
 )
 from app.config import Settings
+from app.middleware.auth import BearerAuthMiddleware
 from app.middleware.body_capture import BodyCaptureMiddleware
 from app.middleware.device_id import DeviceIDMiddleware
 from app.middleware.error_handler import register_exception_handlers
@@ -119,19 +121,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
     register_exception_handlers(app)
-    # 中间件运行序（外层→内层）：Metrics → RequestID → RateLimit → DeviceID → Logging →
-    # BodyCapture → 路由。Starlette add_middleware 为 insert(0) 语义（后加者在外层），
-    # 故按目标运行序倒序添加；历史沿革：Task 6 在 Logging 之后插入 DeviceID，Task 9 在
-    # DeviceID 与 RequestID 之间插入 RateLimit（键用原始头，运行于 DeviceID 外层），
-    # Task 10 追加 Metrics（最外层），Task 4/V1 在添加序最前加入 BodyCapture（运行序最内、
-    # 路由前，位于 Logging 内层——幂等 body 捕获须先于路由 handler 完成）。
+    # 中间件运行序（外层→内层）：Metrics → RequestID → RateLimit → Auth → DeviceID →
+    # Logging → BodyCapture → 路由。Starlette add_middleware 为 insert(0) 语义
+    # （后加者在外层），故按目标运行序倒序添加；历史沿革：Task 6 在 Logging 之后插入
+    # DeviceID，Task 9 在 DeviceID 与 RequestID 之间插入 RateLimit（键用原始头，运行于
+    # DeviceID 外层），Task 10 追加 Metrics（最外层），Task 4/V1 在添加序最前加入
+    # BodyCapture（运行序最内、路由前，位于 Logging 内层——幂等 body 捕获须先于路由
+    # handler 完成），P4-2 在 RateLimit 与 DeviceID 之间插入 BearerAuth（双头过渡窗口，
+    # 认证先于设备鉴权；P4-4 移除 DeviceID 后 Auth 紧邻 RateLimit 内层）。
     app.add_middleware(BodyCaptureMiddleware)  # 添加序最前 → 运行序最内（路由前）
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(DeviceIDMiddleware)
+    app.add_middleware(BearerAuthMiddleware)  # 运行序位于 DeviceID 外层、RateLimit 内层
     app.add_middleware(RateLimitMiddleware, settings=settings)  # 在 DeviceID 与 RequestID 之间
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(MetricsMiddleware)  # 添加序最后 → 运行序最外层（统计所有响应含 401/429）
     app.include_router(probes.router)
+    app.include_router(auth.router)
     app.include_router(metrics.router)
     app.include_router(decks.router)
     app.include_router(cards.router)

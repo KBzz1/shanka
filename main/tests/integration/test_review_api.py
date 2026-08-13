@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.conftest import auth_headers
 
 
 @pytest.fixture
@@ -33,8 +34,9 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -52,7 +54,7 @@ def _make_deck_card(client: TestClient, device: dict[str, str]) -> tuple[str, st
 
 
 def test_review_api_queue_returns_due_card(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     deck_id, card_id = _make_deck_card(client, device)
     resp = client.get(f"/decks/{deck_id}/review", headers=device)
     assert resp.status_code == 200
@@ -63,7 +65,7 @@ def test_review_api_queue_returns_due_card(client: TestClient) -> None:
 
 
 def test_review_api_submit_returns_updated_state(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     _, card_id = _make_deck_card(client, device)
     resp = client.post(
         "/review-events",
@@ -84,7 +86,7 @@ def test_review_api_submit_returns_updated_state(client: TestClient) -> None:
 
 def test_review_api_idempotency_key_replays(client: TestClient) -> None:
     """同 key 同 body 两次提交：键层重放首次完整快照，业务副作用仅一次。"""
-    device = _device()
+    device = _device(client)
     _, card_id = _make_deck_card(client, device)
     headers = {**device, **_idem()}
     payload = {
@@ -103,7 +105,7 @@ def test_review_api_idempotency_key_replays(client: TestClient) -> None:
 def test_review_api_client_event_id_dedup_key_differs(client: TestClient) -> None:
     """实际场景带 Idempotency-Key 且仅 key 不同：键层不介入（key 不同），
     client_event_id 兜底生效 → 事件不重复；重放响应 = 当前 review_state 视图（R-12 完整口径）。"""
-    device = _device()
+    device = _device(client)
     _, card_id = _make_deck_card(client, device)
     client_event = str(uuid.uuid4())
     payload = {
@@ -120,7 +122,7 @@ def test_review_api_client_event_id_dedup_key_differs(client: TestClient) -> Non
 
 
 def test_review_api_client_event_conflict(client: TestClient) -> None:
-    device = _device()
+    device = _device(client)
     _, card_id = _make_deck_card(client, device)
     client_event = str(uuid.uuid4())
     payload_good = {
@@ -139,7 +141,7 @@ def test_review_api_client_event_conflict(client: TestClient) -> None:
 
 def test_review_api_invalid_rating_400(client: TestClient) -> None:
     """rating 为 str（schema 不 Literal 拦截）→ service 内校验抛 REVIEW_EVENT_INVALID 400。"""
-    device = _device()
+    device = _device(client)
     _, card_id = _make_deck_card(client, device)
     resp = client.post(
         "/review-events",
@@ -157,7 +159,7 @@ def test_review_api_invalid_rating_400(client: TestClient) -> None:
 
 def test_review_api_invalid_timezone_400(client: TestClient) -> None:
     """M-3（final review）：device_timezone 非 IANA 时区 → 400 VALIDATION_ERROR（契约第 7 章）。"""
-    device = _device()
+    device = _device(client)
     _, card_id = _make_deck_card(client, device)
     resp = client.post(
         "/review-events",
@@ -175,9 +177,9 @@ def test_review_api_invalid_timezone_400(client: TestClient) -> None:
 
 def test_review_api_cross_device_404(client: TestClient) -> None:
     """跨设备提交评级：卡归属校验 → CARD_NOT_FOUND（用独立 other device 头）。"""
-    device = _device()
+    device = _device(client)
     _, card_id = _make_deck_card(client, device)
-    other = _device()
+    other = _device(client)
     resp = client.post(
         "/review-events",
         json={

@@ -46,6 +46,7 @@ from infra.llm.deepseek import DeepSeekClient
 from services.decks.service import create_deck
 from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.executor import scan_once as scan_tasks
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/acceptance/ → 仓库根
 
@@ -158,6 +159,7 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path]]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环，显式 scan_once
     )
     with TestClient(create_app(settings)) as client:
@@ -168,8 +170,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -273,7 +276,7 @@ def test_acceptance_ac04_valid_cards_inserted_and_completed(
     新语义载体：6 单元 → 6 批（批=单元）→ 每批 1 卡 → 6 卡入库（旧：2 批 × 3 卡）。
     """
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -299,7 +302,7 @@ def test_acceptance_ac04_invalid_cards_not_inserted_skipped(
     """AC-04-b：mock 返回非法卡（缺 question/answer，generator-output schema v2 违约）
     → 重试预算耗尽 → 批次 SKIPPED 不入库（批次级失败不中断任务）。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -329,7 +332,7 @@ def test_acceptance_ac04_rubric_no_auto_fix_prune_or_regenerate(
     AC-05，另测）。
     """
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -361,7 +364,7 @@ def test_acceptance_ac04_rubric_no_auto_fix_prune_or_regenerate(
 def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]) -> None:
     """AC-07-a/b：批次列表含 Rubric/质量/Cache 记录；单卡 Rubric 分数落库。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -414,7 +417,7 @@ def test_acceptance_ac07_abnormal_cache_data_does_not_gate_insertion(
 ) -> None:
     """AC-07-c：Cache 数据异常（usage 缺失 → token 观测 None）不改变既定入库规则。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201

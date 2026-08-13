@@ -21,7 +21,16 @@ from infra.db.session import format_utc
 
 logger = logging.getLogger(__name__)
 
-_EXEMPT_PATHS = {"/healthz", "/readyz", "/metrics", "/openapi.json"}
+_EXEMPT_PATHS = {
+    "/healthz",
+    "/readyz",
+    "/metrics",
+    "/openapi.json",
+    # 双头过渡窗口：/auth/register、/auth/login 无设备上下文（P4-4 整体移除本中间件后
+    # 本豁免随中间件一并退出；logout/me 仍需 X-Device-ID 直至 Task 4）。
+    "/auth/register",
+    "/auth/login",
+}
 
 
 def _validate_device_id(device_id: str) -> bool:

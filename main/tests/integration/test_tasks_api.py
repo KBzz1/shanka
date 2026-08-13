@@ -23,6 +23,7 @@ from infra.llm.deepseek import DeepSeekClient
 from services.decks.service import create_deck
 from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.executor import scan_once as scan_tasks
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -110,6 +111,7 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path]]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环，显式 scan_once
     )
     with TestClient(create_app(settings)) as client:
@@ -120,8 +122,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -198,7 +201,7 @@ def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, P
     """POST /tasks → 201 PENDING+PLANNING（T8 新语义：创建不自动规划，规划 worker
     CAS 接管）；selected_chapters 为 Chapter 对象数组快照（契约 3.4）。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -217,7 +220,7 @@ def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, P
 def test_tasks_create_missing_idempotency_key_400(ctx: tuple[TestClient, Path]) -> None:
     """写接口强制 Idempotency-Key（契约 1.3）：缺失 → 400 VALIDATION_ERROR。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers=device)
     assert resp.status_code == 400
@@ -227,7 +230,7 @@ def test_tasks_create_missing_idempotency_key_400(ctx: tuple[TestClient, Path]) 
 def test_tasks_create_without_api_key_422(ctx: tuple[TestClient, Path]) -> None:
     """未保存可用 API Key → 422 API_KEY_NOT_SET（6.2）。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"], with_key=False)
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 422
@@ -237,7 +240,7 @@ def test_tasks_create_without_api_key_422(ctx: tuple[TestClient, Path]) -> None:
 def test_tasks_create_idempotent_replay(ctx: tuple[TestClient, Path]) -> None:
     """同 key 同 body 重放：返回首次响应，任务只创建一次。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     headers = {**device, **_idem()}
     payload = _payload(seed)
@@ -254,7 +257,7 @@ def test_tasks_create_idempotent_replay(ctx: tuple[TestClient, Path]) -> None:
 def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> None:
     """同 key 异 body → 409 IDEMPOTENCY_CONFLICT。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     headers = {**device, **_idem()}
     assert client.post("/tasks", json=_payload(seed), headers=headers).status_code == 201
@@ -266,7 +269,7 @@ def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> 
 def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
     """长任务轮询：显式 executor 扫描后 GET 返回 COMPLETED（COMPACT=3 知识点/章 × 2 章）。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -289,7 +292,7 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
 def test_tasks_cancel_200(ctx: tuple[TestClient, Path]) -> None:
     """POST cancel → 200 CANCELLED（已入库卡片保留，V4 取消时无卡片）。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
@@ -308,7 +311,7 @@ def test_tasks_cancel_200(ctx: tuple[TestClient, Path]) -> None:
 def test_tasks_resume_200_then_409(ctx: tuple[TestClient, Path]) -> None:
     """PAUSED+resumable=1 → resume 200 RUNNING；再 resume（RUNNING）→ 409 TASK_STATE_CONFLICT。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201

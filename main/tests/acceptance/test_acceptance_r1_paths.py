@@ -82,6 +82,7 @@ from app.errors import AppError, ErrorCode
 from app.main import create_app
 from infra.llm.deepseek import DeepSeekClient
 from services.pdf.scanner import scan_once
+from tests.conftest import auth_headers
 
 SAMPLE = Path("/home/kbzz1/shanka_backend/res/AI-Agents-in-Depth-zh-CN.pdf")
 
@@ -110,8 +111,9 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -136,7 +138,7 @@ def test_acceptance_ac08_pdf_upload_content_not_logged(
     """
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _device()
+    device = _device(client)
     monkeypatch.setattr(logging.getLogger("app.middleware.logging"), "disabled", False)
     with caplog.at_level(logging.INFO):
         with SAMPLE.open("rb") as f:

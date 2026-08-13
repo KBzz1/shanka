@@ -16,6 +16,7 @@ from app.config import Settings
 from app.main import create_app
 from infra.db.models import Card, Chapter, Device, PdfFile
 from infra.db.session import create_db_engine, create_session_factory
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -30,7 +31,11 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path]]:
     cfg = Config(str(REPO_ROOT / "main" / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     command.upgrade(cfg, "head")
-    settings = Settings(database_url=f"sqlite:///{db_path}", storage_path=tmp_path / "storage")
+    settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
+    )
     with TestClient(create_app(settings)) as client:
         yield client, db_path
 
@@ -39,8 +44,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _config() -> dict[str, object]:
@@ -88,7 +94,7 @@ def test_samples_post_three_cards_without_idempotency_key(
 ) -> None:
     """合法请求：不带 Idempotency-Key 成功（幂等豁免）；3 张样卡构成正确且不入库。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_pdf(db_path, device_id=device["X-Device-ID"])
     resp = client.post(
         "/samples",
@@ -126,7 +132,7 @@ def test_samples_cross_device_404(ctx: tuple[TestClient, Path]) -> None:
             "chapter_ids": seed["chapter_ids"],
             "generation_config": _config(),
         },
-        headers=_device(),
+        headers=_device(client),
     )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "PDF_NOT_FOUND"
@@ -135,7 +141,7 @@ def test_samples_cross_device_404(ctx: tuple[TestClient, Path]) -> None:
 def test_samples_invalid_ratio_400(ctx: tuple[TestClient, Path]) -> None:
     """difficulty_ratio 非法（和 ≠ 1）→ 400 VALIDATION_ERROR（validate_config 统一判定）。"""
     client, db_path = ctx
-    device = _device()
+    device = _device(client)
     seed = _seed_pdf(db_path, device_id=device["X-Device-ID"])
     bad_config = _config()
     bad_config["difficulty_ratio"] = {"basic": 0.5, "understanding": 0.5, "application": 0.2}

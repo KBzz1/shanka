@@ -34,6 +34,7 @@ from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from services.decks.service import create_deck
+from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/acceptance/ → 仓库根
 
@@ -68,6 +69,7 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path, Settings]]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环
         api_key_encryption_key="aa" * 32,  # 与 _ENCRYPTED_TEST_KEY 同配置（rewrite 解密路径）
     )
@@ -79,8 +81,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -214,7 +217,7 @@ def test_acceptance_ac06_rewrite_succeeds(
 ) -> None:
     """AC-06-a 可重写：200，响应卡 card_id 与请求一致、front 新值、version 递增（一次 chat）。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
@@ -250,7 +253,7 @@ def test_acceptance_ac06_schema_invalid_preserves_card(
 ) -> None:
     """AC-06-b 通过才替换：Schema 违约响应 → 422 REWRITE_SCHEMA_INVALID，原卡全字段不变。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     card_id, before = _seed_card(db_path, device_id=device["X-Device-ID"])
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_SCHEMA_INVALID_JSON))
@@ -287,7 +290,7 @@ def test_acceptance_ac06_idempotent_replay(
 ) -> None:
     """幂等重放：同键同 body 第二次 → 200 且响应体与首次一致（重放不二次 chat，chat 计数 = 1）。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
@@ -315,7 +318,7 @@ def test_acceptance_ac06_idempotency_conflict(
 ) -> None:
     """幂等冲突：同键异 body → 409 IDEMPOTENCY_CONFLICT（冲突在业务前判定，不二次 chat）。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
@@ -339,14 +342,14 @@ def test_acceptance_ac06_error_path_no_idempotency_record(
 ) -> None:
     """错误路径（404）幂等表无记录 + 无业务残留：下次同键重试重新执行（T3 审查 Minor 2 集成确认）。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
     key = _idem()["Idempotency-Key"]
 
     # 跨设备查卡 → 404 CARD_NOT_FOUND（统一 404，不暴露存在性）
-    other = _device()
+    other = _device(client)
     resp = client.post(
         f"/cards/{card_id}/rewrite", json={}, headers={**other, "Idempotency-Key": key}
     )
@@ -385,7 +388,7 @@ def test_acceptance_ac06_api_key_not_set_422(
     """T4 审查 P4a：设备未保存 API Key → POST rewrite → 422 API_KEY_NOT_SET
     （chat 0 不触网、幂等表无记录、原卡保留）。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
     with _db_factory(db_path)() as session:
         session.execute(delete(ApiKey).where(ApiKey.device_id == device["X-Device-ID"]))
@@ -420,7 +423,7 @@ def test_acceptance_ac06_corrupted_encrypted_key_502(
     """T4 审查 P4b：api_keys 表加密数据损坏（畸形 encrypted_key 解密失败）→
     502 API_KEY_UNAVAILABLE（chat 0、幂等表无记录）。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     corrupt = base64.b64encode(b"\x00" * 12 + b"corrupted-ciphertext").decode("ascii")
     card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], encrypted_key=corrupt)
     calls: dict[str, int] = {"n": 0}
@@ -453,11 +456,11 @@ def test_acceptance_ac06_cross_device_404(
     """隔离（HTTP 层确认）：跨设备重写 → 404 CARD_NOT_FOUND（T3 已覆盖 service 层，
     此处断言 HTTP 错误响应 code；查卡失败在 chat 之前——不暴露存在性）。"""
     client, db_path, _ = ctx
-    device = _device()
+    device = _device(client)
     card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
-    other = _device()
+    other = _device(client)
 
     resp = client.post(f"/cards/{card_id}/rewrite", json={}, headers={**other, **_idem()})
     assert resp.status_code == 404

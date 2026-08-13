@@ -7,10 +7,22 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.conftest import auth_headers
 
 
-def _device_headers(device_id: str | None = None) -> dict[str, str]:
-    return {"X-Device-ID": device_id or str(uuid.uuid4())}
+def _device_headers(client: TestClient, device_id: str | None = None) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ X-Device-ID。"""
+    return {**auth_headers(client), "X-Device-ID": device_id or str(uuid.uuid4())}
+
+
+def _upgrade(db_url: str) -> None:
+    """限流测试库迁移：Bearer 经 auth 中间件 → 需 auth_sessions 表（双头窗口）。"""
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(Path(__file__).resolve().parents[3] / "main" / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", db_url)
+    command.upgrade(cfg, "head")
 
 
 def test_rate_limit_write_dimension_429_with_retry_after(tmp_path: Path) -> None:
@@ -19,9 +31,11 @@ def test_rate_limit_write_dimension_429_with_retry_after(tmp_path: Path) -> None
         database_url=f"sqlite:///{tmp_path / 'rl.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_write_per_minute=3,
+        rate_limit_ip_per_second=100,  # IP 维度隔离（双头窗口 register 计入 IP）
     )
+    _upgrade(settings.database_url)
     with TestClient(create_app(settings)) as client:
-        headers = _device_headers()
+        headers = _device_headers(client)
         codes = []
         for _ in range(5):
             # POST /v1/decks 无路由 → 404；限流中间件在路由前执行
@@ -31,7 +45,7 @@ def test_rate_limit_write_dimension_429_with_retry_after(tmp_path: Path) -> None
     assert codes[3] == 429 and codes[4] == 429
     # Retry-After 响应头存在
     with TestClient(create_app(settings)) as client:
-        headers = _device_headers()
+        headers = _device_headers(client)
         for _ in range(4):
             client.post("/v1/decks", json={"name": "d"}, headers=headers)
         resp = client.post("/v1/decks", json={"name": "d"}, headers=headers)
@@ -51,9 +65,11 @@ def test_rate_limit_pdf_dimension_hits_429(tmp_path: Path) -> None:
         database_url=f"sqlite:///{tmp_path / 'rl_pdf.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_pdf_per_hour=2,
+        rate_limit_ip_per_second=100,  # IP 维度隔离（双头窗口 register 计入 IP）
     )
+    _upgrade(settings.database_url)
     with TestClient(create_app(settings)) as client:
-        headers = {**_device_headers(), "Idempotency-Key": str(uuid.uuid4())}
+        headers = {**_device_headers(client), "Idempotency-Key": str(uuid.uuid4())}
         codes = []
         for _ in range(4):
             resp = client.post(
@@ -84,11 +100,13 @@ def test_rate_limit_device_scope_isolated_per_device(tmp_path: Path) -> None:
         database_url=f"sqlite:///{tmp_path / 'rl_iso.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_write_per_minute=2,
+        rate_limit_ip_per_second=100,  # IP 维度隔离（双头窗口 register 计入 IP）
     )
+    _upgrade(settings.database_url)
     with TestClient(create_app(settings)) as client:
         # 设备键按请求头隔离：同一设备的多次请求须用同一 X-Device-ID
-        headers_a = _device_headers()
-        headers_b = _device_headers()
+        headers_a = _device_headers(client)
+        headers_b = _device_headers(client)
         codes_a = [
             client.post("/v1/decks", json={}, headers=headers_a).status_code for _ in range(3)
         ]

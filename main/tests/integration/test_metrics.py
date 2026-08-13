@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.conftest import auth_headers
 
 
 def _metric_value(text: str, metric_line: str) -> float:
@@ -75,12 +76,18 @@ def test_metrics_rate_limit_hit_recorded(tmp_path: Path) -> None:
         database_url=f"sqlite:///{tmp_path / 'm3.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_write_per_minute=1,
+        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度，显式调高隔离
     )
     write_line = 'rate_limit_hit_total{scope="write"}'
-    with TestClient(create_app(settings)) as client:
-        import uuid
+    from alembic import command
+    from alembic.config import Config
 
-        headers = {"X-Device-ID": str(uuid.uuid4())}
+    # 双头过渡窗口：Bearer 经 auth 中间件 → 需迁移后 auth_sessions 表
+    cfg = Config(str(Path(__file__).resolve().parents[3] / "main" / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    command.upgrade(cfg, "head")
+    with TestClient(create_app(settings)) as client:
+        headers = auth_headers(client)
         before = _metric_value(client.get("/metrics").text, write_line)
         client.post("/v1/decks", json={}, headers=headers)  # 首次（404，路由缺失）
         client.post("/v1/decks", json={}, headers=headers)  # 超限 → 429 → 指标 +1

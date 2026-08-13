@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from tests.conftest import auth_headers
 
 
 @pytest.fixture
@@ -37,8 +38,9 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device() -> dict[str, str]:
-    return {"X-Device-ID": str(uuid.uuid4())}
+def _device(client: TestClient) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
+    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
 
 
 def _idem() -> dict[str, str]:
@@ -47,7 +49,7 @@ def _idem() -> dict[str, str]:
 
 def test_acceptance_ac10_review_workflow(client: TestClient) -> None:
     """AC-10-1：到期队列仅含到期卡；评级后状态/进度/事件正确更新；client_event_id 重试不重复计数。"""
-    device = _device()
+    device = _device(client)
     resp = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()})
     assert resp.status_code == 201
     deck_id = resp.json()["deck_id"]
@@ -91,7 +93,7 @@ def test_acceptance_ac10_review_workflow(client: TestClient) -> None:
 
 def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
     """AC-10-2：看板展示真实周活动/总数/变化率/正确率/streak/掌握卡数；空态非示例值。"""
-    device = _device()
+    device = _device(client)
     resp = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()})
     deck_id = resp.json()["deck_id"]
     resp = client.post(
@@ -119,7 +121,9 @@ def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
     assert body["streak_days"] >= 1  # 今天有事件（事件 reviewed_at = 服务端真实 now）
     assert body["period"]["week_ordinal"] >= 1
     # 空态（新设备）：非示例值，weekly_goal 未上报 → null
-    empty = client.get("/stats/dashboard", params={"timezone": "Asia/Shanghai"}, headers=_device())
+    empty = client.get(
+        "/stats/dashboard", params={"timezone": "Asia/Shanghai"}, headers=_device(client)
+    )
     assert empty.status_code == 200
     empty_body = empty.json()
     assert empty_body["has_data"] is False
