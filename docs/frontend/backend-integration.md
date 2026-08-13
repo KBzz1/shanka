@@ -1,4 +1,4 @@
-# 后端对接说明（闪卡 App v2.1）
+# 后端对接说明（闪卡 App v2.2）
 
 给前端开发者的后端接入指南。**机器可读接口权威**：[openapi.yaml](../Architecture/openapi.yaml)（路径、请求/响应结构）；**行为契约权威**：[structure-contract.md](../Architecture/structure-contract.md)（状态机、幂等、排程、错误码）。本文件是这两者的使用导览 + 部署环境信息，若与契约冲突以契约为准。
 
@@ -31,14 +31,15 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 
 | 头 | 必填 | 说明 |
 | --- | --- | --- |
-| `X-Device-ID` | 所有接口（除 /healthz /readyz /metrics /openapi.json） | 客户端本地生成 **UUID v4** 作为匿名设备 ID，首次使用自动建立数据主体，无注册接口；所有资源按此 ID 隔离 |
-| `Idempotency-Key` | 所有写操作 | 客户端生成 **UUID v4**；**`POST /v1/samples` 豁免**（样卡无副作用） |
+| `Authorization: Bearer <token>` | 所有业务接口（除 /auth/register、/auth/login、/healthz、/readyz、/metrics、/openapi.json） | 注册/登录后获得的 opaque session token；token 只保存在客户端安全存储 |
+| `Idempotency-Key` | 所有写操作 | 客户端生成 **UUID v4**；**`POST /samples` 豁免**（样卡无副作用） |
 
-**设备 ID 等同于密码**：泄漏可被永久冒用且无找回途径（契约 1.1）。不要写日志、不要展示。
+**token 等同于密码**：泄漏后在被撤销或 30 天过期前可被冒用（契约 1.1）。不要写日志、不要展示；
+受保护接口 401 时按 `WWW-Authenticate: Bearer` + `localization_key` 回登录页。
 
 ### 2.2 幂等语义（写操作）
 
-- 同一 `(设备, 接口, Idempotency-Key)` 的重复请求 → 服务端**返回首次成功结果**（同状态码 + 同响应体），不产生重复数据。
+- 同一 `(用户, 接口, Idempotency-Key)` 的重复请求 → 服务端**返回首次成功结果**（同状态码 + 同响应体），不产生重复数据。
 - 键相同但请求体与首次不一致 → `409 IDEMPOTENCY_CONFLICT`（编码错误）。
 - **客户端实践**：每次新操作生成新 UUID v4 键；网络重试必须**复用同一键**（否则可能双写）。
 - 复习评级（`POST /v1/review-events`）额外支持 `client_event_id` 兜底幂等（见 5.3）。
@@ -271,7 +272,9 @@ POST /v1/review-events
 
 | 错误码 | HTTP | 前端处理 |
 | --- | --- | --- |
-| `DEVICE_ID_REQUIRED` / `DEVICE_ID_INVALID` | 401 | 生成/检查 X-Device-ID |
+| `AUTH_REQUIRED` / `AUTH_INVALID` | 401 | 会话缺失/无效/过期：原子清除本地 token 并回登录页（离线网络失败不得误判为退出） |
+| `INVALID_CREDENTIALS` | 401 | 登录失败：提示用户名或密码错误（不区分具体原因） |
+| `USERNAME_TAKEN` | 409 | 注册失败：提示更换用户名 |
 | `RATE_LIMITED` | 429 | 按 `Retry-After` 等待后重试 |
 | `IDEMPOTENCY_CONFLICT` | 409 | 编码错误（同键不同体），检查重试逻辑 |
 | `PDF_UPLOAD_INVALID` | 400 | 提示文件不合规（非 PDF/损坏/超 100MB/超 1000 页） |

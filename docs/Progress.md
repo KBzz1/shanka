@@ -1,6 +1,6 @@
-# 后端实现执行地图（v2.1）
+# 后端实现执行地图（v2.2）
 
-本文是后续 Goal 的唯一进度与状态地图，不建立并列计划或看板。需求权威为 [PRD v2.1](PRD/V2.1/prd_v2_1.md)，实现以 [Architecture](Architecture/AGENTS.md) 的防漂移规则为准。Superpowers plan 只细化当前一个工作包的实施步骤，不定义项目状态，也不替代正式契约。
+本文是后续 Goal 的唯一进度与状态地图，不建立并列计划或看板。需求权威为 [PRD v2.2](PRD/V2.2/prd_v2_2.md)（继承 v2.1），实现以 [Architecture](Architecture/AGENTS.md) 的防漂移规则为准。Superpowers plan 只细化当前一个工作包的实施步骤，不定义项目状态，也不替代正式契约。
 
 最后事实审计：2026-08-13。
 
@@ -286,6 +286,22 @@
 - **受控真实 canary（PRODUCTION_VALIDATED）**：单任务 Planner→Generator→Scoring 全链路真实 DeepSeek（`.env` Key，权限 600），**连续 3 次全 PASS**——规划规范化结果落库（3 单元锚定 QUESTION×3 + TRUE_FALSE 样例）、生成 3 卡锚定正确、评分 3/3 回写（总分 8~12）、账本 7 行/次全 SUCCESS、cost ≈ ¥0.015~0.029/次（累计全战役 ≈ ¥0.06，上限 ¥3 未触发）；canary 发现 2 个 mock 掩盖缺陷并修复：① adapter 内部 HTTP 重试（429/5xx/网络/超时 ×1，SDK 等价，账本 attempt 语义不变——SCORING 不重试语义下瞬时抖动曾致评分全灭）；② thinking 禁用显式携带（上游默认启用 reasoning 挤掉 content 空响应，实测 5/5 复现，`"thinking": {"type": "disabled"}` 后 2/2 正常）。两修复均 TDD + 判别测试 + 全量回归。
 - 登记：R-03 RESOLVED（见第 6 节）；PRD 5.4.2 行 231/238 残留冲突（spec §12 范围外，偏差已登记 V2.2 收敛）；R-22 估算链路随本包删除。
 
+### ACC-P2 — 账号契约 V2.2（PRD 与契约同步，不含实现）
+
+**`DONE`｜依赖：LLM-P1 基线｜覆盖：账号 DESIGN §4.1、任务包 WORKER_PROMPT 目标二 §1｜2026-08-13**
+
+任务包：`docs/llm-account-long-run-v1/`。上游设计（只读）：`docs/account-auth-test-platform-long-run-v1/DESIGN.md`。
+
+当前证据（2026-08-13）：
+- **PRD V2.2**（`docs/PRD/V2.2/prd_v2_2.md`）：继承 v2.1 全文（只声明增量），新增决策 D-05（最简账号体系：用户名/密码 + opaque Bearer session 完全替代 X-Device-ID）、D-06（旧 device_id 数据不迁移、不认领、无访问路径——用户 2026-08-13 决策，legacy-claim 端点与 LEGACY_CLAIM_UNAVAILABLE 不在范围）；新增 FR-19 账号与会话、AC-12 验收标准、账号用户流程、排除项与风险提示。
+- **structure-contract v2.2**：§1.1 鉴权改 Bearer + user_id 归属（D-05/D-06）；§1.3 幂等域 `(user_id, 路径, key)`、client_event_id 用户内唯一；§1.4/§1.6 401 WWW-Authenticate 口径与限流按 user + register/login IP/用户名分桶；§3.14/3.15 账号资源模型；§6.11 四个 /auth 接口；§7 错误码表新增账号组（设备组标注遗留待移除）；§8 日志 user_id；§9 对照表指向 V2.2。
+- **openapi 2.2.0**：全局 `BearerAuth`（http/bearer）取代 DeviceIdAuth；新增 `/auth/register|login|logout|me` 路径（register/login `security: []`）与 4 个 auth schema；Unauthorized 描述更新。
+- **database-design v2.2**：§0/§1 隔离键声明切 user_id；§7.1 重写为 V2.2 目标态（users/auth_sessions 表规格、owner 表 user_id 列、复合键、Alembic 策略、fail-closed downgrade）；§2 表定义保持 v2.1 实现态（与 ORM/守卫一致），随数据地基迁移（P3）同批更新——避免契约先行造成守卫红窗口。
+- **前端对接文档**：backend-integration.md / local-dev.md 切换为 Bearer 头与账号错误码（AUTH_REQUIRED/AUTH_INVALID/INVALID_CREDENTIALS/USERNAME_TAKEN）处理指南。
+- **errors.py**：新增 4 个账号错误码（401×3 + 409）+ ERROR_HTTP_STATUS + LOCALIZATION_KEYS；设备码保留至 X-Device-ID middleware 退出。
+- **验证**：`python -m pytest` 500 passed / 0 failed（契约守卫 44/44）；`ruff check .` 全过；`ruff format --check .` 247 files；`mypy .` Success（196 source files）——主 Agent 2026-08-13 实测。
+- 边界声明：本包只落契约与错误码注册，不含 auth 端点/中间件/ORM/迁移实现（P3 数据地基、P4 后端切换）；最终门禁「V2.2 正式契约与实现一致」待 P8 总验收。
+
 ## 5. 依赖关系与下一步
 
 ```text
@@ -335,6 +351,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | FR-15～16 / AC-10 | V2 | FSRS/statistics + acceptance |
 | FR-17 / AC-08、11 后端本机部分 | V3B（全局脱敏 F0/F1） | security/log capture + acceptance |
 | FR-18 | F1 + 各纵向包 | OpenAPI/contract + endpoint tests |
+| FR-19 / AC-12 | ACC-P2（契约）+ P3/P4（实现） | 契约同步；实现随账号后端切换工作包 |
 | database-design | F1 + V1～V6 各闭环 | migration/ORM contract + integration |
 | O-1～O-6 | F0/F1 + V5A | probe/metrics/log/quality tests |
 | deployment / PRD HTTPS | 当前 Goal 外 | 保留供应商中立的 HTTPS 要求；明确启动联网部署后再实测，不计入 F0～R1 完成条件 |

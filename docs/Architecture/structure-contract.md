@@ -1,19 +1,21 @@
-# 结构契约 v2.1
+# 结构契约 v2.2
 
-前后端接口合同。需求依据:[PRD v2.1](../PRD/V2.1/prd_v2_1.md);机器可读接口定义:[openapi.yaml](openapi.yaml);持久化映射:[database-design.md](database-design.md)。
+前后端接口合同。需求依据:[PRD v2.2](../PRD/V2.2/prd_v2_2.md)(继承 [v2.1](../PRD/V2.1/prd_v2_1.md));机器可读接口定义:[openapi.yaml](openapi.yaml);持久化映射:[database-design.md](database-design.md)。
 
 **字段权威声明**:本章第 3 节资源模型是字段定义的唯一来源;`openapi.yaml` schema 与 `database-design.md` 表结构均从本章派生。
 
 ## 1. 总则
 
-### 1.1 数据主体与鉴权(决策 D-02)
+### 1.1 数据主体与鉴权(决策 D-05)
 
-- 客户端本地生成 UUID v4 作为**匿名设备 ID**,所有请求携带请求头 `X-Device-ID`。
-- 服务端首次见到某设备 ID 时自动建立数据主体,无注册接口。
-- 所有资源按设备 ID 隔离;服务端校验资源归属,禁止仅凭资源 ID 访问他人数据。
-- 缺失/非法设备 ID → `401 DEVICE_ID_REQUIRED` / `DEVICE_ID_INVALID`。
-- **风险声明**:匿名设备 ID 是"等同于密码"的信任凭据,泄漏后(抓包、日志、分享)可被永久冒用,且无找回途径;MVP 缓解:写接口限流(1.6)、风控信号记录(数据库 `devices` 表:首次 IP / UA / 最近活跃)、归属校验统一 404 不暴露存在性。设备 ID 重置与数据迁移接口为后续迭代项。
-- **归属声明**:所有资源隐含归属当前 X-Device-ID,持久化列为 `device_id`;无 `device_id` 列的表(chapters、knowledge_points 等)经外键关联路径归属校验。
+- 用户经用户名/密码**注册或登录**获得 opaque Bearer session token;受保护请求携带 `Authorization: Bearer <token>`(FR-19)。
+- 注册/登录接口(6.11)无鉴权;探针与匿名系统端点(8.2/8.3)豁免 Bearer;其余业务接口全部需要 Bearer。
+- 所有资源按 `user_id` 隔离;服务端校验资源归属,禁止仅凭资源 ID 访问他人数据;跨用户访问统一 404,不暴露存在性。
+- 缺失/非法/撤销/过期 token → `401 AUTH_REQUIRED` / `AUTH_INVALID`,一律携带 `WWW-Authenticate: Bearer` 响应头。
+- **凭据规则**:用户名 3~32 位、仅 `[a-z0-9._-]`、服务端统一转小写;密码 8~128 字符、不截断、不做 normalization;密码 Argon2id(≥ memory_cost=19456 KiB / time_cost=2 / parallelism=1);登录失败统一 `401 INVALID_CREDENTIALS`(用户名不存在时做固定 dummy 校验),用户名冲突 `409 USERNAME_TAKEN`。
+- **会话规则**:256-bit 随机 opaque token,数据库只存 SHA-256 摘要;默认 30 天绝对有效期、无滑动续期、无 refresh;logout 只撤销当前会话;同一用户允许多会话。
+- **风险声明**:session token 等同于密码,泄漏后在被撤销或过期前可被冒用;缓解:注册/登录按 IP 与用户名限流(1.6)、token 只存摘要、敏感信息不落日志(1.5/8.1)。
+- **归属声明**:所有资源隐含归属当前登录 `user_id`,持久化列为 `user_id`;无 `user_id` 列的表(chapters、knowledge_points 等)经外键关联路径归属校验。v2.1 遗留的 `device_id` 数据不迁移、不认领、无访问路径(决策 D-06);`devices` 与旧 `device_id` 列仅兼容审计,不参与认证/授权。
 
 ### 1.2 时间与时区
 
@@ -25,13 +27,13 @@
 ### 1.3 幂等约定
 
 - 所有写操作(创建、追加、删除、任务启动、继续、取消、评级、重写)必须携带请求头 `Idempotency-Key`(客户端生成 UUID v4);**样卡生成(`POST /samples`)无副作用、不落库,豁免幂等键**(对应 6.3)。
-- 服务端按 `(device_id, 接口路径含具体资源 ID, idempotency_key)` 去重;**重复请求返回首次成功结果**(2xx,含 204,返回首次响应状态与响应体),不产生重复数据。
+- 服务端按 `(user_id, 接口路径含具体资源 ID, idempotency_key)` 去重;**重复请求返回首次成功结果**(2xx,含 204,返回首次响应状态与响应体),不产生重复数据。
 - 幂等键相同但请求体与首次不一致 → `409 IDEMPOTENCY_CONFLICT`(客户端应视为编码错误)。
 - 评级接口双幂等键优先级:`Idempotency-Key` 幂等表命中优先;未命中时以 `client_event_id` 兜底 —— 同 `client_event_id` 且 `card_id` + `rating` 一致 → 返回首次成功结果;不一致 → `409 REVIEW_EVENT_CONFLICT`。
 - 幂等记录 INSERT 与业务副作用必须在**同一事务**内完成(防止响应丢失后同键重试造成双写,破坏 AC-05 重复入库率 0% 与 AC-10 评级去重)。
 - 三个专用幂等标识(与 `Idempotency-Key` 并用):
   - `generation_item_id` — 生成卡唯一标识,同一值最多对应一张有效卡片;
-  - `client_event_id` — 复习事件幂等标识,设备内唯一;
+  - `client_event_id` — 复习事件幂等标识,用户内唯一;
   - `generation_item_id` 为空的卡片(manual / imported)由 `Idempotency-Key` 保证不重复写入。
 - 读操作无需幂等键。
 
@@ -50,6 +52,7 @@
 ```
 
 - 错误码为稳定字符串,客户端按 `localization_key` 映射文案;不随消息文本变化。
+- 受保护接口的 401(`AUTH_REQUIRED` / `AUTH_INVALID`)携带 `WWW-Authenticate: Bearer` 响应头(1.1);登录失败的 `INVALID_CREDENTIALS` 不要求该头。
 - `message` 仅面向用户展示,不得包含堆栈、内部路径、SQL 或他人数据;内部细节进服务端日志(以 `request_id` 关联)。
 - **生成链路重试分类**:适配层向上区分可重试性(错误码与 HTTP 见第 7 章)——chat 401(Key 错误)不可重试 → 任务 `FAILED` 不重试;429/5xx/网络/超时可重试(429/5xx 记 `API_KEY_UNAVAILABLE`,网络/超时与响应解析失败内部记 `GENERATION_FAILED`)→ 账本预算内重试(每操作 2 次重试 = 3 次尝试);输出非法走业务重试,预算同上。
 - 完整错误码表见第 7 章。
@@ -61,15 +64,17 @@
 - 客户端不得持久化 Key 明文,UI 不展示完整 Key。
 - 实现防线:通用请求日志对 `PUT /api-key` 请求体强制掩码;`infra/llm/` 异常统一转换为 `API_KEY_*` / `GENERATION_FAILED` 错误码,日志仅记录 request_id、上游状态码、异常类型,禁止记录异常链与请求对象。
 
-### 1.6 限流策略(匿名体系下的防滥用硬防线)
+### 1.6 限流策略(账号体系下的防滥用硬防线)
 
 | 维度 | 默认阈值 | 覆盖接口 |
 | --- | --- | --- |
-| 写操作 | 60 req/min/device | 全部写接口 |
+| 写操作 | 60 req/min/user | 全部写接口 |
 | IP | 5 req/s/IP | 全部接口 |
-| `PUT /api-key` | 10 次/时/device | Key 校验(校验 oracle) |
-| `POST /samples` | 20 次/时/device | 样卡生成(消耗模型配额) |
-| PDF 上传 | 10 次/时/device | `POST /pdfs` |
+| 注册/登录 | 按来源 IP(默认阈值运维可调) | `POST /auth/register`、`POST /auth/login` |
+| 登录(用户名分桶) | 按规范化用户名(默认阈值运维可调) | `POST /auth/login`(防单账号分布式猜测) |
+| `PUT /api-key` | 10 次/时/user | Key 校验(校验 oracle) |
+| `POST /samples` | 20 次/时/user | 样卡生成(消耗模型配额) |
+| PDF 上传 | 10 次/时/user | `POST /pdfs` |
 
 超限返回 `429 RATE_LIMITED` + `Retry-After` 响应头;阈值可运维调整,客户端不得硬编码。
 
@@ -276,7 +281,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `review_event_id` | uuid | ✓ | 服务端生成 |
-| `client_event_id` | uuid | ✓ | 客户端生成,设备内唯一,幂等标识 |
+| `client_event_id` | uuid | ✓ | 客户端生成,用户内唯一,幂等标识 |
 | `card_id` | uuid | ✓ | |
 | `rating` | enum | ✓ | `AGAIN` / `HARD` / `GOOD` / `EASY` |
 | `reviewed_at` | datetime | ✓ | 服务端时间 |
@@ -324,6 +329,28 @@
 generation_item_id、knowledge_point_ids、Rubric 四维与总分、version、created_at、
 updated_at）——样卡不入库、不参与统计与 Rubric（PRD 5.5 数据规则），仅承载
 前端预览所需结构。
+
+### 3.14 AuthUser(账号,V2.2 新增)
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `user_id` | uuid | ✓ | 数据主体标识;全部业务资源的归属键(1.1) |
+| `username` | string | ✓ | 3~32 位,`[a-z0-9._-]`,服务端统一转小写,全库唯一 |
+| `created_at` | datetime | ✓ | |
+
+规则:不返回密码/hash;username 唯一性以转小写后的规范化值为准(决策 D-05)。
+
+### 3.15 AuthSessionResponse(会话,V2.2 新增)
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `user` | AuthUser | ✓ | 最小用户资料 |
+| `access_token` | string | ✓ | 256-bit 随机 opaque token;仅本响应与客户端安全存储出现,服务端只存 SHA-256 摘要 |
+| `token_type` | string | ✓ | 恒为 `Bearer` |
+| `expires_at` | datetime | ✓ | 会话绝对过期时间(默认签发 + 30 天) |
+
+规则:register(201)与 login(200)共用本形状;logout 撤销当前会话返回 204;`GET /auth/me` 只返回 `user`。
+客户端不得自动重试 register/login(防网络重放静默创建多条会话,FR-19)。
 
 ## 4. 状态机
 
@@ -533,11 +560,25 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | --- | --- | --- | --- |
 | GET | `/v1/observability/quality-summary?group_by=model\|pdf\|difficulty&days=30` | 跨任务质量聚合:Rubric 各维平均分、覆盖/重复率均值、任务完成率、成本汇总;按 group_by 分组 | - |
 
-- 隔离口径：按当前 `device_id` 聚合（与业务数据同隔离）；跨设备聚合留给未来运营后台。
+- 隔离口径：按当前 `user_id` 聚合（与业务数据同隔离）；跨用户聚合留给未来运营后台。
 - **分组键定义**：`model` = `Batch.model`；`pdf` = 任务所属 `file_id`；`difficulty` = `Batch.generation_unit_id` → 对应单元的 `target_difficulty`（**不能只依赖 Card**，否则生成失败、没有 Card 的 coverage=0 批次丢失；单元缺失/锚定缺失 → `unknown`）。聚合结果按 `rubric_version` 拆子组——查询窗口同时包含多版本时不得无标识混算。
 - **评分样本口径**：各评分维度只以对应字段非 NULL 的卡为分母（NULL 不计 0 分、不进分母）；`eligible_card_count` = 经批次归属的卡数，`scored_card_count` = `rubric_total_score` 非 NULL 的卡数，`sampling_rate` = `scored/eligible`（分母 0 时返回 null）；覆盖/重复率均值含 SKIPPED 批次（coverage=0 计入分母）。
 - 成本汇总（O-6）：按"价格配置常量"换算 `cache_hit_tokens` / `cache_miss_tokens` / `output_tokens` 为估算金额，hit/miss/output 分开计价；价格常量取 DeepSeek 官方定价、标注生效日期，不固化进 DB。**成本口径：`cost_estimate` 为 generation-stage-only**（Batch token 列为生成阶段兼容投影），不得冒充全链路成本；全链路成本按 `llm_call_attempts` 账本分 stage 汇总，禁止把 Batch 投影再次相加造成双计。
-- `/healthz`（存活）、`/readyz`（就绪:DB 连接 + 存储可写，失败 503）、`/metrics`（Prometheus 文本）、`/openapi.json`（接口文档，前端对接在线拉取）为运行观测基础端点，**豁免 X-Device-ID 鉴权**（探针/采集器无设备上下文）。
+- `/healthz`（存活）、`/readyz`（就绪:DB 连接 + 存储可写，失败 503）、`/metrics`（Prometheus 文本）、`/openapi.json`（接口文档，前端对接在线拉取）为运行观测基础端点，**豁免 Bearer 鉴权**（探针/采集器无账号上下文）；`POST /auth/register`、`POST /auth/login` 同样豁免（6.11）。
+
+### 6.11 账号（FR-19,决策 D-05;V2.2 新增）
+
+| 方法 | 路径 | 说明 | 幂等 |
+| --- | --- | --- | --- |
+| POST | `/v1/auth/register` | 创建用户并建立会话;`{ username, password }`;201 返回 AuthSessionResponse(3.15);用户名冲突 → `409 USERNAME_TAKEN` | - |
+| POST | `/v1/auth/login` | 校验凭据并建立新会话;200 返回 AuthSessionResponse;失败统一 `401 INVALID_CREDENTIALS` | - |
+| POST | `/v1/auth/logout` | 撤销当前会话(仅当前);204 | - |
+| GET | `/v1/auth/me` | 返回当前用户最小资料 AuthUser(3.14) | - |
+
+规则:register/login 豁免 Bearer 鉴权与 Idempotency-Key;logout/me 需要 Bearer。客户端不得自动重试
+register/login(防网络重放静默创建多条会话)。受保护接口 401(`AUTH_REQUIRED` / `AUTH_INVALID`)携带
+`WWW-Authenticate: Bearer`(1.4)。
+认证语义(凭据/会话/限流)见 1.1 / 1.6;数据归属与隔离见 1.1 归属声明与 1.3 幂等约定。
 
 ## 7. 错误码表
 
@@ -547,13 +588,17 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | | `RATE_LIMITED` | 429 | 限流(1.6),响应携带 `Retry-After` |
 | | `IDEMPOTENCY_CONFLICT` | 409 | 幂等键相同但请求体与首次不一致 |
 | | `INTERNAL_ERROR` | 500 | 未预期错误(内部细节仅进日志) |
-| 设备 | `DEVICE_ID_REQUIRED` | 401 | 缺 X-Device-ID |
-| | `DEVICE_ID_INVALID` | 401 | 设备 ID 格式非法 |
+| 账号 | `AUTH_REQUIRED` | 401 | 缺失 Authorization Bearer 凭据;401 带 `WWW-Authenticate: Bearer` |
+| | `AUTH_INVALID` | 401 | token 非法/未知/撤销/过期;401 带 `WWW-Authenticate: Bearer` |
+| | `INVALID_CREDENTIALS` | 401 | 登录失败(用户名不存在与密码错误统一返回,不暴露账号存在性) |
+| | `USERNAME_TAKEN` | 409 | 注册用户名已被占用 |
+| 设备 | `DEVICE_ID_REQUIRED` | 401 | 缺 X-Device-ID(V2.1 遗留错误码;X-Device-ID middleware 退出后随实现移除) |
+| | `DEVICE_ID_INVALID` | 401 | 设备 ID 格式非法(V2.1 遗留错误码,同上) |
 | PDF | `PDF_UPLOAD_INVALID` | 400 | 非 PDF / 损坏 / 超限(100MB / 1000 页) |
 | | `PDF_PARSE_FAILED` | 422 | 文本层解析失败 |
 | | `PDF_TOC_MISSING` | 422 | 无可用目录结构(终止流程) |
-| | `PDF_NOT_FOUND` | 404 | 不存在或非本设备(统一 404,不暴露存在性) |
-| | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本设备(统一 404) |
+| | `PDF_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性) |
+| | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本用户(统一 404) |
 | API Key | `API_KEY_UNAVAILABLE` | 502 | Key 缺失/解密失败、chat 上游 401/429/5xx 或校验链路(validate_key)上游不可用(含网络);生成链路中 401(Key 错误)不可重试 → 任务 `FAILED`,429/5xx 可重试(账本预算内);生成链路网络/超时与响应解析失败内部记 `GENERATION_FAILED`(重试预算同) |
 | | `API_KEY_NOT_SET` | 422 | 样卡 / 任务启动时未保存 Key |
 | 任务 | `TASK_NOT_FOUND` | 404 | |
@@ -561,7 +606,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | | `TASK_NOT_RESUMABLE` | 409 | 任务不可继续 |
 | | `TASK_IN_PROGRESS` | 409 | 删除保护:资源被非终态任务引用(PDF / 牌组) |
 | | `GENERATION_FAILED` | 500 | 系统级生成失败(任务 FAILED);批次级失败不产生错误响应 |
-| 牌组/卡片 | `DECK_NOT_FOUND` | 404 | 不存在或非本设备(统一 404,不暴露存在性) |
+| 牌组/卡片 | `DECK_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性) |
 | | `CARD_NOT_FOUND` | 404 | |
 | | `GENERATION_ITEM_CONFLICT` | 409 | `generation_item_id` 已对应其他卡 |
 | | `IMPORT_PARSE_ERROR` | 422 | 导入内容非法(逐行错误随响应返回;客户端预览阶段已拦截为主) |
@@ -569,32 +614,32 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | 复习 | `REVIEW_EVENT_INVALID` | 400 | 评级非法 |
 | | `REVIEW_EVENT_CONFLICT` | 409 | 同 `client_event_id` 但 `card_id` / `rating` 与首次不一致 |
 
-注:API Key 校验结果(`INVALID` / `INSUFFICIENT_BALANCE`)经 `200 + ApiKey.status` 返回,不产生错误响应(见 6.2)。跨设备资源访问一律返回 404,不暴露资源存在性(1.1)。
+注:API Key 校验结果(`INVALID` / `INSUFFICIENT_BALANCE`)经 `200 + ApiKey.status` 返回,不产生错误响应(见 6.2)。跨用户资源访问一律返回 404,不暴露资源存在性(1.1)。
 注:生成链路重试分类(适配层 `retryable` 元数据,1.4)——chat 401(Key 错误)非重试(任务 `FAILED`);chat 429/5xx 记 `API_KEY_UNAVAILABLE` 重试,网络/超时与响应解析失败记 `GENERATION_FAILED` 重试;Schema/锚定非法属业务重试,预算同为每操作 2 次重试 = 3 次尝试,由 `llm_call_attempts` 账本计数。
 
 ## 8. 运行可观测性（观测范围仅 DeepSeek API）
 
 ### 8.1 结构化日志（O-1）
 
-- JSON 单行格式；字段:`timestamp`(ISO 8601 UTC) / `level` / `request_id` / `device_id` / `task_id` / `batch_id` / `error_code` / `message`。
+- JSON 单行格式；字段:`timestamp`(ISO 8601 UTC) / `level` / `request_id` / `user_id` / `task_id` / `batch_id` / `error_code` / `message`。
 - 级别规范:INFO(请求进出、批处理完成)、WARN(重试、限流触发)、ERROR(异常 + error_code)。
 - 贯穿机制:中间件生成 `request_id` 贯穿全链路;后台批处理以 `task_id` + `batch_id` 关联。
 - 红线保留:1.5/7.1 的 API Key、完整 PDF 内容、完整 Prompt 不落日志。
 
 ### 8.2 健康检查（O-2）
 
-`GET /healthz` 存活探针;`GET /readyz` 就绪探针(DB 连接 + 存储可写,失败 503);`GET /openapi.json` 接口文档;豁免 X-Device-ID 鉴权。
+`GET /healthz` 存活探针;`GET /readyz` 就绪探针(DB 连接 + 存储可写,失败 503);`GET /openapi.json` 接口文档;豁免 Bearer 鉴权。
 
 ### 8.3 指标（O-3）
 
-`GET /metrics`(Prometheus 文本格式),豁免 X-Device-ID 鉴权,生产子域名默认不暴露:
+`GET /metrics`(Prometheus 文本格式),豁免 Bearer 鉴权,生产子域名默认不暴露:
 
 | 指标 | 类型 | labels |
 | --- | --- | --- |
 | `generation_tasks_total` | counter | result(COMPLETED/FAILED/CANCELLED) |
 | `generation_tasks_duration_seconds` | histogram | - |
 | `batch_retry_total` | counter | - |
-| `rate_limit_hit_total` | counter | scope(write/ip/api_key/samples/pdf)  # 1.6 写操作维度命名，与实现一致（审核修正：8.3 原 device 与 1.6 写操作维度矛盾） |
+| `rate_limit_hit_total` | counter | scope(write/ip/auth/api_key/samples/pdf)  # 1.6 维度命名，与实现一致（V2.2：write 维度键为 user；新增 auth 维度） |
 | `llm_requests_total` | counter | model(DeepSeek 模型族)/http_status |
 | `llm_request_duration_seconds` | histogram | model |
 | `llm_tokens_total` | counter | kind(cache_hit/cache_miss/output) |
@@ -627,7 +672,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 
 | 契约章节 | PRD 章节 | 状态 |
 | --- | --- | --- |
-| 1.1 数据主体 | 3.2 / 7.1 服务端访问控制、D-02 | 一致 |
+| 1.1 数据主体 | V2.2 FR-19 / AC-12、D-05 / D-06 | 一致(V2.2 账号会话取代 D-02) |
 | 1.5 API Key | 5.17 / 7.1 / AC-11、D-03 | 一致(PRD 已同步修订) |
 | 3.9 判断题结构 | 5.8 / D-01 | 一致 |
 | 5 复习排程 | 5.15 / 6.6 / AC-10 | 一致(PRD 已同步修订为 FSRS) |
@@ -639,3 +684,4 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | 3.9 Rubric 与关联字段 | 5.9 / 5.6 / 6.3 / AC-07 | 修复(审核) |
 | 8 运行可观测性 / 6.10 聚合观测 | PRD 8 核心指标 / FR-10 / FR-11 | 新增(设计规格 6422765) |
 | 3.5/3.6 生成单元与锚定 / 3.7 批=单元 / 4.1 任务状态机 / 6.10 分组键 | 5.4.1 / 5.6 / 5.7 | 一致(LLM 链路升级工作包契约同步) |
+| 3.14/3.15 账号与会话 / 6.11 账号接口 / 1.6 限流 / 7 账号错误码 | V2.2 FR-19 / AC-12、D-05 | 新增(账号登录工作包契约同步) |

@@ -1,12 +1,13 @@
 openapi: 3.1.0
 info:
   title: 闪卡 App 后端 API
-  version: 2.1.0
+  version: 2.2.0
   description: >
-    闪卡 App v2.1 接口契约(机器可读版)。行为契约(状态机、幂等、FSRS 排程、
-    错误码语义)见 structure-contract.md;需求依据 PRD v2.1。
-    所有接口需携带 X-Device-ID;写操作需携带 Idempotency-Key(POST /samples 豁免)。
-    限流:写接口 60 req/min/device、IP 5 req/s,超限返回 429 + Retry-After(详见 structure-contract.md 1.6)。
+    闪卡 App v2.2 接口契约(机器可读版)。行为契约(状态机、幂等、FSRS 排程、
+    错误码语义)见 structure-contract.md;需求依据 PRD v2.2(继承 v2.1)。
+    所有业务接口需携带 Authorization: Bearer(register/login 与探针豁免);写操作需携带
+    Idempotency-Key(POST /samples 豁免)。
+    限流:写接口 60 req/min/user、IP 5 req/s,超限返回 429 + Retry-After(详见 structure-contract.md 1.6)。
     5xx(INTERNAL_ERROR / GENERATION_FAILED)由全局中间件统一处理,未逐操作声明。
     列表接口 MVP 暂不分页;幂等重放返回首次成功结果(2xx,含 204)。
 
@@ -14,9 +15,11 @@ servers:
   - url: https://shanka.kbzz1.top
 
 security:
-  - DeviceIdAuth: []
+  - BearerAuth: []
 
 tags:
+  - name: auth
+    description: 账号注册、登录与会话(FR-19,决策 D-05)
   - name: pdf
     description: PDF 上传、解析与章节(FR-01/FR-02)
   - name: api-key
@@ -33,6 +36,82 @@ tags:
     description: 数据看板(FR-16)
 
 paths:
+  # ---------- 账号(V2.2,决策 D-05) ----------
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: 创建用户并建立会话
+      operationId: register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthRegisterRequest'
+      responses:
+        '201':
+          description: 用户与会话已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: 校验凭据并建立新会话
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthLoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSessionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: 撤销当前会话
+      operationId: logout
+      responses:
+        '204':
+          description: 当前会话已撤销
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: 返回当前用户最小资料
+      operationId: me
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   # ---------- PDF ----------
   /pdfs:
     post:
@@ -874,11 +953,11 @@ paths:
 
 components:
   securitySchemes:
-    DeviceIdAuth:
-      type: apiKey
-      in: header
-      name: X-Device-ID
-      description: 匿名设备 ID(UUID v4),服务端首次见到自动建立数据主体(决策 D-02)
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: opaque Bearer session token(注册/登录签发,服务端只存 SHA-256 摘要;决策 D-05)
 
   parameters:
     IdempotencyKey:
@@ -1696,6 +1775,55 @@ components:
           type: integer
         generated_at:
           type: string
+    # ---- 账号(V2.2,决策 D-05;结构契约 3.14/3.15) ----
+    AuthRegisterRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          description: 3~32 位,仅 [a-z0-9._-],服务端统一转小写
+        password:
+          type: string
+          format: password
+          description: 8~128 字符,不截断、不 normalization
+    AuthLoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          description: 服务端统一转小写后匹配
+        password:
+          type: string
+          format: password
+    AuthUser:
+      type: object
+      required: [user_id, username, created_at]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        created_at:
+          type: string
+          description: ISO 8601 UTC(结构契约 1.2)
+    AuthSessionResponse:
+      type: object
+      required: [user, access_token, token_type, expires_at]
+      properties:
+        user:
+          $ref: '#/components/schemas/AuthUser'
+        access_token:
+          type: string
+          description: 256-bit 随机 opaque token;仅本响应与客户端安全存储出现
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_at:
+          type: string
+          description: 会话绝对过期时间(签发 + 30 天,ISO 8601 UTC)
 
   responses:
     BadRequest:
@@ -1705,7 +1833,9 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     Unauthorized:
-      description: 缺少或非法 X-Device-ID
+      description: >-
+        受保护接口:缺失、非法、撤销或过期的 Bearer 会话(AUTH_REQUIRED / AUTH_INVALID,携带 WWW-Authenticate: Bearer);
+        登录接口:凭据错误(INVALID_CREDENTIALS)
       content:
         application/json:
           schema:

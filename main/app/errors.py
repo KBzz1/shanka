@@ -16,9 +16,14 @@ class ErrorCode(StrEnum):
     RATE_LIMITED = "RATE_LIMITED"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     INTERNAL_ERROR = "INTERNAL_ERROR"
-    # 设备
+    # 设备（V2.1 遗留；X-Device-ID middleware 退出后随实现移除，见结构契约第 7 章）
     DEVICE_ID_REQUIRED = "DEVICE_ID_REQUIRED"
     DEVICE_ID_INVALID = "DEVICE_ID_INVALID"
+    # 账号（V2.2，决策 D-05；401 一律携带 WWW-Authenticate: Bearer）
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    AUTH_INVALID = "AUTH_INVALID"
+    INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
+    USERNAME_TAKEN = "USERNAME_TAKEN"
     # PDF
     PDF_UPLOAD_INVALID = "PDF_UPLOAD_INVALID"
     PDF_PARSE_FAILED = "PDF_PARSE_FAILED"
@@ -52,6 +57,10 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.DEVICE_ID_REQUIRED: 401,
     ErrorCode.DEVICE_ID_INVALID: 401,
+    ErrorCode.AUTH_REQUIRED: 401,
+    ErrorCode.AUTH_INVALID: 401,
+    ErrorCode.INVALID_CREDENTIALS: 401,
+    ErrorCode.USERNAME_TAKEN: 409,
     ErrorCode.PDF_UPLOAD_INVALID: 400,
     ErrorCode.PDF_PARSE_FAILED: 422,
     ErrorCode.PDF_TOC_MISSING: 422,
@@ -82,6 +91,10 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.internal_error",
         "error.device_id_required",
         "error.device_id_invalid",
+        "error.auth_required",
+        "error.auth_invalid",
+        "error.invalid_credentials",
+        "error.username_taken",
         "error.pdf_upload_invalid",
         "error.pdf_parse_failed",
         "error.pdf_toc_missing",

@@ -4,7 +4,7 @@
 
 - Goal ID：`shanka-llm-account-long-run-v1`
 - Goal：先完成 LLM 链路升级（17 任务，P1），再完成账号登录替代 X-Device-ID（PRD V2.2，P2–P8）。
-- 当前状态：`P1_DONE`（LLM 链路升级完成，基线 a874944，进入 P2 账号阶段）
+- 当前状态：`P2_DONE`（账号契约 V2.2 完成：PRD V2.2 + 原子契约同步，500/0 四工具全绿；进入 P3 数据地基）
 - 设计：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/DESIGN.md`（引用两份上游设计）
 - 启动提示词：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/WORKER_PROMPT.md`
 - 任务地图：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/TASKS.md`
@@ -73,13 +73,19 @@
 - **R-03 已 RESOLVED**（docs/Progress.md 第 6 节 + LLM-P1 工作包条目 DONE）；spec 状态行完成说明（用户裁决：按 plan 更新）。
 - 遗留登记（不阻塞 P2）：PRD 5.4.2 行 231/238 残留（spec §12 范围外，V2.2 收敛）；Settings.batch_size 死配置、build_generation_prompt 死代码、tasks/CLAUDE.md 陈旧表述（清理项）；REWRITE 孤儿 STARTED 无恢复路径（观测噪声，无预算影响）。
 
+## P2 完成记录（2026-08-13，全部为真实命令/证据）
+
+- **契约 V2.2 落盘**：`docs/PRD/V2.2/prd_v2_2.md`（继承 v2.1，决策 D-05 账号会话取代 D-02、D-06 旧数据不迁移不认领；FR-19/AC-12；无 legacy claim 端点、无 LEGACY_CLAIM_UNAVAILABLE）；`structure-contract.md` v2.2（1.1 Bearer+user_id、1.3 幂等域 (user_id,path,key)、1.4/1.6 WWW-Authenticate 口径与限流 user 维度、3.14/3.15、6.11 四端点、7 账号错误码组、8 日志 user_id、9 对照表）；`openapi.yaml` 2.2.0（BearerAuth + /auth/* 四路径 + 4 个 auth schema）；`database-design.md` v2.2（§0/§1 隔离键切 user_id；§7.1 重写为 V2.2 目标态：users/auth_sessions、owner 表 user_id 列、复合键、Alembic fail-closed 策略；§2 保持 v2.1 实现态与 ORM 守卫一致，随 P3 迁移同批更新）；`docs/frontend/` 两文档 Bearer 化；`main/app/errors.py` 4 个账号错误码 + localization keys（设备码保留至 middleware 退出）。
+- **验证（主 Worker 2026-08-13 实测）**：`python -m pytest` **500 passed / 0 failed**（契约守卫 44/44）；`ruff check .` 全过；`ruff format --check .` 247 files；`mypy .` Success（196 source files）。修复 1 个 P2 自身缺陷：openapi Unauthorized 描述含 `WWW-Authenticate: Bearer`（冒号空格）被 YAML 判为映射分隔符 → 折叠标量修复。
+- **边界**：P2 只落契约与错误码注册，不含 auth 端点/中间件/ORM/迁移实现；最终门禁「V2.2 正式契约与实现一致」待 P8。
+
 ## 阶段账本
 
 | 阶段 | 状态 | 证据/下一步 |
 | --- | --- | --- |
 | P0 现场基线核验 | `DONE` | HEAD 8cd0cb5；Alembic head ead86a96d103；聚焦 45 passed；差量一致无漂移 |
 | P1 LLM 升级 17 任务 | `DONE` | `LLM_BASELINE_COMMIT`=a874944；Alembic 2a391e994f93；500/0 四工具全绿；canary 3/3；R-03 RESOLVED（见上 P1 完成记录） |
-| P2 契约 V2.2 | `PENDING` | 依赖 P1 基线冻结（已满足，待开工） |
+| P2 契约 V2.2 | `DONE` | 见上 P2 完成记录：PRD V2.2 + 四契约文档原子同步 + 500/0 四工具全绿 |
 | P3 数据地基 | `PENDING` | 真实 0003 head 上的下一 revision + 往返/fail-closed（无 legacy claim） |
 | P4 后端切换 | `PENDING` | auth、Bearer、user_id 归属 |
 | P5 LLM 后台 user_id 接续 | `PENDING` | 归属改造，不改 LLM 语义 |

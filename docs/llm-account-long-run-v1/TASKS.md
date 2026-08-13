@@ -61,10 +61,10 @@ legacy claim 部分不在本包范围**，用户 2026-08-13 决策）；行为�
 
 ### P2 契约 V2.2
 
-- [ ] 新建 `docs/PRD/V2.2/prd_v2_2.md`（继承 v2.1，账号会话取代 D-02；不篡改 v2.1 历史）
-- [ ] 原子同步 `docs/Architecture/structure-contract.md`、`main/openapi.yaml`、`docs/Architecture/database-design.md`、前端对接、错误码/文案、contract guards
-- [ ] 账号 HTTP 契约固定（/auth/register、/auth/login、/auth/logout、/auth/me；无 legacy claim 端点）
-- [ ] 更新当前 PRD 链接与 `docs/Progress.md`（只报告真实状态）
+- [x] 新建 `docs/PRD/V2.2/prd_v2_2.md`（继承 v2.1，账号会话取代 D-02；不篡改 v2.1 历史）
+- [x] 原子同步 `docs/Architecture/structure-contract.md`、`docs/Architecture/openapi.yaml`（TASKS 原文写 `main/openapi.yaml`，实际权威路径为 docs/Architecture）、`docs/Architecture/database-design.md`、前端对接、错误码/文案、contract guards
+- [x] 账号 HTTP 契约固定（/auth/register、/auth/login、/auth/logout、/auth/me；无 legacy claim 端点）
+- [x] 更新当前 PRD 链接与 `docs/Progress.md`（只报告真实状态）
 
 ### P3 数据地基
 

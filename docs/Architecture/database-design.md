@@ -1,4 +1,4 @@
-# 数据库表设计 v2.1
+# 数据库表设计 v2.2
 
 持久化映射,字段定义源自 [structure-contract.md](structure-contract.md) 第 3 章资源模型;ORM 实现(`main/infra/db/`)必须与本设计一致。
 
@@ -10,7 +10,7 @@
 - **时间格式唯一规范**:`YYYY-MM-DDTHH:MM:SS.sssZ`(UTC、零填充、恒 3 位毫秒),由统一序列化函数生成;禁止 `isoformat()` 默认输出(微秒省略、`+00:00` 偏移等变体)——混合格式会破坏 `due <= now` 范围比较与排序(审核修复)。
 - **连接配置**(审核修复):`PRAGMA journal_mode=WAL;` 与 `PRAGMA foreign_keys=ON;`(SQLite 默认关闭外键)在 SQLAlchemy engine 级 connect 事件统一配置,覆盖池化连接、后台任务与迁移脚本;写事务用 `BEGIN IMMEDIATE`(engine `isolation_level='IMMEDIATE'`,进入即拿写锁,避免并发写直接 `SQLITE_BUSY`)。
 - JSON 字段(`cursor`、`generated_item_ids`、`response_body` 等)统一经序列化函数写入,保证合法 JSON,禁止手工拼接。
-- `device_id` 是数据主体隔离键:所有业务表按 `device_id` 的查询必须走索引。
+- **数据主体隔离键(V2.2,决策 D-05)**:`user_id`。§2 表定义当前仍为 v2.1 实现态(隔离列 `device_id`,与 ORM/契约守卫一致);V2.2 目标态(`users` / `auth_sessions` 表、各 owner 表 `user_id` 列、旧 `device_id` 降级为遗留列)见 7.1,随数据地基迁移落地时与 §2/ORM 同批更新。所有业务表按隔离键的查询必须走索引。
 - 幂等去重统一由 `idempotency_keys` 表承担(见 2.12),业务表不额外维护。
 
 ## 1. 实体关系概览
@@ -27,9 +27,12 @@ devices 1──N idempotency_keys
 devices 1──N llm_call_attempts
 ```
 
+注(V2.2):上图为当前 v2.1 实现态;V2.2 目标态以 `users` 为根、`user_id` 为隔离键(见 7.1)。
+
 ## 2. 表定义
 
 > 类型均按 0 节映射规则;时间列默认 `TEXT NOT NULL`(ISO 8601 UTC);枚举列存储枚举字符串。
+> **状态说明(V2.2)**:本节为 v2.1 实现态,与当前 ORM 及契约守卫一致;V2.2 账号目标态见 7.1。
 
 ### 2.1 devices
 
@@ -337,6 +340,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 | 表 | 契约资源 |
 | --- | --- |
 | devices / api_keys | 3.1 ApiKey |
+| users / auth_sessions | 3.14 AuthUser / 3.15 AuthSessionResponse(V2.2 目标态,见 7.1) |
 | pdf_files / chapters | 3.2 PdfFile / 3.3 Chapter |
 | tasks / generation_config | 3.4 Task / 3.5 GenerationConfig |
 | knowledge_points | 3.6 KnowledgePoint(生成单元) |
@@ -352,10 +356,29 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 
 ## 7. 演进路径
 
-### 7.1 账号体系（未来）
+### 7.1 账号体系（V2.2 目标态，随数据地基迁移落地）
 
-- 新增 `users` 表;`devices` 增加可空外键列 `user_id`(先 NULL 后回填)。**不重构 devices 主键**,匿名设备 ID 体系维持为兼容层。
-- 数据迁移:按绑定关系批量回填 `user_id` 后加 NOT NULL;业务表隔离键仍为 `device_id`。
+账号体系(决策 D-05)引入 `users` / `auth_sessions`,数据主体隔离键从 `device_id` 切换为 `user_id`。
+决策 D-06:旧 device_id 数据**不迁移、不认领、无访问路径**;`devices` 与旧 `device_id` 列降级为仅兼容
+审计,不参与认证/授权。目标态落定后,§0/§1/§2 与 ORM 同批更新,并维持 ORM ↔ 本设计守卫全等。
+
+**新增表**:
+
+- `users(user_id TEXT PK, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`。username 存服务端转小写后的规范化值(3~32 位,`[a-z0-9._-]`);UNIQUE 冲突对应 `409 USERNAME_TAKEN`。password_hash 为 Argon2id 输出(生产参数 ≥ `memory_cost=19456 KiB, time_cost=2, parallelism=1`),绝不进入日志/响应。
+- `auth_sessions(session_id TEXT PK, user_id TEXT NOT NULL FK → users ON DELETE CASCADE, token_hash TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT NULL)`。token_hash 为 256-bit opaque token 的 SHA-256 摘要;索引 `(user_id)`;有效判定 `revoked_at IS NULL AND expires_at > now`(绝对有效期 30 天,无滑动续期、无 refresh;logout 只撤销当前会话)。
+
+**owner 表 `user_id` 列**(新写入必填):
+
+- 直接归属:`api_keys`(PK 改 `user_id`,一用户一 Key)、`pdf_files`、`tasks`、`decks`、`cards`(服务端维护与 deck 一致)、`review_events`、`llm_call_attempts`;各表补 `(user_id, …)` 查询索引。
+- 复合键:`idempotency_keys` 主键改 `PRIMARY KEY (user_id, path, idempotency_key)`;`review_events` 唯一约束改 `UNIQUE (user_id, client_event_id)`。旧设备域幂等缓存不跨身份空间重放。
+- 旧 `device_id` 列为遗留数据保留(未认领历史行只有 device_id;新行只有 user_id);约束保证二者不能同时为空;应用与测试保证新写入不再生成 device_id。
+- 外键传递归属不变:chapters/text_chunks 经 PDF,knowledge_points/batches 经 Task,review_states 经 Card。
+
+**迁移策略**(Alembic):
+
+- 运行时读取真实 Alembic head 后创建下一 revision(不预写文件名);SQLite 重建约束用 batch 操作,显式检查外键/索引/级联。
+- 在临时空库与尚未产生账号写入的旧库副本上验证 upgrade → downgrade → upgrade;一旦存在 user-only 新行,downgrade 先做数据前置检查并 fail closed(拒绝丢弃新数据或合成 device_id)。
+- 物理删除旧列/legacy 表属后续独立清理发布,不在本阶段完成条件内。
 
 ### 7.2 新卡类型（未来）
 
