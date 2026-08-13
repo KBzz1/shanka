@@ -10,29 +10,31 @@
 - **时间格式唯一规范**:`YYYY-MM-DDTHH:MM:SS.sssZ`(UTC、零填充、恒 3 位毫秒),由统一序列化函数生成;禁止 `isoformat()` 默认输出(微秒省略、`+00:00` 偏移等变体)——混合格式会破坏 `due <= now` 范围比较与排序(审核修复)。
 - **连接配置**(审核修复):`PRAGMA journal_mode=WAL;` 与 `PRAGMA foreign_keys=ON;`(SQLite 默认关闭外键)在 SQLAlchemy engine 级 connect 事件统一配置,覆盖池化连接、后台任务与迁移脚本;写事务用 `BEGIN IMMEDIATE`(engine `isolation_level='IMMEDIATE'`,进入即拿写锁,避免并发写直接 `SQLITE_BUSY`)。
 - JSON 字段(`cursor`、`generated_item_ids`、`response_body` 等)统一经序列化函数写入,保证合法 JSON,禁止手工拼接。
-- **数据主体隔离键(V2.2,决策 D-05)**:`user_id`。§2 表定义当前仍为 v2.1 实现态(隔离列 `device_id`,与 ORM/契约守卫一致);V2.2 目标态(`users` / `auth_sessions` 表、各 owner 表 `user_id` 列、旧 `device_id` 降级为遗留列)见 7.1,随数据地基迁移落地时与 §2/ORM 同批更新。所有业务表按隔离键的查询必须走索引。
+- **数据主体隔离键(V2.2,决策 D-05)**:`user_id`。`users` / `auth_sessions` 表与直接归属 6 表(`pdf_files`、`tasks`、`decks`、`cards`、`review_events`、`llm_call_attempts`)的 `user_id` 列已随数据地基迁移落地,旧 `device_id` 降级为可空遗留列,双非空 CHECK(`device_id IS NOT NULL OR user_id IS NOT NULL`)保证二者至少其一;`api_keys` / `idempotency_keys` 主键改 `user_id`、`review_events` 唯一约束改 `(user_id, client_event_id)` 待主键重建任务落地,落地前该三表仍为 device_id 键(见 7.1)。所有业务表按隔离键的查询必须走索引。
 - 幂等去重统一由 `idempotency_keys` 表承担(见 2.12),业务表不额外维护。
 
 ## 1. 实体关系概览
 
 ```text
-devices 1──N pdf_files 1──N chapters
+users 1──N auth_sessions
+users 1──N pdf_files 1──N chapters
                     └──N text_chunks
-devices 1──N decks 1──N cards 1──1 review_states
-devices 1──N tasks 1──N batches 1──1 knowledge_points
+users 1──N decks 1──N cards 1──1 review_states
+users 1──N tasks 1──N batches 1──1 knowledge_points
                │ └──N knowledge_points
-devices 1──N review_events ──N cards
-devices 1──1 api_keys
-devices 1──N idempotency_keys
-devices 1──N llm_call_attempts
+users 1──N review_events ──N cards
+users 1──N llm_call_attempts
+devices 1──1 api_keys（遗留，主键重建任务改 user_id 键）
+devices 1──N idempotency_keys（遗留，主键重建任务改 user_id 键）
 ```
 
-注(V2.2):上图为当前 v2.1 实现态;V2.2 目标态以 `users` 为根、`user_id` 为隔离键(见 7.1)。
+注(V2.2):数据地基迁移已落地——`users` 为根、`user_id` 为隔离键;直接归属 6 表的 `device_id`
+列为旧数据遗留(决策 D-06),不参与认证/授权;`api_keys` / `idempotency_keys` 仍为 device_id 键(见 7.1)。
 
 ## 2. 表定义
 
 > 类型均按 0 节映射规则;时间列默认 `TEXT NOT NULL`(ISO 8601 UTC);枚举列存储枚举字符串。
-> **状态说明(V2.2)**:本节为 v2.1 实现态,与当前 ORM 及契约守卫一致;V2.2 账号目标态见 7.1。
+> **状态说明(V2.2)**:`users` / `auth_sessions` 与直接归属 6 表的 `user_id` 列已随数据地基迁移落地(2.15/2.16);`api_keys` / `idempotency_keys` 主键改 `user_id`、`review_events` 唯一约束改 `(user_id, client_event_id)` 待主键重建任务落地(见 7.1)。
 
 ### 2.1 devices
 
@@ -61,7 +63,8 @@ devices 1──N llm_call_attempts
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | file_id | TEXT | PK | |
-| device_id | TEXT | NOT NULL, FK → devices | |
+| device_id | TEXT | NULL, FK → devices | 旧数据遗留列(V2.2):v2.1 历史行归属;新写入不再生成(决策 D-06) |
+| user_id | TEXT | NULL, FK → users | 数据主体隔离键(V2.2,决策 D-05);旧行无值,新写入保证必填 |
 | filename | TEXT | NOT NULL | |
 | storage_key | TEXT | NOT NULL | 随机 UUID 存储路径,禁止含用户输入(filename 等);删除元数据时同步清理文件(契约 1.7,审核修复) |
 | size_bytes | INTEGER | NOT NULL | |
@@ -69,7 +72,8 @@ devices 1──N llm_call_attempts
 | error_code | TEXT | NULL | `PDF_PARSE_FAILED / PDF_TOC_MISSING` |
 | created_at | TEXT | NOT NULL | |
 
-索引:`(device_id, created_at DESC)`(最近使用列表)。
+约束:`CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(双非空:旧行 device_id、新行 user_id)。
+索引:`(device_id, created_at DESC)`(遗留查询);`(user_id, created_at DESC)`(最近使用列表)。
 
 ### 2.4 chapters
 
@@ -88,7 +92,8 @@ devices 1──N llm_call_attempts
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | task_id | TEXT | PK | |
-| device_id | TEXT | NOT NULL, FK → devices | |
+| device_id | TEXT | NULL, FK → devices | 旧数据遗留列(V2.2):v2.1 历史行归属;新写入不再生成(决策 D-06) |
+| user_id | TEXT | NULL, FK → users | 数据主体隔离键(V2.2,决策 D-05);旧行无值,新写入保证必填 |
 | file_id | TEXT | NULL, FK → pdf_files ON DELETE SET NULL | 删除 PDF 后任务保留,file_id 置空 |
 | deck_id | TEXT | NULL, FK → decks ON DELETE SET NULL | 目标牌组;删除牌组后置空,任务保留(审核修复) |
 | status | TEXT | NOT NULL | `PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED` |
@@ -106,7 +111,8 @@ devices 1──N llm_call_attempts
 | error_code | TEXT | NULL | |
 | created_at / started_at / ended_at / updated_at | TEXT | 按需 | |
 
-索引:`(device_id, created_at DESC)`;`(task_id, device_id)`。
+约束:`CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(双非空:旧行 device_id、新行 user_id)。
+索引:`(device_id, created_at DESC)`、`(task_id, device_id)`(遗留查询);`(user_id, created_at DESC)`。
 
 ### 2.6 knowledge_points
 
@@ -157,13 +163,15 @@ devices 1──N llm_call_attempts
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | deck_id | TEXT | PK | |
-| device_id | TEXT | NOT NULL, FK → devices | |
+| device_id | TEXT | NULL, FK → devices | 旧数据遗留列(V2.2):v2.1 历史行归属;新写入不再生成(决策 D-06) |
+| user_id | TEXT | NULL, FK → users | 数据主体隔离键(V2.2,决策 D-05);旧行无值,新写入保证必填 |
 | name | TEXT | NOT NULL | |
 | source | TEXT | NOT NULL | `MANUAL / IMPORTED` |
 | version | TEXT | NOT NULL | 变更版本,客户端缓存刷新用 |
 | created_at / updated_at | TEXT | NOT NULL | |
 
-索引:`(device_id, updated_at DESC)`。
+约束:`CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(双非空:旧行 device_id、新行 user_id)。
+索引:`(device_id, updated_at DESC)`(遗留查询);`(user_id, updated_at DESC)`。
 
 ### 2.9 cards
 
@@ -171,7 +179,8 @@ devices 1──N llm_call_attempts
 | --- | --- | --- | --- |
 | card_id | TEXT | PK | |
 | deck_id | TEXT | NOT NULL, FK → decks ON DELETE CASCADE | |
-| device_id | TEXT | NOT NULL | 冗余列,服务端维护与 deck 一致 |
+| device_id | TEXT | NULL | 冗余列,服务端维护与 deck 一致;旧数据遗留列(V2.2,新写入不再生成) |
+| user_id | TEXT | NULL, FK → users | 数据主体隔离键(V2.2,决策 D-05);冗余列,服务端维护与 deck 一致 |
 | source | TEXT | NOT NULL | `GENERATED / MANUAL / IMPORTED` |
 | position | INTEGER | NOT NULL | 牌组内排序位置,追加时分配;`UNIQUE (deck_id, position)`(审核修复) |
 | front / back | TEXT | NOT NULL | 通用渲染字段 |
@@ -190,9 +199,10 @@ devices 1──N llm_call_attempts
 
 约束与索引:
 
+- `CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(双非空:旧行 device_id、新行 user_id)。
 - **部分唯一索引**(SQLite 支持):`CREATE UNIQUE INDEX idx_cards_gen_item ON cards(generation_item_id) WHERE source = 'GENERATED' AND generation_item_id IS NOT NULL`(AC-05 重复入库率为 0)。
 - 唯一索引:`UNIQUE (deck_id, position)`(追加 position 分配的并发保护)。
-- 索引:`(device_id, deck_id)`。
+- 索引:`(device_id, deck_id)`(遗留查询);`(user_id, deck_id)`。
 
 ### 2.10 review_states
 
@@ -217,7 +227,8 @@ devices 1──N llm_call_attempts
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | review_event_id | TEXT | PK | |
-| device_id | TEXT | NOT NULL, FK → devices | |
+| device_id | TEXT | NULL, FK → devices | 旧数据遗留列(V2.2):v2.1 历史行归属;新写入不再生成(决策 D-06) |
+| user_id | TEXT | NULL, FK → users | 数据主体隔离键(V2.2,决策 D-05);旧行无值,新写入保证必填 |
 | card_id | TEXT | NOT NULL, FK → cards ON DELETE CASCADE | |
 | client_event_id | TEXT | NOT NULL | 客户端生成 |
 | rating | TEXT | NOT NULL | `AGAIN / HARD / GOOD / EASY` |
@@ -227,8 +238,9 @@ devices 1──N llm_call_attempts
 
 约束与索引:
 
-- 唯一约束:`UNIQUE (device_id, client_event_id)`(离线重试去重,AC-10)。
-- 索引:`(device_id, reviewed_at DESC)`(看板聚合);`(card_id)`。
+- `CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(双非空:旧行 device_id、新行 user_id)。
+- 唯一约束:`UNIQUE (device_id, client_event_id)`(离线重试去重,AC-10;改 `UNIQUE (user_id, client_event_id)` 待主键重建任务落地,见 7.1)。
+- 索引:`(device_id, reviewed_at DESC)`(遗留查询);`(user_id, reviewed_at DESC)`(看板聚合);`(card_id)`。
 
 不可变记录:不提供 UPDATE / DELETE。
 
@@ -277,7 +289,8 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | call_id | TEXT | PK | |
-| device_id | TEXT | NOT NULL, FK → devices | 数据归属 |
+| device_id | TEXT | NULL, FK → devices | 数据归属(旧数据遗留列,V2.2:新写入不再生成) |
+| user_id | TEXT | NULL, FK → users | 数据归属(V2.2,决策 D-05);旧行无值,新写入保证必填 |
 | scope_type / scope_id | TEXT | NOT NULL | `TASK` / `CARD`;任务链路 scope_id=task_id,单卡重写 scope_id=card_id |
 | task_id | TEXT | NULL, FK → tasks ON DELETE CASCADE | 可空;手动/导入卡重写没有生成任务 |
 | stage | TEXT | NOT NULL | `PLANNING / GENERATING / SCORING / REWRITE` |
@@ -296,7 +309,9 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | normalized_result | TEXT | NULL | 仅 PLANNING 成功时保存通过校验的规范化 units JSON;不保存原文、完整 Prompt 或原始模型响应 |
 | created_at / finished_at | TEXT | 按需 | 调用占位与结束时间 |
 
-唯一约束:`UNIQUE (scope_type, scope_id, stage, operation_key, attempt_no)`。索引:`(device_id, created_at)`、`(task_id, stage, operation_key)`。
+唯一约束:`UNIQUE (scope_type, scope_id, stage, operation_key, attempt_no)`。
+约束:`CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(双非空:旧行 device_id、新行 user_id)。
+索引:`(device_id, created_at)`(遗留查询)、`(user_id, created_at)`、`(task_id, stage, operation_key)`。
 规则:
 
 - 重试判定:该 operation_key 的 STARTED/SUCCESS/FAILED/UNKNOWN 尝试总数达到预算 → 不再发请求;孤儿 STARTED 转 UNKNOWN 并计数,不能仅统计 FAILED。
@@ -305,10 +320,40 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 - Scoring 上限:账本 stage=SCORING 的全部尝试数 ≤ `max_scoring_calls_per_task`(抽样预保证 + 调用前账本条件校验)。
 - 成本口径:账本是 Planner/Generator/Scoring/Rewrite 总 token 的唯一来源;Batch token 仅是 GENERATING 的兼容投影,不得再次相加双计。
 
+### 2.15 users
+
+账号数据主体(V2.2,决策 D-05):`user_id` 为数据主体隔离键,替代 v2.1 匿名设备隔离。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| user_id | TEXT | PK | 服务端生成 |
+| username | TEXT | UNIQUE NOT NULL | 服务端转小写后的规范化值(3~32 位,`[a-z0-9._-]`);UNIQUE 冲突对应 `409 USERNAME_TAKEN` |
+| password_hash | TEXT | NOT NULL | Argon2id 输出(生产参数 ≥ `memory_cost=19456 KiB, time_cost=2, parallelism=1`);绝不进入日志/响应 |
+| created_at / updated_at | TEXT | NOT NULL | |
+
+唯一约束:`UNIQUE (username)`。
+
+### 2.16 auth_sessions
+
+登录会话(V2.2):token 为 256-bit 不透明随机串,库内只存其 SHA-256 摘要(`token_hash`),绝不存明文。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| session_id | TEXT | PK | 服务端生成 |
+| user_id | TEXT | NOT NULL, FK → users ON DELETE CASCADE | 归属用户;删除用户级联清理会话 |
+| token_hash | TEXT | UNIQUE NOT NULL | 256-bit opaque token 的 SHA-256 摘要 |
+| created_at | TEXT | NOT NULL | |
+| expires_at | TEXT | NOT NULL | 绝对有效期 30 天,无滑动续期、无 refresh |
+| revoked_at | TEXT | NULL | logout 只撤销当前会话 |
+
+唯一约束:`UNIQUE (token_hash)`。索引:`(user_id)`。
+有效判定:`revoked_at IS NULL AND expires_at > now`。
+
 ## 3. 级联与并发
 
 | 删除对象 | 级联效果 |
 | --- | --- |
+| users | auth_sessions CASCADE(本期无用户删除接口,预留) |
 | decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL(存在非终态任务引用时删除被 `409 TASK_IN_PROGRESS` 拒绝,契约 6.5) |
 | pdf_files | chapters CASCADE;tasks.file_id SET NULL(存在非终态任务引用时删除被 `409 TASK_IN_PROGRESS` 拒绝,契约 6.1) |
 | tasks | knowledge_points、batches CASCADE(本期无任务删除接口,预留) |
@@ -321,11 +366,11 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 - **resume 并发防护**:`resume` 在 `BEGIN IMMEDIATE` 事务内先校验 `status == 'PAUSED' AND resumable = 1` 再置 `RUNNING`,状态校验失败返回 `TASK_STATE_CONFLICT`;孤儿 `RUNNING`(心跳 `updated_at` 超过 30 分钟)允许抢占:条件更新 `status='RUNNING' AND updated_at < now-30min`(契约 4.1)。
 - 新建卡片时同事务插入初始 `review_states`(state=NEW,初始排程参数,审核修复)。
 - 单卡重写(FR-13,决策 C-05):原地更新 `cards` 行(新内容、新 `generation_item_id`,`position` 不变,`updated_at` / `version` 递增),`review_states` 重置为新卡初始状态;旧 `generation_item_id` 随列覆盖自然作废。
-- `cards.device_id` 由服务端写入,保证与 `decks.device_id` 一致;所有资源归属校验按 `device_id` 过滤(无 `device_id` 列的表如 chapters、knowledge_points、batches、review_states 经 FK join 到所属设备)。
+- `cards.device_id` / `cards.user_id` 由服务端写入,保证与 `decks` 对应列一致(device_id 为遗留列);数据主体隔离键为 `user_id`(V2.2);v2.1 归属校验按 `device_id` 过滤(无隔离键列的表如 chapters、knowledge_points、batches、review_states 经 FK join 到所属隔离键)。
 
 ## 4. 看板聚合实现说明
 
-MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` 已覆盖),不建物化聚合表。统计口径见 PRD 5.16 与结构契约 3.12。单设备数据量(千级卡片、万级事件)下 SQLite 聚合毫秒级完成,若后续数据量增长再引入异步聚合(PRD 6.6 允许)。
+MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` 与 `(user_id, reviewed_at DESC)` 已覆盖),不建物化聚合表。统计口径见 PRD 5.16 与结构契约 3.12。单设备数据量(千级卡片、万级事件)下 SQLite 聚合毫秒级完成,若后续数据量增长再引入异步聚合(PRD 6.6 允许)。
 
 ## 5. 迁移路径(未来,不在本期实现)
 
@@ -340,7 +385,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 | 表 | 契约资源 |
 | --- | --- |
 | devices / api_keys | 3.1 ApiKey |
-| users / auth_sessions | 3.14 AuthUser / 3.15 AuthSessionResponse(V2.2 目标态,见 7.1) |
+| users / auth_sessions | 3.14 AuthUser / 3.15 AuthSessionResponse(V2.2,已随数据地基迁移落地) |
 | pdf_files / chapters | 3.2 PdfFile / 3.3 Chapter |
 | tasks / generation_config | 3.4 Task / 3.5 GenerationConfig |
 | knowledge_points | 3.6 KnowledgePoint(生成单元) |
@@ -356,28 +401,27 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 
 ## 7. 演进路径
 
-### 7.1 账号体系（V2.2 目标态，随数据地基迁移落地）
+### 7.1 账号体系（V2.2，数据地基迁移已部分落地）
 
 账号体系(决策 D-05)引入 `users` / `auth_sessions`,数据主体隔离键从 `device_id` 切换为 `user_id`。
 决策 D-06:旧 device_id 数据**不迁移、不认领、无访问路径**;`devices` 与旧 `device_id` 列降级为仅兼容
-审计,不参与认证/授权。目标态落定后,§0/§1/§2 与 ORM 同批更新,并维持 ORM ↔ 本设计守卫全等。
+审计,不参与认证/授权。
 
-**新增表**:
+**已落地(数据地基迁移,§0/§1/§2/§3 与 ORM 同批更新)**:
 
-- `users(user_id TEXT PK, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`。username 存服务端转小写后的规范化值(3~32 位,`[a-z0-9._-]`);UNIQUE 冲突对应 `409 USERNAME_TAKEN`。password_hash 为 Argon2id 输出(生产参数 ≥ `memory_cost=19456 KiB, time_cost=2, parallelism=1`),绝不进入日志/响应。
-- `auth_sessions(session_id TEXT PK, user_id TEXT NOT NULL FK → users ON DELETE CASCADE, token_hash TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked_at TEXT NULL)`。token_hash 为 256-bit opaque token 的 SHA-256 摘要;索引 `(user_id)`;有效判定 `revoked_at IS NULL AND expires_at > now`(绝对有效期 30 天,无滑动续期、无 refresh;logout 只撤销当前会话)。
-
-**owner 表 `user_id` 列**(新写入必填):
-
-- 直接归属:`api_keys`(PK 改 `user_id`,一用户一 Key)、`pdf_files`、`tasks`、`decks`、`cards`(服务端维护与 deck 一致)、`review_events`、`llm_call_attempts`;各表补 `(user_id, …)` 查询索引。
-- 复合键:`idempotency_keys` 主键改 `PRIMARY KEY (user_id, path, idempotency_key)`;`review_events` 唯一约束改 `UNIQUE (user_id, client_event_id)`。旧设备域幂等缓存不跨身份空间重放。
-- 旧 `device_id` 列为遗留数据保留(未认领历史行只有 device_id;新行只有 user_id);约束保证二者不能同时为空;应用与测试保证新写入不再生成 device_id。
+- 新增表 `users`、`auth_sessions`(定义见 2.15/2.16)。
+- 直接归属 6 表(`pdf_files`、`tasks`、`decks`、`cards`、`review_events`、`llm_call_attempts`)补 `user_id` 列 + `(user_id, …)` 查询索引;旧 `device_id` 降级为可空遗留列,双非空 CHECK(`device_id IS NOT NULL OR user_id IS NOT NULL`)保证二者至少其一(未认领历史行只有 device_id,新行只有 user_id;应用与测试保证新写入不再生成 device_id)。
 - 外键传递归属不变:chapters/text_chunks 经 PDF,knowledge_points/batches 经 Task,review_states 经 Card。
+
+**待落地(主键重建任务)**:
+
+- `api_keys` PK 改 `user_id`(一用户一 Key);`idempotency_keys` 主键改 `PRIMARY KEY (user_id, path, idempotency_key)`;`review_events` 唯一约束改 `UNIQUE (user_id, client_event_id)`(旧设备域幂等缓存不跨身份空间重放)。落地前该三表仍为 device_id 键(§2 相应章节同步更新)。
+- downgrade fail-closed 预检:一旦存在 user-only 新行,downgrade 先做数据前置检查并 fail closed(拒绝丢弃新数据或合成 device_id)。
 
 **迁移策略**(Alembic):
 
-- 运行时读取真实 Alembic head 后创建下一 revision(不预写文件名);SQLite 重建约束用 batch 操作,显式检查外键/索引/级联。
-- 在临时空库与尚未产生账号写入的旧库副本上验证 upgrade → downgrade → upgrade;一旦存在 user-only 新行,downgrade 先做数据前置检查并 fail closed(拒绝丢弃新数据或合成 device_id)。
+- 运行时读取真实 Alembic head 后创建下一 revision(不预写文件名);SQLite 重建约束用 batch 操作,显式检查外键/索引/级联;batch 重建 FK 父表期间关闭外键强制,避免 DROP 旧表隐式 DELETE 级联误删子表数据。
+- 在临时空库与尚未产生账号写入的旧库副本上验证 upgrade → downgrade → upgrade。
 - 物理删除旧列/legacy 表属后续独立清理发布,不在本阶段完成条件内。
 
 ### 7.2 新卡类型（未来）

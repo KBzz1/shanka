@@ -1,4 +1,4 @@
-"""ORM 模型（database-design 2.1~2.12 一一对应 + 本包新增表，契约守卫 2 校验）。
+"""ORM 模型（database-design 2.1~2.16 一一对应 + 本包新增表，契约守卫 2 校验）。
 
 类型映射（database-design §0）：UUID→TEXT、时间→TEXT(ISO 8601 UTC)、JSON→TEXT、
 布尔→INTEGER(0/1)、小数→REAL、枚举→TEXT。
@@ -52,13 +52,24 @@ class ApiKey(Base):
 
 
 class PdfFile(Base):
-    """2.3 pdf_files：PDF 元数据，storage_key 为随机 UUID 存储路径。"""
+    """2.3 pdf_files：PDF 元数据，storage_key 为随机 UUID 存储路径。
+
+    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    """
 
     __tablename__ = "pdf_files"
-    __table_args__ = (Index("ix_pdf_files_device_created", "device_id", "created_at"),)
+    __table_args__ = (
+        CheckConstraint(
+            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_pdf_files_owner_domain"
+        ),
+        Index("ix_pdf_files_device_created", "device_id", "created_at"),
+        Index("ix_pdf_files_user_created", "user_id", "created_at"),
+    )
 
     file_id: Mapped[str] = mapped_column(String, primary_key=True)
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=False)
+    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
+    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
     storage_key: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -83,16 +94,25 @@ class Chapter(Base):
 
 
 class Task(Base):
-    """2.5 tasks：生成任务（file_id/deck_id 删除后 SET NULL 保留任务）。"""
+    """2.5 tasks：生成任务（file_id/deck_id 删除后 SET NULL 保留任务）。
+
+    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    """
 
     __tablename__ = "tasks"
     __table_args__ = (
+        CheckConstraint(
+            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_tasks_owner_domain"
+        ),
         Index("ix_tasks_device_created", "device_id", "created_at"),
         Index("ix_tasks_task_device", "task_id", "device_id"),
+        Index("ix_tasks_user_created", "user_id", "created_at"),
     )
 
     task_id: Mapped[str] = mapped_column(String, primary_key=True)
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=False)
+    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
+    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     file_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("pdf_files.file_id", ondelete="SET NULL"), nullable=True
     )
@@ -193,13 +213,23 @@ class Deck(Base):
     MANUAL/IMPORTED/GENERATED，而 database-design 2.8 只列 MANUAL/IMPORTED——
     字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明。
     F1 建表用 TEXT 无 DB CHECK，不受影响；V4 创建 GENERATED 牌组时若需确认落点再更新 database-design。
+
+    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
     """
 
     __tablename__ = "decks"
-    __table_args__ = (Index("ix_decks_device_updated", "device_id", "updated_at"),)
+    __table_args__ = (
+        CheckConstraint(
+            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_decks_owner_domain"
+        ),
+        Index("ix_decks_device_updated", "device_id", "updated_at"),
+        Index("ix_decks_user_updated", "user_id", "updated_at"),
+    )
 
     deck_id: Mapped[str] = mapped_column(String, primary_key=True)
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=False)
+    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
+    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)  # MANUAL/IMPORTED
     version: Mapped[str] = mapped_column(String, nullable=False)
@@ -208,12 +238,19 @@ class Deck(Base):
 
 
 class Card(Base):
-    """2.9 cards：卡片（部分唯一索引 generation_item_id；UNIQUE(deck_id, position)）。"""
+    """2.9 cards：卡片（部分唯一索引 generation_item_id；UNIQUE(deck_id, position)）。
+
+    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    """
 
     __tablename__ = "cards"
     __table_args__ = (
+        CheckConstraint(
+            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_cards_owner_domain"
+        ),
         UniqueConstraint("deck_id", "position", name="uq_cards_deck_position"),
         Index("ix_cards_device_deck", "device_id", "deck_id"),
+        Index("ix_cards_user_deck", "user_id", "deck_id"),
         Index(
             "ix_cards_gen_item_partial",
             "generation_item_id",
@@ -226,7 +263,9 @@ class Card(Base):
     deck_id: Mapped[str] = mapped_column(
         String, ForeignKey("decks.deck_id", ondelete="CASCADE"), nullable=False
     )
-    device_id: Mapped[str] = mapped_column(String, nullable=False)
+    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
+    device_id: Mapped[str] = mapped_column(String, nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     source: Mapped[str] = mapped_column(String, nullable=False)  # GENERATED/MANUAL/IMPORTED
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     front: Mapped[str] = mapped_column(Text, nullable=False)
@@ -277,17 +316,26 @@ class ReviewState(Base):
 
 
 class ReviewEvent(Base):
-    """2.11 review_events：不可变复习事件（UNIQUE(device_id, client_event_id)）。"""
+    """2.11 review_events：不可变复习事件（UNIQUE(device_id, client_event_id)）。
+
+    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    """
 
     __tablename__ = "review_events"
     __table_args__ = (
+        CheckConstraint(
+            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_review_events_owner_domain"
+        ),
         UniqueConstraint("device_id", "client_event_id", name="uq_review_events_device_client"),
         Index("ix_review_events_device_reviewed", "device_id", "reviewed_at"),
+        Index("ix_review_events_user_reviewed", "user_id", "reviewed_at"),
         Index("ix_review_events_card_id", "card_id"),
     )
 
     review_event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=False)
+    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
+    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     card_id: Mapped[str] = mapped_column(
         String, ForeignKey("cards.card_id", ondelete="CASCADE"), nullable=False
     )
@@ -337,10 +385,17 @@ class TextChunk(Base):
 
 
 class LlmCallAttempt(Base):
-    """llm_call_attempts：LLM 调用账本（spec §9；调用前 STARTED 占位，重试/上限/成本权威）。"""
+    """llm_call_attempts：LLM 调用账本（spec §9；调用前 STARTED 占位，重试/上限/成本权威）。
+
+    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    """
 
     __tablename__ = "llm_call_attempts"
     __table_args__ = (
+        CheckConstraint(
+            "device_id IS NOT NULL OR user_id IS NOT NULL",
+            name="ck_llm_call_attempts_owner_domain",
+        ),
         UniqueConstraint(
             "scope_type",
             "scope_id",
@@ -350,11 +405,14 @@ class LlmCallAttempt(Base):
             name="uq_llm_call_attempts_scope_attempt_no",
         ),
         Index("ix_llm_call_attempts_device_created", "device_id", "created_at"),
+        Index("ix_llm_call_attempts_user_created", "user_id", "created_at"),
         Index("ix_llm_call_attempts_task_stage_operation", "task_id", "stage", "operation_key"),
     )
 
     call_id: Mapped[str] = mapped_column(String, primary_key=True)
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=False)
+    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
+    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     scope_type: Mapped[str] = mapped_column(String, nullable=False)  # TASK/CARD
     scope_id: Mapped[str] = mapped_column(String, nullable=False)
     task_id: Mapped[str | None] = mapped_column(
@@ -382,3 +440,38 @@ class LlmCallAttempt(Base):
     normalized_result: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class User(Base):
+    """2.15 users：账号数据主体（V2.2，决策 D-05；user_id 为数据主体隔离键）。
+
+    username 存服务端转小写后的规范化值；password_hash 为 Argon2id 输出，绝不进入日志/响应。
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    username: Mapped[str] = mapped_column(String, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class AuthSession(Base):
+    """2.16 auth_sessions：登录会话（token 只存 SHA-256 摘要，绝不存明文）。"""
+
+    __tablename__ = "auth_sessions"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_auth_sessions_token_hash"),
+        Index("ix_auth_sessions_user_id", "user_id"),
+    )
+
+    session_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)

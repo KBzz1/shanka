@@ -47,6 +47,10 @@ def test_alembic_upgrade_creates_all_tables(alembic_env: tuple[Config, Path]) ->
         "review_states",
         "review_events",
         "idempotency_keys",
+        "text_chunks",
+        "llm_call_attempts",
+        "users",
+        "auth_sessions",
         "alembic_version",
     }
     assert expected <= tables
@@ -77,6 +81,68 @@ def test_alembic_0002_adds_request_body_hash(alembic_env: tuple[Config, Path]) -
     with engine.connect() as conn:
         cols = {r[1] for r in conn.execute(text("PRAGMA table_info('idempotency_keys')"))}
     assert "request_body_hash" in cols
+
+
+def test_alembic_users_auth_sessions_columns(alembic_env: tuple[Config, Path]) -> None:
+    """P3-T1：users/auth_sessions 列集合与约束（username/token_hash UNIQUE、user_id FK）。"""
+    config, db_path = alembic_env
+    command.upgrade(config, "head")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        users = {r[1]: r for r in conn.execute(text("PRAGMA table_info('users')"))}
+        sessions = {r[1]: r for r in conn.execute(text("PRAGMA table_info('auth_sessions')"))}
+        # SQLite 将 UNIQUE 约束实现为 sqlite_autoindex（不保留声明名），约束名在 sqlite_master SQL 文本中
+        users_sql = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'")
+        ).scalar_one()
+        sessions_sql = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='auth_sessions'")
+        ).scalar_one()
+        session_fks = conn.execute(text("PRAGMA foreign_key_list('auth_sessions')")).fetchall()
+    assert set(users) == {"user_id", "username", "password_hash", "created_at", "updated_at"}
+    assert users["user_id"][5] == 1  # PK
+    assert users["username"][3] == 1  # NOT NULL
+    assert users["password_hash"][3] == 1
+    assert users["created_at"][3] == 1 and users["updated_at"][3] == 1
+    assert "uq_users_username" in users_sql  # users.username UNIQUE
+    assert set(sessions) == {
+        "session_id",
+        "user_id",
+        "token_hash",
+        "created_at",
+        "expires_at",
+        "revoked_at",
+    }
+    assert sessions["session_id"][5] == 1
+    assert sessions["user_id"][3] == 1
+    assert sessions["token_hash"][3] == 1
+    assert sessions["created_at"][3] == 1 and sessions["expires_at"][3] == 1
+    assert sessions["revoked_at"][3] == 0  # NULL
+    assert "uq_auth_sessions_token_hash" in sessions_sql  # auth_sessions.token_hash UNIQUE
+    # user_id FK → users（PRAGMA foreign_key_list 行：(id, seq, table, from, ...)）
+    assert {(r[2], r[3]) for r in session_fks} == {("users", "user_id")}
+
+
+def test_alembic_owner_tables_have_user_id(alembic_env: tuple[Config, Path]) -> None:
+    """P3-T1：直接归属 6 表 user_id 列、device_id 降级可空、双非空 CHECK 存在。"""
+    config, db_path = alembic_env
+    command.upgrade(config, "head")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    owner_tables = ("pdf_files", "tasks", "decks", "cards", "review_events", "llm_call_attempts")
+    with engine.connect() as conn:
+        for table in owner_tables:
+            cols = {r[1]: r for r in conn.execute(text(f"PRAGMA table_info('{table}')"))}
+            sql_text = conn.execute(
+                text(f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{table}'")
+            ).scalar_one()
+            fks = conn.execute(text(f"PRAGMA foreign_key_list('{table}')")).fetchall()
+            assert "user_id" in cols, f"{table} 缺 user_id 列"
+            assert cols["device_id"][3] == 0, f"{table}.device_id 应为可空（遗留列）"
+            assert cols["user_id"][3] == 0, f"{table}.user_id 应为可空（双非空由 CHECK 保证）"
+            assert f"ck_{table}_owner_domain" in sql_text, f"{table} 缺双非空 CHECK"
+            assert any(r[3] == "user_id" and r[2] == "users" for r in fks), (
+                f"{table}.user_id 缺 FK → users"
+            )
 
 
 def test_alembic_foreign_keys_and_checks_active(alembic_env: tuple[Config, Path]) -> None:

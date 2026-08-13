@@ -47,9 +47,23 @@ def run_migrations_online() -> None:
         raise RuntimeError("alembic.ini 缺少 sqlalchemy.url（应至少保留占位 URL）")
     connectable = create_db_engine(url)
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-        with context.begin_transaction():
-            context.run_migrations()
+        # database-design 7.1：SQLite 迁移全程关闭外键强制——batch 重建 FK 父表时
+        # DROP 旧表会触发隐式 DELETE 并级联误删子表数据（实测：带数据旧库上
+        # chapters/knowledge_points/cards 等子表行被清空）。PRAGMA foreign_keys 在
+        # 事务内是 no-op，而 engine begin 事件会对每个事务发 BEGIN IMMEDIATE，因此必须
+        # 在连接建立后、任何事务开始前经底层 DBAPI cursor（与 connect 事件同路径）设置，
+        # 迁移结束（外层事务已提交）再恢复。连接回到池时外键强制恢复 ON。
+        raw = connection.connection.driver_connection
+        assert raw is not None  # 连接已建立，DBAPI 连接必然存在
+        if connection.dialect.name == "sqlite":
+            raw.execute("PRAGMA foreign_keys=OFF")
+        try:
+            context.configure(connection=connection, target_metadata=target_metadata)
+            with context.begin_transaction():
+                context.run_migrations()
+        finally:
+            if connection.dialect.name == "sqlite":
+                raw.execute("PRAGMA foreign_keys=ON")
 
 
 if context.is_offline_mode():
