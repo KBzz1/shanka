@@ -1,10 +1,16 @@
 """executor.py：任务执行器（4.4 定式：进程内 DB 驱动；V5A adapter 分批执行）。
 
-V5A 同步执行：扫描 RUNNING 任务 → plan_batches（若任务无批次）→ 解密 API Key（仅 infra/llm
-路径）→ 构造带 Key 的 DeepSeekClient（client_factory 注入，测试 mock transport）→ 循环
-process_next_batch 直至无待处理批次；V5B：每批完成后心跳刷新 task.updated_at（服务端时钟，
-孤儿恢复判据）并 commit（批次事务粒度：批次状态+游标+心跳同事务落库，长任务中间状态可观测，
-崩溃后已完成批次保留、未完成批次可恢复）→ 全部批次终态 → 任务 COMPLETED。
+扫描一轮 = 规划 worker + 生成 worker（spec §6.1）：
+
+- 规划 worker：先 claim_planning_task（CAS1 首次接管 + 章节快照冻结 / CAS2 孤儿恢复，
+  每次扫描至多接管一个 PLANNING 任务）→ run_planning（选页拆组/账本恢复/组调用/合并
+  落库，内部短事务提交心跳与终态；LLM 调用在事务外）。
+- 生成 worker：扫描 `status='RUNNING' AND stage='GENERATING'` 任务 → 解密 API Key
+  （仅 infra/llm 路径）→ 构造带 Key 的 DeepSeekClient（client_factory 注入，测试 mock
+  transport）→ 循环 process_next_batch 直至无待处理批次；V5B：每批完成后心跳刷新
+  task.updated_at（服务端时钟，孤儿恢复判据）并 commit（批次事务粒度：批次状态+游标+
+  心跳同事务落库，长任务中间状态可观测，崩溃后已完成批次保留、未完成批次可恢复）→
+  全部批次终态 → 任务 COMPLETED。
 系统级错误（adapter 抛 API_KEY_UNAVAILABLE/GENERATION_FAILED）→ 任务 FAILED（4.1）；
 批次级失败（Schema 重试达上限）→ 批次 SKIPPED，任务继续（4.2）。V4 fake 不再用于任务执行
 （样卡仍用 fake）。
@@ -28,6 +34,7 @@ from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from infra.metrics import GENERATION_TASKS_DURATION_SECONDS, GENERATION_TASKS_TOTAL
 from services.generation.batches import plan_batches, process_next_batch
+from services.generation.planning_executor import claim_planning_task, run_planning
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +89,52 @@ def process_running_tasks(
     settings: Settings | None = None,
     client_factory: ClientFactory | None = None,
 ) -> int:
-    """处理全部 RUNNING 任务（V5A adapter 分批生成入库）。返回处理任务数。
+    """扫描一轮：先规划 worker（CAS 抢占一个 PLANNING 任务 → run_planning），
+    再生成 worker（RUNNING + stage=GENERATING 任务分批生成入库）。返回处理任务数。
 
     storage 预留：V5A 真实 adapter 读取批次内容时使用（当前批次 prompt 仅用知识点 topic）；
-    事务：_execute_task 每批完成后 commit（批次事务粒度：批次状态+游标+心跳同事务落库），
-    任务终态（COMPLETED/FAILED）由调用方最终 commit 落库（scan_once / handler）。
+    事务：规划 CAS/快照冻结、每组心跳、最终条件更新由 claim/run_planning 内部短事务
+    commit（§4.2 冻结原子性、§6.2 STARTED 占位先行）；_execute_task 每批完成后 commit
+    （批次事务粒度：批次状态+游标+心跳同事务落库）；任务终态由调用方最终 commit 落库
+    （scan_once / handler）。
     settings/client_factory 测试注入；缺省 settings 取环境配置，client_factory 构造生产客户端。
     """
     settings = settings or Settings()
+    now = format_utc(SystemClock().now_utc())
+    # 规划 worker 入口（spec §6.1）：每次扫描至多接管一个 PLANNING 任务
+    claimed = claim_planning_task(
+        session, orphan_timeout_minutes=settings.orphan_timeout_minutes, now=now
+    )
+    if claimed is not None:
+        session.commit()  # CAS1/CAS2 接管 + 章节快照冻结原子提交（§4.2 规划快照冻结时刻）
+        try:
+            api_key = _decrypt_api_key(session, task=claimed, settings=settings)
+            client = (
+                client_factory(api_key)
+                if client_factory is not None
+                else DeepSeekClient(settings, api_key=api_key)
+            )
+            try:
+                run_planning(session, claimed, settings=settings, client=client)
+            finally:
+                client.close()
+        except AppError as exc:
+            # 系统级错误（Key 解密失败/上游不可用）→ FAILED + failure_stage=PLANNING（§6.3）
+            _fail_task(claimed, error_code=exc.code.value, failure_stage="PLANNING")
+            logger.warning(
+                "task planning failed",
+                extra={"task_id": claimed.task_id, "error_code": exc.code.value},
+            )
+        except Exception:  # noqa: BLE001
+            _fail_task(
+                claimed, error_code=ErrorCode.GENERATION_FAILED.value, failure_stage="PLANNING"
+            )
+            logger.warning("task planning unexpected failure", extra={"task_id": claimed.task_id})
+    # 生成 worker 扫描：RUNNING + stage=GENERATING（避免与规划中任务冲突，spec §6.1）
     tasks = session.scalars(
-        select(Task).where(Task.status == "RUNNING").order_by(Task.created_at)
+        select(Task)
+        .where(Task.status == "RUNNING", Task.stage == "GENERATING")
+        .order_by(Task.created_at)
     ).all()
     for task in tasks:
         try:
@@ -106,12 +149,14 @@ def process_running_tasks(
         except Exception:  # noqa: BLE001
             _fail_task(task, error_code=ErrorCode.GENERATION_FAILED.value)
             logger.warning("task execution unexpected failure", extra={"task_id": task.task_id})
-    return len(tasks)
+    # 处理任务数：同一任务规划 + 生成同轮衔接只计一次
+    claimed_id = claimed.task_id if claimed is not None else None
+    return sum(1 for task in tasks if task.task_id != claimed_id) + (1 if claimed else 0)
 
 
-def _fail_task(task: Task, *, error_code: str) -> None:
+def _fail_task(task: Task, *, error_code: str, failure_stage: str = "GENERATING") -> None:
     task.status = "FAILED"
-    task.failure_stage = "GENERATING"
+    task.failure_stage = failure_stage
     task.error_code = error_code
     task.ended_at = task.updated_at
     task.resumable = 0
@@ -135,12 +180,7 @@ def _execute_task(
         .order_by(KnowledgePoint.priority)
     ).all()
     if task.total_batch_count is None and kps:
-        plan_batches(
-            session,
-            task_id=task.task_id,
-            knowledge_points=kps,
-            batch_size=settings.batch_size,
-        )
+        plan_batches(session, task_id=task.task_id, knowledge_points=kps)
         session.flush()
     api_key = _decrypt_api_key(session, task=task, settings=settings)
     client = (

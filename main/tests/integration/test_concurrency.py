@@ -20,7 +20,7 @@ from infra.db.models import Base, Batch, Card, KnowledgePoint, Task
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
-from services.generation.batches import plan_batches, process_next_batch
+from services.generation.batches import process_next_batch
 from services.tasks.executor import process_running_tasks
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
@@ -42,6 +42,12 @@ def _uuid() -> str:
 
 
 def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "COMPACT") -> str:
+    """种子：RUNNING+GENERATING 任务 + 知识点 + 批次（每 3 知识点一批，旧 batch_size 语义）。
+
+    T8 起 create_task 不再规划知识点（PENDING+PLANNING）；V5B 并发/心跳测试聚焦
+    生成路径，直接构造知识点与批次绕过规划 worker（规划路径由 test_planning_executor.py
+    覆盖）。test 1 直接调 process_next_batch，不经过 executor 的 plan 路径。
+    """
     from infra.db.models import ApiKey, Chapter, Device, PdfFile
     from services.decks.service import create_deck
     from services.tasks.service import create_task
@@ -94,11 +100,38 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
         ),
         now="2026-08-10T00:00:00.000Z",
     )
-    # 预建批次（test 1 直接调 process_next_batch，不经过 executor 的 plan 路径）
-    kps = session.scalars(
-        select(KnowledgePoint).where(KnowledgePoint.task_id == task.task_id)
-    ).all()
-    plan_batches(session, task_id=task.task_id, knowledge_points=kps)
+    task.status = "RUNNING"
+    task.stage = "GENERATING"
+    n_kps = {"COMPACT": 3, "BALANCED": 6}.get(quantity_tendency, 3)
+    kps = [
+        KnowledgePoint(
+            knowledge_point_id=str(uuid.uuid4()),
+            task_id=task.task_id,
+            chapter_id=ch.chapter_id,
+            source_chunk_id="c1",
+            topic=f"知识点{i + 1}",
+            priority=i + 1,
+            status="PENDING",
+        )
+        for i in range(n_kps)
+    ]
+    session.add_all(kps)
+    session.flush()
+    n_batches = (n_kps + 2) // 3
+    for b in range(n_batches):
+        session.add(
+            Batch(
+                batch_id=str(uuid.uuid4()),
+                task_id=task.task_id,
+                batch_index=b + 1,
+                status="PENDING",
+                generated_item_ids="[]",
+                retry_count=0,
+                created_at="2026-08-10T00:00:00.000Z",
+            )
+        )
+    task.total_batch_count = n_batches
+    task.completed_batch_count = 0
     session.commit()
     return task.task_id
 

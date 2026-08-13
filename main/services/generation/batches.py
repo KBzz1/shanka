@@ -1,6 +1,7 @@
 """services.generation.batches：分批执行核心（4.2 批次状态机/重试/游标原子推进）。
 
-- plan_batches：知识点按 batch_size 分组建 Batch（PENDING，batch_index 从 1 起）+ 游标初始化；
+- plan_batches：按生成单元建批（spec §7：1 单元 = 1 批，batch_index=单元 priority
+  1..N，generation_unit_id 显式外键必填）+ 游标初始化；
 - process_next_batch：条件更新抢占下一个可处理批次（PENDING 或 FAILED，FAILED 必未达重试上限，
   WHERE status IN (PENDING, FAILED) 原子转 PROCESSING，rowcount=0 → 下一条/0 → 并发单执行者）→
   adapter.chat（Prompt 组装）→ 响应 JSON 解析 → 逐卡 Schema 校验 → 合法卡入库（V1 模式 +
@@ -58,25 +59,29 @@ def plan_batches(
     *,
     task_id: str,
     knowledge_points: Sequence[KnowledgePoint],
-    batch_size: int = 3,
 ) -> None:
-    """按 batch_size 分组建 Batch（PENDING）→ 任务游标 total/completed 初始化（同事务）。"""
+    """按生成单元建批（spec §7）：每单元一批、batch_index=单元 priority（1..N）、
+    generation_unit_id 显式外键 → 任务游标 total=单元数/completed=0 初始化（同事务）。
+
+    Task 9 起签名由 batch_size 分组合并为"1 单元 1 批"（批粒度 = 生成单元）；旧调用方
+    由 T10 生成批改造统一迁移。
+    """
     task = session.get(Task, task_id)
-    total = (len(knowledge_points) + batch_size - 1) // batch_size
-    for i in range(0, len(knowledge_points), batch_size):
+    for kp in knowledge_points:
         session.add(
             Batch(
                 batch_id=str(uuid.uuid4()),
                 task_id=task_id,
-                batch_index=i // batch_size + 1,
+                batch_index=kp.priority,
                 status="PENDING",
                 generated_item_ids="[]",
                 retry_count=0,
+                generation_unit_id=kp.knowledge_point_id,
                 created_at=task.updated_at if task is not None else None,
             )
         )
     if task is not None:
-        task.total_batch_count = total
+        task.total_batch_count = len(knowledge_points)
         task.completed_batch_count = 0
 
 

@@ -44,6 +44,11 @@ def _uuid() -> str:
 
 
 def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "COMPACT") -> str:
+    """种子：PENDING+PLANNING 任务直接转 RUNNING+GENERATING 并预建知识点与批次。
+
+    T8 起 create_task 不再规划知识点（PENDING+PLANNING）；生成路径测试绕过规划
+    worker，聚焦批次语义——T9 新增的规划执行路径由 test_planning_executor.py 覆盖。
+    """
     from infra.db.models import ApiKey, Chapter, Device, PdfFile
     from services.decks.service import create_deck
 
@@ -90,6 +95,40 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
         ),
         now="2026-08-11T00:00:00.000Z",
     )
+    task.status = "RUNNING"
+    task.stage = "GENERATING"
+    # 知识点数 = 每章基础 3 × 密度系数（COMPACT=3 / BALANCED=6）——旧规划语义，测试直接构造
+    n_kps = {"COMPACT": 3, "BALANCED": 6}.get(quantity_tendency, 3)
+    kps = [
+        KnowledgePoint(
+            knowledge_point_id=str(uuid.uuid4()),
+            task_id=task.task_id,
+            chapter_id=ch.chapter_id,
+            source_chunk_id="c1",
+            topic=f"知识点{i + 1}",
+            priority=i + 1,
+            status="PENDING",
+        )
+        for i in range(n_kps)
+    ]
+    session.add_all(kps)
+    session.flush()
+    # 批次 = 每 3 知识点一批（旧 batch_size 语义，V5B 批次状态机测试的基座）
+    n_batches = (n_kps + 2) // 3
+    for b in range(n_batches):
+        session.add(
+            Batch(
+                batch_id=str(uuid.uuid4()),
+                task_id=task.task_id,
+                batch_index=b + 1,
+                status="PENDING",
+                generated_item_ids="[]",
+                retry_count=0,
+                created_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+    task.total_batch_count = n_batches
+    task.completed_batch_count = 0
     session.commit()
     return task.task_id
 
@@ -98,6 +137,64 @@ def _valid_cards_json(n: int = 3) -> str:
     """每批 3 张合法卡（= batch_size 默认值）：3 知识点任务 → 1 批 → 3 卡（每知识点一张）。"""
     cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(n)]
     return json.dumps({"cards": cards}, ensure_ascii=False)
+
+
+def _seed_planning_task(session: Session, *, device_id: str) -> str:
+    """PENDING+PLANNING 任务 + 章节 + 页文本（text_chunks）：规划 worker 全流程基座。"""
+    from infra.db.models import ApiKey, Chapter, Device, PdfFile
+    from services.decks.service import create_deck
+    from services.pdf.text_chunks import persist_text_chunks
+
+    if session.get(Device, device_id) is None:
+        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+        session.flush()
+    pdf = PdfFile(
+        file_id=_uuid(),
+        device_id=device_id,
+        filename="p.pdf",
+        storage_key=_uuid(),
+        size_bytes=1,
+        status="PARSED",
+        created_at="2026-08-11T00:00:00.000Z",
+    )
+    session.add(pdf)
+    session.flush()
+    deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+    session.flush()
+    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    session.add(ch)
+    session.flush()
+    if session.scalar(select(ApiKey).where(ApiKey.device_id == device_id)) is None:
+        session.add(
+            ApiKey(
+                device_id=device_id,
+                encrypted_key=_ENCRYPTED_TEST_KEY,
+                status="AVAILABLE",
+                masked_key="sk-****",
+                updated_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()
+    persist_text_chunks(
+        session,
+        file_id=pdf.file_id,
+        pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2)],
+        now="2026-08-11T00:00:00.000Z",
+    )
+    task = create_task(
+        session,
+        device_id=device_id,
+        file_id=pdf.file_id,
+        deck_id=deck.deck_id,
+        chapter_ids=[ch.chapter_id],
+        config=GenerationConfig(
+            quantity_tendency="COMPACT",
+            difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+        ),
+        now="2026-08-11T00:00:00.000Z",
+    )
+    session.commit()
+    return task.task_id
 
 
 def _client_factory(api_key: str) -> DeepSeekClient:
@@ -307,3 +404,76 @@ def test_executor_cancel_between_batches_preserves_cancelled(
     assert task.ended_at == "2026-08-11T00:00:00.000Z"  # 取消侧 ended_at 不被覆盖
     assert [b.status for b in batches] == ["SUCCEEDED", "PENDING"]  # 批 2 未 claim（保留 PENDING）
     assert len(cards) == 3  # 仅批 1 卡入库（BALANCED 6 知识点 → 2 批 × 3 卡）
+
+
+def test_executor_full_flow_plan_then_generate(
+    session_factory: Callable[[], Session],
+) -> None:
+    """T9 接线：一次扫描 = 规划 worker（CAS 抢占 + 规划落库）→ 生成 worker（批生成）→ COMPLETED。
+
+    mock 首次 chat 返回合法 planner 单元（引用请求内组页），后续返回 1 张合法卡
+    （1 单元 = 1 批 = 1 卡）；断言规划与生成在同一次 process_running_tasks 中衔接。
+    """
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_planning_task(session, device_id=device)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # 规划调用：从 <PLANNER_INPUT> 提取组页 → 合法单元
+            body = json.loads(request.content)
+            user = body["messages"][-1]["content"]
+            payload = json.loads(
+                user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
+            )
+            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+            content = json.dumps(
+                {
+                    "units": [
+                        {
+                            "source_chunk_ids": [chunk_ids[0]],
+                            "learning_objective": "全流程目标",
+                            "target_difficulty": "BASIC",
+                            "card_type": "QUESTION",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        else:  # 生成调用：1 张合法卡（1 单元 1 批）
+            content = _valid_cards_json(1)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": content}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_cache_hit_tokens": 2,
+                    "prompt_cache_miss_tokens": 8,
+                },
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+    def client_factory(_api_key: str) -> DeepSeekClient:
+        # 每次调用返回新 client：executor 在规划阶段结束后 close 规划 client，
+        # 生成阶段经 factory 重建（与生产路径一致）
+        return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+
+    with session_factory() as session:
+        n = process_running_tasks(session, settings=_SETTINGS, client_factory=client_factory)
+        session.commit()
+        task = session.get(Task, task_id)
+        assert task is not None and task.deck_id is not None
+        kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
+        cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
+    assert n == 1
+    assert calls == 2  # 1 次规划 + 1 次生成（同一扫描轮内衔接）
+    assert task.status == "COMPLETED"
+    assert len(kps) == 1
+    assert kps[0].topic == "全流程目标"
+    assert len(cards) == 1
+    assert task.generated_card_count == 1
