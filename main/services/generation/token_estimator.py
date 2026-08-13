@@ -8,7 +8,7 @@
 from typing import Any
 
 from services.generation.cost import estimate_cost
-from services.generation.planning import knowledge_point_count
+from services.generation.quota import task_unit_budget
 
 # 校准常量(2026-08-12,R1 live 实测 deepseek-v4-flash;向上取整偏保守)
 PROMPT_TOKENS_PER_KP = 1500  # 实测 1,427/单元(85,599/60)
@@ -22,7 +22,7 @@ def estimate_tokens(
     custom_requirements: str | None,
 ) -> dict[str, int]:
     """输入参数 → 预计 token(与 V4 规划同口径:每章 3×密度系数知识点,每知识点一卡)。"""
-    kp_count = knowledge_point_count(chapter_count, quantity_tendency)
+    kp_count = task_unit_budget(chapter_count, quantity_tendency)
     prompt_tokens = kp_count * PROMPT_TOKENS_PER_KP
     if custom_requirements:
         prompt_tokens += int(len(custom_requirements) * CUSTOM_REQ_TOKENS_PER_CHAR)
