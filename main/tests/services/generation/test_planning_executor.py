@@ -529,7 +529,7 @@ def test_planning_all_failed_fails_task(
         attempts = session.scalars(
             select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
         ).all()
-    assert calls == 3  # 预算 3 次尝试（2 次重试）
+    assert calls == 6  # 3 次逻辑尝试 × 2 次 HTTP（T17 起 adapter 内部重试 1 次/逻辑调用）
     assert task.status == "FAILED"
     assert task.failure_stage == "PLANNING"
     assert task.skipped_planning_group_count == 1

@@ -686,7 +686,10 @@ def test_process_batch_retryable_upstream_retries_within_budget(
     session_factory: Callable[[], Session],
 ) -> None:
     """上游暂时失败（500，retryable=True）→ 账本 FAILED 预算内重试（不 raise）；
-    重试成功 → SUCCEEDED；Batch.retry_count 兼容投影 = 失败尝试数（账本为权威）。"""
+    重试成功 → SUCCEEDED；Batch.retry_count 兼容投影 = 失败尝试数（账本为权威）。
+
+    T17 起 adapter 内部对 500 自动重试 1 次（同一次逻辑调用）：连续 2 次 500 才构成
+    一次逻辑 FAILED（calls 1/2 = 第一次逻辑调用内部耗尽），calls 3 才是第二次逻辑调用。"""
     device = _uuid()
     with session_factory() as session:
         task_id = _seed_unit_task(session, device_id=device)
@@ -695,7 +698,7 @@ def test_process_batch_retryable_upstream_retries_within_budget(
         def handler(request: httpx.Request) -> httpx.Response:
             nonlocal calls
             calls += 1
-            if calls == 1:
+            if calls <= 2:
                 return httpx.Response(500, json={"error": {"message": "upstream down"}})
             return _ok(_valid_question_card())
 
@@ -723,7 +726,7 @@ def test_process_batch_retryable_upstream_retries_within_budget(
             select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
         ).all()
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
-    assert calls == 2
+    assert calls == 3  # 2 次 HTTP（第一次逻辑调用内部重试耗尽）+ 1 次 HTTP（第二次逻辑调用成功）
     assert batch.status == "SUCCEEDED"
     assert batch.retry_count == 1  # 投影 = 失败尝试数（本次成功不计）
     assert [a.status for a in attempts] == ["FAILED", "SUCCESS"]

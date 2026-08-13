@@ -618,7 +618,9 @@ def test_scoring_failure_non_blocking(session_factory: Callable[[], Session]) ->
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         attempts = _scoring_attempts(session, task_id=task_id)
-    assert calls == 1  # 失败不重试
+    assert (
+        calls == 2
+    )  # 1 次逻辑尝试 × 2 次 HTTP（T17 起 adapter 内部重试 1 次）；不重试语义 = attempts == 1（账本逻辑层）
     assert task.status == "COMPLETED"  # 失败不阻塞任务完成
     assert len(cards) == 1  # 卡保留
     assert cards[0].rubric_total_score is None

@@ -27,6 +27,10 @@ _BASE_URL = "https://api.deepseek.com"
 _VALIDATE_PATH = "/user/balance"
 _CHAT_PATH = "/chat/completions"
 _UPSTREAM_DOWN = "DeepSeek 上游不可用"
+# T17 canary 修复：同一次逻辑调用内的 HTTP 内部重试（429/5xx/网络/超时），
+# 等价于官方 SDK 自带重试；账本 attempt 语义不变（一次 attempt = 一次逻辑调用）。
+_CHAT_INTERNAL_RETRIES = 1
+_RETRY_DELAY_SECONDS = 1.0
 
 
 class RetryableUpstreamError(AppError):
@@ -116,18 +120,35 @@ class DeepSeekClient:
         if self.settings.deepseek_thinking:
             body["thinking"] = {"type": "enabled"}
         start = time.monotonic()
-        try:
-            resp = self._client.post(
-                _CHAT_PATH,
-                json=body,
-                headers={"Authorization": f"Bearer {auth_key}"},
-            )
-        except httpx.HTTPError as exc:
-            logger.warning("deepseek chat request error type=%s", type(exc).__name__)
-            # 网络/超时：上游暂时失败 → retryable=True（账本预算内重试）
-            raise RetryableUpstreamError(
-                ErrorCode.GENERATION_FAILED, "DeepSeek 请求失败", retryable=True
-            ) from None
+        # 内部 HTTP 重试（SDK 等价行为，T17 canary 修复）：429/5xx/网络/超时自动重试 1 次
+        # （同一次逻辑调用内，账本 attempt 语义不变）；401 与解析失败不重试。
+        for attempt in range(_CHAT_INTERNAL_RETRIES + 1):
+            try:
+                resp = self._client.post(
+                    _CHAT_PATH,
+                    json=body,
+                    headers={"Authorization": f"Bearer {auth_key}"},
+                )
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "deepseek chat request error type=%s attempt=%s",
+                    type(exc).__name__,
+                    attempt,
+                )
+                if attempt < _CHAT_INTERNAL_RETRIES:
+                    time.sleep(_RETRY_DELAY_SECONDS)
+                    continue
+                # 网络/超时：上游暂时失败 → retryable=True（账本预算内重试）
+                raise RetryableUpstreamError(
+                    ErrorCode.GENERATION_FAILED, "DeepSeek 请求失败", retryable=True
+                ) from None
+            if resp.status_code in (429, 500, 502, 503) and attempt < _CHAT_INTERNAL_RETRIES:
+                logger.warning(
+                    "deepseek chat upstream status=%s attempt=%s", resp.status_code, attempt
+                )
+                time.sleep(_RETRY_DELAY_SECONDS)
+                continue
+            break
         duration_ms = round((time.monotonic() - start) * 1000)
         if resp.status_code == 401:
             # Key 错误：不重试（spec §6.3）

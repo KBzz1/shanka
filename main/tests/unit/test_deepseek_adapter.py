@@ -356,3 +356,81 @@ def test_adapter_validate_key_unchanged_plain_app_error() -> None:
         client.validate_key("sk-x")
     assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
     assert not isinstance(excinfo.value, RetryableUpstreamError)
+
+
+# === T17 canary 修复（内部 HTTP 重试，SDK 等价行为）===
+# canary 实测：上游瞬时网络抖动 + SCORING 不重试 → 3 组评分全灭（真卡 0 评分）。
+# 修复：adapter 层对 429/5xx/网络/超时自动重试 1 次（同一次逻辑调用内，账本语义不变）。
+
+
+def test_adapter_chat_internal_retry_network_then_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """网络错误 1 次后成功 → 同一次逻辑调用返回 200（内部重试生效，不抛上层）。"""
+    monkeypatch.setattr("infra.llm.deepseek._RETRY_DELAY_SECONDS", 0.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("flaky network")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    result = client.chat("p", "sk-test")
+    assert calls == 2
+    assert result["http_status"] == 200
+
+
+def test_adapter_chat_internal_retry_429_then_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """429 1 次后成功 → 同一次逻辑调用返回 200（上游限流自动重试）。"""
+    monkeypatch.setattr("infra.llm.deepseek._RETRY_DELAY_SECONDS", 0.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    result = client.chat("p", "sk-test")
+    assert calls == 2
+    assert result["http_status"] == 200
+
+
+def test_adapter_chat_internal_retry_exhausted_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """连续网络错误（重试耗尽）→ 仍抛 RetryableUpstreamError(retryable=True)——上层契约不变。"""
+    monkeypatch.setattr("infra.llm.deepseek._RETRY_DELAY_SECONDS", 0.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("flaky network")
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(RetryableUpstreamError) as excinfo:
+        client.chat("hi", "sk-test")
+    assert excinfo.value.code is ErrorCode.GENERATION_FAILED
+    assert excinfo.value.retryable is True
+    assert calls == 2
+
+
+def test_adapter_chat_internal_retry_does_not_retry_401(monkeypatch: pytest.MonkeyPatch) -> None:
+    """401 不重试（Key 错误不属上游重试分类）——立即抛且只调用一次。"""
+    monkeypatch.setattr("infra.llm.deepseek._RETRY_DELAY_SECONDS", 0.0)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, json={"error": {"message": "invalid api key"}})
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(RetryableUpstreamError) as excinfo:
+        client.chat("hi", "sk-test")
+    assert excinfo.value.retryable is False
+    assert calls == 1
