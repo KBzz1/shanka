@@ -54,6 +54,7 @@ def create_task_endpoint(
     key = get_idempotency_key(request)
     path = request.url.path
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+    settings: Settings = request.app.state.settings
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         task = create_task(
@@ -64,6 +65,7 @@ def create_task_endpoint(
             chapter_ids=payload.chapter_ids,
             config=payload.generation_config,
             now=_now(),
+            settings=settings,  # 预算硬上限（spec §10）
         )
         session.flush()
         return 201, task_view(task)

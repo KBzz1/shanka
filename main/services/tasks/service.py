@@ -1,7 +1,7 @@
 """tasks/service.py：任务用例（创建/查询/取消/resume + 状态机 + DB 条件更新）。
 
 事务语义：本模块函数不 commit/rollback，由调用方（handler/service 用例）控制；
-Task 创建与 KnowledgePoint 规划同事务（KnowledgePoint 与 Task 同事务落库）。
+创建只落创建快照（PENDING+PLANNING），知识点规划由规划 worker CAS 接管（spec §6.1）。
 """
 
 import json
@@ -13,13 +13,14 @@ from sqlalchemy import select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import GenerationConfig
 from infra.db.models import ApiKey, Chapter, PdfFile, Task
 from infra.db.session import format_utc
 from infra.metrics import GENERATION_TASKS_TOTAL
 from services.decks.service import _owned as _owned_deck
-from services.generation.planning import plan_knowledge_points
+from services.generation.quota import task_unit_budget
 from services.generation.validate import validate_config
 
 
@@ -64,6 +65,8 @@ def task_view(task: Task) -> dict[str, object]:
         "resumable": bool(task.resumable),
         "failure_stage": task.failure_stage,
         "error_code": task.error_code,
+        "completion_reason": task.completion_reason,
+        "skipped_planning_group_count": task.skipped_planning_group_count,
         "created_at": task.created_at,
         "started_at": task.started_at,
         "ended_at": task.ended_at,
@@ -80,9 +83,13 @@ def create_task(
     chapter_ids: list[str],
     config: GenerationConfig,
     now: str,
+    settings: Settings | None = None,
 ) -> Task:
-    """创建任务：校验归属/配置/已保存 Key（无 → API_KEY_NOT_SET 422）→ 建 Task（RUNNING
-    + stage=GENERATING + JSON 快照）→ 规划知识点（同事务）→ 返回 Task 视图。
+    """创建任务：校验归属/配置/已保存 Key（无 → API_KEY_NOT_SET 422）→ 预算硬上限
+    （spec §10，超限 → VALIDATION_ERROR 不创建）→ 建 Task（PENDING + stage=PLANNING
+    + 创建快照 JSON，started_at/total_batch_count 空）；规划由 worker CAS 接管（§6.1），
+    本函数不再同事务规划。settings 注入定式同 executor：显式参数 > session.info["settings"]
+    > Settings() 环境缺省。
     """
     validate_config(config)
     pdf = session.get(PdfFile, file_id)
@@ -113,31 +120,35 @@ def create_task(
     )
     if key_row is None:
         raise AppError(ErrorCode.API_KEY_NOT_SET, "未保存可用 API Key")
-    # 决策：创建即 RUNNING（后台循环立即处理）；规划同步完成（stage 直接 GENERATING，异步生成）
+    # 预算硬上限（spec §10）：章节数 × 3 × 密度 > max_generation_units_per_task → 直接拒绝，
+    # 不创建任务、不调用 Planner（Planner 合法输出经子配额截断不可能突破该上限）
+    if settings is None:
+        injected = session.info.get("settings")
+        if isinstance(injected, Settings):
+            settings = injected
+        else:
+            settings = Settings()
+    budget = task_unit_budget(len(chapter_ids), config.quantity_tendency)
+    if budget > settings.max_generation_units_per_task:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "生成单元预算超出上限")
+    # 创建即 PENDING+PLANNING（spec §6.1）：只落创建快照，started_at/total_batch_count 留空，
+    # 规划 worker 首次 CAS 接管时原子刷新快照并转 RUNNING+PLANNING
     task = Task(
         task_id=_uuid4(),
         device_id=device_id,
         file_id=file_id,
         deck_id=deck_id,
-        status="RUNNING",
-        stage="GENERATING",
+        status="PENDING",
+        stage="PLANNING",
         selected_chapters=json.dumps(chapter_snapshot, ensure_ascii=False),
         generation_config=json.dumps(config.model_dump(), ensure_ascii=False),
         generated_card_count=0,
         resumable=0,
         created_at=now,
-        started_at=now,
         updated_at=now,
     )
     session.add(task)
     session.flush()
-    kps = plan_knowledge_points(
-        session,
-        task_id=task.task_id,
-        chapter_ids=chapter_ids,
-        quantity_tendency=config.quantity_tendency,
-    )
-    session.add_all(kps)
     return task
 
 

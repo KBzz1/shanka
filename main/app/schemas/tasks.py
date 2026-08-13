@@ -58,6 +58,8 @@ class Task(BaseModel):
     resumable: bool
     failure_stage: str | None  # PLANNING/GENERATING/WRITE_BACK
     error_code: str | None
+    completion_reason: str | None  # NO_GENERATION_UNITS 等空单元三分支（spec §6.4）
+    skipped_planning_group_count: int  # 部分规划组失败被跳过的组数（spec §6.4）
     created_at: str
     started_at: str | None
     ended_at: str | None
