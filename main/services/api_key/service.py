@@ -7,7 +7,7 @@ get_status 只返回 DB 状态（不解密不重校验——校验是写路径�
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from infra.db.models import ApiKey
@@ -40,10 +40,21 @@ def save_key(
         )
         session.add(row)
     else:
-        row.encrypted_key = encrypted
-        row.status = status
-        row.masked_key = masked(api_key)
-        row.updated_at = now
+        # P3-T2：api_keys 主键为 user_id（旧行 user_id 为 NULL），ORM 对 NULL 主键行的
+        # UPDATE 抛 FlushError（persistence._collect_update_commands）——覆盖路径改用
+        # Core 条件更新，业务语义不变（同 device_id 覆盖加密 Key/状态，见 models.ApiKey
+        # 的 mapper 注释与 P3-T2 报告）。
+        session.execute(
+            update(ApiKey)
+            .where(ApiKey.device_id == device_id)
+            .values(
+                encrypted_key=encrypted,
+                status=status,
+                masked_key=masked(api_key),
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
     return {"status": status, "masked_key": masked(api_key), "updated_at": now}
 
 

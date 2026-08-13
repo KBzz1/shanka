@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -36,12 +37,33 @@ class Device(Base):
 
 
 class ApiKey(Base):
-    """2.2 api_keys：一设备一 Key，加密存储（V3B 使用）。"""
+    """2.2 api_keys：一用户一 Key（V2.2），加密存储（V3B 使用）。
+
+    V2.2：user_id 为数据主体隔离键与主键；device_id 为旧数据遗留列（新写入不再生成）。
+    SQLite rowid 表非 INTEGER 主键允许 NULL——user_id 主键 nullable=True 合法，旧行
+    （user_id 为 NULL）可保留，多 NULL 不冲突。
+
+    SQLAlchemy ORM 限制（实测，见 P3-T2 报告）：以 user_id 为 mapper 身份键时，旧行
+    （user_id 为 NULL）经 ORM 查询被静默跳过、ORM 写入/更新抛 FlushError。因此
+    __mapper_args__ 把 mapper 身份键改写为 device_id——v2.1 设备域行（device_id 非空）
+    的读取/写入/更新继续走 ORM 原路径；元数据主键仍为 user_id（与 database-design 2.2
+    及迁移 DDL 一致，守卫 2/alembic check 不受影响）。用户域行（device_id 为 NULL）
+    对 ORM 不可见，用户侧写入落地时应改为 Core 直写或重新设计映射。
+    """
 
     __tablename__ = "api_keys"
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", name="pk_api_keys"),
+        CheckConstraint(
+            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_api_keys_owner_domain"
+        ),
+    )
+    # SQLAlchemy 声明式协议读取类属性，仅初始化一次、不可变使用（RUF012 豁免）
+    __mapper_args__ = {"primary_key": ["device_id"]}  # noqa: RUF012
 
-    device_id: Mapped[str] = mapped_column(
-        String, ForeignKey("devices.device_id", ondelete="CASCADE"), primary_key=True
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
+    device_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("devices.device_id", ondelete="CASCADE"), nullable=True
     )
     encrypted_key: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(
@@ -67,8 +89,10 @@ class PdfFile(Base):
     )
 
     file_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    # DB 已可空（遗留列）；v2.1 写入仍保证非空，用户侧写入落地后新行只写 user_id
+    device_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("devices.device_id"), nullable=True
+    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
     storage_key: Mapped[str] = mapped_column(String, nullable=False)
@@ -110,7 +134,8 @@ class Task(Base):
     )
 
     task_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
+    # DB 已可空（遗留列），注解暂留非空：v2.1 调用链（create_attempt 等）按非空 str 使用
+    # task.device_id，收敛需随用户侧写入落地同步收紧调用链，超出本任务边界（报告已注明）
     device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     file_id: Mapped[str | None] = mapped_column(
@@ -227,8 +252,10 @@ class Deck(Base):
     )
 
     deck_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    # DB 已可空（遗留列）；v2.1 写入仍保证非空，用户侧写入落地后新行只写 user_id
+    device_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("devices.device_id"), nullable=True
+    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)  # MANUAL/IMPORTED
@@ -263,8 +290,8 @@ class Card(Base):
     deck_id: Mapped[str] = mapped_column(
         String, ForeignKey("decks.deck_id", ondelete="CASCADE"), nullable=False
     )
-    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
-    device_id: Mapped[str] = mapped_column(String, nullable=True)
+    # DB 已可空（遗留列，与 deck 冗余一致）；v2.1 写入仍保证非空
+    device_id: Mapped[str | None] = mapped_column(String, nullable=True)
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     source: Mapped[str] = mapped_column(String, nullable=False)  # GENERATED/MANUAL/IMPORTED
     position: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -316,7 +343,7 @@ class ReviewState(Base):
 
 
 class ReviewEvent(Base):
-    """2.11 review_events：不可变复习事件（UNIQUE(device_id, client_event_id)）。
+    """2.11 review_events：不可变复习事件（UNIQUE(device_id, client_event_id) + UNIQUE(user_id, client_event_id)）。
 
     V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
     """
@@ -327,14 +354,16 @@ class ReviewEvent(Base):
             "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_review_events_owner_domain"
         ),
         UniqueConstraint("device_id", "client_event_id", name="uq_review_events_device_client"),
+        UniqueConstraint("user_id", "client_event_id", name="uq_review_events_user_client"),
         Index("ix_review_events_device_reviewed", "device_id", "reviewed_at"),
         Index("ix_review_events_user_reviewed", "user_id", "reviewed_at"),
         Index("ix_review_events_card_id", "card_id"),
     )
 
     review_event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    device_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("devices.device_id"), nullable=True
+    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     card_id: Mapped[str] = mapped_column(
         String, ForeignKey("cards.card_id", ondelete="CASCADE"), nullable=False
@@ -347,15 +376,41 @@ class ReviewEvent(Base):
 
 
 class IdempotencyKey(Base):
-    """2.12 idempotency_keys：幂等（复合主键 device_id+path+key；F1 Task 8 增加 request_body_hash 列）。"""
+    """2.12 idempotency_keys：幂等（V2.2 主键 user_id+path+key；遗留唯一 device_id+path+key）。
+
+    V2.2：主键重建为 (user_id, path, idempotency_key)，user_id 为数据主体隔离键；
+    device_id 为旧数据遗留列（新写入不再生成）；遗留 UNIQUE (device_id, path,
+    idempotency_key) 保留（旧设备域幂等缓存不跨身份空间重放，SQLite 多 NULL 不冲突）。
+    SQLite rowid 表非 INTEGER 主键允许 NULL——user_id 主键 nullable=True 合法，旧行
+    （user_id 为 NULL）可保留。注意：两个不同设备的旧行若 (path, idempotency_key) 相同，
+    新主键 (NULL, path, idempotency_key) 会冲突——迁移将显式失败而非丢行（幂等键为
+    随机 UUID，跨设备同键实际不存在）。
+
+    SQLAlchemy ORM 限制（实测，见 P3-T2 报告）：复合主键含 NULL 时需
+    allow_partial_pks=True，否则旧行（user_id 为 NULL）经 ORM 查询被静默跳过、
+    写入抛 FlushError。v2.1 路径只做查询与插入（无更新/删除），allow_partial_pks
+    下全部可用；更新/删除路径（若有）对 user_id 为 NULL 的行仍会抛 FlushError。
+    """
 
     __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        PrimaryKeyConstraint("user_id", "path", "idempotency_key", name="pk_idempotency_keys"),
+        UniqueConstraint(
+            "device_id", "path", "idempotency_key", name="uq_idempotency_keys_device_path"
+        ),
+        CheckConstraint(
+            "device_id IS NOT NULL OR user_id IS NOT NULL",
+            name="ck_idempotency_keys_owner_domain",
+        ),
+    )
+    # SQLAlchemy 声明式协议读取类属性，仅初始化一次、不可变使用（RUF012 豁免）
+    __mapper_args__ = {"allow_partial_pks": True}  # noqa: RUF012
 
-    # 复合主键列序对齐 database-design 2.12 `PRIMARY KEY (device_id, path, idempotency_key)`：
-    # SQLite 复合主键前导列为 device_id，device_id 过滤查询可命中 rowid 索引。
-    device_id: Mapped[str] = mapped_column(String, primary_key=True)
-    path: Mapped[str] = mapped_column(String, primary_key=True)
-    idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
+    # 复合主键列序对齐 database-design 2.12 `PRIMARY KEY (user_id, path, idempotency_key)`。
+    user_id: Mapped[str | None] = mapped_column(String, primary_key=True, nullable=True)
+    device_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    path: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     response_status: Mapped[int] = mapped_column(Integer, nullable=False)
     response_body: Mapped[str] = mapped_column(Text, nullable=False)  # JSON 快照
     request_body_hash: Mapped[str] = mapped_column(
@@ -410,8 +465,10 @@ class LlmCallAttempt(Base):
     )
 
     call_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # v2.1 写入仍保证 device_id 非空（用户侧写入落地后转 user-only，届时收敛注解）
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    # DB 已可空（遗留列）；v2.1 写入仍保证非空，用户侧写入落地后新行只写 user_id
+    device_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("devices.device_id"), nullable=True
+    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     scope_type: Mapped[str] = mapped_column(String, nullable=False)  # TASK/CARD
     scope_id: Mapped[str] = mapped_column(String, nullable=False)
