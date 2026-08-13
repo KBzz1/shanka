@@ -29,6 +29,23 @@ class LoggingTest(unittest.TestCase):
             self.assertEqual(line["status"], 200)
             self.assertIn("timestamp", line)
 
+    def test_sensitive_fields_masked(self) -> None:
+        """敏感字段统一脱敏:Authorization -> Bearer ***;password/token/api_key -> ***。"""
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "test.log"
+            shlogging.init_logger("run-1", path)
+            shlogging.event(
+                "INFO", "x",
+                authorization="Bearer tok-abc", password="pw-abc",
+                access_token="tok-abc", api_key="sk-abc", method="GET",
+            )
+            line = json.loads(path.read_text().strip())
+            self.assertEqual(line["authorization"], "Bearer ***")
+            self.assertEqual(line["password"], "***")
+            self.assertEqual(line["access_token"], "***")
+            self.assertEqual(line["api_key"], "***")
+            self.assertEqual(line["method"], "GET")  # 非敏感字段原样
+
     def test_append_mode(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "test.log"

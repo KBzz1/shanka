@@ -2,7 +2,9 @@
 
 事件字段:必选 timestamp/level/run_id/message;请求事件另含
 suite/scenario/step/request_id/device_id/method/path/status/duration_ms/error_code。
-脱敏纪律:调用方不得把 API Key 明文、设备 ID 混入 message 或附加字段。
+脱敏纪律(红线 4):敏感字段统一自动脱敏——Authorization -> Bearer ***,password/token/
+api_key 等 -> ***;调用方不得把明文凭据混入 message(register/login 等敏感路径由
+client 直接不落事件)。
 """
 
 from __future__ import annotations
@@ -21,6 +23,21 @@ _scenario = ""
 _device_id = ""
 _file: TextIO | None = None
 _console = False
+
+_SENSITIVE_FIELDS = frozenset({"authorization", "token", "access_token", "password", "api_key", "secret"})
+_MASK = "***"
+
+
+def redact_field(key: str, value: Any) -> Any:
+    """字段级脱敏(client 与 logging 统一):Authorization -> Bearer ***;其余敏感字段 -> ***。"""
+    if not isinstance(value, str) or not value:
+        return value
+    k = key.lower()
+    if k == "authorization" and value.lower().startswith("bearer "):
+        return "Bearer ***"
+    if k in _SENSITIVE_FIELDS or any(s in k for s in ("token", "password", "secret")):
+        return _MASK
+    return value
 
 
 def init_logger(run_id: str, log_path: Path | None = None, console: bool = False) -> None:
@@ -54,7 +71,8 @@ def event(level: str, message: str, **fields: Any) -> None:
     if _device_id:
         row["device_id"] = _device_id
     for k, v in fields.items():
-        row[k] = v if isinstance(v, (str, int, float, bool, type(None))) else str(v)
+        v = v if isinstance(v, (str, int, float, bool, type(None))) else str(v)
+        row[k] = redact_field(k, v)
     text = json.dumps(row, ensure_ascii=False)
     with _lock:
         if _file is not None:

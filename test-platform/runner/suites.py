@@ -42,12 +42,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--suite", default="quick", choices=list(SUITES))
     ap.add_argument("--scenario", default=None, help="只跑指定场景(NAME)")
     ap.add_argument("--confirm-cost", action="store_true", help="确认 LLM 调用成本(合计 > 阈值时必需)")
-    ap.add_argument("--confirm-prod", action="store_true", help="确认操作生产环境")
-    ap.add_argument("--device-id", default=None, help="固定 X-Device-ID(所有场景共用)")
+    ap.add_argument("--confirm-prod", action="store_true", help="确认操作生产环境(禁止自动注册)")
     args = ap.parse_args(argv)
 
     if not gate_ok(environment=args.environment, confirm_prod=args.confirm_prod):
         print("拒绝执行:生产环境需要 --confirm-prod", file=sys.stderr)
+        return 1
+
+    # 凭据只从环境变量读取(不进 CLI/console/JSONL);缺失报错退出,不自动注册
+    try:
+        environments.credentials()
+    except environments.MissingCredentialsError as exc:
+        print(f"拒绝执行: {exc}", file=sys.stderr)
         return 1
 
     scenarios = SUITES[args.suite]
@@ -69,10 +75,8 @@ def main(argv: list[str] | None = None) -> int:
     failed = 0
     for mod in scenarios:
         print(f"\n===== 场景 {mod.NAME} ({mod.SUITE}) =====")
-        shlogging.set_context(suite=mod.SUITE, scenario=mod.NAME, device_id=args.device_id or "")
+        shlogging.set_context(suite=mod.SUITE, scenario=mod.NAME, device_id="")
         args_list = ["--base-url", base]
-        if args.device_id:
-            args_list += ["--device-id", args.device_id]
         failed += mod.main(args_list)
     print(f"\n套件 {args.suite} 完成, 失败步骤 {failed}, run_id={run_id}")
     return 1 if failed else 0
