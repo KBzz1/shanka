@@ -18,10 +18,11 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Batch, Card, KnowledgePoint, Task
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
+from services.generation.batches import plan_batches
 from services.tasks.executor import process_running_tasks
 from services.tasks.service import create_task
 
@@ -44,13 +45,18 @@ def _uuid() -> str:
 
 
 def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "COMPACT") -> str:
-    """种子：PENDING+PLANNING 任务直接转 RUNNING+GENERATING 并预建知识点与批次。
+    """种子：PENDING+PLANNING 任务直接转 RUNNING+GENERATING + 页文本 + 生成单元
+    （锚定难度/卡型/来源页）+ 按单元建批（generation_unit_id 必填——LLM 升级管线
+    spec §7 批=单元，1 单元 1 批）。
 
     T8 起 create_task 不再规划知识点（PENDING+PLANNING）；生成路径测试绕过规划
     worker，聚焦批次语义——T9 新增的规划执行路径由 test_planning_executor.py 覆盖。
+    单元数 = 每章基础 3 × 密度系数（COMPACT=3 / BALANCED=6）——旧规划配额语义，
+    测试直接构造；目标难度按 0.4/0.4/0.2 循环锚定。
     """
     from infra.db.models import ApiKey, Chapter, Device, PdfFile
     from services.decks.service import create_deck
+    from services.pdf.text_chunks import persist_text_chunks
 
     # 守卫插入：同 device 二次建任务（防回退用例）复用已存在的 devices/api_keys 行
     if session.get(Device, device_id) is None:
@@ -83,6 +89,12 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
             )
         )
         session.flush()
+    persist_text_chunks(
+        session,
+        file_id=pdf.file_id,
+        pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2)],
+        now="2026-08-11T00:00:00.000Z",
+    )
     task = create_task(
         session,
         device_id=device_id,
@@ -97,46 +109,65 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
     )
     task.status = "RUNNING"
     task.stage = "GENERATING"
-    # 知识点数 = 每章基础 3 × 密度系数（COMPACT=3 / BALANCED=6）——旧规划语义，测试直接构造
+    task.updated_at = "2026-08-11T00:00:00.000Z"
+    session.flush()
+    chunks = session.scalars(
+        select(TextChunk).where(TextChunk.file_id == pdf.file_id).order_by(TextChunk.page_number)
+    ).all()
+    diffs = ["BASIC", "UNDERSTANDING", "APPLICATION"]
     n_kps = {"COMPACT": 3, "BALANCED": 6}.get(quantity_tendency, 3)
     kps = [
         KnowledgePoint(
             knowledge_point_id=str(uuid.uuid4()),
             task_id=task.task_id,
             chapter_id=ch.chapter_id,
-            source_chunk_id="c1",
+            source_chunk_id=chunks[0].chunk_id,  # 兼容投影（spec §3.1）
             topic=f"知识点{i + 1}",
             priority=i + 1,
             status="PENDING",
+            target_difficulty=diffs[i % len(diffs)],
+            card_type="QUESTION",
+            source_chunk_ids=json.dumps([c.chunk_id for c in chunks], ensure_ascii=False),
         )
         for i in range(n_kps)
     ]
     session.add_all(kps)
     session.flush()
-    # 批次 = 每 3 知识点一批（旧 batch_size 语义，V5B 批次状态机测试的基座）
-    n_batches = (n_kps + 2) // 3
-    for b in range(n_batches):
-        session.add(
-            Batch(
-                batch_id=str(uuid.uuid4()),
-                task_id=task.task_id,
-                batch_index=b + 1,
-                status="PENDING",
-                generated_item_ids="[]",
-                retry_count=0,
-                created_at="2026-08-11T00:00:00.000Z",
-            )
-        )
-    task.total_batch_count = n_batches
-    task.completed_batch_count = 0
+    # 批次 = 单元（spec §7：1 单元 1 批，generation_unit_id 显式外键）
+    plan_batches(
+        session, task_id=task.task_id, generation_units=kps, now="2026-08-11T00:00:00.000Z"
+    )
     session.commit()
     return task.task_id
 
 
-def _valid_cards_json(n: int = 3) -> str:
-    """每批 3 张合法卡（= batch_size 默认值）：3 知识点任务 → 1 批 → 3 卡（每知识点一张）。"""
+def _valid_cards_json(n: int = 1) -> str:
+    """每批 1 张合法卡（LLM 升级管线 spec §7：批=单元，generator-output schema v2
+    maxItems=1）——3 单元任务 → 3 批 → 3 卡（每单元一张）。"""
     cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(n)]
     return json.dumps({"cards": cards}, ensure_ascii=False)
+
+
+def _scoring_content(request: httpx.Request) -> str:
+    """<SCORING_INPUT> 提取 items → ID 守恒的确定性分数（总分代码计算 9）。"""
+    body = json.loads(request.content)
+    user = body["messages"][-1]["content"]
+    payload = json.loads(user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0])
+    return json.dumps(
+        {
+            "scores": [
+                {
+                    "generation_item_id": item["generation_item_id"],
+                    "evidence_score": 2,
+                    "correctness_score": 3,
+                    "difficulty_score": 2,
+                    "learning_value_score": 2,
+                }
+                for item in payload["items"]
+            ]
+        },
+        ensure_ascii=False,
+    )
 
 
 def _seed_planning_task(session: Session, *, device_id: str) -> str:
@@ -198,11 +229,16 @@ def _seed_planning_task(session: Session, *, device_id: str) -> str:
 
 
 def _client_factory(api_key: str) -> DeepSeekClient:
+    """mock transport 分派：<SCORING_INPUT> → 分数；其余（<GENERATOR_INPUT>）→ 每批 1 卡。"""
+
     def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user = body["messages"][-1]["content"]
+        content = _scoring_content(request) if "<SCORING_INPUT>" in user else _valid_cards_json()
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": _valid_cards_json()}}],
+                "choices": [{"message": {"content": content}}],
                 "usage": {
                     "prompt_tokens": 10,
                     "completion_tokens": 5,
@@ -291,8 +327,9 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
     """F-2 系统级失败路径：第 2 批 transport 401 → adapter 抛 API_KEY_UNAVAILABLE →
     任务 FAILED + error_code + resumable=0 + 已入库卡保留 + generation_tasks_total{FAILED} 计数。
 
-    BALANCED 密度 → 6 知识点 → 2 批（batch_size=3）：第 1 批成功（3 卡入库），
-    第 2 批 401（Key 失效）→ executor 上抛 AppError → _fail_task（4.1 系统级失败）。
+    BALANCED 密度 → 6 单元 → 6 批（批=单元）：第 1 批成功（1 卡入库），
+    第 2 批 401（Key 失效，retryable=False）→ executor 上抛 AppError → _fail_task
+    （4.1 系统级失败）。
     """
     device = _uuid()
     with session_factory() as session:
@@ -331,7 +368,7 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
     assert task.failure_stage == "GENERATING"
     assert task.resumable == 0
     assert task.ended_at == task.updated_at
-    assert len(cards) == 3  # 第 1 批已入库卡保留（4.1）
+    assert len(cards) == 1  # 第 1 批已入库卡保留（4.1）
     assert after - before == 1.0  # 8.3：系统级失败也计数
 
 
@@ -402,8 +439,16 @@ def test_executor_cancel_between_batches_preserves_cancelled(
     assert calls == 1  # 批 2 未被抢占 → 无第二次 chat 调用
     assert task.status == "CANCELLED"  # 不被 COMPLETED 覆盖
     assert task.ended_at == "2026-08-11T00:00:00.000Z"  # 取消侧 ended_at 不被覆盖
-    assert [b.status for b in batches] == ["SUCCEEDED", "PENDING"]  # 批 2 未 claim（保留 PENDING）
-    assert len(cards) == 3  # 仅批 1 卡入库（BALANCED 6 知识点 → 2 批 × 3 卡）
+    # 批 2-6 未 claim（保留 PENDING；BALANCED 6 单元 → 6 批，批=单元）
+    assert [b.status for b in batches] == [
+        "SUCCEEDED",
+        "PENDING",
+        "PENDING",
+        "PENDING",
+        "PENDING",
+        "PENDING",
+    ]
+    assert len(cards) == 1  # 仅批 1 卡入库（BALANCED 6 单元 → 6 批 × 每批 1 卡）
 
 
 def test_executor_full_flow_plan_then_generate(

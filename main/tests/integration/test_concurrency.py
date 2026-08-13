@@ -16,11 +16,11 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Batch, Card, KnowledgePoint, Task
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
-from services.generation.batches import process_next_batch
+from services.generation.batches import plan_batches, process_next_batch
 from services.tasks.executor import process_running_tasks
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
@@ -41,15 +41,24 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "COMPACT") -> str:
-    """种子：RUNNING+GENERATING 任务 + 知识点 + 批次（每 3 知识点一批，旧 batch_size 语义）。
+def _seed_task(
+    session: Session,
+    *,
+    device_id: str,
+    quantity_tendency: str = "COMPACT",
+    n_units: int | None = None,
+) -> str:
+    """种子：RUNNING+GENERATING 任务 + 页文本 + 生成单元（锚定难度/卡型/来源页）+
+    按单元建批（spec §7 批=单元，generation_unit_id 必填）。
 
     T8 起 create_task 不再规划知识点（PENDING+PLANNING）；V5B 并发/心跳测试聚焦
-    生成路径，直接构造知识点与批次绕过规划 worker（规划路径由 test_planning_executor.py
+    生成路径，直接构造单元与批次绕过规划 worker（规划路径由 test_planning_executor.py
     覆盖）。test 1 直接调 process_next_batch，不经过 executor 的 plan 路径。
+    n_units 覆盖单元数（test 1 单批次抢占场景用 1 单元 = 1 批）。
     """
     from infra.db.models import ApiKey, Chapter, Device, PdfFile
     from services.decks.service import create_deck
+    from services.pdf.text_chunks import persist_text_chunks
     from services.tasks.service import create_task
 
     # FK 前置守卫：devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
@@ -88,6 +97,12 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
             )
         )
         session.flush()
+    persist_text_chunks(
+        session,
+        file_id=pdf.file_id,
+        pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2)],
+        now="2026-08-10T00:00:00.000Z",
+    )
     task = create_task(
         session,
         device_id=device_id,
@@ -102,52 +117,76 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
     )
     task.status = "RUNNING"
     task.stage = "GENERATING"
-    n_kps = {"COMPACT": 3, "BALANCED": 6}.get(quantity_tendency, 3)
+    task.updated_at = "2026-08-10T00:00:00.000Z"
+    session.flush()
+    chunks = session.scalars(
+        select(TextChunk).where(TextChunk.file_id == pdf.file_id).order_by(TextChunk.page_number)
+    ).all()
+    diffs = ["BASIC", "UNDERSTANDING", "APPLICATION"]
+    n_kps = (
+        n_units if n_units is not None else {"COMPACT": 3, "BALANCED": 6}.get(quantity_tendency, 3)
+    )
     kps = [
         KnowledgePoint(
             knowledge_point_id=str(uuid.uuid4()),
             task_id=task.task_id,
             chapter_id=ch.chapter_id,
-            source_chunk_id="c1",
+            source_chunk_id=chunks[0].chunk_id,  # 兼容投影（spec §3.1）
             topic=f"知识点{i + 1}",
             priority=i + 1,
             status="PENDING",
+            target_difficulty=diffs[i % len(diffs)],
+            card_type="QUESTION",
+            source_chunk_ids=json.dumps([c.chunk_id for c in chunks], ensure_ascii=False),
         )
         for i in range(n_kps)
     ]
     session.add_all(kps)
     session.flush()
-    n_batches = (n_kps + 2) // 3
-    for b in range(n_batches):
-        session.add(
-            Batch(
-                batch_id=str(uuid.uuid4()),
-                task_id=task.task_id,
-                batch_index=b + 1,
-                status="PENDING",
-                generated_item_ids="[]",
-                retry_count=0,
-                created_at="2026-08-10T00:00:00.000Z",
-            )
-        )
-    task.total_batch_count = n_batches
-    task.completed_batch_count = 0
+    plan_batches(
+        session, task_id=task.task_id, generation_units=kps, now="2026-08-10T00:00:00.000Z"
+    )
     session.commit()
     return task.task_id
 
 
-def _valid_cards_json(n: int = 3) -> str:
-    """每批 3 张合法卡（= batch_size 默认值）：3 知识点任务 → 1 批 → 3 卡（每知识点一张）。"""
+def _valid_cards_json(n: int = 1) -> str:
+    """每批 1 张合法卡（spec §7：批=单元，generator-output schema v2 maxItems=1）。"""
     cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(n)]
     return json.dumps({"cards": cards}, ensure_ascii=False)
 
 
+def _scoring_content(request: httpx.Request) -> str:
+    """<SCORING_INPUT> 提取 items → ID 守恒的确定性分数（总分代码计算 9）。"""
+    body = json.loads(request.content)
+    user = body["messages"][-1]["content"]
+    payload = json.loads(user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0])
+    return json.dumps(
+        {
+            "scores": [
+                {
+                    "generation_item_id": item["generation_item_id"],
+                    "evidence_score": 2,
+                    "correctness_score": 3,
+                    "difficulty_score": 2,
+                    "learning_value_score": 2,
+                }
+                for item in payload["items"]
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
 def _client() -> DeepSeekClient:
     def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user = body["messages"][-1]["content"]
+        content = _scoring_content(request) if "<SCORING_INPUT>" in user else _valid_cards_json()
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": _valid_cards_json()}}],
+                "choices": [{"message": {"content": content}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1},
             },
         )
@@ -160,10 +199,14 @@ def _client_factory(api_key: str) -> DeepSeekClient:
 
 
 def test_concurrency_two_workers_single_effect(session_factory: Callable[[], Session]) -> None:
-    """两 worker 并发处理同任务：批次条件更新抢占 → 单执行者（无双处理）。"""
+    """两 worker 并发处理同任务：批次条件更新抢占 → 单执行者（无双处理）。
+
+    1 单元 = 1 批（spec §7）：worker A 抢占唯一批次并完成后，worker B 无
+    PENDING/FAILED 批次可取 → 0（旧 batch_size 语义下 3 知识点 = 1 批同构）。
+    """
     device = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, device_id=device)
+        task_id = _seed_task(session, device_id=device, n_units=1)
     client = _client()
     with session_factory() as session:
         # worker A 取批次（PENDING→PROCESSING）
@@ -201,9 +244,10 @@ def test_concurrency_batch_commit_survives_crash(
     """批次事务粒度：批 2 处理中崩溃（SystemExit）→ 批 1 已落库（卡+心跳+SUCCEEDED）。
 
     崩溃模拟：mock transport 第 2 次 chat 抛 SystemExit（BaseException——绕过 executor 的
-    except Exception）→ 批 2 的 claim/心跳同事务回滚，任务保持 RUNNING；批 1 的
-    批次状态+游标+心跳已随批次事务提交（与单次最终 commit 的差异点——Task 3 恢复语义：
-    已完成批次保留、未完成批次 PENDING 可恢复）。
+    except Exception）→ 批 2 的 claim/STARTED 已随调用前事务提交（spec §9），批次保持
+    PROCESSING、任务保持 RUNNING；批 1 的批次状态+游标+心跳已随批次事务提交
+    （与单次最终 commit 的差异点——Task 3 恢复语义：已完成批次保留、未完成批次经
+    心跳超时孤儿恢复后重试）。
     """
     device = _uuid()
     with session_factory() as session:
@@ -247,5 +291,14 @@ def test_concurrency_batch_commit_survives_crash(
     assert task.status == "RUNNING"  # 终态未落库（崩溃发生在 COMPLETED 之前）
     assert task.updated_at is not None and created_at is not None
     assert task.updated_at > created_at  # 批 1 心跳已随批提交
-    assert [b.status for b in batches] == ["SUCCEEDED", "PENDING"]  # 批 1 已提交；批 2 claim 回滚
-    assert len(cards) == 3  # 批 1 卡片已提交（崩溃不丢已完成批次）
+    # 批 1 已提交；批 2 抢占+STARTED 已提交（spec §9 调用前占位）→ PROCESSING 保留
+    # （恢复语义：心跳超时孤儿恢复将其复位 FAILED 后按账本重试——test_ledger 同款）
+    assert [b.status for b in batches] == [
+        "SUCCEEDED",
+        "PROCESSING",
+        "PENDING",
+        "PENDING",
+        "PENDING",
+        "PENDING",
+    ]
+    assert len(cards) == 1  # 批 1 卡片已提交（崩溃不丢已完成批次）

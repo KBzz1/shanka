@@ -376,8 +376,10 @@ def _task_with_cards(
 ) -> tuple[Task, list[Card], list[KnowledgePoint]]:
     task = session.get(Task, task_id)
     assert task is not None and task.deck_id is not None
-    cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
-    units = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
+    cards = list(session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all())
+    units = list(
+        session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
+    )
     return task, cards, units
 
 
@@ -824,3 +826,103 @@ def test_scan_takes_over_scoring_orphan(session_factory: Callable[[], Session]) 
     assert [a.status for a in attempts] == ["UNKNOWN", "SUCCESS"]
     scored = [c for c in cards if c.rubric_total_score is not None]
     assert len(scored) == 1  # 仅未尝试组写回评分
+
+
+# ---------- T11 Minor：字符上限拆组 / 空组 / 调用中取消 ----------
+
+
+def test_plan_groups_split_by_input_char_cap(session_factory: Callable[[], Session]) -> None:
+    """scoring_max_input_chars 双限之一：BASIC 合批受输入字符上限再拆。6 单元同层
+    （共享 2 页原文）：每组重建页开销后 2 卡 = 1135 字符 ≤ 1200、3 卡 = 1507 > 1200
+    → 组大小 [2, 2, 2]（card 上限 12 未触达，仅字符限拆分——确定性）。"""
+    from services.generation.scoring import plan_scoring_groups
+
+    device = _uuid()
+    settings = Settings(
+        api_key_encryption_key="aa" * 32,
+        scoring_max_input_chars=1200,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    with session_factory() as session:
+        task_id = _seed_scoring_task(
+            session, device_id=device, difficulties=["BASIC"], n_units=6, settings=settings
+        )
+        task = session.get(Task, task_id)
+        assert task is not None
+        groups = plan_scoring_groups(session, task=task, settings=settings)
+    assert [len(g.card_ids) for g in groups] == [2, 2, 2]
+    assert all(len(g.card_ids) <= settings.scoring_max_cards_per_call for g in groups)
+    assert len({g.operation_key for g in groups}) == len(groups)  # 组 key 唯一
+
+
+def test_scoring_group_entries_vanished_fails_no_call(
+    session_factory: Callable[[], Session],
+) -> None:
+    """组数据消失（并发删除）：plan 后清空批次 generated_item_ids → 组 entries 空 →
+    STARTED+FAILED 同事务记账、0 次调用（恢复按账本跳过——spec §8 已尝试游标）。"""
+    from infra.llm.prompts import asset_versions
+    from services.generation.scoring import _run_scoring_group, plan_scoring_groups
+
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+        task = session.get(Task, task_id)
+        assert task is not None
+        groups = plan_scoring_groups(session, task=task, settings=_SETTINGS)
+        assert len(groups) == 1
+        # 并发删除：批次 generated_item_ids 清空（等价卡已消失）→ 组数据失效
+        batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
+        batch.generated_item_ids = "[]"
+        session.commit()
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return _ok(_scoring_response_from_request(request))
+
+        _run_scoring_group(
+            session,
+            task,
+            groups[0],
+            settings=_SETTINGS,
+            client=_client(handler),
+            versions=asset_versions(),
+        )
+        session.commit()
+    assert calls == 0  # 空组不发调用
+    with session_factory() as session:
+        attempts = _scoring_attempts(session, task_id=task_id)
+    assert [a.status for a in attempts] == ["FAILED"]
+    assert attempts[0].error_code == "GENERATION_FAILED"
+
+
+def test_scoring_cancel_during_call_no_writeback(session_factory: Callable[[], Session]) -> None:
+    """评分 chat 进行中（事务外）另一连接取消 → 回写守卫（status!=RUNNING）→ 卡评分
+    留 NULL、账本 STARTED 保留（恢复转 UNKNOWN）、最终条件更新不覆盖 CANCELLED。"""
+    from services.generation.scoring import run_scoring_stage
+
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # chat 进行中（事务外）注入取消（另一连接——cancel handler 同款写入）
+            with session_factory() as other:
+                task_row = other.get(Task, task_id)
+                assert task_row is not None
+                task_row.status = "CANCELLED"
+                task_row.ended_at = _NOW
+                task_row.updated_at = _NOW
+                other.commit()
+            return _ok(_scoring_response_from_request(request))
+
+        task, cards, _ = _task_with_cards(session, task_id=task_id)
+        run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
+        session.commit()
+    with session_factory() as session:
+        task, cards, _ = _task_with_cards(session, task_id=task_id)
+        attempts = _scoring_attempts(session, task_id=task_id)
+    assert task.status == "CANCELLED"  # 不被最终条件更新覆盖
+    assert cards[0].rubric_total_score is None  # 不写回（守卫）
+    assert [a.status for a in attempts] == ["STARTED"]  # 留给恢复转 UNKNOWN（§9）

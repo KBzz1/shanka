@@ -799,16 +799,7 @@ def test_planning_fingerprint_drift_fails_task(
     （FAILED + PLANNING + 兜底错误码），fail fast 不发调用、不复用旧结果。"""
     device = _uuid()
     with session_factory() as session:
-        task_id, chapter_id, file_id = _seed_planning_task(session, device_id=device)
-        from infra.db.models import TextChunk
-
-        pages = list(
-            session.scalars(
-                select(TextChunk)
-                .where(TextChunk.file_id == file_id)
-                .order_by(TextChunk.page_number)
-            ).all()
-        )
+        task_id, chapter_id, _ = _seed_planning_task(session, device_id=device)
         op_key = f"planning:{chapter_id}:0"
         # 用错误 fingerprint 预置一次 SUCCESS（模拟规划输入漂移：分组/配额/版本变化）
         attempt = create_attempt(

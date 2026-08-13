@@ -3,22 +3,35 @@
 设备中间件先于路由运行（main.py 中间件运行序），带合法 X-Device-ID 才到达路由
 匹配层。brief 指定 404，但 /tasks/{task_id}（GET 详情）路径模式仍匹配
 /tasks/estimate 的路径段，Starlette 对"路径存在但方法不存在"返回 405 ——
-405 即端点已删的运行时事实（404 需 GET 详情路由也不存在才能出现）。
+405 即端点已删的运行时事实（404 需 GET 详情路由也不存在才能出现）；
+断言收 {404, 405} 集合（两种运行时事实都证明端点已删除，防御路由结构变化）。
 token_estimator 模块随链路删除：import 必须 ModuleNotFoundError。
 """
 
 import importlib
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.main import create_app
+from infra.db.models import Base
+from infra.db.session import create_db_engine, create_session_factory
 
 
-def test_estimate_endpoint_removed(tmp_path: Path) -> None:
+@pytest.fixture
+def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
+    """预建全表 schema：消除设备中间件对空库注册 devices 的 WARN 日志噪声。"""
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'estimate_removed.db'}")
+    Base.metadata.create_all(engine)
+    yield create_session_factory(engine)
+
+
+def test_estimate_endpoint_removed(tmp_path: Path, session_factory: sessionmaker[Session]) -> None:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'estimate_removed.db'}",
         storage_path=tmp_path / "storage",
@@ -36,7 +49,7 @@ def test_estimate_endpoint_removed(tmp_path: Path) -> None:
         headers={"X-Device-ID": str(uuid.uuid4())},
     )
     # brief 期望 404;运行时为 405:/tasks/{task_id}(GET) 路径模式仍匹配 /tasks/estimate
-    assert resp.status_code == 405
+    assert resp.status_code in {404, 405}
 
 
 def test_token_estimator_module_gone() -> None:

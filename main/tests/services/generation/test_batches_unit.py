@@ -20,6 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
 from infra.db.models import (
     ApiKey,
@@ -78,8 +79,13 @@ def _seed_unit_task(
     n_units: int = 1,
     plan: bool = True,
     settings: Settings = _SETTINGS,
+    no_source_chunks: bool = False,
 ) -> str:
-    """RUNNING+GENERATING 任务 + 页文本 + 生成单元 + （plan）按单元建批。返回 task_id。"""
+    """RUNNING+GENERATING 任务 + 页文本 + 生成单元 + （plan）按单元建批。返回 task_id。
+
+    no_source_chunks=True：单元 source_chunk_ids 写空（来源不足极端情形——生成前
+    直接 SKIPPED 不发调用的分支）。
+    """
     from services.decks.service import create_deck
 
     if session.get(Device, device_id) is None:
@@ -149,7 +155,11 @@ def _seed_unit_task(
             status="PENDING",
             target_difficulty=difficulty,
             card_type=card_type,
-            source_chunk_ids=json.dumps([c.chunk_id for c in chunks], ensure_ascii=False),
+            source_chunk_ids=(
+                "[]"
+                if no_source_chunks
+                else json.dumps([c.chunk_id for c in chunks], ensure_ascii=False)
+            ),
         )
         for i in range(n_units)
     ]
@@ -667,3 +677,119 @@ def test_batch_ledger_same_transaction_crash_recovery(
     generating = [a for a in attempts if a.stage == "GENERATING"]
     assert [a.status for a in generating] == ["UNKNOWN", "SUCCESS"]
     assert len(cards) == 1 and cards[0].card_type == "QUESTION"
+
+
+# ---------- 上游错误分类（spec §6.3）：retryable 重试 / 401 raise-to-fail ----------
+
+
+def test_process_batch_retryable_upstream_retries_within_budget(
+    session_factory: Callable[[], Session],
+) -> None:
+    """上游暂时失败（500，retryable=True）→ 账本 FAILED 预算内重试（不 raise）；
+    重试成功 → SUCCEEDED；Batch.retry_count 兼容投影 = 失败尝试数（账本为权威）。"""
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_unit_task(session, device_id=device)
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return httpx.Response(500, json={"error": {"message": "upstream down"}})
+            return _ok(_valid_question_card())
+
+        client = _client(handler)
+        assert process_next_batch(session, task_id=task_id, client=client) == 1
+        session.commit()
+    with session_factory() as session:
+        batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
+        ).all()
+    assert batch.status == "FAILED"  # 预算内：等待下次重试
+    assert batch.retry_count == 1
+    assert [a.status for a in attempts] == ["FAILED"]
+    assert attempts[0].error_code == "API_KEY_UNAVAILABLE"
+    with session_factory() as session:
+        session.info["settings"] = _SETTINGS  # executor 注入同款（process_next_batch 消费）
+        assert process_next_batch(session, task_id=task_id, client=client) == 1  # 预算内重试
+        session.commit()
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None and task.deck_id is not None
+        batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
+        ).all()
+        cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
+    assert calls == 2
+    assert batch.status == "SUCCEEDED"
+    assert batch.retry_count == 1  # 投影 = 失败尝试数（本次成功不计）
+    assert [a.status for a in attempts] == ["FAILED", "SUCCESS"]
+    assert len(cards) == 1
+
+
+def test_process_batch_key_error_raises_to_fail_task(
+    session_factory: Callable[[], Session],
+) -> None:
+    """401（retryable=False，Key 错误）→ 记账 FAILED 后上抛 AppError（executor 任务
+    FAILED，spec §6.3），不进入预算重试（调用数 1）。"""
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_unit_task(session, device_id=device)
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return httpx.Response(401, json={"error": {"message": "invalid api key"}})
+
+        with pytest.raises(AppError) as excinfo:
+            process_next_batch(session, task_id=task_id, client=_client(handler))
+        session.commit()
+    assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
+    assert calls == 1  # 不重试（retryable=False）
+    with session_factory() as session:
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
+        ).all()
+    assert [a.status for a in attempts] == ["FAILED"]
+    assert attempts[0].error_code == "API_KEY_UNAVAILABLE"
+
+
+def test_process_batch_no_source_pages_skipped_without_call(
+    session_factory: Callable[[], Session],
+) -> None:
+    """单元无可用来源页（source_chunk_ids 空）→ 不发调用直接 SKIPPED
+    （SOURCE_INSUFFICIENT 纵深防御分支）、单元 SKIPPED、无账本行、卡 0。"""
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_unit_task(session, device_id=device, no_source_chunks=True)
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return _ok(_valid_question_card())
+
+        assert process_next_batch(session, task_id=task_id, client=_client(handler)) == 1
+        session.commit()
+    assert calls == 0
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None and task.deck_id is not None
+        batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
+        unit = session.scalars(
+            select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)
+        ).one()
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
+        ).all()
+        cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
+    assert batch.status == "SKIPPED"
+    assert batch.coverage_rate == 0.0
+    assert unit.status == "SKIPPED"
+    assert cards == []
+    assert attempts == []
+    assert task.completed_batch_count == 1

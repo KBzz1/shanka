@@ -21,6 +21,7 @@ from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from services.decks.service import create_deck
+from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.executor import scan_once as scan_tasks
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
@@ -33,18 +34,61 @@ _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
 
 def _client_factory(api_key: str) -> DeepSeekClient:
-    """mock transport：每批 3 张合法卡（= batch_size 默认）；COMPACT 2 章 = 6 知识点 → 2 批 → 6 卡。"""
+    """mock transport 全链路分派（LLM 升级管线）：<PLANNER_INPUT> → 按请求配额产出
+    锚定单元（引用请求内组页）；<SCORING_INPUT> → ID 守恒的确定性分数；其余
+    （<GENERATOR_INPUT>）→ 每批 1 张合法卡（1 单元 1 批）。COMPACT 2 章 = 6 单元
+    → 6 批 → 6 卡。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         import json
 
-        cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(3)]
+        body = json.loads(request.content)
+        user = body["messages"][-1]["content"]
+        if "<PLANNER_INPUT>" in user:
+            payload = json.loads(
+                user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
+            )
+            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+            units: list[dict[str, object]] = []
+            for difficulty, quota in payload["difficulty_quota"].items():
+                for _ in range(quota):
+                    units.append(
+                        {
+                            "source_chunk_ids": [chunk_ids[0]],
+                            "learning_objective": f"知识点{len(units)}",
+                            "target_difficulty": difficulty,
+                            "card_type": "QUESTION",
+                        }
+                    )
+            content = json.dumps({"units": units}, ensure_ascii=False)
+        elif "<SCORING_INPUT>" in user:
+            payload = json.loads(
+                user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0]
+            )
+            content = json.dumps(
+                {
+                    "scores": [
+                        {
+                            "generation_item_id": item["generation_item_id"],
+                            "evidence_score": 2,
+                            "correctness_score": 3,
+                            "difficulty_score": 2,
+                            "learning_value_score": 2,
+                        }
+                        for item in payload["items"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        else:  # 生成调用：1 单元 1 批 → 每批 1 张合法卡
+            content = json.dumps(
+                {"cards": [{"type": "QUESTION", "question": "q0", "answer": "a0"}]},
+                ensure_ascii=False,
+            )
         return httpx.Response(
             200,
             json={
-                "choices": [
-                    {"message": {"content": json.dumps({"cards": cards}, ensure_ascii=False)}}
-                ],
+                "choices": [{"message": {"content": content}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
                 "model": "deepseek-v4-flash",
             },
@@ -126,6 +170,14 @@ def _seed_context(db_path: Path, *, device_id: str, with_key: bool = True) -> di
                 )
             )
             session.flush()
+        # LLM 升级管线：规划 worker 读取章节范围内页文本（text_chunks）——
+        # 缺页文本则规划空结果（NO_GENERATION_UNITS），轮询测试需真实页文本
+        persist_text_chunks(
+            session,
+            file_id=pdf.file_id,
+            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2)],
+            now="2026-08-11T00:00:00.000Z",
+        )
         session.commit()
     return {"file_id": pdf.file_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
 
@@ -142,16 +194,17 @@ def _payload(seed: dict[str, object], *, tendency: str = "COMPACT") -> dict[str,
     }
 
 
-def test_tasks_create_201_running_with_chapter_snapshot(ctx: tuple[TestClient, Path]) -> None:
-    """POST /tasks → 201 RUNNING；selected_chapters 为 Chapter 对象数组快照（契约 3.4）。"""
+def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, Path]) -> None:
+    """POST /tasks → 201 PENDING+PLANNING（T8 新语义：创建不自动规划，规划 worker
+    CAS 接管）；selected_chapters 为 Chapter 对象数组快照（契约 3.4）。"""
     client, db_path = ctx
     device = _device()
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     body = resp.json()
-    assert body["status"] == "RUNNING"
-    assert body["stage"] == "GENERATING"
+    assert body["status"] == "PENDING"
+    assert body["stage"] == "PLANNING"
     assert body["generated_card_count"] == 0
     chapters = body["selected_chapters"]
     assert len(chapters) == 2
@@ -228,7 +281,7 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
         if final["status"] == "COMPLETED":
             break
     assert final["status"] == "COMPLETED"
-    assert final["generated_card_count"] == 6  # 2 章 × 3 知识点 = 2 批 × 每批 3 卡
+    assert final["generated_card_count"] == 6  # COMPACT 2 章 → 6 单元 → 6 批 × 每批 1 卡
     assert final["ended_at"] is not None
     assert final["resumable"] is False
 

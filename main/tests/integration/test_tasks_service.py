@@ -99,7 +99,15 @@ def _config(tendency: str = "BALANCED") -> GenerationConfig:
     )
 
 
-def test_tasks_create_runs_and_plans(session_factory: Callable[[], Session]) -> None:
+def test_tasks_create_pending_snapshot_without_planning(
+    session_factory: Callable[[], Session],
+) -> None:
+    """T8 新语义：create_task 只落创建快照（PENDING + stage=PLANNING，不自动规划）。
+
+    原验收意图（创建快照持久化 + selected_chapters 契约 3.4 Chapter[] 可还原）保留；
+    知识点规划由规划 worker CAS 接管（spec §6.1），创建事务内不再产出 KnowledgePoint
+    （断言 0 行——规划断言载体换成 test_planning_executor.py 的 claim 流程）。
+    """
     device = _uuid()
     with session_factory() as session:
         ctx = _seed_context(session, device_id=device)
@@ -118,8 +126,10 @@ def test_tasks_create_runs_and_plans(session_factory: Callable[[], Session]) -> 
         task_id = task.task_id
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
         status = task.status
-    assert status == "RUNNING"
-    assert len(kps) > 0
+        stage = task.stage
+    assert status == "PENDING"
+    assert stage == "PLANNING"
+    assert len(kps) == 0  # 规划不再在创建同事务（spec §6.1）
     with session_factory() as session:
         row = session.get(Task, task_id)
         assert row is not None
@@ -228,6 +238,8 @@ def test_tasks_cancel_keeps_cards(session_factory: Callable[[], Session]) -> Non
         )
         session.commit()
         task_id = task.task_id
+        # T8 起创建为 PENDING+PLANNING；"运行中取消" 前置由直写构造（RUNNING）
+        task.status = "RUNNING"
         result = cancel_task(
             session, device_id=device, task_id=task_id, now="2026-08-11T01:00:00.000Z"
         )
@@ -284,7 +296,9 @@ def test_tasks_resume_orphan_running_after_timeout(session_factory: Callable[[],
             now="2026-08-11T00:00:00.000Z",
         )
         session.flush()
-        # 模拟孤儿：RUNNING + updated_at 3 小时前
+        # 模拟孤儿：RUNNING + updated_at 3 小时前（T8 起创建为 PENDING+PLANNING，
+        # RUNNING 由规划 worker CAS 接管写入——本用例聚焦恢复状态机，直写 RUNNING）
+        task.status = "RUNNING"
         task.updated_at = "2026-08-10T21:00:00.000Z"
         session.commit()
         task_id = task.task_id
@@ -313,6 +327,8 @@ def test_tasks_resume_running_fresh_conflicts(session_factory: Callable[[], Sess
             config=_config(),
             now="2026-08-11T00:00:00.000Z",
         )
+        # T8 起创建为 PENDING+PLANNING；"新鲜 RUNNING" 前置由直写构造（心跳内）
+        task.status = "RUNNING"
         session.commit()
         task_id = task.task_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:

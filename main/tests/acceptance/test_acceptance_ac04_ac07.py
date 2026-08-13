@@ -1,19 +1,28 @@
 """验收测试：AC-04 正式生成与入库 + AC-07 质量与缓存数据（PRD 9；迁移 schema + HTTP + mock transport）。
 
-映射（PRD AC-04 三条 / AC-07 三条）：
-AC-04-a 按知识点分批生成正式卡片 → POST /tasks → executor 扫描（mock transport 合法卡）
-        → 任务 COMPLETED + 合法卡入库（Schema 通过）
-AC-04-b 只有通过 Schema 校验的卡片入库 → 非法卡批次 SKIPPED，cards 无行
-AC-04-c Rubric 评分不影响 Schema 合法卡入库 → 低分但 Schema 合法的卡仍全部入库
-AC-04-d 不因 Rubric 执行自动修复/淘汰/补生成 → 低分批次 SUCCEEDED 不重试（retry_count=0）、
-        批次数不增加（total==completed）、低分卡不淘汰（仍在牌组）
-AC-07-a 单卡 Rubric 评分 + 整批质量记录 → GET /tasks/{id}/batches 含 rubric_version/质量分布；
-        卡片 5 个 Rubric 分数字段非 null
-AC-07-b Prompt Cache 命中/未命中/输出 Token 记录 → batches items 含 cache_hit/miss + output tokens
-AC-07-c Rubric/Cache 异常不影响入库规则 → usage 缺失（token 观测 None）仍正常入库 SUCCEEDED
+LLM 升级管线（规划 → 生成 → 评分）mock 全链路驱动（planner 按请求配额产出锚定单元 →
+批=单元 → 每批 1 卡 → 评分回写 Card 5 字段）。AC 验收意图在新语义下的映射：
+
+AC-04-a 按知识点分批生成正式卡片 → POST /tasks → executor 扫描 → 任务 COMPLETED
+        + 合法卡入库（Schema 通过）；批次语义换载体：旧"batch_size 每批 3 卡" →
+        新"1 单元 1 批、每批 1 卡"（6 单元 → 6 批 → 6 卡）
+AC-04-b 只有通过 Schema 校验的卡片入库 → 非法卡（缺 question/answer）→ 批次重试
+        预算耗尽 SKIPPED，cards 无行（批次级失败不中断任务）
+AC-04-c Rubric 评分不影响 Schema 合法卡入库 → 低分（评分 mock 总分 ≤ 6）但 Schema
+        合法的卡仍全部入库（原"低分批次 SUCCEEDED"意图不变，评分来自 SCORING 阶段
+        而非生成响应）
+AC-04-d 不因 Rubric 执行自动修复/淘汰/补生成 → 低分批次 SUCCEEDED 不重试
+        （retry_count=0）、批次数不增加（total==completed）、低分卡不淘汰（仍在牌组）
+AC-07-a 单卡 Rubric 评分 + 整批质量记录 → GET /tasks/{id}/batches 含
+        rubric_version/质量分布；卡片 5 个 Rubric 分数字段非 null（SCORING 回写）
+AC-07-b Prompt Cache 命中/未命中/输出 Token 记录 → batches items 含
+        cache_hit/miss + output tokens（生成调用 usage 投影，批=单元 1 卡）
+AC-07-c Rubric/Cache 异常不影响入库规则 → usage 缺失（token 观测 None）仍正常
+        入库 SUCCEEDED
 
 后台循环间隔拉大（3600s）隔离：测试显式调 executor.scan_once（test_tasks_api 同款"显式
-scan_once"模式）；种子直写迁移后 DB（devices 前置 + 真实加密 Key——executor 解密路径）。
+scan_once"模式）；种子直写迁移后 DB（devices 前置 + 真实加密 Key——executor 解密路径 +
+text_chunks 页文本——规划输入）。
 """
 
 import json
@@ -35,6 +44,7 @@ from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from services.decks.service import create_deck
+from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.executor import scan_once as scan_tasks
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/acceptance/ → 仓库根
@@ -44,29 +54,91 @@ _TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
 assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
+# 评分四维缺省（正常）：总分 = 代码计算 2+3+2+2 = 9（AC-07-a 区间 0 < total ≤ 12）
+_DEFAULT_SCORES = {
+    "evidence_score": 2,
+    "correctness_score": 3,
+    "difficulty_score": 2,
+    "learning_value_score": 2,
+}
+# 低分四维（AC-04-c）：总分 = 1+1+0+2 = 4 ≤ 6（Schema 合法但 Rubric 极低）
+_LOW_SCORES = {
+    "evidence_score": 1,
+    "correctness_score": 1,
+    "difficulty_score": 0,
+    "learning_value_score": 2,
+}
 
-def _handler(cards: list[dict[str, object]], *, with_usage: bool = True) -> httpx.Response:
-    """构造 mock transport 响应体：卡片 + Prompt Cache usage + model。"""
-    body: dict[str, object] = {
-        "choices": [{"message": {"content": json.dumps({"cards": cards}, ensure_ascii=False)}}],
-        "model": "deepseek-v4-flash",
-    }
-    if with_usage:
-        body["usage"] = {
-            "prompt_tokens": 10,
-            "completion_tokens": 5,
-            "prompt_cache_hit_tokens": 2,
-            "prompt_cache_miss_tokens": 8,
-        }
-    return httpx.Response(200, json=body)
 
-
-def _client_factory(
-    *, cards: list[dict[str, object]], with_usage: bool = True
+def _pipeline_factory(
+    *,
+    cards: list[dict[str, object]],
+    scores: dict[str, int] | None = None,
+    with_usage: bool = True,
 ) -> Callable[[str], DeepSeekClient]:
+    """mock transport 全链路分派（planner → generator → scorer）。
+
+    - <PLANNER_INPUT>：按请求配额产出锚定单元（引用请求内组页）；学习目标全局唯一
+      编号（跨规划调用共享计数器——生成卡内容可按目标序号定位）。
+    - <GENERATOR_INPUT>：从学习目标提取序号 → 每批 1 张卡（cards 按序号循环）。
+    - <SCORING_INPUT>：ID 集合守恒的分数（scores 四维；缺省正常分数）。
+    """
+    counter = [0]
+    score = scores or _DEFAULT_SCORES
+
     def factory(api_key: str) -> DeepSeekClient:
         def handler(request: httpx.Request) -> httpx.Response:
-            return _handler(cards, with_usage=with_usage)
+            body = json.loads(request.content)
+            user = body["messages"][-1]["content"]
+            if "<PLANNER_INPUT>" in user:
+                payload = json.loads(
+                    user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
+                )
+                chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+                units: list[dict[str, object]] = []
+                for difficulty, quota in payload["difficulty_quota"].items():
+                    for _ in range(quota):
+                        units.append(
+                            {
+                                "source_chunk_ids": [chunk_ids[0]],
+                                "learning_objective": f"知识点{counter[0]}",
+                                "target_difficulty": difficulty,
+                                "card_type": "QUESTION",
+                            }
+                        )
+                        counter[0] += 1
+                content = json.dumps({"units": units}, ensure_ascii=False)
+            elif "<SCORING_INPUT>" in user:
+                payload = json.loads(
+                    user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0]
+                )
+                content = json.dumps(
+                    {
+                        "scores": [
+                            {**score, "generation_item_id": item["generation_item_id"]}
+                            for item in payload["items"]
+                        ]
+                    },
+                    ensure_ascii=False,
+                )
+            else:  # 生成调用：1 单元 1 批 → 每批 1 张卡（按目标序号循环）
+                payload = json.loads(
+                    user.split("<GENERATOR_INPUT>", 1)[1].split("</GENERATOR_INPUT>", 1)[0]
+                )
+                index = int(payload["learning_objective"].split("知识点", 1)[1])
+                content = json.dumps({"cards": [cards[index % len(cards)]]}, ensure_ascii=False)
+            resp_body: dict[str, object] = {
+                "choices": [{"message": {"content": content}}],
+                "model": "deepseek-v4-flash",
+            }
+            if with_usage:
+                resp_body["usage"] = {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_cache_hit_tokens": 2,
+                    "prompt_cache_miss_tokens": 8,
+                }
+            return httpx.Response(200, json=resp_body)
 
         return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
 
@@ -105,7 +177,8 @@ def _idem() -> dict[str, str]:
 
 
 def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
-    """devices 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）。"""
+    """devices 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）
+    + 页文本（text_chunks——LLM 升级管线规划输入）。"""
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
         session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
@@ -145,6 +218,13 @@ def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
             )
         )
         session.flush()
+        # 章节 1（页 1-2）/ 章节 2（页 2-3）→ 页文本覆盖 1-3
+        persist_text_chunks(
+            session,
+            file_id=pdf.file_id,
+            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2, 3)],
+            now="2026-08-11T00:00:00.000Z",
+        )
         session.commit()
     return {"file_id": pdf.file_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
 
@@ -155,7 +235,7 @@ def _payload(seed: dict[str, object]) -> dict[str, object]:
         "deck_id": seed["deck_id"],
         "chapter_ids": seed["chapter_ids"],
         "generation_config": {
-            "quantity_tendency": "COMPACT",  # 3 知识点/章 × 2 章 = 6 → 2 批（batch_size 3）
+            "quantity_tendency": "COMPACT",  # 预算 6 单元（BASIC 3 / UNDERSTANDING 2 / APPLICATION 1）
             "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
         },
     }
@@ -165,18 +245,22 @@ def _db_factory(db_path: Path) -> sessionmaker[Session]:
     return create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
 
 
-def _valid_cards(n: int = 3) -> list[dict[str, object]]:
+def _valid_cards(n: int = 6) -> list[dict[str, object]]:
     return [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(n)]
 
 
 def _run_to_completed(
-    db_path: Path, *, cards: list[dict[str, object]], with_usage: bool = True
+    db_path: Path,
+    *,
+    cards: list[dict[str, object]],
+    scores: dict[str, int] | None = None,
+    with_usage: bool = True,
 ) -> None:
-    """显式 executor 扫描一轮（mock transport）→ 任务 COMPLETED。"""
+    """显式 executor 扫描一轮（mock transport 全链路）→ 任务 COMPLETED。"""
     n = scan_tasks(
         _db_factory(db_path),
         settings=_SETTINGS,
-        client_factory=_client_factory(cards=cards, with_usage=with_usage),
+        client_factory=_pipeline_factory(cards=cards, scores=scores, with_usage=with_usage),
     )
     assert n >= 1
 
@@ -184,7 +268,10 @@ def _run_to_completed(
 def test_acceptance_ac04_valid_cards_inserted_and_completed(
     ctx: tuple[TestClient, Path],
 ) -> None:
-    """AC-04-a：mock 返回合法卡 → 任务 COMPLETED + 合法卡入库（Schema 通过）。"""
+    """AC-04-a：mock 返回合法卡 → 任务 COMPLETED + 合法卡入库（Schema 通过）。
+
+    新语义载体：6 单元 → 6 批（批=单元）→ 每批 1 卡 → 6 卡入库（旧：2 批 × 3 卡）。
+    """
     client, db_path = ctx
     device = _device()
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
@@ -194,8 +281,8 @@ def test_acceptance_ac04_valid_cards_inserted_and_completed(
     _run_to_completed(db_path, cards=_valid_cards())
     body = client.get(f"/tasks/{task_id}", headers=device).json()
     assert body["status"] == "COMPLETED"
-    assert body["generated_card_count"] == 6  # 2 批 × 3 卡，全部入库
-    assert body["total_batch_count"] == 2 and body["completed_batch_count"] == 2
+    assert body["generated_card_count"] == 6  # 6 批 × 1 卡，全部入库
+    assert body["total_batch_count"] == 6 and body["completed_batch_count"] == 6
     with _db_factory(db_path)() as session:
         cards = session.scalars(
             select(Card).where(Card.deck_id == cast(str, seed["deck_id"]))
@@ -209,7 +296,8 @@ def test_acceptance_ac04_valid_cards_inserted_and_completed(
 def test_acceptance_ac04_invalid_cards_not_inserted_skipped(
     ctx: tuple[TestClient, Path],
 ) -> None:
-    """AC-04-b：mock 返回非法卡（缺 question/answer，Schema 违约）→ 批次 SKIPPED 不入库。"""
+    """AC-04-b：mock 返回非法卡（缺 question/answer，generator-output schema v2 违约）
+    → 重试预算耗尽 → 批次 SKIPPED 不入库（批次级失败不中断任务）。"""
     client, db_path = ctx
     device = _device()
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
@@ -226,26 +314,27 @@ def test_acceptance_ac04_invalid_cards_not_inserted_skipped(
         ).all()
         batches = session.scalars(select(Batch).where(Batch.task_id == task_id)).all()
     assert cards == []  # 非法卡不入库（Schema 是唯一门槛）
+    assert len(batches) == 6  # 每单元一批均耗尽预算 SKIPPED
     assert all(b.status == "SKIPPED" for b in batches)
 
 
 def test_acceptance_ac04_rubric_no_auto_fix_prune_or_regenerate(
     ctx: tuple[TestClient, Path],
 ) -> None:
-    """AC-04-c/d：低分但 Schema 合法的卡照常入库；不自动修复/淘汰/补生成。"""
+    """AC-04-c/d：低分但 Schema 合法的卡照常入库；不自动修复/淘汰/补生成。
+
+    新语义：低分来自 SCORING 阶段（评分 mock evidence/correctness 1 分、
+    difficulty 0 分、learning 2 分 → rubric_total_score 4 ≤ 6）；生成响应不含评分，
+    入库与否仍只由 Schema 决定。内容按目标序号互异（generation_item_id 防重属
+    AC-05，另测）。
+    """
     client, db_path = ctx
     device = _device()
     seed = _seed_context(db_path, device_id=device["X-Device-ID"])
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
-    # Schema 合法（front/back/question/answer minLength=1 均满足）但 Rubric 极低
-    # （evidence/correctness 1 分、difficulty 0-2、learning 2 → rubric_total_score ≤ 6）；
-    # 内容互异避免 generation_item_id 防重干扰（防重属 AC-05，另测）
-    low_quality: list[dict[str, object]] = [
-        {"type": "QUESTION", "question": f"x{i}", "answer": f"x{i}"} for i in range(3)
-    ]
-    _run_to_completed(db_path, cards=low_quality)
+    _run_to_completed(db_path, cards=_valid_cards(), scores=_LOW_SCORES)
     body = client.get(f"/tasks/{task_id}", headers=device).json()
     assert body["status"] == "COMPLETED"
     with _db_factory(db_path)() as session:
@@ -254,10 +343,10 @@ def test_acceptance_ac04_rubric_no_auto_fix_prune_or_regenerate(
         ).all()
         batches = session.scalars(select(Batch).where(Batch.task_id == task_id)).all()
     assert len(cards) == 6  # 低分合法卡全部入库（Rubric 不淘汰）
-    assert len(batches) == 2
+    assert len(batches) == 6
     assert all(b.status == "SUCCEEDED" for b in batches)
     assert all(b.retry_count == 0 for b in batches)  # 不因低分自动重试/修复
-    assert body["total_batch_count"] == 2 and body["completed_batch_count"] == 2  # 不补生成
+    assert body["total_batch_count"] == 6 and body["completed_batch_count"] == 6  # 不补生成
     assert all(
         c.evidence_score is not None
         and c.correctness_score is not None
@@ -281,10 +370,10 @@ def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]
     resp = client.get(f"/tasks/{task_id}/batches", headers=device)
     assert resp.status_code == 200
     items = resp.json()["items"]
-    assert len(items) == 2
+    assert len(items) == 6
     for item in items:
         assert item["status"] == "SUCCEEDED"
-        # AC-07-b：Prompt Cache 命中/未命中/输出 Token 记录
+        # AC-07-b：Prompt Cache 命中/未命中/输出 Token 记录（生成调用 usage 投影）
         assert item["cache_hit_tokens"] == 2
         assert item["cache_miss_tokens"] == 8
         assert item["output_tokens"] == 5
@@ -301,7 +390,8 @@ def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]
         assert item["difficulty_deviation"] == 0.0
         assert item["retry_count"] == 0
         assert item["cost_estimate"] is not None and item["cost_estimate"] > 0  # 仅观测
-        assert isinstance(item["generated_item_ids"], list) and len(item["generated_item_ids"]) == 3
+        # 批=单元：每批恰好 1 个 generation_item_id（旧：每批 3）
+        assert isinstance(item["generated_item_ids"], list) and len(item["generated_item_ids"]) == 1
     # AC-07-a：单卡 Rubric 5 分数字段（3.9；经卡片详情核验，此处直读 DB 验证落库）
     with _db_factory(db_path)() as session:
         cards = session.scalars(
