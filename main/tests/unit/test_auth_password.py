@@ -10,20 +10,20 @@ from services.auth.password import (
 )
 
 
-def test_production_params_not_below_owasp_baseline():
+def test_production_params_not_below_owasp_baseline() -> None:
     assert PRODUCTION_PARAMS["memory_cost"] >= 19456
     assert PRODUCTION_PARAMS["time_cost"] >= 2
     assert PRODUCTION_PARAMS["parallelism"] >= 1
 
 
-def test_hash_and_verify_roundtrip():
+def test_hash_and_verify_roundtrip() -> None:
     h = hash_password("correct horse battery staple")
     assert h != "correct horse battery staple"
     assert verify_password("correct horse battery staple", h) is True
     assert verify_password("wrong", h) is False
 
 
-def test_password_not_truncated_or_normalized():
+def test_password_not_truncated_or_normalized() -> None:
     # 128 字符上限内原样参与哈希（DESIGN：禁止静默截断/Unicode 归一化）
     p128 = "x" * 128
     h = hash_password(p128)
@@ -32,7 +32,7 @@ def test_password_not_truncated_or_normalized():
     assert verify_password("PASSWORD", hash_password("password")) is False
 
 
-def test_hasher_allows_low_cost_injection():
+def test_hasher_allows_low_cost_injection() -> None:
     # 低成本实例可自验证（DESIGN：测试可注入低成本 hasher；生产默认与参数守卫不被降低）
     low = Argon2PasswordHasher(memory_cost=8, time_cost=1, parallelism=1)
     h = low.hash("pw")
@@ -40,7 +40,7 @@ def test_hasher_allows_low_cost_injection():
     assert low.verify(h, "wrong") is False
 
 
-def test_verify_dummy_runs_same_hasher_branch():
+def test_verify_dummy_runs_same_hasher_branch() -> None:
     # 只断言走同类 hasher 分支（DESIGN：不写毫秒断言）
     assert verify_dummy("anything") is False
     assert DUMMY_PASSWORD_HASH.startswith("$argon2id$")
