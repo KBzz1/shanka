@@ -40,10 +40,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
 
 def _user(client: TestClient, username: str, password: str) -> dict[str, str]:
-    return {
-        **auth_headers(client, username=username, password=password),
-        "X-Device-ID": str(uuid.uuid4()),
-    }
+    return auth_headers(client, username=username, password=password)
 
 
 def test_idempotency_key_isolated_per_user(client: TestClient, tmp_path: Path) -> None:

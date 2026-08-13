@@ -58,11 +58,8 @@ def _user_id(db_path: Path, username: str = "alice") -> str:
 def _user(
     client: TestClient, username: str = "alice", password: str = "secret-pass-1"
 ) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
-    return {
-        **auth_headers(client, username=username, password=password),
-        "X-Device-ID": str(uuid.uuid4()),
-    }
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client, username=username, password=password)
 
 
 def _config() -> dict[str, object]:
@@ -167,7 +164,7 @@ def test_samples_invalid_ratio_400(ctx: tuple[TestClient, Path]) -> None:
     """difficulty_ratio 非法（和 ≠ 1）→ 400 VALIDATION_ERROR（validate_config 统一判定）。"""
     client, db_path = ctx
     user = _user(client)
-    seed = _seed_pdf(db_path, user_id=user["X-Device-ID"])
+    seed = _seed_pdf(db_path, user_id=_user_id(db_path))
     bad_config = _config()
     bad_config["difficulty_ratio"] = {"basic": 0.5, "understanding": 0.5, "application": 0.2}
     resp = client.post(

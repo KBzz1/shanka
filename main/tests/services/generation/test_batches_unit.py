@@ -16,7 +16,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -28,7 +28,6 @@ from infra.db.models import (
     Batch,
     Card,
     Chapter,
-    Device,
     KnowledgePoint,
     LlmCallAttempt,
     PdfFile,
@@ -100,9 +99,6 @@ def _seed_unit_task(
             )
         )
         session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
-    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
-        session.add(Device(device_id=user_id, created_at=_NOW))
-        session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -119,10 +115,11 @@ def _seed_unit_task(
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
-    if session.scalar(select(ApiKey).where(ApiKey.device_id == user_id)) is None:
-        session.add(
-            ApiKey(
-                device_id=user_id,
+    if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:
+        session.execute(
+            insert(ApiKey).values(
+                user_id=user_id,
+                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -139,7 +136,6 @@ def _seed_unit_task(
     task = create_task(
         session,
         user_id=user_id,
-        device_id=user_id,  # 双列过渡种子（executor Key 查找仍 device 域）
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -150,7 +146,6 @@ def _seed_unit_task(
         ),
         now=_NOW,
     )
-    task.device_id = user_id  # 双头过渡：executor Key 查找仍 device 域（Task 5 切换）
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = _NOW

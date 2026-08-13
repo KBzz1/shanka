@@ -4,8 +4,8 @@
   DeepSeekClient 请求级构造，try/finally close（biz 抛异常也释放）；加密密钥缺失 → 500 配置错误。
 - GET /api-key/status：只读 DB 状态（不解密不重校验）；未保存 → UNKNOWN + masked_key 空串。
 - 明文 Key 只在 handler → service → adapter 调用栈内（红线 4），响应仅返回状态与脱敏标识。
-- P4-3 中间态：execute_idempotent 已切 user 域（幂等记录与 Key 归属无关）；save_key/
-  get_status 仍按 device 域（双头窗口内行为不变——Task 5 整体切用户域）。
+- P4-4（原 plan Task 5 前移）：Key 归属切 user 域——save_key/get_status 按 principal.user_id；
+  幂等域自 P4-3 起已 user 域（与 Key 归属无关）。
 """
 
 from typing import Annotated, Any
@@ -48,7 +48,7 @@ def save_api_key_endpoint(
     payload: ApiKeyPutRequest,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = "/api-key"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -59,7 +59,7 @@ def save_api_key_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         result = save_key(
             session,
-            device_id=device_id,
+            user_id=user_id,
             api_key=payload.api_key,
             encryption_key=encryption_key,
             client=client,
@@ -70,7 +70,7 @@ def save_api_key_endpoint(
     try:
         _replayed, status, body = execute_idempotent(
             session,
-            # P4-3：幂等域统一 user 域（与 Key 归属无关）；save_key 内部仍按 device 域（Task 5 切换）
+            # P4-4：Key 归属与幂等域统一 user 域
             user_id=request.state.principal.user_id,
             path=path,
             idempotency_key=key,
@@ -92,5 +92,7 @@ def api_key_status_endpoint(
     settings: Settings = request.app.state.settings
     # get_status 不解密（仅返回 DB 状态）；加密密钥缺失时传空 bytes 无碍
     encryption_key = key_from_settings(settings) or b""
-    result = get_status(session, device_id=request.state.device_id, encryption_key=encryption_key)
+    result = get_status(
+        session, user_id=request.state.principal.user_id, encryption_key=encryption_key
+    )
     return JSONResponse(content=result)

@@ -5,7 +5,7 @@
 - Authorization 头 `Bearer <token>` 解析：缺失/空 → 401 AUTH_REQUIRED；非 Bearer 前缀
   或 token 未知/撤销/过期 → 401 AUTH_INVALID；两者均携带 `WWW-Authenticate: Bearer`。
 - 通过后 request.state.principal = AuthPrincipal(user_id, session_id) 供后续中间件与
-  handler 使用（双头过渡窗口内 DeviceID 中间件仍按 X-Device-ID 域运行）。
+  handler 使用。
 """
 
 from collections.abc import Awaitable, Callable

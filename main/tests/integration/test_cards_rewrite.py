@@ -1,6 +1,6 @@
 """services.cards 单卡重写集成测试（V6）：原地替换/失败保留/ReviewState 重置/Rubric 记录。
 
-种子写入真实加密 Key（rewrite_card 解密路径）；client_factory 注入 mock transport（不触网）。
+种子写入真实加密 Key（rewrite_card 解密路径，用户域 Core 直写）；client_factory 注入 mock transport（不触网）。
 """
 
 import hashlib
@@ -13,12 +13,12 @@ from typing import Any
 import httpx
 import pytest
 from prometheus_client import REGISTRY, generate_latest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.db.models import ApiKey, Base, Card, Device, LlmCallAttempt, ReviewState, User
+from infra.db.models import ApiKey, Base, Card, LlmCallAttempt, ReviewState, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -31,7 +31,6 @@ _TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
 assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
-_DEVICE = "dev"
 _USER = "user-1"
 _NOW = "2026-08-11T00:00:00.000Z"
 _NEW_NOW = "2026-08-11T01:00:00.000Z"
@@ -54,11 +53,10 @@ def _seed_card(session: Session, *, encrypted_key: str = _ENCRYPTED_TEST_KEY) ->
         User(user_id=_USER, username="u-1", password_hash="x", created_at=_NOW, updated_at=_NOW)
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-    session.add(Device(device_id=_DEVICE, created_at=_NOW))
-    session.flush()
-    session.add(
-        ApiKey(
-            device_id=_DEVICE,
+    session.execute(
+        insert(ApiKey).values(
+            user_id=_USER,
+            device_id=None,
             encrypted_key=encrypted_key,
             status="AVAILABLE",
             masked_key="sk-****",
@@ -166,7 +164,6 @@ def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> No
         card = rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements="用更简洁的语言",
             now=_NEW_NOW,
@@ -236,7 +233,6 @@ def test_rewrite_dual_message_shape_and_max_tokens(
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements="用更简洁的语言",
             now=_NEW_NOW,
@@ -283,7 +279,6 @@ def test_rewrite_ledger_success_row(session_factory: Callable[[], Session]) -> N
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             idempotency_key=idempotency_key,
@@ -336,7 +331,6 @@ def test_rewrite_ledger_failed_on_llm_error(session_factory: Callable[[], Sessio
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -389,7 +383,6 @@ def test_rewrite_ledger_started_committed_before_chat(
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -422,7 +415,6 @@ def test_rewrite_schema_invalid_preserves_card(session_factory: Callable[[], Ses
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -464,7 +456,6 @@ def test_rewrite_empty_cards_response_schema_invalid(
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -494,7 +485,6 @@ def test_rewrite_llm_error_preserves_card(session_factory: Callable[[], Session]
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -520,9 +510,7 @@ def test_rewrite_no_api_key_422(session_factory: Callable[[], Session]) -> None:
     with session_factory() as session:
         seeded = _seed_card(session)
         card_id = seeded.card_id
-        session.execute(
-            delete(ApiKey).where(ApiKey.device_id == _DEVICE)
-        )  # 移除 Key 行 → 无 AVAILABLE
+        session.execute(delete(ApiKey).where(ApiKey.user_id == _USER))  # 移除 Key 行 → 无 AVAILABLE
         session.commit()
     calls = 0
 
@@ -535,7 +523,6 @@ def test_rewrite_no_api_key_422(session_factory: Callable[[], Session]) -> None:
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -555,7 +542,6 @@ def test_rewrite_no_encryption_config_422(session_factory: Callable[[], Session]
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -576,7 +562,6 @@ def test_rewrite_decrypt_failure_502(session_factory: Callable[[], Session]) -> 
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -594,7 +579,6 @@ def test_rewrite_cross_user_404(session_factory: Callable[[], Session]) -> None:
         rewrite_card(
             session,
             user_id="other",
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -630,7 +614,6 @@ def test_rewrite_true_false_response_switches_type(
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -688,7 +671,6 @@ def test_rewrite_multi_card_response_takes_first(
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -739,7 +721,6 @@ def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> 
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,

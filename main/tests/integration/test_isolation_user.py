@@ -1,7 +1,7 @@
 """用户隔离（DESIGN §5.1：跨用户资源统一 404，不暴露存在性）。
 
-双头过渡窗口（P4-3）：auth_headers 提供 Bearer + X-Device-ID；资源归属语义已切
-user 域——跨用户访问与他用户资源挂接一律 404（替换原 device 隔离断言口径）。
+P4-4 起 auth_headers 仅提供 Bearer；资源归属按 user 域——跨用户访问与他用户资源
+挂接一律 404（替换原 device 隔离断言口径）。
 """
 
 import uuid
@@ -38,11 +38,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
 
 def _user(client: TestClient, username: str, password: str) -> dict[str, str]:
-    """独立用户的 Bearer + X-Device-ID 双头（每用户独立 X-Device-ID）。"""
-    return {
-        **auth_headers(client, username=username, password=password),
-        "X-Device-ID": str(uuid.uuid4()),
-    }
+    """独立用户的 Bearer 头（P4-4 起无 X-Device-ID）。"""
+    return auth_headers(client, username=username, password=password)
 
 
 def _idem() -> dict[str, str]:

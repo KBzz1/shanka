@@ -80,9 +80,8 @@ def test_request_logging_error_path_logs_internal_error(
     app.add_api_route("/boom", _boom, methods=["GET"])
     # raise_server_exceptions=False：Starlette 对未处理异常先发 500 再重抛
     # （ServerErrorMiddleware 语义），测试关注 500 与 ERROR 日志而非重抛。
-    # 双头过渡窗口（P4-2）：非豁免路径需携带合法 Bearer + X-Device-ID；Bearer 经
-    # auth 中间件 → auth_sessions 查询需表结构。用 create_all 而非 alembic upgrade：
-    # alembic env.py 的 fileConfig 会再次禁用 captured_logs 目标 logger。
+    # P4-4 起仅 Bearer：auth 中间件 → auth_sessions 查询需表结构。用 create_all 而非
+    # alembic upgrade：alembic env.py 的 fileConfig 会再次禁用 captured_logs 目标 logger。
     from infra.db.models import Base
 
     Base.metadata.create_all(app.state.engine)

@@ -58,8 +58,6 @@ def create_task_endpoint(
         task = create_task(
             session,
             user_id=user_id,
-            # 双头过渡（P4-3）：已保存 Key 校验仍按 device 域（api_key 用户域切换在 Task 5）
-            device_id=request.state.device_id,
             file_id=payload.file_id,
             deck_id=payload.deck_id,
             chapter_ids=payload.chapter_ids,

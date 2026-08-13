@@ -36,33 +36,21 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
 
 def test_missing_token_401_auth_required(client: TestClient) -> None:
-    r = client.get("/decks", headers={"X-Device-ID": "11111111-1111-4111-8111-111111111111"})
+    r = client.get("/decks")
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "AUTH_REQUIRED"
     assert r.headers["WWW-Authenticate"] == "Bearer"
 
 
 def test_malformed_token_401_auth_invalid(client: TestClient) -> None:
-    r = client.get(
-        "/decks",
-        headers={
-            "Authorization": "NotBearer xyz",
-            "X-Device-ID": "11111111-1111-4111-8111-111111111111",
-        },
-    )
+    r = client.get("/decks", headers={"Authorization": "NotBearer xyz"})
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "AUTH_INVALID"
     assert r.headers["WWW-Authenticate"] == "Bearer"
 
 
 def test_unknown_token_401_auth_invalid(client: TestClient) -> None:
-    r = client.get(
-        "/decks",
-        headers={
-            "Authorization": "Bearer never-seen-token",
-            "X-Device-ID": "11111111-1111-4111-8111-111111111111",
-        },
-    )
+    r = client.get("/decks", headers={"Authorization": "Bearer never-seen-token"})
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "AUTH_INVALID"
     assert r.headers["WWW-Authenticate"] == "Bearer"

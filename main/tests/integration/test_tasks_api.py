@@ -2,7 +2,7 @@
 
 后台循环间隔拉大到 3600s 隔离（测试不依赖 lifespan 循环，轮询测试显式调
 executor.scan_once——V3A 同款"显式 scan_once"模式）；种子直写迁移后 DB
-（FK 强制：devices 前置 + ApiKey 种子）。
+（FK 强制：users 前置 + ApiKey 用户域种子）。
 """
 
 import uuid
@@ -12,11 +12,11 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task, User
+from infra.db.models import ApiKey, Chapter, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -111,7 +111,7 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path]]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
-        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
+        rate_limit_ip_per_second=100,  # Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环，显式 scan_once
     )
     with TestClient(create_app(settings)) as client:
@@ -122,9 +122,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(client: TestClient) -> dict[str, str]:
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client)
 
 
 def _idem() -> dict[str, str]:
@@ -142,12 +142,11 @@ def _user_id(db_path: Path, username: str = "alice") -> str:
     return str(row)
 
 
-def _seed_context(
-    db_path: Path, *, device_id: str, user_id: str, with_key: bool = True
-) -> dict[str, object]:
-    """users/devices 前置 + PDF + 2 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。
+def _seed_context(db_path: Path, *, user_id: str, with_key: bool = True) -> dict[str, object]:
+    """users 前置 + PDF + 2 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。
 
-    PDF/牌组 user 域（tasks 归属校验）；ApiKey/Device 保持 device 域（Task 5 前）。
+    PDF/牌组 user 域（tasks 归属校验）；ApiKey 用户域（P4-4 起 Key 归属切 user 域——
+    Core 直写：ApiKey 用户域行对 ORM 不可见，P3 mapper 过渡遗留，Task 5 移除）。
     """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
@@ -162,8 +161,6 @@ def _seed_context(
                 )
             )
             session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
-        session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
             user_id=user_id,
@@ -190,9 +187,10 @@ def _seed_context(
             session.flush()
             chapter_ids.append(ch.chapter_id)
         if with_key:
-            session.add(
-                ApiKey(
-                    device_id=device_id,
+            session.execute(
+                insert(ApiKey).values(
+                    user_id=user_id,
+                    device_id=None,
                     encrypted_key=_ENCRYPTED_TEST_KEY,
                     status="AVAILABLE",
                     masked_key="sk-****",
@@ -228,9 +226,9 @@ def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, P
     """POST /tasks → 201 PENDING+PLANNING（T8 新语义：创建不自动规划，规划 worker
     CAS 接管）；selected_chapters 为 Chapter 对象数组快照（契约 3.4）。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     body = resp.json()
     assert body["status"] == "PENDING"
@@ -247,9 +245,9 @@ def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, P
 def test_tasks_create_missing_idempotency_key_400(ctx: tuple[TestClient, Path]) -> None:
     """写接口强制 Idempotency-Key（契约 1.3）：缺失 → 400 VALIDATION_ERROR。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers=device)
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers=user)
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
@@ -257,11 +255,9 @@ def test_tasks_create_missing_idempotency_key_400(ctx: tuple[TestClient, Path]) 
 def test_tasks_create_without_api_key_422(ctx: tuple[TestClient, Path]) -> None:
     """未保存可用 API Key → 422 API_KEY_NOT_SET（6.2）。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(
-        db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path), with_key=False
-    )
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path), with_key=False)
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "API_KEY_NOT_SET"
 
@@ -269,9 +265,9 @@ def test_tasks_create_without_api_key_422(ctx: tuple[TestClient, Path]) -> None:
 def test_tasks_create_idempotent_replay(ctx: tuple[TestClient, Path]) -> None:
     """同 key 同 body 重放：返回首次响应，任务只创建一次。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    headers = {**device, **_idem()}
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    headers = {**user, **_idem()}
     payload = _payload(seed)
     r1 = client.post("/tasks", json=payload, headers=headers)
     r2 = client.post("/tasks", json=payload, headers=headers)
@@ -286,9 +282,9 @@ def test_tasks_create_idempotent_replay(ctx: tuple[TestClient, Path]) -> None:
 def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> None:
     """同 key 异 body → 409 IDEMPOTENCY_CONFLICT。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    headers = {**device, **_idem()}
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    headers = {**user, **_idem()}
     assert client.post("/tasks", json=_payload(seed), headers=headers).status_code == 201
     resp = client.post("/tasks", json=_payload(seed, tendency="EXTENSIVE"), headers=headers)
     assert resp.status_code == 409
@@ -298,24 +294,16 @@ def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> 
 def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
     """长任务轮询：显式 executor 扫描后 GET 返回 COMPLETED（COMPACT=3 知识点/章 × 2 章）。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
-    # 双头过渡（P4-3）：executor Key 查找仍 device 域（Task 5 切 user）——
-    # 补种 device_id 双列，模拟 P4 窗口前创建的设备域任务由 executor 续跑
-    engine = create_db_engine(f"sqlite:///{db_path}")
-    with engine.begin() as conn:
-        conn.execute(
-            text("UPDATE tasks SET device_id = :d WHERE task_id = :t"),
-            {"d": device["X-Device-ID"], "t": task_id},
-        )
     task_factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     final: dict[str, object] = {}
     for _ in range(10):
         scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
-        resp = client.get(f"/tasks/{task_id}", headers=device)
+        resp = client.get(f"/tasks/{task_id}", headers=user)
         assert resp.status_code == 200
         final = resp.json()
         if final["status"] == "COMPLETED":
@@ -329,18 +317,18 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
 def test_tasks_cancel_200(ctx: tuple[TestClient, Path]) -> None:
     """POST cancel → 200 CANCELLED（已入库卡片保留，V4 取消时无卡片）。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
-    resp = client.post(f"/tasks/{task_id}/cancel", headers={**device, **_idem()})
+    resp = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "CANCELLED"
     assert body["ended_at"] is not None
     # 终态再取消保持 CANCELLED（状态机不变式）
-    resp = client.post(f"/tasks/{task_id}/cancel", headers={**device, **_idem()})
+    resp = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
     assert resp.status_code == 200
     assert resp.json()["status"] == "CANCELLED"
 
@@ -348,9 +336,9 @@ def test_tasks_cancel_200(ctx: tuple[TestClient, Path]) -> None:
 def test_tasks_resume_200_then_409(ctx: tuple[TestClient, Path]) -> None:
     """PAUSED+resumable=1 → resume 200 RUNNING；再 resume（RUNNING）→ 409 TASK_STATE_CONFLICT。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     # 直写 PAUSED + resumable=1（服务端无 PAUSED 入口；后台循环间隔 3600 不干预）
@@ -361,9 +349,9 @@ def test_tasks_resume_200_then_409(ctx: tuple[TestClient, Path]) -> None:
         task.status = "PAUSED"
         task.resumable = 1
         session.commit()
-    resp = client.post(f"/tasks/{task_id}/resume", headers={**device, **_idem()})
+    resp = client.post(f"/tasks/{task_id}/resume", headers={**user, **_idem()})
     assert resp.status_code == 200
     assert resp.json()["status"] == "RUNNING"
-    resp = client.post(f"/tasks/{task_id}/resume", headers={**device, **_idem()})
+    resp = client.post(f"/tasks/{task_id}/resume", headers={**user, **_idem()})
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "TASK_STATE_CONFLICT"

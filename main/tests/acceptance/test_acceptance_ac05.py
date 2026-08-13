@@ -30,7 +30,7 @@ from typing import cast
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
@@ -40,7 +40,6 @@ from infra.db.models import (
     Batch,
     Card,
     Chapter,
-    Device,
     LlmCallAttempt,
     PdfFile,
     Task,
@@ -87,9 +86,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(client: TestClient) -> dict[str, str]:
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client)
 
 
 def _idem() -> dict[str, str]:
@@ -107,19 +106,10 @@ def _user_id(db_path: Path, username: str = "alice") -> str:
     return str(row)
 
 
-def _link_device(db_path: Path, task_id: str, device: dict[str, str]) -> None:
-    """双头过渡（P4-3）：executor Key 查找仍 device 域（Task 5 切 user）——补种 device_id 双列。"""
-    engine = create_db_engine(f"sqlite:///{db_path}")
-    with engine.begin() as conn:
-        conn.execute(
-            text("UPDATE tasks SET device_id = :d WHERE task_id = :t"),
-            {"d": device["X-Device-ID"], "t": task_id},
-        )
-
-
-def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, object]:
-    """users/devices 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）
-    + 页文本（text_chunks——LLM 升级管线规划输入）。PDF/牌组 user 域；Key 仍 device 域（Task 5 前）。
+def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
+    """users 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）
+    + 页文本（text_chunks——LLM 升级管线规划输入）。PDF/牌组/Key 均 user 域（P4-4 起——
+    ApiKey 用户域 Core 直写：ORM 对用户域行不可见，P3 mapper 过渡遗留，Task 5 移除）。
     """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
@@ -134,8 +124,6 @@ def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, o
                 )
             )
             session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
-        session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
             user_id=user_id,
@@ -161,9 +149,10 @@ def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, o
             session.add(ch)
             session.flush()
             chapter_ids.append(ch.chapter_id)
-        session.add(
-            ApiKey(
-                device_id=device_id,
+        session.execute(
+            insert(ApiKey).values(
+                user_id=user_id,
+                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -309,14 +298,11 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     """AC-05 a-d：批 2 前崩溃 → 卡保留 + resume 孤儿从游标继续 + 批 1 不重跑 +
     generation_item_id 防重。"""
     client, db_path, settings = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
-    _link_device(
-        db_path, task_id, device
-    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
 
     # 崩溃模拟（T1 模式）：扫描 = 2 次规划（2 章）+ 批 1 一次生成成功，批 2 前
     # SystemExit（绕过 executor 的 except Exception）；崩溃点 = 第 4 次调用
@@ -330,7 +316,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
 
     # AC-05-a：崩溃后任务停留 RUNNING + 批 1 SUCCEEDED + 卡保留（批次事务粒度已落库）；
     # 批 2 抢占 + STARTED 占位已随调用前事务提交（spec §9）→ PROCESSING
-    body = client.get(f"/tasks/{task_id}", headers=device).json()
+    body = client.get(f"/tasks/{task_id}", headers=user).json()
     assert body["status"] == "RUNNING"
     assert body["generated_card_count"] == 1
     assert body["completed_batch_count"] == 1 and body["total_batch_count"] == 6
@@ -360,7 +346,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     assert [a.status for a in batch1_attempts] == ["SUCCESS"]  # 批 1 账本一次成功（AC-05-c 前置）
 
     # 新鲜 RUNNING（心跳内）resume → 409（孤儿判据生效，非 PAUSED 路径）
-    resp = client.post(f"/tasks/{task_id}/resume", headers={**device, **_idem()})
+    resp = client.post(f"/tasks/{task_id}/resume", headers={**user, **_idem()})
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "TASK_STATE_CONFLICT"
 
@@ -373,8 +359,8 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
 
     # 新 app（重启模拟）→ resume（孤儿）→ 200 RUNNING
     with TestClient(create_app(settings)) as restarted:
-        assert restarted.get(f"/tasks/{task_id}", headers=device).json()["status"] == "RUNNING"
-        resp = restarted.post(f"/tasks/{task_id}/resume", headers={**device, **_idem()})
+        assert restarted.get(f"/tasks/{task_id}", headers=user).json()["status"] == "RUNNING"
+        resp = restarted.post(f"/tasks/{task_id}/resume", headers={**user, **_idem()})
         assert resp.status_code == 200
         assert resp.json()["status"] == "RUNNING"
 
@@ -382,6 +368,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     # 可复算）已在库（等价旧语义"批 2 响应含批内重复内容"：新 pipeline 每批恰好 1 卡，
     # 内容重复只能经同 seed 重入出现，防重守卫 = generation_item_id 先查后插）
     dup_gen_item = _stable_uuid(f"gen|{task_id}|2|QUESTION|q1|a1")
+    owner_id = _user_id(db_path)  # 会话外取 user_id：engine 级 BEGIN IMMEDIATE（读也写事务）
     with _db_factory(db_path)() as session:
         task_row = session.get(Task, task_id)
         assert task_row is not None and task_row.deck_id is not None
@@ -389,7 +376,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
             Card(
                 card_id=_uuid(),
                 deck_id=task_row.deck_id,
-                device_id=device["X-Device-ID"],
+                user_id=owner_id,
                 source="GENERATED",
                 position=2,
                 front="q1",
@@ -432,7 +419,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     assert gen_objectives.count("知识点0") == 1  # 批 1 未重跑（AC-05-c）
     assert gen_objectives.count("知识点1") == 2  # 崩溃 + 孤儿恢复重试
 
-    body = client.get(f"/tasks/{task_id}", headers=device).json()
+    body = client.get(f"/tasks/{task_id}", headers=user).json()
     assert body["status"] == "COMPLETED"
     assert body["generated_card_count"] == 5  # 批 1 + 批 3..6 新入库（批 2 dedup 命中不增计数）
     assert body["completed_batch_count"] == 6 and body["total_batch_count"] == 6  # 游标到终值
@@ -452,7 +439,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
 
     # AC-05-d 附证（批次视图观测）：批 2 重复内容被防重命中 → duplicate_rate 1.0，
     # 批 1/批 2 generated_item_ids 各 1（批=单元）
-    items = client.get(f"/tasks/{task_id}/batches", headers=device).json()["items"]
+    items = client.get(f"/tasks/{task_id}/batches", headers=user).json()["items"]
     assert (
         isinstance(items[0]["generated_item_ids"], list)
         and len(items[0]["generated_item_ids"]) == 1
@@ -467,14 +454,11 @@ def test_acceptance_ac05_cancel_keeps_inserted_cards(
 ) -> None:
     """场景 2（取消保留）：任务运行中 cancel → CANCELLED + 已入库卡保留，取消后不再处理。"""
     client, db_path, _ = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
-    _link_device(
-        db_path, task_id, device
-    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
 
     # 任务运行中：批 1 成功后崩溃暂停（T1 模式）→ 任务 RUNNING + 1 卡已入库
     calls: dict[str, int] = {"n": 0}
@@ -484,7 +468,7 @@ def test_acceptance_ac05_cancel_keeps_inserted_cards(
         scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory)
     assert calls["n"] == 4
 
-    resp = client.post(f"/tasks/{task_id}/cancel", headers={**device, **_idem()})
+    resp = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "CANCELLED"

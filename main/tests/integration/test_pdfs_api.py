@@ -31,11 +31,8 @@ def client(tmp_path: Path) -> TestClient:
 def _user(
     client: TestClient, username: str = "alice", password: str = "secret-pass-1"
 ) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
-    return {
-        **auth_headers(client, username=username, password=password),
-        "X-Device-ID": str(uuid.uuid4()),
-    }
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client, username=username, password=password)
 
 
 def _idem() -> dict[str, str]:

@@ -16,13 +16,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import ApiKey, Base, Chapter, Device, KnowledgePoint, PdfFile, Task, User
+from infra.db.models import ApiKey, Base, Chapter, KnowledgePoint, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from services.tasks.service import create_task, task_view
@@ -62,8 +62,6 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
         )
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
-    session.add(Device(device_id=user_id, created_at=_NOW))
-    session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -98,9 +96,10 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
                 "end_page": ch.end_page,
             }
         )
-    session.add(
-        ApiKey(
-            device_id=user_id,
+    session.execute(
+        insert(ApiKey).values(
+            user_id=user_id,
+            device_id=None,
             encrypted_key="enc",
             status="AVAILABLE",
             masked_key="sk-****",
@@ -138,7 +137,6 @@ def test_create_task_pending_planning(session: Session) -> None:
     task = create_task(
         session,
         user_id=user,
-        device_id=user,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=ctx["file_id"],
         deck_id=ctx["deck_id"],
         chapter_ids=ctx["chapter_ids"],
@@ -171,7 +169,6 @@ def test_create_task_budget_exceeded_rejected(session: Session, tmp_path: Path) 
         create_task(
             session,
             user_id=user,
-            device_id=user,  # 双头过渡：ApiKey 校验仍 device 域
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
@@ -190,7 +187,6 @@ def test_create_task_budget_boundary_accepted(session: Session, tmp_path: Path) 
     task = create_task(
         session,
         user_id=user,
-        device_id=user,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=ctx["file_id"],
         deck_id=ctx["deck_id"],
         chapter_ids=ctx["chapter_ids"],

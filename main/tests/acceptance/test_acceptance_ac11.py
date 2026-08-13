@@ -59,9 +59,9 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(client: TestClient) -> dict[str, str]:
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client)
 
 
 def _idem() -> dict[str, str]:
@@ -70,7 +70,7 @@ def _idem() -> dict[str, str]:
 
 def test_acceptance_ac11_save_and_status(client: TestClient) -> None:
     """AC-11-1：验证并保存返回状态（AVAILABLE），GET status 返回脱敏标识。"""
-    device = _device(client)
+    device = _user(client)
     resp = client.put(
         "/api-key", json={"api_key": "sk-ac11-secret-value"}, headers={**device, **_idem()}
     )
@@ -87,7 +87,7 @@ def test_acceptance_ac11_save_and_status(client: TestClient) -> None:
 
 def test_acceptance_ac11_unknown_when_not_saved(client: TestClient) -> None:
     """AC-11-b/c：未保存 Key → 200 UNKNOWN + masked_key 空串（无明文可展示）。"""
-    resp = client.get("/api-key/status", headers=_device(client))
+    resp = client.get("/api-key/status", headers=_user(client))
     assert resp.status_code == 200
     assert resp.json()["status"] == "UNKNOWN"
     assert resp.json()["masked_key"] == ""
@@ -97,7 +97,7 @@ def test_acceptance_ac11_no_plaintext_in_logs(
     client: TestClient, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC-11/AC-08：请求日志无明文 Key（红线 4：任何日志不得引用明文）。"""
-    device = _device(client)
+    device = _user(client)
     # alembic fileConfig（migrations/env.py，disable_existing_loggers 默认 True）在 fixture
     # 迁移时禁用既有 logger → 临时恢复请求日志中间件 logger，使断言真实覆盖请求日志
     monkeypatch.setattr(logging.getLogger("app.middleware.logging"), "disabled", False)

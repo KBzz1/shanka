@@ -38,14 +38,11 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device(
+def _user(
     client: TestClient, username: str = "alice", password: str = "secret-pass-1"
 ) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
-    return {
-        **auth_headers(client, username=username, password=password),
-        "X-Device-ID": str(uuid.uuid4()),
-    }
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client, username=username, password=password)
 
 
 def _idem() -> dict[str, str]:
@@ -54,7 +51,7 @@ def _idem() -> dict[str, str]:
 
 def test_acceptance_ac10_review_workflow(client: TestClient) -> None:
     """AC-10-1：到期队列仅含到期卡；评级后状态/进度/事件正确更新；client_event_id 重试不重复计数。"""
-    device = _device(client)
+    device = _user(client)
     resp = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()})
     assert resp.status_code == 201
     deck_id = resp.json()["deck_id"]
@@ -98,7 +95,7 @@ def test_acceptance_ac10_review_workflow(client: TestClient) -> None:
 
 def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
     """AC-10-2：看板展示真实周活动/总数/变化率/正确率/streak/掌握卡数；空态非示例值。"""
-    device = _device(client)
+    device = _user(client)
     resp = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()})
     deck_id = resp.json()["deck_id"]
     resp = client.post(
@@ -129,7 +126,7 @@ def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
     empty = client.get(
         "/stats/dashboard",
         params={"timezone": "Asia/Shanghai"},
-        headers=_device(client, "user2", "pass-2222"),
+        headers=_user(client, "user2", "pass-2222"),
     )
     assert empty.status_code == 200
     empty_body = empty.json()

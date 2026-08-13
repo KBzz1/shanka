@@ -312,7 +312,7 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
     )
     session_factory = migrate_db(db_path)
     device_id = args.device_id or str(uuid.uuid4())
-    headers = {"X-Device-ID": device_id}
+    headers: dict[str, str] = {}  # P4-4：X-Device-ID 已退出，仅 Bearer（下方注册后注入）
 
     report: dict[str, Any] = {
         "driver": "r1-live-driver",
@@ -327,8 +327,8 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
 
     app = create_app(settings)
     with TestClient(app) as client:
-        # 双头过渡窗口（P4-2）：注册/登录 live 驱动账号（测试假凭据，非敏感信息）→
-        # Bearer + X-Device-ID 双头；report 不记录 token/密码。
+        # P4-4 起仅 Bearer：注册/登录 live 驱动账号（测试假凭据，非敏感信息）；
+        # report 不记录 token/密码。
         reg = client.post(
             "/auth/register", json={"username": "live-driver", "password": "live-driver-pass-1"}
         )

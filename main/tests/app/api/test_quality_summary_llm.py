@@ -73,9 +73,9 @@ def _user_id(db_path: Path, username: str = "alice") -> str:
     return str(row)
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(client: TestClient) -> dict[str, str]:
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client)
 
 
 def _session(db_path: Path) -> Session:
@@ -231,7 +231,7 @@ def test_summary_null_scores_not_zero(ctx: tuple[TestClient, Path]) -> None:
     """NULL 评分不计 0 分：evidence 分母 = 非 NULL 卡数（1 而非 2）；
     scored_card_count 按 rubric_total_score 非 NULL（1），eligible = 2。"""
     client, db_path = ctx
-    device = _device(client)
+    device = _user(client)
     file_id, deck_id = _seed_base(db_path, user_id=_user_id(db_path))
     task_id = _seed_task(db_path, user_id=_user_id(db_path), file_id=file_id)
     _seed_batch(db_path, task_id=task_id, item_ids=["item-a", "item-b"])
@@ -266,7 +266,7 @@ def test_summary_difficulty_group_by_unit(ctx: tuple[TestClient, Path]) -> None:
     """difficulty 分组键 = generation_unit_id → 单元 target_difficulty；
     SKIPPED 无卡批次进 BASIC 组，coverage=0 计入 coverage_avg。"""
     client, db_path = ctx
-    device = _device(client)
+    device = _user(client)
     file_id, _deck_id = _seed_base(db_path, user_id=_user_id(db_path))
     task_id = _seed_task(db_path, user_id=_user_id(db_path), file_id=file_id)
     unit_id = _seed_unit(db_path, task_id=task_id, target_difficulty="BASIC")
@@ -296,7 +296,7 @@ def test_summary_sampling_rate_and_rubric_version(ctx: tuple[TestClient, Path]) 
     """响应含 eligible/scored/sampling_rate（0.5）与 rubric_version；
     cost_estimate 标注 scope == generation-stage-only。"""
     client, db_path = ctx
-    device = _device(client)
+    device = _user(client)
     file_id, deck_id = _seed_base(db_path, user_id=_user_id(db_path))
     task_id = _seed_task(db_path, user_id=_user_id(db_path), file_id=file_id)
     _seed_batch(db_path, task_id=task_id, rubric_version="v2", item_ids=["item-a", "item-b"])
@@ -331,7 +331,7 @@ def test_unit_difficulties_chunks_large_in_query(ctx: tuple[TestClient, Path]) -
     """>500 个单元 id 的难度预取按 _CARD_QUERY_CHUNK 分块（SQLite 变量数上限兜底）：
     501 个 id → ≥2 次 ORM 执行（修复前恒为 1 次大 IN），且映射完整、归因正确。"""
     client, db_path = ctx
-    _device(client)  # 注册 alice（后续 seed 按用户名取 user_id）
+    _user(client)  # 注册 alice（后续 seed 按用户名取 user_id）
     file_id, _deck_id = _seed_base(db_path, user_id=_user_id(db_path))
     task_id = _seed_task(db_path, user_id=_user_id(db_path), file_id=file_id)
     unit_ids = [f"unit-{i}" for i in range(501)]

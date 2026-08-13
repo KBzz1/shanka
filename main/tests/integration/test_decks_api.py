@@ -42,11 +42,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 def _user(
     client: TestClient, username: str = "alice", password: str = "secret-pass-1"
 ) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
-    return {
-        **auth_headers(client, username=username, password=password),
-        "X-Device-ID": str(uuid.uuid4()),
-    }
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client, username=username, password=password)
 
 
 def _idem() -> dict[str, str]:
@@ -122,15 +119,14 @@ def test_decks_api_delete_blocked_by_running_task(client: TestClient, tmp_path: 
         assert owner_id is not None
         conn.execute(
             text(
-                "INSERT INTO tasks (task_id, device_id, user_id, status, selected_chapters,"
+                "INSERT INTO tasks (task_id, user_id, status, selected_chapters,"
                 " generation_config, deck_id, generated_card_count, resumable,"
                 " created_at, updated_at)"
-                " VALUES (:task_id, :device_id, :user_id, 'RUNNING', '[]', '{}', :deck_id,"
+                " VALUES (:task_id, :user_id, 'RUNNING', '[]', '{}', :deck_id,"
                 " 0, 0, :now, :now)"
             ),
             {
                 "task_id": str(uuid.uuid4()),
-                "device_id": user["X-Device-ID"],
                 "user_id": str(owner_id),
                 "deck_id": deck_id,
                 "now": "2026-08-11T00:00:00.000Z",

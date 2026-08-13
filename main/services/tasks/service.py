@@ -78,7 +78,6 @@ def create_task(
     session: Session,
     *,
     user_id: str,
-    device_id: str,  # 双头过渡（P4-3）：已保存 Key 校验仍按 device 域（Task 5 切换）
     file_id: str,
     deck_id: str,
     chapter_ids: list[str],
@@ -86,7 +85,7 @@ def create_task(
     now: str,
     settings: Settings | None = None,
 ) -> Task:
-    """创建任务：校验归属（user 域）/配置/已保存 Key（device 域中间态，无 → API_KEY_NOT_SET 422）→ 预算硬上限
+    """创建任务：校验归属（user 域）/配置/已保存 Key（user 域，无 → API_KEY_NOT_SET 422）→ 预算硬上限
     （spec §10，超限 → VALIDATION_ERROR 不创建）→ 建 Task（PENDING + stage=PLANNING
     + 创建快照 JSON，started_at/total_batch_count 空）；规划由 worker CAS 接管（§6.1），
     本函数不再同事务规划。settings 注入定式同 executor：显式参数 > session.info["settings"]
@@ -115,9 +114,10 @@ def create_task(
     ]
     _owned_deck(session, user_id=user_id, deck_id=deck_id)
     # 已保存 Key 校验（6.2：无 Key → API_KEY_NOT_SET）；只查 status=AVAILABLE 行存在，
-    # 不解密（V5A 生成时才解密调用）
+    # 不解密（V5A 生成时才解密调用）。P4-4：按 user 域查询（列投影 Core select——
+    # ApiKey 用户域行对 ORM 不可见，P3 mapper 过渡遗留，Task 5 移除）。
     key_row = session.scalar(
-        select(ApiKey).where(ApiKey.device_id == device_id, ApiKey.status == "AVAILABLE")
+        select(ApiKey.user_id).where(ApiKey.user_id == user_id, ApiKey.status == "AVAILABLE")
     )
     if key_row is None:
         raise AppError(ErrorCode.API_KEY_NOT_SET, "未保存可用 API Key")

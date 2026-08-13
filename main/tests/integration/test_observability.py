@@ -16,11 +16,11 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import insert, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, Device, PdfFile, User
+from infra.db.models import ApiKey, Chapter, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -132,11 +132,8 @@ def _uuid() -> str:
 def _user(
     client: TestClient, username: str = "alice", password: str = "secret-pass-1"
 ) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
-    return {
-        **auth_headers(client, username=username, password=password),
-        "X-Device-ID": str(uuid.uuid4()),
-    }
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client, username=username, password=password)
 
 
 def _idem() -> dict[str, str]:
@@ -154,10 +151,11 @@ def _user_id(db_path: Path, username: str = "alice") -> str:
     return str(row)
 
 
-def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, object]:
-    """users/devices 前置 + PDF + 2 章节 + 牌组 + 真实加密 ApiKey（COMPACT → 6 知识点 → 2 批）。
+def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
+    """users 前置 + PDF + 2 章节 + 牌组 + 真实加密 ApiKey（COMPACT → 6 知识点 → 2 批）。
 
-    PDF/牌组 user 域（tasks 归属校验）；ApiKey/Device 保持 user 域（Task 5 前）。
+    PDF/牌组 user 域（tasks 归属校验）；ApiKey 用户域（P4-4 起——Core 直写：
+    ApiKey 用户域行对 ORM 不可见，P3 mapper 过渡遗留，Task 5 移除）。
     """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
@@ -172,8 +170,6 @@ def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, o
                 )
             )
             session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
-        session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
             user_id=user_id,
@@ -206,9 +202,10 @@ def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, o
             pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2, 3)],
             now="2026-08-11T00:00:00.000Z",
         )
-        session.add(
-            ApiKey(
-                device_id=device_id,
+        session.execute(
+            insert(ApiKey).values(
+                user_id=user_id,
+                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -234,17 +231,10 @@ def _payload(seed: dict[str, object]) -> dict[str, object]:
 
 def _run_task(client: TestClient, db_path: Path, *, user: dict[str, str]) -> tuple[str, str]:
     """POST 任务 → 显式 executor 扫描（mock transport 两批）→ 返回 (task_id, file_id)。"""
-    seed = _seed_context(db_path, device_id=user["X-Device-ID"], user_id=_user_id(db_path))
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
-    # 双头过渡（P4-3）：executor Key 查找仍 user 域（Task 5 切 user）——补种双列
-    engine = create_db_engine(f"sqlite:///{db_path}")
-    with engine.begin() as conn:
-        conn.execute(
-            text("UPDATE tasks SET device_id = :d WHERE task_id = :t"),
-            {"d": user["X-Device-ID"], "t": task_id},
-        )
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     n = scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory)
     assert n == 1  # 单任务执行完毕（两批）
@@ -364,7 +354,7 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
 
 
 def test_quality_summary_isolates_by_device(ctx: tuple[TestClient, Path]) -> None:
-    """6.10 隔离口径：quality-summary 按当前 user 聚合；批次列表跨设备 404。"""
+    """6.10 隔离口径：quality-summary 按当前 user 聚合；批次列表跨用户 404。"""
     client, db_path = ctx
     user = _user(client)
     task_id, _file_id = _run_task(client, db_path, user=user)
@@ -433,7 +423,7 @@ def test_cancel_metric_counts_transition_once(ctx: tuple[TestClient, Path]) -> N
     """
     client, db_path = ctx
     user = _user(client)
-    seed = _seed_context(db_path, device_id=user["X-Device-ID"], user_id=_user_id(db_path))
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201  # 任务创建即 RUNNING（未跑 executor）
     task_id = resp.json()["task_id"]

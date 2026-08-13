@@ -218,8 +218,6 @@ def rewrite_card_endpoint(
         card = rewrite_card(
             session,
             user_id=user_id,
-            # 双头过渡（P4-3）：Key 解析仍按 device 域（api_key 用户域切换在 Task 5）
-            device_id=request.state.device_id,
             card_id=card_id,
             custom_requirements=custom_requirements,
             idempotency_key=key,

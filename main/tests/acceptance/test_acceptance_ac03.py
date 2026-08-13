@@ -46,9 +46,9 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(client: TestClient) -> dict[str, str]:
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client)
 
 
 def _config() -> dict[str, object]:
@@ -94,7 +94,7 @@ def _seed_pdf_context(client: TestClient, device: dict[str, str]) -> tuple[str, 
 
 def test_acceptance_ac03_sample_cards(client: TestClient) -> None:
     """AC-03：3 张样卡（三档难度各 1；2 问答 + 1 判断）；不入牌组不统计。"""
-    device = _device(client)
+    device = _user(client)
     file_id, chapter_ids = _seed_pdf_context(client, device)
     resp = client.post(
         "/samples",

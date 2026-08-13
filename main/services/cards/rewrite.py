@@ -55,20 +55,22 @@ def _next_version(current: str) -> str:
     return f"v{int(m.group(1)) + 1}"
 
 
-def _resolve_api_key(session: Session, *, device_id: str, settings: Settings) -> str:
+def _resolve_api_key(session: Session, *, user_id: str, settings: Settings) -> str:
     """Key 解析（红线 4：仅本调用路径解密；明文不落日志/响应）。
 
     无加密配置或 api_keys 无 AVAILABLE 行 → API_KEY_NOT_SET（422，契约 ch7「样卡/任务启动时未
     保存 Key」语义）；解密失败 → API_KEY_UNAVAILABLE（502——502 留给解密失败/上游不可用）。
+    P4-4：按 user 域查询（列投影 Core select——ApiKey 用户域行对 ORM 不可见，
+    P3 mapper 过渡遗留，Task 5 移除）。
     """
     key = key_from_settings(settings)
-    row = session.scalar(
-        select(ApiKey).where(ApiKey.device_id == device_id, ApiKey.status == "AVAILABLE")
+    encrypted = session.scalar(
+        select(ApiKey.encrypted_key).where(ApiKey.user_id == user_id, ApiKey.status == "AVAILABLE")
     )
-    if key is None or row is None:
+    if key is None or encrypted is None:
         raise AppError(ErrorCode.API_KEY_NOT_SET, "未保存 API Key 或加密配置缺失")
     try:
-        return decrypt_key(row.encrypted_key, key)
+        return decrypt_key(encrypted, key)
     except Exception:  # noqa: BLE001 —— 解密失败（畸形 payload/密钥不符）统一 API_KEY_UNAVAILABLE
         raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 解密失败") from None
 
@@ -158,7 +160,6 @@ def rewrite_card(
     session: Session,
     *,
     user_id: str,
-    device_id: str,  # 双头过渡（P4-3）：Key 解析仍按 device 域（Task 5 切换）
     card_id: str,
     custom_requirements: str | None,
     now: str,
@@ -195,9 +196,7 @@ def rewrite_card(
             updated_at=now,
         )
         session.add(review_state)
-    api_key = _resolve_api_key(
-        session, device_id=device_id, settings=settings
-    )  # device 域中间态（Task 5 切 user）
+    api_key = _resolve_api_key(session, user_id=user_id, settings=settings)
     client = (
         client_factory(api_key)
         if client_factory is not None

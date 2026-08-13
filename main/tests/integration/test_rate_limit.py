@@ -10,13 +10,13 @@ from app.main import create_app
 from tests.conftest import auth_headers
 
 
-def _device_headers(client: TestClient, device_id: str | None = None) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ X-Device-ID。"""
-    return {**auth_headers(client), "X-Device-ID": device_id or str(uuid.uuid4())}
+def _user_headers(client: TestClient) -> dict[str, str]:
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client)
 
 
 def _upgrade(db_url: str) -> None:
-    """限流测试库迁移：Bearer 经 auth 中间件 → 需 auth_sessions 表（双头窗口）。"""
+    """限流测试库迁移：Bearer 经 auth 中间件 → 需 auth_sessions 表。"""
     from alembic import command
     from alembic.config import Config
 
@@ -26,16 +26,16 @@ def _upgrade(db_url: str) -> None:
 
 
 def test_rate_limit_write_dimension_429_with_retry_after(tmp_path: Path) -> None:
-    """写操作 60 req/min/device：阈值可下调以便测试——用 Settings 构造小阈值 app。"""
+    """写操作 60 req/min/user：阈值可下调以便测试——用 Settings 构造小阈值 app。"""
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'rl.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_write_per_minute=3,
-        rate_limit_ip_per_second=100,  # IP 维度隔离（双头窗口 register 计入 IP）
+        rate_limit_ip_per_second=100,  # IP 维度隔离（register 请求计入 IP）
     )
     _upgrade(settings.database_url)
     with TestClient(create_app(settings)) as client:
-        headers = _device_headers(client)
+        headers = _user_headers(client)
         codes = []
         for _ in range(5):
             # POST /v1/decks 无路由 → 404；限流中间件在路由前执行
@@ -45,7 +45,7 @@ def test_rate_limit_write_dimension_429_with_retry_after(tmp_path: Path) -> None
     assert codes[3] == 429 and codes[4] == 429
     # Retry-After 响应头存在
     with TestClient(create_app(settings)) as client:
-        headers = _device_headers(client)
+        headers = _user_headers(client)
         for _ in range(4):
             client.post("/v1/decks", json={"name": "d"}, headers=headers)
         resp = client.post("/v1/decks", json={"name": "d"}, headers=headers)
@@ -56,7 +56,7 @@ def test_rate_limit_write_dimension_429_with_retry_after(tmp_path: Path) -> None
 
 
 def test_rate_limit_pdf_dimension_hits_429(tmp_path: Path) -> None:
-    """1.6 专门维度回归（fix round 1）：POST /pdfs 10 次/时/device 须生效。
+    """1.6 专门维度回归（fix round 1）：POST /pdfs 10 次/时/user 须生效。
 
     F-2 修复前 _scope 按 /v1/pdfs 判定（路由无前缀）→ 落入通用 write 维度；
     修复后走 pdf 维度——低阈值构造 app 验证 429。
@@ -65,11 +65,11 @@ def test_rate_limit_pdf_dimension_hits_429(tmp_path: Path) -> None:
         database_url=f"sqlite:///{tmp_path / 'rl_pdf.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_pdf_per_hour=2,
-        rate_limit_ip_per_second=100,  # IP 维度隔离（双头窗口 register 计入 IP）
+        rate_limit_ip_per_second=100,  # IP 维度隔离（register 请求计入 IP）
     )
     _upgrade(settings.database_url)
     with TestClient(create_app(settings)) as client:
-        headers = {**_device_headers(client), "Idempotency-Key": str(uuid.uuid4())}
+        headers = {**_user_headers(client), "Idempotency-Key": str(uuid.uuid4())}
         codes = []
         for _ in range(4):
             resp = client.post(
@@ -124,19 +124,13 @@ def test_rate_limit_user_scope_isolated_per_user(tmp_path: Path) -> None:
         database_url=f"sqlite:///{tmp_path / 'rl_iso.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_write_per_minute=2,
-        rate_limit_ip_per_second=100,  # IP 维度隔离（双头窗口 register 计入 IP）
+        rate_limit_ip_per_second=100,  # IP 维度隔离（register 请求计入 IP）
     )
     _upgrade(settings.database_url)
     with TestClient(create_app(settings)) as client:
         # 业务桶键 = principal.user_id（P4-3）：每用户独立桶
-        headers_a = {
-            **auth_headers(client, "user1", "pass-1111"),
-            "X-Device-ID": "11111111-1111-4111-8111-111111111111",
-        }
-        headers_b = {
-            **auth_headers(client, "user2", "pass-2222"),
-            "X-Device-ID": "11111111-1111-4111-8111-111111111111",
-        }
+        headers_a = auth_headers(client, "user1", "pass-1111")
+        headers_b = auth_headers(client, "user2", "pass-2222")
         codes_a = [
             client.post("/v1/decks", json={}, headers=headers_a).status_code for _ in range(3)
         ]
@@ -144,4 +138,4 @@ def test_rate_limit_user_scope_isolated_per_user(tmp_path: Path) -> None:
             client.post("/v1/decks", json={}, headers=headers_b).status_code for _ in range(2)
         ]
     assert codes_a == [404, 404, 429]
-    assert codes_b == [404, 404]  # user2 不受 user1 影响（同 X-Device-ID 也不串桶）
+    assert codes_b == [404, 404]  # user2 不受 user1 影响（键已切 user 域）

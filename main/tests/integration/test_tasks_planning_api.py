@@ -13,11 +13,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task, User
+from infra.db.models import ApiKey, Chapter, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from tests.conftest import auth_headers
@@ -39,7 +39,7 @@ def _make_client(tmp_path: Path, *, max_units: int) -> tuple[TestClient, Path]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
-        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
+        rate_limit_ip_per_second=100,  # Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环
         max_generation_units_per_task=max_units,
     )
@@ -65,9 +65,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(client: TestClient) -> dict[str, str]:
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client)
 
 
 def _idem() -> dict[str, str]:
@@ -85,12 +85,11 @@ def _user_id(db_path: Path, username: str = "alice") -> str:
     return str(row)
 
 
-def _seed_context(
-    db_path: Path, *, device_id: str, user_id: str, chapter_count: int = 2
-) -> dict[str, object]:
-    """users/devices 前置 + PDF + chapter_count 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。
+def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dict[str, object]:
+    """users 前置 + PDF + chapter_count 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。
 
-    PDF/牌组 user 域（tasks 归属校验）；ApiKey/Device 保持 device 域（Task 5 前）。
+    PDF/牌组 user 域（tasks 归属校验）；ApiKey 用户域（P4-4 起——Core 直写：
+    ApiKey 用户域行对 ORM 不可见，P3 mapper 过渡遗留，Task 5 移除）。
     """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
@@ -105,8 +104,6 @@ def _seed_context(
                 )
             )
             session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-        session.add(Device(device_id=device_id, created_at=_NOW))
-        session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
             user_id=user_id,
@@ -132,9 +129,10 @@ def _seed_context(
             session.add(ch)
             session.flush()
             chapter_ids.append(ch.chapter_id)
-        session.add(
-            ApiKey(
-                device_id=device_id,
+        session.execute(
+            insert(ApiKey).values(
+                user_id=user_id,
+                device_id=None,
                 encrypted_key="enc",
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -161,9 +159,9 @@ def _payload(seed: dict[str, object], *, tendency: str = "COMPACT") -> dict[str,
 def test_tasks_create_201_pending_planning_view(ctx: tuple[TestClient, Path]) -> None:
     """POST /tasks → 201 PENDING+PLANNING：started_at/total_batch_count 为空、快照完整、新字段。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     body = resp.json()
     assert body["status"] == "PENDING"
@@ -183,11 +181,9 @@ def test_tasks_create_201_pending_planning_view(ctx: tuple[TestClient, Path]) ->
 def test_tasks_create_budget_exceeded_400(ctx_strict: tuple[TestClient, Path]) -> None:
     """预算超上限（5 章 COMPACT=15 > 5）→ 400 VALIDATION_ERROR，不创建任务（spec §10）。"""
     client, db_path = ctx_strict
-    device = _device(client)
-    seed = _seed_context(
-        db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path), chapter_count=5
-    )
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path), chapter_count=5)
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 400
     error = resp.json()["error"]
     assert error["code"] == "VALIDATION_ERROR"

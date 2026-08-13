@@ -1,4 +1,4 @@
-"""运行观测探针（structure-contract 8.2）：/healthz 存活、/readyz 就绪（DB + 存储），豁免 X-Device-ID 鉴权。"""
+"""运行观测探针（structure-contract 8.2）：/healthz 存活、/readyz 就绪（DB + 存储），豁免 Bearer 认证。"""
 
 import logging
 

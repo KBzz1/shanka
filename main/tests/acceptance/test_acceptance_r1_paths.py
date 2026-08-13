@@ -111,9 +111,9 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(client: TestClient) -> dict[str, str]:
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client)
 
 
 def _idem() -> dict[str, str]:
@@ -138,7 +138,7 @@ def test_acceptance_ac08_pdf_upload_content_not_logged(
     """
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _device(client)
+    device = _user(client)
     monkeypatch.setattr(logging.getLogger("app.middleware.logging"), "disabled", False)
     with caplog.at_level(logging.INFO):
         with SAMPLE.open("rb") as f:

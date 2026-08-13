@@ -76,15 +76,24 @@ def _duration_seconds(start: str | None, end: str | None) -> float | None:
 
 
 def _decrypt_api_key(session: Session, *, task: Task, settings: Settings) -> str:
-    """从 api_keys 表取 encrypted_key 解密（红线 4：仅 infra/llm 路径；明文不落日志/响应）。"""
+    """从 api_keys 表取 encrypted_key 解密（红线 4：仅 infra/llm 路径；明文不落日志/响应）。
+
+    P4-4（原 plan Task 5 前移）：Key 归属切 user 域——按 task.user_id 查询（列投影 Core
+    select，ApiKey 用户域行对 ORM 不可见）；legacy 任务（user_id NULL）无 Key 可解析 →
+    API_KEY_UNAVAILABLE（干净 FAILED，不 500）。
+    """
     key = key_from_settings(settings)
-    row = session.scalar(
-        select(ApiKey).where(ApiKey.device_id == task.device_id, ApiKey.status == "AVAILABLE")
+    if task.user_id is None:  # legacy device 域任务（D-06 无访问路径）
+        raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 不可用（加密配置缺失或未保存 Key）")
+    encrypted = session.scalar(
+        select(ApiKey.encrypted_key).where(
+            ApiKey.user_id == task.user_id, ApiKey.status == "AVAILABLE"
+        )
     )
-    if key is None or row is None:
+    if key is None or encrypted is None:
         raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 不可用（加密配置缺失或未保存 Key）")
     try:
-        return decrypt_key(row.encrypted_key, key)
+        return decrypt_key(encrypted, key)
     except Exception:  # noqa: BLE001 —— 解密失败（畸形 payload/密钥不符）统一 API_KEY_UNAVAILABLE
         raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 解密失败") from None
 

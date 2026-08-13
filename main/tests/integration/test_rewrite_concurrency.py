@@ -17,11 +17,11 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from infra.db.models import ApiKey, Base, Card, Device, ReviewEvent, ReviewState, User
+from infra.db.models import ApiKey, Base, Card, ReviewEvent, ReviewState, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -35,7 +35,6 @@ _TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
 assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
-_DEVICE = "dev"
 _USER = "user-1"
 _NOW = "2026-08-11T00:00:00.000Z"
 _T1 = "2026-08-11T01:00:00.000Z"
@@ -59,11 +58,10 @@ def _seed_card(session: Session) -> Card:
         User(user_id=_USER, username="u-1", password_hash="x", created_at=_NOW, updated_at=_NOW)
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-    session.add(Device(device_id=_DEVICE, created_at=_NOW))
-    session.flush()
-    session.add(
-        ApiKey(
-            device_id=_DEVICE,
+    session.execute(
+        insert(ApiKey).values(
+            user_id=_USER,
+            device_id=None,
             encrypted_key=_ENCRYPTED_TEST_KEY,
             status="AVAILABLE",
             masked_key="sk-****",
@@ -157,7 +155,6 @@ def test_rewrite_concurrency_same_card_last_write_wins(
         first = rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_T1,
@@ -172,7 +169,6 @@ def test_rewrite_concurrency_same_card_last_write_wins(
         second = rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_T2,
@@ -235,7 +231,6 @@ def test_rewrite_concurrency_review_then_rewrite_resets_schedule(
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_T2,
@@ -276,7 +271,6 @@ def test_rewrite_concurrency_rewrite_then_review_schedules_new_content(
         rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_T1,
@@ -327,7 +321,6 @@ def test_rewrite_concurrency_response_no_pdf_source_fields(
         card = rewrite_card(
             session,
             user_id=_USER,
-            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_T1,

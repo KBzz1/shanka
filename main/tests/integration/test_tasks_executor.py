@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 import pytest
 from prometheus_client import REGISTRY, generate_latest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -54,7 +54,7 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
     单元数 = 每章基础 3 × 密度系数（COMPACT=3 / BALANCED=6）——旧规划配额语义，
     测试直接构造；目标难度按 0.4/0.4/0.2 循环锚定。
     """
-    from infra.db.models import ApiKey, Chapter, Device, PdfFile
+    from infra.db.models import ApiKey, Chapter, PdfFile
     from services.decks.service import create_deck
     from services.pdf.text_chunks import persist_text_chunks
 
@@ -70,9 +70,6 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
             )
         )
         session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
-        session.add(Device(device_id=user_id, created_at="2026-08-11T00:00:00.000Z"))
-        session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -89,10 +86,11 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
-    if session.scalar(select(ApiKey).where(ApiKey.device_id == user_id)) is None:
-        session.add(
-            ApiKey(
-                device_id=user_id,
+    if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:
+        session.execute(
+            insert(ApiKey).values(
+                user_id=user_id,
+                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -109,7 +107,6 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
     task = create_task(
         session,
         user_id=user_id,
-        device_id=user_id,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -119,7 +116,6 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
         ),
         now="2026-08-11T00:00:00.000Z",
     )
-    task.device_id = user_id  # 双列过渡：executor Key 查找仍 device 域（Task 5 切换）
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = "2026-08-11T00:00:00.000Z"
@@ -185,7 +181,7 @@ def _scoring_content(request: httpx.Request) -> str:
 
 def _seed_planning_task(session: Session, *, user_id: str) -> str:
     """PENDING+PLANNING 任务 + 章节 + 页文本（text_chunks）：规划 worker 全流程基座。"""
-    from infra.db.models import ApiKey, Chapter, Device, PdfFile
+    from infra.db.models import ApiKey, Chapter, PdfFile
     from services.decks.service import create_deck
     from services.pdf.text_chunks import persist_text_chunks
 
@@ -200,9 +196,6 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
             )
         )
         session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
-        session.add(Device(device_id=user_id, created_at="2026-08-11T00:00:00.000Z"))
-        session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -219,10 +212,11 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
-    if session.scalar(select(ApiKey).where(ApiKey.device_id == user_id)) is None:
-        session.add(
-            ApiKey(
-                device_id=user_id,
+    if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:
+        session.execute(
+            insert(ApiKey).values(
+                user_id=user_id,
+                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -239,7 +233,6 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     task = create_task(
         session,
         user_id=user_id,
-        device_id=user_id,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -249,7 +242,6 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
         ),
         now="2026-08-11T00:00:00.000Z",
     )
-    task.device_id = user_id  # 双列过渡：executor Key 查找仍 device 域（Task 5 切换）
     session.commit()
     return task.task_id
 

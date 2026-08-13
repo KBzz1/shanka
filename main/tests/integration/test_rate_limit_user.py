@@ -1,7 +1,7 @@
 """限流用户域切换（P4-3）：业务维度键 user_id、auth IP 桶、login 用户名桶。
 
-- 业务桶（write/api_key/samples/pdf）键从 X-Device-ID 切 principal.user_id：
-  user1 写超限 429 不影响 user2。
+- 业务桶（write/api_key/samples/pdf）键 = principal.user_id：user1 写超限 429
+  不影响 user2。
 - auth 维度（structure-contract 1.6/8.3）：POST /auth/register|/auth/login 按 IP
   限流，429 + Retry-After。
 - login 用户名桶（service 层限流）：同用户名多次登录（含失败）超限 → 429 +
@@ -39,17 +39,10 @@ def _make_client(tmp_path: Path, name: str, **overrides: Any) -> TestClient:
 
 
 def test_write_dimension_isolated_per_user(tmp_path: Path) -> None:
-    """业务维度键 = user_id：user1 超限 429 不影响 user2（同 X-Device-ID 也不串桶）。"""
+    """业务维度键 = user_id：user1 超限 429 不影响 user2。"""
     with _make_client(tmp_path, "rl_user", rate_limit_write_per_minute=2) as client:
-        # 两用户共用一个 X-Device-ID——键已切 user 域，不再按设备串桶
-        h1 = {
-            **auth_headers(client, "user1", "pass-1111"),
-            "X-Device-ID": "99999999-9999-4999-8999-999999999999",
-        }
-        h2 = {
-            **auth_headers(client, "user2", "pass-2222"),
-            "X-Device-ID": "99999999-9999-4999-8999-999999999999",
-        }
+        h1 = auth_headers(client, "user1", "pass-1111")
+        h2 = auth_headers(client, "user2", "pass-2222")
         codes_a = [client.post("/v1/decks", json={}, headers=h1).status_code for _ in range(3)]
         codes_b = [client.post("/v1/decks", json={}, headers=h2).status_code for _ in range(2)]
     assert codes_a == [404, 404, 429]  # 无路由 404：限流在路由前

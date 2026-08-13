@@ -53,14 +53,11 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         yield test_client
 
 
-def _device(
+def _user(
     client: TestClient, username: str = "alice", password: str = "secret-pass-1"
 ) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
-    return {
-        **auth_headers(client, username=username, password=password),
-        "X-Device-ID": str(uuid.uuid4()),
-    }
+    """已注册用户的 Bearer 头（P4-4 起 X-Device-ID 退出，仅 Bearer）。"""
+    return auth_headers(client, username=username, password=password)
 
 
 def _idem() -> dict[str, str]:
@@ -75,7 +72,7 @@ def _create_deck(client: TestClient, device: dict[str, str]) -> str:
 
 def test_acceptance_ac09_deck_card_workflow(client: TestClient) -> None:
     """AC-09-1：新建牌组、单卡添加、批量导入；同一幂等键重放不重复写入。"""
-    device = _device(client)
+    device = _user(client)
     resp = client.post("/decks", json={"name": "英语"}, headers={**device, **_idem()})
     assert resp.status_code == 201
     deck_id = resp.json()["deck_id"]
@@ -104,7 +101,7 @@ def test_acceptance_ac09_deck_card_workflow(client: TestClient) -> None:
 
 def test_acceptance_ac09_real_progress(client: TestClient) -> None:
     """AC-09-2：列表/详情展示服务端真实卡片数、待复习数与进度（非本地演示数据）。"""
-    device = _device(client)
+    device = _user(client)
     deck_id = _create_deck(client, device)
     client.post(
         f"/decks/{deck_id}/cards", json={"front": "f", "back": "b"}, headers={**device, **_idem()}
@@ -127,7 +124,7 @@ def test_acceptance_ac09_real_progress(client: TestClient) -> None:
 
 def test_acceptance_ac09_delete_removes_from_reads(client: TestClient) -> None:
     """AC-09-3：删除牌组后其卡片不再出现在读取结果（详情/列表/卡片列表）。"""
-    device = _device(client)
+    device = _user(client)
     deck_id = _create_deck(client, device)
     client.post(
         f"/decks/{deck_id}/cards", json={"front": "f", "back": "b"}, headers={**device, **_idem()}
@@ -144,7 +141,7 @@ def test_acceptance_ac09_delete_removes_from_reads(client: TestClient) -> None:
 
 def test_acceptance_ac09_import_empty_front_or_back_422(client: TestClient) -> None:
     """补覆盖：import 卡片 front/back 为空 → 422 IMPORT_PARSE_ERROR（cards.py 手动校验分支）。"""
-    device = _device(client)
+    device = _user(client)
     deck_id = _create_deck(client, device)
     for bad in (
         {"cards": [{"front": "", "back": "b"}]},  # front 为空
@@ -160,16 +157,16 @@ def test_acceptance_ac09_import_empty_front_or_back_422(client: TestClient) -> N
 
 def test_acceptance_ac09_cards_cross_user_404(client: TestClient) -> None:
     """补覆盖：cards GET 跨用户 → 404 DECK_NOT_FOUND（资源归属隔离）。"""
-    device = _device(client)
+    device = _user(client)
     deck_id = _create_deck(client, device)
-    resp = client.get(f"/decks/{deck_id}/cards", headers=_device(client, "user2", "pass-2222"))
+    resp = client.get(f"/decks/{deck_id}/cards", headers=_user(client, "user2", "pass-2222"))
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
 
 
 def test_acceptance_ac09_delete_requires_idempotency_key(client: TestClient) -> None:
     """补覆盖：DELETE 缺 Idempotency-Key → 400 VALIDATION_ERROR（写接口强制键，契约 1.3）。"""
-    device = _device(client)
+    device = _user(client)
     deck_id = _create_deck(client, device)
     resp = client.delete(f"/decks/{deck_id}", headers=device)
     assert resp.status_code == 400
@@ -178,7 +175,7 @@ def test_acceptance_ac09_delete_requires_idempotency_key(client: TestClient) -> 
 
 def test_acceptance_ac09_import_idempotency_replay(client: TestClient) -> None:
     """补覆盖：import 同 key 同 body 幂等重放 → 首次 results 原样返回、不重复写入。"""
-    device = _device(client)
+    device = _user(client)
     key = _idem()
     deck_id = _create_deck(client, device)
     headers = {**device, **key}
@@ -195,20 +192,15 @@ def test_acceptance_ac09_import_idempotency_replay(client: TestClient) -> None:
 def test_acceptance_ac09_concurrent_idempotency_single_side_effect(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """补覆盖：handler 级并发幂等——两个线程同 (device, path, key) 并发 POST /decks。
+    """补覆盖：handler 级并发幂等——两个线程同 (user, path, key) 并发 POST /decks。
 
     两个独立 TestClient（同库）经 threading.Barrier 同时发请求：唯一约束占位，
     后到事务 BEGIN IMMEDIATE 串行化 → 回滚重读重放。HTTP 响应层面无法直接区分
     fresh/replay（两者 body 相同），以组合断言证明恰一 fresh 一 replay：
     两次均 201 且 deck_id 相同 + 幂等记录仅 1 行 + 牌组列表只有 1 个（单副作用）。
     """
-    device_id = str(uuid.uuid4())
-    # 双头过渡窗口：token 经 client 注册（与 client2 同库共享 session 表）
-    headers = {
-        **auth_headers(client),
-        "X-Device-ID": device_id,
-        "Idempotency-Key": str(uuid.uuid4()),
-    }
+    # token 经 client 注册（与 client2 同库共享 session 表）
+    headers = {**auth_headers(client), "Idempotency-Key": str(uuid.uuid4())}
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'ac09.db'}",
         storage_path=tmp_path / "storage",
@@ -246,7 +238,7 @@ def test_acceptance_ac09_concurrent_idempotency_single_side_effect(
     assert errors == []
     assert statuses == [201, 201]
     assert len(set(deck_ids)) == 1  # 重放返回首次 deck_id（fresh 若重复执行必生成不同 id）
-    resp = client.get("/decks", headers={**auth_headers(client), "X-Device-ID": device_id})
+    resp = client.get("/decks", headers=auth_headers(client))
     assert len(resp.json()["items"]) == 1  # 单副作用：牌组列表只有 1 个
     engine = create_db_engine(f"sqlite:///{tmp_path / 'ac09.db'}")
     with engine.connect() as conn:

@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import ApiKey, Base, Chapter, Device, KnowledgePoint, PdfFile, Task, User
+from infra.db.models import ApiKey, Base, Chapter, KnowledgePoint, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from services.tasks.service import cancel_task, create_task, get_task, resume_task
@@ -49,8 +49,6 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         )
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
-    session.add(Device(device_id=user_id, created_at="2026-08-11T00:00:00.000Z"))
-    session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -79,9 +77,10 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         chapter_ids.append(ch.chapter_id)
         chapters.append(ch)
     if with_key:
-        session.add(
-            ApiKey(
-                device_id=user_id,
+        session.execute(
+            insert(ApiKey).values(
+                user_id=user_id,
+                device_id=None,
                 encrypted_key="enc",
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -129,7 +128,6 @@ def test_tasks_create_pending_snapshot_without_planning(
         task = create_task(
             session,
             user_id=device,
-            device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
@@ -162,7 +160,6 @@ def test_tasks_create_without_key_422(session_factory: Callable[[], Session]) ->
         create_task(
             session,
             user_id=device,
-            device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
@@ -181,7 +178,6 @@ def test_tasks_create_cross_user_404(session_factory: Callable[[], Session]) -> 
         create_task(
             session,
             user_id=_uuid(),
-            device_id=_uuid(),
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
@@ -196,9 +192,20 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
     device = _uuid()
     with session_factory() as session:
         ctx = _seed_context(session, user_id=device)
+        other_owner = _uuid()
+        session.add(
+            User(
+                user_id=other_owner,
+                username=f"u-{other_owner[:8]}",
+                password_hash="x",
+                created_at="2026-08-11T00:00:00.000Z",
+                updated_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()  # FK 强制：users 行先落库
         other_pdf = PdfFile(
             file_id=_uuid(),
-            device_id=device,
+            user_id=other_owner,  # 他人 PDF（原 device 域遗留种子——归属已切 user 域）
             filename="c.pdf",
             storage_key=_uuid(),
             size_bytes=1,
@@ -218,7 +225,6 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
         create_task(
             session,
             user_id=device,
-            device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=[ctx["chapter_ids"][0], foreign_id],
@@ -247,7 +253,6 @@ def test_tasks_cancel_keeps_cards(session_factory: Callable[[], Session]) -> Non
         task = create_task(
             session,
             user_id=device,
-            device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
@@ -274,7 +279,6 @@ def test_tasks_resume_paused(session_factory: Callable[[], Session]) -> None:
         task = create_task(
             session,
             user_id=device,
-            device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
@@ -308,7 +312,6 @@ def test_tasks_resume_orphan_running_after_timeout(session_factory: Callable[[],
         task = create_task(
             session,
             user_id=device,
-            device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
@@ -341,7 +344,6 @@ def test_tasks_resume_running_fresh_conflicts(session_factory: Callable[[], Sess
         task = create_task(
             session,
             user_id=device,
-            device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],

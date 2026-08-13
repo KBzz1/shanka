@@ -12,7 +12,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -39,7 +39,7 @@ def _uuid() -> str:
 
 
 def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> str:
-    from infra.db.models import ApiKey, Chapter, Device, PdfFile
+    from infra.db.models import ApiKey, Chapter, PdfFile
     from services.decks.service import create_deck
 
     # FK 前置守卫：users/devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
@@ -54,9 +54,6 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
             )
         )
         session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
-        session.add(Device(device_id=user_id, created_at=_NOW))
-        session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -73,9 +70,10 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
-    session.add(
-        ApiKey(
-            device_id=user_id,
+    session.execute(
+        insert(ApiKey).values(
+            user_id=user_id,
+            device_id=None,
             encrypted_key="enc",
             status="AVAILABLE",
             masked_key="sk-****",
@@ -86,7 +84,6 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
     task = create_task(
         session,
         user_id=user_id,
-        device_id=user_id,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -96,7 +93,6 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
         ),
         now=_NOW,
     )
-    task.device_id = user_id  # 双列过渡：executor Key 查找仍 device 域（Task 5 切换）
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = _NOW

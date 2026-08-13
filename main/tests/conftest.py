@@ -63,18 +63,18 @@ def db_engine(tmp_path: Path) -> Engine:
     return create_db_engine(f"sqlite:///{db_path}")
 
 
-# 双头过渡窗口（P4-2）：已注册用户的 Bearer token 模块级缓存。键 (id(client), username)——
-# id(client) 区分不同 DB 的 client（每个测试函数独立临时库）；命中缓存直接返回，避免每
-# 次构造 headers 重复 Argon2id 计算（~100ms/次，无缓存全量 +100s 级）。
-# 值带 weakref：client 对象 GC 后地址可被新 client 复用——weakref 已死则视为未命中
-# 重新注册，杜绝「新 client 拿到旧库 token」的 401 污染。
+# 已注册用户的 Bearer token 模块级缓存（P4-2 引入，P4-4 去设备头后仅 Bearer）。
+# 键 (id(client), username)——id(client) 区分不同 DB 的 client（每个测试函数独立临时库）；
+# 命中缓存直接返回，避免每次构造 headers 重复 Argon2id 计算（~100ms/次，无缓存全量
+# +100s 级）。值带 weakref：client 对象 GC 后地址可被新 client 复用——weakref 已死则
+# 视为未命中重新注册，杜绝「新 client 拿到旧库 token」的 401 污染。
 _AUTH_TOKEN_CACHE: dict[tuple[int, str], tuple[weakref.ReferenceType[TestClient], str]] = {}
 
 
 def auth_headers(
     client: TestClient, username: str = "alice", password: str = "secret-pass-1"
 ) -> dict[str, str]:
-    """register 或 login 后返回 Bearer + 过渡期 X-Device-ID 双头。
+    """register 或 login 后返回 Bearer 头（P4-4 起 X-Device-ID 已退出，仅 Bearer）。
 
     缓存语义：同一 (client, username) 只做一次 register/login（token 会话为该测试
     client 的 DB 持有）；文件内 logout 撤销语义的测试请用文件内 helper（test_auth.py
@@ -90,7 +90,4 @@ def auth_headers(
         assert r.status_code in (200, 201), r.text
         token = r.json()["access_token"]
         _AUTH_TOKEN_CACHE[cache_key] = (weakref.ref(client), token)
-    return {
-        "Authorization": f"Bearer {token}",
-        "X-Device-ID": "11111111-1111-4111-8111-111111111111",
-    }
+    return {"Authorization": f"Bearer {token}"}

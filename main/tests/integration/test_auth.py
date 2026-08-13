@@ -19,8 +19,6 @@ from services.auth.tokens import hash_session_token
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
-_DEVICE_HEADER = {"X-Device-ID": "11111111-1111-4111-8111-111111111111"}
-
 
 @pytest.fixture
 def client(tmp_path: Path) -> Iterator[TestClient]:
@@ -51,10 +49,7 @@ def _auth_headers(
     assert set(body) == {"user", "access_token", "token_type", "expires_at"}
     assert set(body["user"]) == {"user_id", "username", "created_at"}
     assert body["user"]["username"] == username
-    return {
-        "Authorization": f"Bearer {body['access_token']}",
-        "X-Device-ID": "11111111-1111-4111-8111-111111111111",
-    }
+    return {"Authorization": f"Bearer {body['access_token']}"}
 
 
 def test_register_login_logout_me_flow(client: TestClient) -> None:
@@ -80,10 +75,7 @@ def test_register_login_logout_me_flow(client: TestClient) -> None:
     # 重新登录生成新 session
     r2 = client.post("/auth/login", json={"username": "alice", "password": "secret-pass-1"})
     assert r2.status_code == 200
-    h2 = {
-        "Authorization": f"Bearer {r2.json()['access_token']}",
-        "X-Device-ID": "11111111-1111-4111-8111-111111111111",
-    }
+    h2 = {"Authorization": f"Bearer {r2.json()['access_token']}"}
     assert client.get("/auth/me", headers=h2).status_code == 200
 
 
@@ -134,10 +126,7 @@ def test_multiple_sessions_coexist_logout_only_current(client: TestClient) -> No
     headers1 = _auth_headers(client)
     r2 = client.post("/auth/login", json={"username": "alice", "password": "secret-pass-1"})
     assert r2.status_code == 200
-    headers2 = {
-        "Authorization": f"Bearer {r2.json()['access_token']}",
-        "X-Device-ID": "11111111-1111-4111-8111-111111111111",
-    }
+    headers2 = {"Authorization": f"Bearer {r2.json()['access_token']}"}
     assert client.get("/auth/me", headers=headers1).status_code == 200
     assert client.get("/auth/me", headers=headers2).status_code == 200
     resp = client.post(
@@ -171,7 +160,7 @@ def test_expired_session_401_auth_invalid(client: TestClient, tmp_path: Path) ->
                 "exp": "2020-01-02T00:00:00.000Z",
             },
         )
-    r = client.get("/auth/me", headers={"Authorization": f"Bearer {token}", **_DEVICE_HEADER})
+    r = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "AUTH_INVALID"
 
