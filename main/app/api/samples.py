@@ -40,7 +40,7 @@ def generate_samples_endpoint(
     """生成 3 张样卡（1 基础 + 1 理解 + 1 应用；2 问答 + 1 判断），不入库。"""
     cards = generate_samples(
         session,
-        device_id=request.state.device_id,
+        user_id=request.state.principal.user_id,
         file_id=payload.file_id,
         chapter_ids=payload.chapter_ids,
         config=payload.generation_config,

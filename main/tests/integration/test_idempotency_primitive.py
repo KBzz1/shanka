@@ -37,7 +37,7 @@ def test_idempotency_fresh_executes_and_records(session_factory: Callable[[], Se
     with session_factory() as session:
         replayed, status, body = execute_idempotent(
             session,
-            device_id="dev-1",
+            user_id="user-1",
             path="/v1/decks",
             idempotency_key=str(uuid.uuid4()),
             request_body_hash=request_body_hash(b'{"name":"d"}'),
@@ -63,7 +63,7 @@ def test_idempotency_replay_returns_first_response(session_factory: Callable[[],
     with session_factory() as session:
         execute_idempotent(
             session,
-            device_id="dev-1",
+            user_id="user-1",
             path="/v1/decks",
             idempotency_key=key,
             request_body_hash=request_body_hash(body),
@@ -73,7 +73,7 @@ def test_idempotency_replay_returns_first_response(session_factory: Callable[[],
     with session_factory() as session:
         replayed, status, body_out = execute_idempotent(
             session,
-            device_id="dev-1",
+            user_id="user-1",
             path="/v1/decks",
             idempotency_key=key,
             request_body_hash=request_body_hash(body),
@@ -97,7 +97,7 @@ def test_idempotency_body_mismatch_raises_conflict(session_factory: Callable[[],
     with session_factory() as session:
         execute_idempotent(
             session,
-            device_id="dev-1",
+            user_id="user-1",
             path="/v1/decks",
             idempotency_key=key,
             request_body_hash=request_body_hash(b'{"name":"d"}'),
@@ -107,7 +107,7 @@ def test_idempotency_body_mismatch_raises_conflict(session_factory: Callable[[],
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         execute_idempotent(
             session,
-            device_id="dev-1",
+            user_id="user-1",
             path="/v1/decks",
             idempotency_key=key,
             request_body_hash=request_body_hash(b'{"name":"OTHER"}'),
@@ -130,7 +130,7 @@ def test_idempotency_non_2xx_not_recorded_and_retried(
     with session_factory() as session:
         replayed, status, body = execute_idempotent(
             session,
-            device_id="dev-1",
+            user_id="user-1",
             path="/v1/decks",
             idempotency_key=key,
             request_body_hash=request_body_hash(b'{"name":"d"}'),
@@ -145,7 +145,7 @@ def test_idempotency_non_2xx_not_recorded_and_retried(
     with session_factory() as session:
         replayed, status, body = execute_idempotent(
             session,
-            device_id="dev-1",
+            user_id="user-1",
             path="/v1/decks",
             idempotency_key=key,
             request_body_hash=request_body_hash(b'{"name":"d"}'),
@@ -181,7 +181,7 @@ def test_idempotency_concurrent_same_key_single_effect(
             try:
                 out = execute_idempotent(
                     session,
-                    device_id="dev-1",
+                    user_id="user-1",
                     path="/v1/decks",
                     idempotency_key=key,
                     request_body_hash=request_body_hash(body),
@@ -225,7 +225,7 @@ def test_idempotency_rollback_releases_claim(session_factory: Callable[[], Sessi
         with pytest.raises(RuntimeError):
             execute_idempotent(
                 session,
-                device_id="dev-1",
+                user_id="user-1",
                 path="/v1/decks",
                 idempotency_key=key,
                 request_body_hash=request_body_hash(b"{}"),
@@ -242,7 +242,7 @@ def test_idempotency_rollback_releases_claim(session_factory: Callable[[], Sessi
     with session_factory() as session:
         replayed, _status, _body = execute_idempotent(
             session,
-            device_id="dev-1",
+            user_id="user-1",
             path="/v1/decks",
             idempotency_key=key,
             request_body_hash=request_body_hash(b"{}"),
@@ -301,7 +301,7 @@ def test_idempotency_flush_conflict_backstop_replays(tmp_path: Path) -> None:
             try:
                 out = execute_idempotent(
                     session,
-                    device_id="dev-1",
+                    user_id="user-1",
                     path="/v1/decks",
                     idempotency_key=key,
                     request_body_hash=request_body_hash(body),
@@ -323,7 +323,7 @@ def test_idempotency_flush_conflict_backstop_replays(tmp_path: Path) -> None:
         with factory() as session:
             replayed, status, body_out = execute_idempotent(
                 session,
-                device_id="dev-1",
+                user_id="user-1",
                 path="/v1/decks",
                 idempotency_key=key,
                 request_body_hash=request_body_hash(body),

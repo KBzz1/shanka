@@ -34,29 +34,34 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
+    return {
+        **auth_headers(client, username=username, password=password),
+        "X-Device-ID": str(uuid.uuid4()),
+    }
 
 
 def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-def _make_deck_card(client: TestClient, device: dict[str, str]) -> tuple[str, str]:
-    deck_id = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()}).json()[
+def _make_deck_card(client: TestClient, user: dict[str, str]) -> tuple[str, str]:
+    deck_id = client.post("/decks", json={"name": "D"}, headers={**user, **_idem()}).json()[
         "deck_id"
     ]
     card_id = client.post(
-        f"/decks/{deck_id}/cards", json={"front": "f", "back": "b"}, headers={**device, **_idem()}
+        f"/decks/{deck_id}/cards", json={"front": "f", "back": "b"}, headers={**user, **_idem()}
     ).json()["card_id"]
     return deck_id, card_id
 
 
 def test_review_api_queue_returns_due_card(client: TestClient) -> None:
-    device = _device(client)
-    deck_id, card_id = _make_deck_card(client, device)
-    resp = client.get(f"/decks/{deck_id}/review", headers=device)
+    user = _user(client)
+    deck_id, card_id = _make_deck_card(client, user)
+    resp = client.get(f"/decks/{deck_id}/review", headers=user)
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 1
@@ -65,8 +70,8 @@ def test_review_api_queue_returns_due_card(client: TestClient) -> None:
 
 
 def test_review_api_submit_returns_updated_state(client: TestClient) -> None:
-    device = _device(client)
-    _, card_id = _make_deck_card(client, device)
+    user = _user(client)
+    _, card_id = _make_deck_card(client, user)
     resp = client.post(
         "/review-events",
         json={
@@ -75,7 +80,7 @@ def test_review_api_submit_returns_updated_state(client: TestClient) -> None:
             "client_event_id": str(uuid.uuid4()),
             "device_timezone": "Asia/Shanghai",
         },
-        headers={**device, **_idem()},
+        headers={**user, **_idem()},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -86,9 +91,9 @@ def test_review_api_submit_returns_updated_state(client: TestClient) -> None:
 
 def test_review_api_idempotency_key_replays(client: TestClient) -> None:
     """同 key 同 body 两次提交：键层重放首次完整快照，业务副作用仅一次。"""
-    device = _device(client)
-    _, card_id = _make_deck_card(client, device)
-    headers = {**device, **_idem()}
+    user = _user(client)
+    _, card_id = _make_deck_card(client, user)
+    headers = {**user, **_idem()}
     payload = {
         "card_id": card_id,
         "rating": "GOOD",
@@ -105,8 +110,8 @@ def test_review_api_idempotency_key_replays(client: TestClient) -> None:
 def test_review_api_client_event_id_dedup_key_differs(client: TestClient) -> None:
     """实际场景带 Idempotency-Key 且仅 key 不同：键层不介入（key 不同），
     client_event_id 兜底生效 → 事件不重复；重放响应 = 当前 review_state 视图（R-12 完整口径）。"""
-    device = _device(client)
-    _, card_id = _make_deck_card(client, device)
+    user = _user(client)
+    _, card_id = _make_deck_card(client, user)
     client_event = str(uuid.uuid4())
     payload = {
         "card_id": card_id,
@@ -114,16 +119,16 @@ def test_review_api_client_event_id_dedup_key_differs(client: TestClient) -> Non
         "client_event_id": client_event,
         "device_timezone": "Asia/Shanghai",
     }
-    r1 = client.post("/review-events", json=payload, headers={**device, **_idem()})
-    r2 = client.post("/review-events", json=payload, headers={**device, **_idem()})
+    r1 = client.post("/review-events", json=payload, headers={**user, **_idem()})
+    r2 = client.post("/review-events", json=payload, headers={**user, **_idem()})
     assert r1.status_code == 200 and r2.status_code == 200
     assert r1.json() == r2.json()  # R-12 兜底重放完整口径：响应 = 当前 review_state 视图
     assert r2.json()["reps"] == 1  # client_event_id 兜底重放当前视图，不重复计数
 
 
 def test_review_api_client_event_conflict(client: TestClient) -> None:
-    device = _device(client)
-    _, card_id = _make_deck_card(client, device)
+    user = _user(client)
+    _, card_id = _make_deck_card(client, user)
     client_event = str(uuid.uuid4())
     payload_good = {
         "card_id": card_id,
@@ -131,18 +136,18 @@ def test_review_api_client_event_conflict(client: TestClient) -> None:
         "client_event_id": client_event,
         "device_timezone": "Asia/Shanghai",
     }
-    r1 = client.post("/review-events", json=payload_good, headers={**device, **_idem()})
+    r1 = client.post("/review-events", json=payload_good, headers={**user, **_idem()})
     assert r1.status_code == 200  # 首 POST 正常成功，冲突来自第二 POST 的 client_event_id 复用
     payload_again = {**payload_good, "rating": "AGAIN"}
-    resp = client.post("/review-events", json=payload_again, headers={**device, **_idem()})
+    resp = client.post("/review-events", json=payload_again, headers={**user, **_idem()})
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "REVIEW_EVENT_CONFLICT"
 
 
 def test_review_api_invalid_rating_400(client: TestClient) -> None:
     """rating 为 str（schema 不 Literal 拦截）→ service 内校验抛 REVIEW_EVENT_INVALID 400。"""
-    device = _device(client)
-    _, card_id = _make_deck_card(client, device)
+    user = _user(client)
+    _, card_id = _make_deck_card(client, user)
     resp = client.post(
         "/review-events",
         json={
@@ -151,7 +156,7 @@ def test_review_api_invalid_rating_400(client: TestClient) -> None:
             "client_event_id": str(uuid.uuid4()),
             "device_timezone": "Asia/Shanghai",
         },
-        headers={**device, **_idem()},
+        headers={**user, **_idem()},
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "REVIEW_EVENT_INVALID"
@@ -159,8 +164,8 @@ def test_review_api_invalid_rating_400(client: TestClient) -> None:
 
 def test_review_api_invalid_timezone_400(client: TestClient) -> None:
     """M-3（final review）：device_timezone 非 IANA 时区 → 400 VALIDATION_ERROR（契约第 7 章）。"""
-    device = _device(client)
-    _, card_id = _make_deck_card(client, device)
+    user = _user(client)
+    _, card_id = _make_deck_card(client, user)
     resp = client.post(
         "/review-events",
         json={
@@ -169,17 +174,17 @@ def test_review_api_invalid_timezone_400(client: TestClient) -> None:
             "client_event_id": str(uuid.uuid4()),
             "device_timezone": "Not/AZone",
         },
-        headers={**device, **_idem()},
+        headers={**user, **_idem()},
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
-def test_review_api_cross_device_404(client: TestClient) -> None:
-    """跨设备提交评级：卡归属校验 → CARD_NOT_FOUND（用独立 other device 头）。"""
-    device = _device(client)
-    _, card_id = _make_deck_card(client, device)
-    other = _device(client)
+def test_review_api_cross_user_404(client: TestClient) -> None:
+    """跨用户提交评级：卡归属校验 → CARD_NOT_FOUND（用独立 other user 头）。"""
+    user = _user(client)
+    _, card_id = _make_deck_card(client, user)
+    other = _user(client, "user2", "pass-2222")
     resp = client.post(
         "/review-events",
         json={

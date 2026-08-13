@@ -1,4 +1,4 @@
-"""services.decks 集成测试：创建/列表/详情/删除/进度/删除保护（真实 SQLite）。"""
+"""services.decks 集成测试：创建/列表/详情/删除/进度/删除保护（真实 SQLite；user 域隔离）。"""
 
 import uuid
 from collections.abc import Callable
@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Device
+from infra.db.models import Base, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import (
     create_deck,
@@ -31,17 +31,25 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _ensure_device(session: Session, device_id: str) -> None:
-    """devices 行先落库：HTTP 流由 F1 设备中间件自动建立，service 测试需显式建立（FK 强制）。"""
-    session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+def _ensure_user(session: Session, user_id: str) -> None:
+    """users 行先落库：HTTP 流由注册端点建立，service 测试需显式建立（FK 强制）。"""
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            password_hash="x",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
     session.flush()
 
 
 def test_decks_create_assigns_defaults(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        _ensure_device(session, device)
-        deck = create_deck(session, device_id=device, name="学习", now="2026-08-11T00:00:00.000Z")
+        _ensure_user(session, user)
+        deck = create_deck(session, user_id=user, name="学习", now="2026-08-11T00:00:00.000Z")
         session.commit()
         deck_id = deck.deck_id
     assert deck.name == "学习"
@@ -51,7 +59,7 @@ def test_decks_create_assigns_defaults(session_factory: Callable[[], Session]) -
     # 进度派生：空牌组
     with session_factory() as session:
         progress = deck_progress(
-            session, device_id=device, deck_id=deck_id, now="2026-08-11T00:00:00.000Z"
+            session, user_id=user, deck_id=deck_id, now="2026-08-11T00:00:00.000Z"
         )
     assert progress == {
         "card_count": 0,
@@ -62,31 +70,31 @@ def test_decks_create_assigns_defaults(session_factory: Callable[[], Session]) -
     }
 
 
-def test_decks_list_isolated_per_device(session_factory: Callable[[], Session]) -> None:
-    device_a, device_b = _uuid(), _uuid()
+def test_decks_list_isolated_per_user(session_factory: Callable[[], Session]) -> None:
+    user_a, user_b = _uuid(), _uuid()
     with session_factory() as session:
-        _ensure_device(session, device_a)
-        _ensure_device(session, device_b)
-        create_deck(session, device_id=device_a, name="A", now="2026-08-11T00:00:00.000Z")
-        create_deck(session, device_id=device_b, name="B", now="2026-08-11T00:00:00.000Z")
+        _ensure_user(session, user_a)
+        _ensure_user(session, user_b)
+        create_deck(session, user_id=user_a, name="A", now="2026-08-11T00:00:00.000Z")
+        create_deck(session, user_id=user_b, name="B", now="2026-08-11T00:00:00.000Z")
         session.commit()
     with session_factory() as session:
-        decks_a = list_decks(session, device_id=device_a, now="2026-08-11T00:00:00.000Z")
-        decks_b = list_decks(session, device_id=device_b, now="2026-08-11T00:00:00.000Z")
+        decks_a = list_decks(session, user_id=user_a, now="2026-08-11T00:00:00.000Z")
+        decks_b = list_decks(session, user_id=user_b, now="2026-08-11T00:00:00.000Z")
     assert [d["name"] for d in decks_a] == ["A"]
     assert [d["name"] for d in decks_b] == ["B"]
 
 
-def test_decks_get_other_device_returns_404(session_factory: Callable[[], Session]) -> None:
-    device_a, device_b = _uuid(), _uuid()
+def test_decks_get_other_user_returns_404(session_factory: Callable[[], Session]) -> None:
+    user_a, user_b = _uuid(), _uuid()
     with session_factory() as session:
-        _ensure_device(session, device_a)
-        _ensure_device(session, device_b)
-        deck = create_deck(session, device_id=device_a, name="A", now="2026-08-11T00:00:00.000Z")
+        _ensure_user(session, user_a)
+        _ensure_user(session, user_b)
+        deck = create_deck(session, user_id=user_a, name="A", now="2026-08-11T00:00:00.000Z")
         session.commit()
         deck_id = deck.deck_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        get_deck(session, device_id=device_b, deck_id=deck_id, now="2026-08-11T00:00:00.000Z")
+        get_deck(session, user_id=user_b, deck_id=deck_id, now="2026-08-11T00:00:00.000Z")
     assert excinfo.value.code is ErrorCode.DECK_NOT_FOUND
 
 
@@ -95,16 +103,16 @@ def test_decks_delete_removes_cascade_and_sets_null(session_factory: Callable[[]
     from infra.db.models import Card, ReviewState, Task
     from infra.db.models import Deck as DeckModel
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        _ensure_device(session, device)
-        deck = create_deck(session, device_id=device, name="D", now="2026-08-11T00:00:00.000Z")
+        _ensure_user(session, user)
+        deck = create_deck(session, user_id=user, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
         # 插入一张卡 + 初始 review_state + 一个终态任务引用
         card = Card(
             card_id=_uuid(),
             deck_id=deck.deck_id,
-            device_id=device,
+            user_id=user,
             source="MANUAL",
             position=1,
             front="f",
@@ -131,7 +139,7 @@ def test_decks_delete_removes_cascade_and_sets_null(session_factory: Callable[[]
         )
         task = Task(
             task_id=_uuid(),
-            device_id=device,
+            user_id=user,
             status="COMPLETED",
             selected_chapters="[]",
             generation_config="{}",
@@ -146,7 +154,7 @@ def test_decks_delete_removes_cascade_and_sets_null(session_factory: Callable[[]
         deck_id, card_id, task_id = deck.deck_id, card.card_id, task.task_id
     # 删除
     with session_factory() as session:
-        delete_deck(session, device_id=device, deck_id=deck_id)
+        delete_deck(session, user_id=user, deck_id=deck_id)
         session.commit()
     with session_factory() as session:
         assert session.get(DeckModel, deck_id) is None
@@ -158,22 +166,22 @@ def test_decks_delete_removes_cascade_and_sets_null(session_factory: Callable[[]
         assert task_row.deck_id is None  # SET NULL
         # 重复删除：牌组已不存在 → DECK_NOT_FOUND（API 级"重复提交安全返回"由 Task 4 幂等键层保证）
         with pytest.raises(AppError) as excinfo:
-            delete_deck(session, device_id=device, deck_id=deck_id)
+            delete_deck(session, user_id=user, deck_id=deck_id)
         assert excinfo.value.code is ErrorCode.DECK_NOT_FOUND
 
 
 def test_decks_delete_blocked_by_non_terminal_task(session_factory: Callable[[], Session]) -> None:
     from infra.db.models import Task
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        _ensure_device(session, device)
-        deck = create_deck(session, device_id=device, name="D", now="2026-08-11T00:00:00.000Z")
+        _ensure_user(session, user)
+        deck = create_deck(session, user_id=user, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
         session.add(
             Task(
                 task_id=_uuid(),
-                device_id=device,
+                user_id=user,
                 status="RUNNING",
                 selected_chapters="[]",
                 generation_config="{}",
@@ -187,5 +195,5 @@ def test_decks_delete_blocked_by_non_terminal_task(session_factory: Callable[[],
         session.commit()
         deck_id = deck.deck_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        delete_deck(session, device_id=device, deck_id=deck_id)
+        delete_deck(session, user_id=user, deck_id=deck_id)
     assert excinfo.value.code is ErrorCode.TASK_IN_PROGRESS

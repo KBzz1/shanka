@@ -5,7 +5,7 @@
   source/target_difficulty/knowledge_point_ids 保留原值；code 不变；
   version 递增（database-design 2.9）；updated_at 刷新（created_at 不变）。
 - ReviewState 原子重置为新建卡初始值（2.10；difficulty=1.0 满足 ORM CHECK 1~10）。
-- 失败保留：卡不存在/跨设备 CARD_NOT_FOUND（404）；无 Key API_KEY_NOT_SET（422）；
+- 失败保留：卡不存在/跨用户 CARD_NOT_FOUND（404）；无 Key API_KEY_NOT_SET（422）；
   解密失败 API_KEY_UNAVAILABLE（502）；响应解析/Schema 违约 REWRITE_SCHEMA_INVALID（422，
   保留原卡不做任何写）；LLM 调用异常由 adapter 抛 GENERATION_FAILED/API_KEY_UNAVAILABLE。
 - Rubric 评分字段（evidence/correctness/difficulty/learning_value/rubric_total）由
@@ -157,7 +157,8 @@ def _fail_rewrite_attempt(
 def rewrite_card(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
+    device_id: str,  # 双头过渡（P4-3）：Key 解析仍按 device 域（Task 5 切换）
     card_id: str,
     custom_requirements: str | None,
     now: str,
@@ -176,7 +177,7 @@ def rewrite_card(
     idempotency_key：handler 传入 Idempotency-Key（operation_key 区分多次用户请求）；
     测试可传 None → hash("")。
     """
-    card = session.scalar(select(Card).where(Card.card_id == card_id, Card.device_id == device_id))
+    card = session.scalar(select(Card).where(Card.card_id == card_id, Card.user_id == user_id))
     if card is None:
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
     review_state = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
@@ -194,7 +195,9 @@ def rewrite_card(
             updated_at=now,
         )
         session.add(review_state)
-    api_key = _resolve_api_key(session, device_id=device_id, settings=settings)
+    api_key = _resolve_api_key(
+        session, device_id=device_id, settings=settings
+    )  # device 域中间态（Task 5 切 user）
     client = (
         client_factory(api_key)
         if client_factory is not None
@@ -207,7 +210,7 @@ def rewrite_card(
     )
     attempt = create_attempt(
         session,
-        device_id=device_id,
+        user_id=user_id,
         scope_type="CARD",
         scope_id=card_id,
         task_id=None,

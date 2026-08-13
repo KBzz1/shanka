@@ -5,16 +5,25 @@
   （用户名不存在先执行固定 dummy 校验抹平时序差；损坏 PHC 哈希 catch InvalidHashError 绝不 500）。
 - logout：条件更新 revoked_at（已撤销/重放不再执行副作用），幂等。
 - resolve_principal：只查 auth_sessions（行含 user_id 无需 JOIN），撤销/过期 → None，供中间件。
+- login 用户名桶限流（P4-3）：RateLimiter 共享实例由 handler 从 app.state 注入
+  （body 于 BodyCapture 内层，middleware 不可读——裁决）；检查在规范化+校验后，
+  超限 → RATE_LIMITED（handler 捕获后 429 + Retry-After）。
 """
+
+from __future__ import annotations
 
 import re
 import uuid
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from argon2.exceptions import InvalidHashError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:  # 仅类型（分层不允许 services 运行时依赖 app——运行时鸭子类型调用 check）
+    from app.middleware.rate_limit import RateLimiter
 
 from app.errors import AppError, ErrorCode
 from domain.auth import AuthPrincipal
@@ -115,10 +124,18 @@ def login_user(
     password: str,
     now: datetime,
     ttl_days: int,
+    username_limiter: RateLimiter,
 ) -> tuple[dict[str, str], str, str]:
-    """登录：校验凭据 + 新建会话；失败统一 INVALID_CREDENTIALS（不暴露用户存在性）。"""
+    """登录：校验凭据 + 新建会话；失败统一 INVALID_CREDENTIALS（不暴露用户存在性）。
+
+    username_limiter：login 用户名桶（P4-3）——规范化后先 check，超限抛 RATE_LIMITED
+    （handler 捕获后 429 + Retry-After）；成功与失败登录均计入桶。
+    """
     normalized = _normalize_username(username)
     _validate_username(normalized)
+    allowed, _retry_after = username_limiter.check(normalized)
+    if not allowed:
+        raise AppError(ErrorCode.RATE_LIMITED, "请求过于频繁，请稍后重试")
     user = session.scalar(select(User).where(User.username == normalized))
     if user is None:
         verify_dummy(password)  # 固定 dummy 校验抹平账号存在性时序差（DESIGN §4.2）

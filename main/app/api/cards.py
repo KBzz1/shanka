@@ -45,7 +45,7 @@ def list_cards_endpoint(
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    cards = list_cards(session, device_id=request.state.device_id, deck_id=deck_id)
+    cards = list_cards(session, user_id=request.state.principal.user_id, deck_id=deck_id)
     return JSONResponse(content={"items": [card_view(c) for c in cards]})
 
 
@@ -56,7 +56,7 @@ def create_card_endpoint(
     payload: CardCreate,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/decks/{deck_id}/cards"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -64,7 +64,7 @@ def create_card_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         card = create_card(
             session,
-            device_id=device_id,
+            user_id=user_id,
             deck_id=deck_id,
             front=payload.front,
             back=payload.back,
@@ -74,7 +74,7 @@ def create_card_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -91,7 +91,7 @@ def import_cards_endpoint(
     payload: dict[str, list[dict[str, str]]],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/decks/{deck_id}/cards/import"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -105,7 +105,7 @@ def import_cards_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         results = import_cards(
             session,
-            device_id=device_id,
+            user_id=user_id,
             deck_id=deck_id,
             cards=[(c["front"], c["back"]) for c in raw_cards],
             now=_now(),
@@ -116,7 +116,7 @@ def import_cards_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -134,7 +134,7 @@ def update_card_endpoint(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
     """编辑卡片（structure-contract 6.5）：内容覆盖 + ReviewState 重置为新卡。"""
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/cards/{card_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -142,7 +142,7 @@ def update_card_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         card = update_card(
             session,
-            device_id=device_id,
+            user_id=user_id,
             card_id=card_id,
             front=payload.front,
             back=payload.back,
@@ -152,7 +152,7 @@ def update_card_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -169,18 +169,18 @@ def delete_card_endpoint(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> Response:
     """删除单卡（structure-contract 6.5）；级联 review_states/review_events。"""
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/cards/{card_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        delete_card(session, device_id=device_id, card_id=card_id)
+        delete_card(session, user_id=user_id, card_id=card_id)
         return 204, {}
 
     _replayed, status, _body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -204,7 +204,7 @@ def rewrite_card_endpoint(
     非 2xx 不落幂等记录（execute_idempotent 契约 1.3/2.12），不 commit。
     client_factory 从 app.state 注入（getattr 缺省 None → 生产构造真实 client；测试注入 mock）。
     """
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/cards/{card_id}/rewrite"  # 与 openapi 路径一致，无 /v1 前缀（现有路由惯例）
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -217,7 +217,9 @@ def rewrite_card_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         card = rewrite_card(
             session,
-            device_id=device_id,
+            user_id=user_id,
+            # 双头过渡（P4-3）：Key 解析仍按 device 域（api_key 用户域切换在 Task 5）
+            device_id=request.state.device_id,
             card_id=card_id,
             custom_requirements=custom_requirements,
             idempotency_key=key,
@@ -229,7 +231,7 @@ def rewrite_card_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,

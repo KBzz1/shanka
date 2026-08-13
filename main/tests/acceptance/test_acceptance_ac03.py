@@ -23,7 +23,7 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import Card, Chapter, Device, PdfFile, ReviewState
+from infra.db.models import Card, Chapter, PdfFile, ReviewState, User
 from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -59,15 +59,15 @@ def _config() -> dict[str, object]:
 
 
 def _seed_pdf_context(client: TestClient, device: dict[str, str]) -> tuple[str, list[str]]:
-    """种 DB 行：Device（FK 前置）+ PdfFile(PARSED) + 2 章节（plan Task 5 决策，避免样书依赖）。"""
+    """种 DB 行：User（FK 前置）+ PdfFile(PARSED) + 2 章节（plan Task 5 决策，避免样书依赖）。"""
     app = cast(FastAPI, client.app)
     factory = app.state.session_factory
     with factory() as session:
-        session.add(Device(device_id=device["X-Device-ID"], created_at="2026-08-11T00:00:00.000Z"))
-        session.flush()
+        owner = session.scalar(select(User).where(User.username == "alice"))  # 注册端点已建行
+        assert owner is not None
         pdf = PdfFile(
             file_id=str(uuid.uuid4()),
-            device_id=device["X-Device-ID"],
+            user_id=owner.user_id,
             filename="b.pdf",
             storage_key=str(uuid.uuid4()),
             size_bytes=10,

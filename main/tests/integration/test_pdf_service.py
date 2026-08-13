@@ -1,7 +1,7 @@
-"""services.pdf.service 集成测试：上传/列表/详情/删除/章节（真实 SQLite + 临时存储）。
+"""services.pdf.service 集成测试：上传/列表/详情/删除/章节（真实 SQLite + 临时存储；user 域）。
 
-V1 教训 carry-forward：devices FK 强制（PRAGMA foreign_keys=ON），service 层测试需
-显式建立 devices 行（HTTP 流由设备中间件自动建立，见 test_decks_service.py）。
+V1 教训 carry-forward：users FK 强制（PRAGMA foreign_keys=ON），service 层测试需
+显式建立 users 行（HTTP 流由注册端点建立，见 test_decks_service.py）。
 """
 
 import uuid
@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Chapter, Device, PdfFile, Task
+from infra.db.models import Base, Chapter, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.storage.local import LocalStorage
 from services.pdf.service import (
@@ -40,19 +40,27 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _ensure_device(session: Session, device_id: str) -> None:
-    """devices 行先落库（FK 强制）：service 测试需显式建立。"""
-    session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+def _ensure_user(session: Session, user_id: str) -> None:
+    """users 行先落库（FK 强制）：service 测试需显式建立。"""
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            password_hash="x",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
     session.flush()
 
 
 def _seed_pdf(
-    session: Session, *, device_id: str, storage_key: str = "", status: str = "PARSED"
+    session: Session, *, user_id: str, storage_key: str = "", status: str = "PARSED"
 ) -> str:
-    _ensure_device(session, device_id)
+    _ensure_user(session, user_id)
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="book.pdf",
         storage_key=storage_key or _uuid(),
         size_bytes=100,
@@ -67,12 +75,12 @@ def _seed_pdf(
 def test_pdf_service_upload_creates_pending(
     session_factory: Callable[[], Session], storage: LocalStorage
 ) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        _ensure_device(session, device)
+        _ensure_user(session, user)
         pdf = upload_pdf(
             session,
-            device_id=device,
+            user_id=user,
             filename="book.pdf",
             size_bytes=100,
             storage_key=_uuid(),
@@ -84,42 +92,42 @@ def test_pdf_service_upload_creates_pending(
     with session_factory() as session:
         row = session.get(PdfFile, file_id)
         assert row is not None
-        assert row.device_id == device
+        assert row.user_id == user
 
 
 def test_pdf_service_list_isolated_and_sorted(session_factory: Callable[[], Session]) -> None:
-    device_a, device_b = _uuid(), _uuid()
+    user_a, user_b = _uuid(), _uuid()
     with session_factory() as session:
-        _seed_pdf(session, device_id=device_a)
-        _seed_pdf(session, device_id=device_b)
+        _seed_pdf(session, user_id=user_a)
+        _seed_pdf(session, user_id=user_b)
         session.commit()
     with session_factory() as session:
-        list_a = list_pdfs(session, device_id=device_a)
-        list_b = list_pdfs(session, device_id=device_b)
+        list_a = list_pdfs(session, user_id=user_a)
+        list_b = list_pdfs(session, user_id=user_b)
     assert len(list_a) == 1 and len(list_b) == 1
 
 
-def test_pdf_service_get_cross_device_404(session_factory: Callable[[], Session]) -> None:
-    device_a, device_b = _uuid(), _uuid()
+def test_pdf_service_get_cross_user_404(session_factory: Callable[[], Session]) -> None:
+    user_a, user_b = _uuid(), _uuid()
     with session_factory() as session:
-        file_id = _seed_pdf(session, device_id=device_a)
+        file_id = _seed_pdf(session, user_id=user_a)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        get_pdf(session, device_id=device_b, file_id=file_id)
+        get_pdf(session, user_id=user_b, file_id=file_id)
     assert excinfo.value.code is ErrorCode.PDF_NOT_FOUND
 
 
 def test_pdf_service_delete_removes_and_cleans_storage(
     session_factory: Callable[[], Session], storage: LocalStorage, tmp_path: Path
 ) -> None:
-    device = _uuid()
+    user = _uuid()
     storage_key = uuid.uuid4().hex  # storage.open 严格校验 32 位 hex（草稿瑕疵修正）
     with session_factory() as session:
-        file_id = _seed_pdf(session, device_id=device, storage_key=storage_key)
+        file_id = _seed_pdf(session, user_id=user, storage_key=storage_key)
         # 终态任务引用：删除后应保留任务、file_id SET NULL（database-design §3）
         task = Task(
             task_id=_uuid(),
-            device_id=device,
+            user_id=user,
             file_id=file_id,
             status="COMPLETED",
             selected_chapters="[]",
@@ -138,7 +146,7 @@ def test_pdf_service_delete_removes_and_cleans_storage(
     obj_path.write_bytes(b"%PDF-1.4 fake")
     assert obj_path.exists()
     with session_factory() as session:
-        delete_pdf(session, device_id=device, file_id=file_id, storage=storage)
+        delete_pdf(session, user_id=user, file_id=file_id, storage=storage)
         session.commit()
     with session_factory() as session:
         assert session.get(PdfFile, file_id) is None
@@ -151,13 +159,13 @@ def test_pdf_service_delete_removes_and_cleans_storage(
 def test_pdf_service_delete_blocked_by_non_terminal_task(
     session_factory: Callable[[], Session], storage: LocalStorage
 ) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        file_id = _seed_pdf(session, device_id=device)
+        file_id = _seed_pdf(session, user_id=user)
         session.add(
             Task(
                 task_id=_uuid(),
-                device_id=device,
+                user_id=user,
                 file_id=file_id,
                 status="RUNNING",
                 selected_chapters="[]",
@@ -170,14 +178,14 @@ def test_pdf_service_delete_blocked_by_non_terminal_task(
         )
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        delete_pdf(session, device_id=device, file_id=file_id, storage=storage)
+        delete_pdf(session, user_id=user, file_id=file_id, storage=storage)
     assert excinfo.value.code is ErrorCode.TASK_IN_PROGRESS
 
 
 def test_pdf_service_update_chapter(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        file_id = _seed_pdf(session, device_id=device)
+        file_id = _seed_pdf(session, user_id=user)
         ch = Chapter(chapter_id=_uuid(), file_id=file_id, name="旧名", start_page=1, end_page=10)
         session.add(ch)
         session.commit()
@@ -185,7 +193,7 @@ def test_pdf_service_update_chapter(session_factory: Callable[[], Session]) -> N
     with session_factory() as session:
         updated = update_chapter(
             session,
-            device_id=device,
+            user_id=user,
             file_id=file_id,
             chapter_id=chapter_id,
             name="新名",
@@ -199,9 +207,9 @@ def test_pdf_service_update_chapter(session_factory: Callable[[], Session]) -> N
 
 
 def test_pdf_service_update_chapter_invalid_range(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        file_id = _seed_pdf(session, device_id=device)
+        file_id = _seed_pdf(session, user_id=user)
         ch = Chapter(chapter_id=_uuid(), file_id=file_id, name="c", start_page=1, end_page=10)
         session.add(ch)
         session.commit()
@@ -209,7 +217,7 @@ def test_pdf_service_update_chapter_invalid_range(session_factory: Callable[[], 
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         update_chapter(
             session,
-            device_id=device,
+            user_id=user,
             file_id=file_id,
             chapter_id=chapter_id,
             name="x",
@@ -222,9 +230,9 @@ def test_pdf_service_update_chapter_invalid_range(session_factory: Callable[[], 
 
 def test_pdf_service_update_chapter_not_parsed(session_factory: Callable[[], Session]) -> None:
     """非 PARSED 时 PATCH 章节 → 409 TASK_STATE_CONFLICT（裁决）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        file_id = _seed_pdf(session, device_id=device, status="FAILED")
+        file_id = _seed_pdf(session, user_id=user, status="FAILED")
         ch = Chapter(chapter_id=_uuid(), file_id=file_id, name="c", start_page=1, end_page=5)
         session.add(ch)
         session.commit()
@@ -232,7 +240,7 @@ def test_pdf_service_update_chapter_not_parsed(session_factory: Callable[[], Ses
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         update_chapter(
             session,
-            device_id=device,
+            user_id=user,
             file_id=file_id,
             chapter_id=chapter_id,
             name="x",

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -44,7 +44,7 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "COMPACT") -> str:
+def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMPACT") -> str:
     """种子：PENDING+PLANNING 任务直接转 RUNNING+GENERATING + 页文本 + 生成单元
     （锚定难度/卡型/来源页）+ 按单元建批（generation_unit_id 必填——LLM 升级管线
     spec §7 批=单元，1 单元 1 批）。
@@ -58,13 +58,24 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
     from services.decks.service import create_deck
     from services.pdf.text_chunks import persist_text_chunks
 
-    # 守卫插入：同 device 二次建任务（防回退用例）复用已存在的 devices/api_keys 行
-    if session.get(Device, device_id) is None:
-        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+    # 守卫插入：同 user 二次建任务（防回退用例）复用已存在的 users/devices/api_keys 行
+    if session.get(User, user_id) is None:
+        session.add(
+            User(
+                user_id=user_id,
+                username=f"u-{user_id[:8]}",
+                password_hash="x",
+                created_at="2026-08-11T00:00:00.000Z",
+                updated_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
+    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
+        session.add(Device(device_id=user_id, created_at="2026-08-11T00:00:00.000Z"))
         session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="b.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -73,15 +84,15 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+    deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
-    if session.scalar(select(ApiKey).where(ApiKey.device_id == device_id)) is None:
+    if session.scalar(select(ApiKey).where(ApiKey.device_id == user_id)) is None:
         session.add(
             ApiKey(
-                device_id=device_id,
+                device_id=user_id,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -97,7 +108,8 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
     )
     task = create_task(
         session,
-        device_id=device_id,
+        user_id=user_id,
+        device_id=user_id,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -107,6 +119,7 @@ def _seed_task(session: Session, *, device_id: str, quantity_tendency: str = "CO
         ),
         now="2026-08-11T00:00:00.000Z",
     )
+    task.device_id = user_id  # 双列过渡：executor Key 查找仍 device 域（Task 5 切换）
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = "2026-08-11T00:00:00.000Z"
@@ -170,18 +183,29 @@ def _scoring_content(request: httpx.Request) -> str:
     )
 
 
-def _seed_planning_task(session: Session, *, device_id: str) -> str:
+def _seed_planning_task(session: Session, *, user_id: str) -> str:
     """PENDING+PLANNING 任务 + 章节 + 页文本（text_chunks）：规划 worker 全流程基座。"""
     from infra.db.models import ApiKey, Chapter, Device, PdfFile
     from services.decks.service import create_deck
     from services.pdf.text_chunks import persist_text_chunks
 
-    if session.get(Device, device_id) is None:
-        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+    if session.get(User, user_id) is None:
+        session.add(
+            User(
+                user_id=user_id,
+                username=f"u-{user_id[:8]}",
+                password_hash="x",
+                created_at="2026-08-11T00:00:00.000Z",
+                updated_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
+    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
+        session.add(Device(device_id=user_id, created_at="2026-08-11T00:00:00.000Z"))
         session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="p.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -190,15 +214,15 @@ def _seed_planning_task(session: Session, *, device_id: str) -> str:
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+    deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
-    if session.scalar(select(ApiKey).where(ApiKey.device_id == device_id)) is None:
+    if session.scalar(select(ApiKey).where(ApiKey.device_id == user_id)) is None:
         session.add(
             ApiKey(
-                device_id=device_id,
+                device_id=user_id,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -214,7 +238,8 @@ def _seed_planning_task(session: Session, *, device_id: str) -> str:
     )
     task = create_task(
         session,
-        device_id=device_id,
+        user_id=user_id,
+        device_id=user_id,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -224,6 +249,7 @@ def _seed_planning_task(session: Session, *, device_id: str) -> str:
         ),
         now="2026-08-11T00:00:00.000Z",
     )
+    task.device_id = user_id  # 双列过渡：executor Key 查找仍 device 域（Task 5 切换）
     session.commit()
     return task.task_id
 
@@ -253,9 +279,9 @@ def _client_factory(api_key: str) -> DeepSeekClient:
 
 
 def test_executor_completes_task_and_inserts_cards(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, device_id=device)
+        task_id = _seed_task(session, user_id=user)
     with session_factory() as session:
         n = process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
@@ -272,9 +298,9 @@ def test_executor_completes_task_and_inserts_cards(session_factory: Callable[[],
 
 def test_executor_no_duplicate_generation_items(session_factory: Callable[[], Session]) -> None:
     """generation_item_id 部分唯一索引防重：二次执行不重复入库。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, device_id=device)
+        task_id = _seed_task(session, user_id=user)
     with session_factory() as session:
         process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
@@ -295,10 +321,10 @@ def test_executor_same_chapter_second_task_still_generates(
     session_factory: Callable[[], Session],
 ) -> None:
     """F-1 防回退：generation_item_id seed 含任务维度——同设备同章节二次任务不互相去重。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task1 = _seed_task(session, device_id=device)
-        task2 = _seed_task(session, device_id=device)  # 同章节二次任务（新 task_id）
+        task1 = _seed_task(session, user_id=user)
+        task2 = _seed_task(session, user_id=user)  # 同章节二次任务（新 task_id）
     with session_factory() as session:
         process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
@@ -331,9 +357,9 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
     第 2 批 401（Key 失效，retryable=False）→ executor 上抛 AppError → _fail_task
     （4.1 系统级失败）。
     """
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, device_id=device, quantity_tendency="BALANCED")
+        task_id = _seed_task(session, user_id=user, quantity_tendency="BALANCED")
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -384,9 +410,9 @@ def test_executor_cancel_between_batches_preserves_cancelled(
     （此刻 executor 无打开事务，另一连接写入无锁冲突——单线程确定性，不依赖调度时序；
     BEGIN IMMEDIATE 并发写入冲突属已知限制，另行登记，本用例覆盖批次间隙成功路径）。
     """
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, device_id=device, quantity_tendency="BALANCED")
+        task_id = _seed_task(session, user_id=user, quantity_tendency="BALANCED")
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -461,9 +487,9 @@ def test_executor_full_flow_plan_then_generate(
     （1 单元 = 1 批 = 1 卡），评分调用（<SCORING_INPUT>）返回 ID 守恒的分数；
     断言规划/生成/评分在同一次 process_running_tasks 中衔接。
     """
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_planning_task(session, device_id=device)
+        task_id = _seed_planning_task(session, user_id=user)
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:

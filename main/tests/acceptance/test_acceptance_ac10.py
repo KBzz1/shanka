@@ -38,9 +38,14 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(settings))
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _device(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
+    return {
+        **auth_headers(client, username=username, password=password),
+        "X-Device-ID": str(uuid.uuid4()),
+    }
 
 
 def _idem() -> dict[str, str]:
@@ -120,9 +125,11 @@ def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
     assert body["recall_accuracy"] == 1.0  # 周内 1 GOOD / 1
     assert body["streak_days"] >= 1  # 今天有事件（事件 reviewed_at = 服务端真实 now）
     assert body["period"]["week_ordinal"] >= 1
-    # 空态（新设备）：非示例值，weekly_goal 未上报 → null
+    # 空态（新用户）：非示例值，weekly_goal 未上报 → null
     empty = client.get(
-        "/stats/dashboard", params={"timezone": "Asia/Shanghai"}, headers=_device(client)
+        "/stats/dashboard",
+        params={"timezone": "Asia/Shanghai"},
+        headers=_device(client, "user2", "pass-2222"),
     )
     assert empty.status_code == 200
     empty_body = empty.json()

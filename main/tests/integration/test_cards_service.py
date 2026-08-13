@@ -1,4 +1,4 @@
-"""services.cards 集成测试：position/创建/列表/导入原子/初始 review_state/进度派生。"""
+"""services.cards 集成测试：position/创建/列表/导入原子/初始 review_state/进度派生（user 域）。"""
 
 import uuid
 from collections.abc import Callable
@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Device, ReviewState
+from infra.db.models import Base, ReviewState, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.cards.service import create_card, import_cards, list_cards
 from services.decks.service import create_deck, deck_progress
@@ -27,18 +27,26 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _ensure_device(session: Session, device_id: str) -> None:
-    """devices 行先落库：HTTP 流由 F1 设备中间件自动建立，service 测试需显式建立（FK 强制）。"""
-    session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+def _ensure_user(session: Session, user_id: str) -> None:
+    """users 行先落库：HTTP 流由注册端点建立，service 测试需显式建立（FK 强制）。"""
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            password_hash="x",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
     session.flush()
 
 
 @pytest.fixture
 def deck_id(session_factory: Callable[[], Session]) -> str:
-    """牌组归属 dev 设备（_owned 语义），devices 行前置（carry-forward：FK 违约已实证）。"""
+    """牌组归属 dev 用户（_owned 语义），users 行前置（carry-forward：FK 违约已实证）。"""
     with session_factory() as session:
-        _ensure_device(session, "dev")
-        deck = create_deck(session, device_id="dev", name="D", now="2026-08-11T00:00:00.000Z")
+        _ensure_user(session, "dev")
+        deck = create_deck(session, user_id="dev", name="D", now="2026-08-11T00:00:00.000Z")
         session.commit()
         return deck.deck_id
 
@@ -49,7 +57,7 @@ def test_cards_create_assigns_incrementing_position_and_initial_state(
     with session_factory() as session:
         c1 = create_card(
             session,
-            device_id="dev",
+            user_id="dev",
             deck_id=deck_id,
             front="f1",
             back="b1",
@@ -60,7 +68,7 @@ def test_cards_create_assigns_incrementing_position_and_initial_state(
     with session_factory() as session:
         c2 = create_card(
             session,
-            device_id="dev",
+            user_id="dev",
             deck_id=deck_id,
             front="f2",
             back="b2",
@@ -70,7 +78,7 @@ def test_cards_create_assigns_incrementing_position_and_initial_state(
     assert c1.position == 1
     assert c2.position == 2  # 追加不覆盖
     with session_factory() as session:
-        cards = list_cards(session, device_id="dev", deck_id=deck_id)
+        cards = list_cards(session, user_id="dev", deck_id=deck_id)
         assert [c.position for c in cards] == [1, 2]  # 稳定排序
         rs = session.scalar(select(ReviewState).where(ReviewState.card_id == c1_id))
         assert rs is not None
@@ -80,7 +88,7 @@ def test_cards_create_assigns_incrementing_position_and_initial_state(
         assert rs.due == "2026-08-11T00:00:00.000Z"
         # carry-forward：创建卡后进度非零且正确（初始 due=now 恒到期；now 取最后一张卡 due）
         progress = deck_progress(
-            session, device_id="dev", deck_id=deck_id, now="2026-08-11T00:00:00.001Z"
+            session, user_id="dev", deck_id=deck_id, now="2026-08-11T00:00:00.001Z"
         )
         assert progress["card_count"] == 2
         assert progress["due_count"] == 2
@@ -88,13 +96,11 @@ def test_cards_create_assigns_incrementing_position_and_initial_state(
         assert progress["review_count"] == 0
 
 
-def test_cards_create_other_device_404(
-    session_factory: Callable[[], Session], deck_id: str
-) -> None:
+def test_cards_create_other_user_404(session_factory: Callable[[], Session], deck_id: str) -> None:
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         create_card(
             session,
-            device_id="other",
+            user_id="other",
             deck_id=deck_id,
             front="f",
             back="b",
@@ -110,7 +116,7 @@ def test_cards_import_atomic_all_or_nothing(
     with session_factory() as session:
         results = import_cards(
             session,
-            device_id="dev",
+            user_id="dev",
             deck_id=deck_id,
             cards=[("f1", "b1"), ("f2", "b2")],
             now="2026-08-11T00:00:00.000Z",
@@ -120,7 +126,7 @@ def test_cards_import_atomic_all_or_nothing(
     assert all(r["status"] == "CREATED" for r in results)
     assert all(r["card_id"] for r in results)
     with session_factory() as session:
-        cards = list_cards(session, device_id="dev", deck_id=deck_id)
+        cards = list_cards(session, user_id="dev", deck_id=deck_id)
         assert len(cards) == 2
         assert [c.position for c in cards] == [1, 2]
 
@@ -151,14 +157,14 @@ def test_cards_import_rolls_back_on_write_failure(
         with pytest.raises(IntegrityError):
             import_cards(
                 session,
-                device_id="dev",
+                user_id="dev",
                 deck_id=deck_id,
                 cards=[("f1", "b1"), ("f2", "b2")],
                 now="2026-08-11T00:00:00.000Z",
             )
         session.rollback()
     with session_factory() as session:
-        cards = list_cards(session, device_id="dev", deck_id=deck_id)
+        cards = list_cards(session, user_id="dev", deck_id=deck_id)
         assert len(cards) == 0  # 原子：无部分写入
 
 
@@ -168,7 +174,7 @@ def test_cards_import_position_continues_after_existing(
     with session_factory() as session:
         create_card(
             session,
-            device_id="dev",
+            user_id="dev",
             deck_id=deck_id,
             front="f0",
             back="b0",
@@ -178,12 +184,12 @@ def test_cards_import_position_continues_after_existing(
     with session_factory() as session:
         import_cards(
             session,
-            device_id="dev",
+            user_id="dev",
             deck_id=deck_id,
             cards=[("f1", "b1")],
             now="2026-08-11T00:00:00.001Z",
         )
         session.commit()
     with session_factory() as session:
-        cards = list_cards(session, device_id="dev", deck_id=deck_id)
+        cards = list_cards(session, user_id="dev", deck_id=deck_id)
         assert [c.position for c in cards] == [1, 2]

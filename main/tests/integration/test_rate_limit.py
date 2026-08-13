@@ -95,7 +95,7 @@ def test_rate_limit_ip_dimension_blocks(tmp_path: Path) -> None:
     assert codes[2] == 429  # IP 维度覆盖探针（1.6 表"全部接口"）
 
 
-def test_rate_limit_device_scope_isolated_per_device(tmp_path: Path) -> None:
+def test_rate_limit_user_scope_isolated_per_user(tmp_path: Path) -> None:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'rl_iso.db'}",
         storage_path=tmp_path / "storage",
@@ -104,9 +104,15 @@ def test_rate_limit_device_scope_isolated_per_device(tmp_path: Path) -> None:
     )
     _upgrade(settings.database_url)
     with TestClient(create_app(settings)) as client:
-        # 设备键按请求头隔离：同一设备的多次请求须用同一 X-Device-ID
-        headers_a = _device_headers(client)
-        headers_b = _device_headers(client)
+        # 业务桶键 = principal.user_id（P4-3）：每用户独立桶
+        headers_a = {
+            **auth_headers(client, "user1", "pass-1111"),
+            "X-Device-ID": "11111111-1111-4111-8111-111111111111",
+        }
+        headers_b = {
+            **auth_headers(client, "user2", "pass-2222"),
+            "X-Device-ID": "11111111-1111-4111-8111-111111111111",
+        }
         codes_a = [
             client.post("/v1/decks", json={}, headers=headers_a).status_code for _ in range(3)
         ]
@@ -114,4 +120,4 @@ def test_rate_limit_device_scope_isolated_per_device(tmp_path: Path) -> None:
             client.post("/v1/decks", json={}, headers=headers_b).status_code for _ in range(2)
         ]
     assert codes_a == [404, 404, 429]
-    assert codes_b == [404, 404]  # 设备 B 不受设备 A 影响
+    assert codes_b == [404, 404]  # user2 不受 user1 影响（同 X-Device-ID 也不串桶）

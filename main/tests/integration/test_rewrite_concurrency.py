@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from infra.db.models import ApiKey, Base, Card, Device, ReviewEvent, ReviewState
+from infra.db.models import ApiKey, Base, Card, Device, ReviewEvent, ReviewState, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -36,6 +36,7 @@ assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
 _DEVICE = "dev"
+_USER = "user-1"
 _NOW = "2026-08-11T00:00:00.000Z"
 _T1 = "2026-08-11T01:00:00.000Z"
 _T2 = "2026-08-11T02:00:00.000Z"
@@ -53,7 +54,11 @@ def _uuid() -> str:
 
 
 def _seed_card(session: Session) -> Card:
-    """dev 设备的 GENERATED 卡 + 非初始 ReviewState + AVAILABLE Key（重写前状态）。"""
+    """user 域 GENERATED 卡 + 非初始 ReviewState + AVAILABLE Key（重写前状态）。"""
+    session.add(
+        User(user_id=_USER, username="u-1", password_hash="x", created_at=_NOW, updated_at=_NOW)
+    )
+    session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
     session.add(Device(device_id=_DEVICE, created_at=_NOW))
     session.flush()
     session.add(
@@ -66,12 +71,12 @@ def _seed_card(session: Session) -> Card:
         )
     )
     session.flush()
-    deck = create_deck(session, device_id=_DEVICE, name="D", now=_NOW)
+    deck = create_deck(session, user_id=_USER, name="D", now=_NOW)
     session.flush()
     card = Card(
         card_id=_uuid(),
         deck_id=deck.deck_id,
-        device_id=_DEVICE,
+        user_id=_USER,
         source="GENERATED",
         position=1,
         front="旧正面",
@@ -151,6 +156,7 @@ def test_rewrite_concurrency_same_card_last_write_wins(
     with session_factory() as session:
         first = rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -165,6 +171,7 @@ def test_rewrite_concurrency_same_card_last_write_wins(
     with session_factory() as session:
         second = rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -214,7 +221,7 @@ def test_rewrite_concurrency_review_then_rewrite_resets_schedule(
     with session_factory() as session:
         reviewed = submit_review(
             session,
-            device_id=_DEVICE,
+            user_id=_USER,
             card_id=card_id,
             rating="GOOD",
             client_event_id=_uuid(),
@@ -227,6 +234,7 @@ def test_rewrite_concurrency_review_then_rewrite_resets_schedule(
     with session_factory() as session:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -267,6 +275,7 @@ def test_rewrite_concurrency_rewrite_then_review_schedules_new_content(
     with session_factory() as session:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -280,7 +289,7 @@ def test_rewrite_concurrency_rewrite_then_review_schedules_new_content(
     with session_factory() as session:
         reviewed = submit_review(
             session,
-            device_id=_DEVICE,
+            user_id=_USER,
             card_id=card_id,
             rating="GOOD",
             client_event_id=_uuid(),
@@ -317,6 +326,7 @@ def test_rewrite_concurrency_response_no_pdf_source_fields(
     with session_factory() as session:
         card = rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,

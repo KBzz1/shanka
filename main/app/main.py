@@ -29,7 +29,7 @@ from app.middleware.device_id import DeviceIDMiddleware
 from app.middleware.error_handler import register_exception_handlers
 from app.middleware.logging import LoggingMiddleware
 from app.middleware.metrics_middleware import MetricsMiddleware
-from app.middleware.rate_limit import RateLimitMiddleware
+from app.middleware.rate_limit import RateLimiter, RateLimitMiddleware
 from app.middleware.request_id import RequestIDMiddleware
 from infra.db.session import create_db_engine, create_session_factory
 from infra.logging import setup_logging
@@ -121,19 +121,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
     register_exception_handlers(app)
-    # 中间件运行序（外层→内层）：Metrics → RequestID → RateLimit → Auth → DeviceID →
+    # 中间件运行序（外层→内层）：Metrics → RequestID → Auth → RateLimit → DeviceID →
     # Logging → BodyCapture → 路由。Starlette add_middleware 为 insert(0) 语义
     # （后加者在外层），故按目标运行序倒序添加；历史沿革：Task 6 在 Logging 之后插入
     # DeviceID，Task 9 在 DeviceID 与 RequestID 之间插入 RateLimit（键用原始头，运行于
     # DeviceID 外层），Task 10 追加 Metrics（最外层），Task 4/V1 在添加序最前加入
     # BodyCapture（运行序最内、路由前，位于 Logging 内层——幂等 body 捕获须先于路由
     # handler 完成），P4-2 在 RateLimit 与 DeviceID 之间插入 BearerAuth（双头过渡窗口，
-    # 认证先于设备鉴权；P4-4 移除 DeviceID 后 Auth 紧邻 RateLimit 内层）。
+    # 认证先于设备鉴权），P4-3 将 Auth 移出 RateLimit 外层（限流业务维度键改读
+    # principal.user_id；P4-4 移除 DeviceID 后 Auth 紧邻 RateLimit 内层）。
     app.add_middleware(BodyCaptureMiddleware)  # 添加序最前 → 运行序最内（路由前）
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(DeviceIDMiddleware)
-    app.add_middleware(BearerAuthMiddleware)  # 运行序位于 DeviceID 外层、RateLimit 内层
-    app.add_middleware(RateLimitMiddleware, settings=settings)  # 在 DeviceID 与 RequestID 之间
+    app.add_middleware(RateLimitMiddleware, settings=settings)  # 运行序位于 DeviceID 外层
+    app.add_middleware(BearerAuthMiddleware)  # P4-3：运行序位于 RateLimit 外层（先认证再限流）
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(MetricsMiddleware)  # 添加序最后 → 运行序最外层（统计所有响应含 401/429）
     app.include_router(probes.router)
@@ -153,6 +154,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
     app.state.storage = storage
+    # login 用户名桶（P4-3）：service 层限流共享实例（body 于 BodyCapture 内层，
+    # middleware 不可读——裁决：限流器在 auth handler 取用）
+    app.state.login_username_limiter = RateLimiter(
+        limit=settings.rate_limit_login_username_per_hour, window_seconds=3600
+    )
     return app
 
 

@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.deepseek import DeepSeekClient
 from services.generation.batches import plan_batches, process_next_batch
@@ -38,17 +38,28 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> str:
+def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> str:
     from infra.db.models import ApiKey, Chapter, Device, PdfFile
     from services.decks.service import create_deck
 
-    # FK 前置守卫：devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
-    if session.get(Device, device_id) is None:
-        session.add(Device(device_id=device_id, created_at=_NOW))
+    # FK 前置守卫：users/devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
+    if session.get(User, user_id) is None:
+        session.add(
+            User(
+                user_id=user_id,
+                username=f"u-{user_id[:8]}",
+                password_hash="x",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
+    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
+        session.add(Device(device_id=user_id, created_at=_NOW))
         session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="b.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -57,14 +68,14 @@ def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> 
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
+    deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
     session.add(
         ApiKey(
-            device_id=device_id,
+            device_id=user_id,
             encrypted_key="enc",
             status="AVAILABLE",
             masked_key="sk-****",
@@ -74,7 +85,8 @@ def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> 
     session.flush()
     task = create_task(
         session,
-        device_id=device_id,
+        user_id=user_id,
+        device_id=user_id,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -84,6 +96,7 @@ def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> 
         ),
         now=_NOW,
     )
+    task.device_id = user_id  # 双列过渡：executor Key 查找仍 device 域（Task 5 切换）
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = _NOW
@@ -144,9 +157,9 @@ def _client_ok(session_factory: Callable[[], Session]) -> DeepSeekClient:
 
 
 def test_batches_plan_and_process_all(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task_with_kps(session, device_id=device)
+        task_id = _seed_task_with_kps(session, user_id=user)
     with session_factory() as session:
         task = session.get(Task, task_id)
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
@@ -190,9 +203,9 @@ def test_batches_plan_and_process_all(session_factory: Callable[[], Session]) ->
 
 def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[], Session]) -> None:
     """非法输出（Schema 校验失败）→ 重试预算耗尽（1+limit 次尝试）→ SKIPPED，任务继续。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task_with_kps(session, device_id=device, n_kps=1)
+        task_id = _seed_task_with_kps(session, user_id=user, n_kps=1)
     with session_factory() as session:
         task = session.get(Task, task_id)
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
@@ -226,9 +239,9 @@ def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[]
 
 
 def test_batches_usage_and_versions_recorded(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task_with_kps(session, device_id=device, n_kps=1)
+        task_id = _seed_task_with_kps(session, user_id=user, n_kps=1)
     with session_factory() as session:
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
         plan_batches(session, task_id=task_id, generation_units=kps, now=_NOW)

@@ -24,20 +24,20 @@ def _uuid4() -> str:
     return str(uuid.uuid4())
 
 
-def _owned_pdf(session: Session, *, device_id: str, file_id: str) -> PdfFile:
+def _owned_pdf(session: Session, *, user_id: str, file_id: str) -> PdfFile:
     pdf = session.get(PdfFile, file_id)
-    if pdf is None or pdf.device_id != device_id:
+    if pdf is None or pdf.user_id != user_id:
         raise AppError(ErrorCode.PDF_NOT_FOUND, "PDF 不存在")
     return pdf
 
 
 def upload_pdf(
-    session: Session, *, device_id: str, filename: str, size_bytes: int, storage_key: str, now: str
+    session: Session, *, user_id: str, filename: str, size_bytes: int, storage_key: str, now: str
 ) -> PdfFile:
     """上传登记：落 PENDING，解析由扫描器接管（Task 3）。"""
     pdf = PdfFile(
         file_id=_uuid4(),
-        device_id=device_id,
+        user_id=user_id,
         filename=filename,
         storage_key=storage_key,
         size_bytes=size_bytes,
@@ -48,26 +48,26 @@ def upload_pdf(
     return pdf
 
 
-def list_pdfs(session: Session, *, device_id: str) -> list[PdfFile]:
+def list_pdfs(session: Session, *, user_id: str) -> list[PdfFile]:
     return list(
         session.scalars(
-            select(PdfFile)
-            .where(PdfFile.device_id == device_id)
-            .order_by(PdfFile.created_at.desc())
+            select(PdfFile).where(PdfFile.user_id == user_id).order_by(PdfFile.created_at.desc())
         ).all()
     )
 
 
-def get_pdf(session: Session, *, device_id: str, file_id: str) -> PdfFile:
-    return _owned_pdf(session, device_id=device_id, file_id=file_id)
+def get_pdf(session: Session, *, user_id: str, file_id: str) -> PdfFile:
+    return _owned_pdf(session, user_id=user_id, file_id=file_id)
 
 
-def delete_pdf(session: Session, *, device_id: str, file_id: str, storage: LocalStorage) -> None:
-    pdf = _owned_pdf(session, device_id=device_id, file_id=file_id)
+def delete_pdf(session: Session, *, user_id: str, file_id: str, storage: LocalStorage) -> None:
+    pdf = _owned_pdf(session, user_id=user_id, file_id=file_id)
     blocking = (
         session.scalar(
             select(func.count(Task.task_id)).where(
-                Task.file_id == file_id, Task.status.in_(_NON_TERMINAL)
+                Task.file_id == file_id,
+                Task.user_id == user_id,  # 一致性守卫（DESIGN §5.1）：只计本用户任务
+                Task.status.in_(_NON_TERMINAL),
             )
         )
         or 0
@@ -75,7 +75,9 @@ def delete_pdf(session: Session, *, device_id: str, file_id: str, storage: Local
     if blocking:
         raise AppError(ErrorCode.TASK_IN_PROGRESS, "存在进行中的任务引用该文件")
     # 终态任务 file_id SET NULL（database-design §3：tasks.file_id ON DELETE SET NULL）
-    for task in session.scalars(select(Task).where(Task.file_id == file_id)).all():
+    for task in session.scalars(
+        select(Task).where(Task.file_id == file_id, Task.user_id == user_id)
+    ).all():
         task.file_id = None
     session.delete(pdf)
     try:
@@ -89,7 +91,7 @@ def delete_pdf(session: Session, *, device_id: str, file_id: str, storage: Local
 def update_chapter(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     file_id: str,
     chapter_id: str,
     name: str | None,
@@ -108,7 +110,7 @@ def update_chapter(
         raise AppError(ErrorCode.VALIDATION_ERROR, "起始页码非法")
     if end_page is not None and end_page < 1:
         raise AppError(ErrorCode.VALIDATION_ERROR, "结束页码非法")
-    pdf = _owned_pdf(session, device_id=device_id, file_id=file_id)
+    pdf = _owned_pdf(session, user_id=user_id, file_id=file_id)
     if pdf.status != "PARSED":
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "PDF 尚未解析完成")
     chapter = session.get(Chapter, chapter_id)
@@ -125,13 +127,13 @@ def update_chapter(
     return chapter
 
 
-def delete_chapter(session: Session, *, device_id: str, file_id: str, chapter_id: str) -> None:
+def delete_chapter(session: Session, *, user_id: str, file_id: str, chapter_id: str) -> None:
     """删除章节（structure-contract 6.1，契约 3.6 语义落地）。
 
     仅 PARSED 后可删（同章节 PATCH 约束）；关联 knowledge_points.chapter_id 应用层
     置 null（2.6 无 DB FK）；历史任务 selected_chapters 为快照，不受影响。
     """
-    pdf = _owned_pdf(session, device_id=device_id, file_id=file_id)
+    pdf = _owned_pdf(session, user_id=user_id, file_id=file_id)
     if pdf.status != "PARSED":
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "PDF 尚未解析完成")
     chapter = session.get(Chapter, chapter_id)

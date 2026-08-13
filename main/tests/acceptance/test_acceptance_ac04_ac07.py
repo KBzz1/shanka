@@ -34,12 +34,12 @@ from typing import cast
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Batch, Card, Chapter, Device, PdfFile
+from infra.db.models import ApiKey, Batch, Card, Chapter, Device, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -179,16 +179,49 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
-    """devices 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）
-    + 页文本（text_chunks——LLM 升级管线规划输入）。"""
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    assert row is not None
+    return str(row)
+
+
+def _link_device(db_path: Path, task_id: str, device: dict[str, str]) -> None:
+    """双头过渡（P4-3）：executor Key 查找仍 device 域（Task 5 切 user）——补种 device_id 双列。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE tasks SET device_id = :d WHERE task_id = :t"),
+            {"d": device["X-Device-ID"], "t": task_id},
+        )
+
+
+def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, object]:
+    """users/devices 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）
+    + 页文本（text_chunks——LLM 升级管线规划输入）。PDF/牌组 user 域；Key 仍 device 域（Task 5 前）。
+    """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    password_hash="x",
+                    created_at="2026-08-11T00:00:00.000Z",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
         session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
         session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
-            device_id=device_id,
+            user_id=user_id,
             filename="b.pdf",
             storage_key=_uuid(),
             size_bytes=10,
@@ -197,7 +230,7 @@ def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
         )
         session.add(pdf)
         session.flush()
-        deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
         chapter_ids: list[str] = []
         for i in range(2):
@@ -277,10 +310,13 @@ def test_acceptance_ac04_valid_cards_inserted_and_completed(
     """
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    _link_device(
+        db_path, task_id, device
+    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
     _run_to_completed(db_path, cards=_valid_cards())
     body = client.get(f"/tasks/{task_id}", headers=device).json()
     assert body["status"] == "COMPLETED"
@@ -303,10 +339,13 @@ def test_acceptance_ac04_invalid_cards_not_inserted_skipped(
     → 重试预算耗尽 → 批次 SKIPPED 不入库（批次级失败不中断任务）。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    _link_device(
+        db_path, task_id, device
+    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
     _run_to_completed(db_path, cards=[{"type": "QUESTION"}])
     body = client.get(f"/tasks/{task_id}", headers=device).json()
     assert body["status"] == "COMPLETED"  # 批次级失败不中断任务（4.2）
@@ -333,10 +372,13 @@ def test_acceptance_ac04_rubric_no_auto_fix_prune_or_regenerate(
     """
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    _link_device(
+        db_path, task_id, device
+    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
     _run_to_completed(db_path, cards=_valid_cards(), scores=_LOW_SCORES)
     body = client.get(f"/tasks/{task_id}", headers=device).json()
     assert body["status"] == "COMPLETED"
@@ -365,10 +407,13 @@ def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]
     """AC-07-a/b：批次列表含 Rubric/质量/Cache 记录；单卡 Rubric 分数落库。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    _link_device(
+        db_path, task_id, device
+    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
     _run_to_completed(db_path, cards=_valid_cards())
     resp = client.get(f"/tasks/{task_id}/batches", headers=device)
     assert resp.status_code == 200
@@ -418,10 +463,13 @@ def test_acceptance_ac07_abnormal_cache_data_does_not_gate_insertion(
     """AC-07-c：Cache 数据异常（usage 缺失 → token 观测 None）不改变既定入库规则。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    _link_device(
+        db_path, task_id, device
+    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
     _run_to_completed(db_path, cards=_valid_cards(), with_usage=False)
     body = client.get(f"/tasks/{task_id}", headers=device).json()
     assert body["status"] == "COMPLETED"

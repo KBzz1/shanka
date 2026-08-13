@@ -29,6 +29,7 @@ from infra.db.models import (
     LlmCallAttempt,
     PdfFile,
     Task,
+    User,
 )
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
@@ -77,7 +78,7 @@ def _page_content(page_number: int) -> str:
 def _seed_planning_task(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     chapter_start_page: int = 1,
     chapter_end_page: int = 2,
     text_page_range: tuple[int, int] | None = None,
@@ -89,12 +90,23 @@ def _seed_planning_task(
     """
     from services.decks.service import create_deck
 
-    if session.get(Device, device_id) is None:
-        session.add(Device(device_id=device_id, created_at=_NOW))
+    if session.get(User, user_id) is None:
+        session.add(
+            User(
+                user_id=user_id,
+                username=f"u-{user_id[:8]}",
+                password_hash="x",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
+    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
+        session.add(Device(device_id=user_id, created_at=_NOW))
         session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="p.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -103,7 +115,7 @@ def _seed_planning_task(
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
+    deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
     session.flush()
     ch = Chapter(
         chapter_id=_uuid(),
@@ -114,10 +126,10 @@ def _seed_planning_task(
     )
     session.add(ch)
     session.flush()
-    if session.scalar(select(ApiKey).where(ApiKey.device_id == device_id)) is None:
+    if session.scalar(select(ApiKey).where(ApiKey.device_id == user_id)) is None:
         session.add(
             ApiKey(
-                device_id=device_id,
+                device_id=user_id,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -137,7 +149,8 @@ def _seed_planning_task(
     )
     task = create_task(
         session,
-        device_id=device_id,
+        user_id=user_id,
+        device_id=user_id,  # 双列过渡种子（executor Key 查找仍 device 域）
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -218,9 +231,9 @@ def test_claim_cas1_snapshot_freeze(
     session_factory: Callable[[], Session],
 ) -> None:
     """CAS1：PENDING+PLANNING → RUNNING；claim 前修改 Chapter.start_page → 快照含新值。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, chapter_id, _ = _seed_planning_task(session, device_id=device)
+        task_id, chapter_id, _ = _seed_planning_task(session, user_id=user)
         ch = session.get(Chapter, chapter_id)
         assert ch is not None
         ch.start_page = 99
@@ -241,9 +254,9 @@ def test_claim_cas2_orphan_takeover_marks_started_unknown(
     session_factory: Callable[[], Session],
 ) -> None:
     """CAS2：RUNNING+PLANNING 心跳超时 → 接管 + 遗留 STARTED 转 UNKNOWN（恢复按账本）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, chapter_id, _ = _seed_planning_task(session, device_id=device)
+        task_id, chapter_id, _ = _seed_planning_task(session, user_id=user)
         task = session.get(Task, task_id)
         assert task is not None
         task.status = "RUNNING"
@@ -252,7 +265,7 @@ def test_claim_cas2_orphan_takeover_marks_started_unknown(
         session.commit()
         create_attempt(
             session,
-            device_id=device,
+            user_id=user,
             scope_type="TASK",
             scope_id=task_id,
             task_id=task_id,
@@ -279,9 +292,9 @@ def test_claim_chapter_deleted_fails_task(
     session_factory: Callable[[], Session],
 ) -> None:
     """CAS1 提交前章节已删除 → 同事务 FAILED + failure_stage=PLANNING（不接管规划）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, chapter_id, _ = _seed_planning_task(session, device_id=device)
+        task_id, chapter_id, _ = _seed_planning_task(session, user_id=user)
         ch = session.get(Chapter, chapter_id)
         assert ch is not None
         session.delete(ch)
@@ -302,9 +315,9 @@ def test_planning_success_units_and_batches(
     session_factory: Callable[[], Session],
 ) -> None:
     """成功规划 → GENERATING + KnowledgePoint（含新列/兼容投影）+ 每单元一批（generation_unit_id）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, _, _ = _seed_planning_task(session, device_id=device)
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -356,9 +369,9 @@ def test_planning_success_reuses_normalized(
     session_factory: Callable[[], Session],
 ) -> None:
     """账本已有同 operation_key+fingerprint 的 SUCCESS → 复用 normalized_result，0 次调用。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, chapter_id, file_id = _seed_planning_task(session, device_id=device)
+        task_id, chapter_id, file_id = _seed_planning_task(session, user_id=user)
     # 计算 run_planning 会使用的 operation_key/fingerprint/子配额（镜像实现）
     with session_factory() as session:
         from infra.db.models import TextChunk
@@ -384,7 +397,7 @@ def test_planning_success_reuses_normalized(
         ]
         attempt = create_attempt(
             session,
-            device_id=device,
+            user_id=user,
             scope_type="TASK",
             scope_id=task_id,
             task_id=task_id,
@@ -434,9 +447,9 @@ def test_planning_budget_reset_prevented(
     session_factory: Callable[[], Session],
 ) -> None:
     """账本已有 3 次尝试（预算耗尽）→ 组 SKIPPED、0 次调用、skipped 计数（预算不重置）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, chapter_id, file_id = _seed_planning_task(session, device_id=device)
+        task_id, chapter_id, file_id = _seed_planning_task(session, user_id=user)
         from infra.db.models import TextChunk
 
         pages = list(
@@ -452,7 +465,7 @@ def test_planning_budget_reset_prevented(
         for attempt_no in (1, 2, 3):
             att = create_attempt(
                 session,
-                device_id=device,
+                user_id=user,
                 scope_type="TASK",
                 scope_id=task_id,
                 task_id=task_id,
@@ -491,9 +504,9 @@ def test_planning_empty_units_completed_no_units(
     session_factory: Callable[[], Session],
 ) -> None:
     """全组成功但 0 个合法单元 → COMPLETED + NO_GENERATION_UNITS（§6.4 分支 1）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, _, _ = _seed_planning_task(session, device_id=device)
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
         client = _client_with_handler(lambda request: _ok_response('{"units": []}'))
         _claim_and_plan(session, client=client)
     with session_factory() as session:
@@ -511,9 +524,9 @@ def test_planning_all_failed_fails_task(
     session_factory: Callable[[], Session],
 ) -> None:
     """上游持续失败（retryable）→ 3 次尝试后组 SKIPPED、全组 SKIPPED → FAILED+PLANNING。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, _, _ = _seed_planning_task(session, device_id=device)
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -540,9 +553,9 @@ def test_planning_cancelled_final_condition_update(
     session_factory: Callable[[], Session],
 ) -> None:
     """全部组成功后在最终事务前取消 → 条件更新 rowcount=0 → 不写 KnowledgePoint/Batch。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, _, _ = _seed_planning_task(session, device_id=device)
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
         calls = 0
         injected = False
         original_refresh = session.refresh
@@ -593,7 +606,7 @@ def test_planning_groups_split_and_sub_quota(
     session_factory: Callable[[], Session],
 ) -> None:
     """按 planner_max_input_chars 连续页拆组：2 组各一次调用、每组只引用本组页。"""
-    device = _uuid()
+    user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
         planner_max_input_chars=300,
@@ -604,7 +617,7 @@ def test_planning_groups_split_and_sub_quota(
         # 最大余数法全部分给 300 字符大组，小组零配额）
         task_id, _, _ = _seed_planning_task(
             session,
-            device_id=device,
+            user_id=user,
             chapter_start_page=1,
             chapter_end_page=4,
             quantity_tendency="EXTENSIVE",
@@ -644,7 +657,7 @@ def test_planning_hard_cap_fails_task(
     session_factory: Callable[[], Session],
 ) -> None:
     """组数 > max_planner_groups_per_task → 任务 FAILED + PLANNING（不发调用，§6.3 硬上限）。"""
-    device = _uuid()
+    user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
         planner_max_input_chars=100,
@@ -653,7 +666,7 @@ def test_planning_hard_cap_fails_task(
     )
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(
-            session, device_id=device, chapter_start_page=1, chapter_end_page=4
+            session, user_id=user, chapter_start_page=1, chapter_end_page=4
         )
         calls = 0
 
@@ -681,12 +694,12 @@ def test_planning_no_text_chapter_is_empty_success(
     session_factory: Callable[[], Session],
 ) -> None:
     """章节范围内无页文本 → 不发请求、成功空结果 → COMPLETED NO_GENERATION_UNITS。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         # 章节页码 10-12 无对应页文本（text_chunks 只落 1-2 页）→ 无文本成功空结果
         task_id, _, _ = _seed_planning_task(
             session,
-            device_id=device,
+            user_id=user,
             chapter_start_page=10,
             chapter_end_page=12,
             text_page_range=(1, 2),
@@ -728,9 +741,9 @@ def test_planning_heartbeat_refreshes_per_attempt(
     steps = iter(FrozenClock(base + timedelta(minutes=2 * i)) for i in range(1, 20))
     monkeypatch.setattr(planning_mod, "SystemClock", lambda: next(steps))
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, _, _ = _seed_planning_task(session, device_id=device)
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
         client = _client_with_handler(
             lambda request: _ok_response(_planning_response_from_request(request))
         )
@@ -749,9 +762,9 @@ def test_planning_key_error_cancel_race_preserves_cancelled(
 ) -> None:
     """review fix 2：401 Key 错误路径的条件更新——finish 提交后、guard 前注入取消
     → rowcount=0 → FAILED 不覆盖 CANCELLED。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, _, _ = _seed_planning_task(session, device_id=device)
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
         chatted = False
         injected = False
         original_refresh = session.refresh
@@ -797,14 +810,14 @@ def test_planning_fingerprint_drift_fails_task(
 ) -> None:
     """review fix 3（§6.2）：账本 fingerprint 与重推导不一致 → 输入漂移失败
     （FAILED + PLANNING + 兜底错误码），fail fast 不发调用、不复用旧结果。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id, chapter_id, _ = _seed_planning_task(session, device_id=device)
+        task_id, chapter_id, _ = _seed_planning_task(session, user_id=user)
         op_key = f"planning:{chapter_id}:0"
         # 用错误 fingerprint 预置一次 SUCCESS（模拟规划输入漂移：分组/配额/版本变化）
         attempt = create_attempt(
             session,
-            device_id=device,
+            user_id=user,
             scope_type="TASK",
             scope_id=task_id,
             task_id=task_id,
@@ -854,7 +867,7 @@ def test_planning_mixed_skipped_and_empty_records_skips(
 ) -> None:
     """review fix 4（§6.4）：部分组跳过 + 其余成功但 0 单元 → COMPLETED
     NO_GENERATION_UNITS 且 skipped_planning_group_count 保留观测。"""
-    device = _uuid()
+    user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
         planner_max_input_chars=300,
@@ -862,7 +875,7 @@ def test_planning_mixed_skipped_and_empty_records_skips(
     )
     with session_factory() as session:
         task_id, chapter_id, file_id = _seed_planning_task(
-            session, device_id=device, chapter_start_page=1, chapter_end_page=4
+            session, user_id=user, chapter_start_page=1, chapter_end_page=4
         )
         from infra.db.models import TextChunk
 
@@ -882,7 +895,7 @@ def test_planning_mixed_skipped_and_empty_records_skips(
         for attempt_no in (1, 2, 3):
             att = create_attempt(
                 session,
-                device_id=device,
+                user_id=user,
                 scope_type="TASK",
                 scope_id=task_id,
                 task_id=task_id,

@@ -1,7 +1,7 @@
 """样卡 service 集成测试：构成/不入库/校验（真实 SQLite）。
 
-V1 教训 carry-forward：devices FK 强制（PRAGMA foreign_keys=ON），service 层测试需
-显式建立 devices 行（HTTP 流由设备中间件自动建立，见 test_pdf_service.py）。
+V1 教训 carry-forward：users FK 强制（PRAGMA foreign_keys=ON），service 层测试需
+显式建立 users 行（HTTP 流由注册端点建立，见 test_pdf_service.py）。
 """
 
 import uuid
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Card, Chapter, Device, PdfFile
+from infra.db.models import Base, Card, Chapter, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.generation.samples import generate_samples
 from services.generation.validate import validate_config
@@ -31,17 +31,25 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _ensure_device(session: Session, device_id: str) -> None:
-    """devices 行先落库（FK 强制）：service 测试需显式建立。"""
-    session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+def _ensure_user(session: Session, user_id: str) -> None:
+    """users 行先落库（FK 强制）：service 测试需显式建立。"""
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            password_hash="x",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
     session.flush()
 
 
-def _seed_pdf(session: Session, *, device_id: str) -> tuple[str, list[str]]:
-    _ensure_device(session, device_id)
+def _seed_pdf(session: Session, *, user_id: str) -> tuple[str, list[str]]:
+    _ensure_user(session, user_id)
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="b.pdf",
         storage_key=_uuid(),
         size_bytes=10,
@@ -73,13 +81,13 @@ def _config(quantity: str = "BALANCED") -> GenerationConfig:
 
 
 def test_samples_generates_three_not_persisted(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        file_id, chapter_ids = _seed_pdf(session, device_id=device)
+        file_id, chapter_ids = _seed_pdf(session, user_id=user)
         session.commit()
     with session_factory() as session:
         cards = generate_samples(
-            session, device_id=device, file_id=file_id, chapter_ids=chapter_ids, config=_config()
+            session, user_id=user, file_id=file_id, chapter_ids=chapter_ids, config=_config()
         )
         session.commit()
     assert len(cards) == 3
@@ -91,15 +99,15 @@ def test_samples_generates_three_not_persisted(session_factory: Callable[[], Ses
         assert session.scalar(select(Card).limit(1)) is None  # 不入库
 
 
-def test_samples_cross_device_404(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+def test_samples_cross_user_404(session_factory: Callable[[], Session]) -> None:
+    user = _uuid()
     with session_factory() as session:
-        file_id, chapter_ids = _seed_pdf(session, device_id=device)
+        file_id, chapter_ids = _seed_pdf(session, user_id=user)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         generate_samples(
             session,
-            device_id=_uuid(),
+            user_id=_uuid(),
             file_id=file_id,
             chapter_ids=chapter_ids,
             config=_config(),
@@ -108,13 +116,13 @@ def test_samples_cross_device_404(session_factory: Callable[[], Session]) -> Non
 
 
 def test_samples_chapter_not_in_file_404(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        file_id, _ = _seed_pdf(session, device_id=device)
+        file_id, _ = _seed_pdf(session, user_id=user)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         generate_samples(
-            session, device_id=device, file_id=file_id, chapter_ids=[_uuid()], config=_config()
+            session, user_id=user, file_id=file_id, chapter_ids=[_uuid()], config=_config()
         )
     assert excinfo.value.code is ErrorCode.PDF_NOT_FOUND
 

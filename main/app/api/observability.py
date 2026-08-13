@@ -74,7 +74,7 @@ def quality_summary_endpoint(
     now = SystemClock().now_utc()
     groups = _aggregate(
         session,
-        device_id=request.state.device_id,
+        user_id=request.state.principal.user_id,
         group_by=group_by,
         days=days,
         now=now,
@@ -92,7 +92,7 @@ def quality_summary_endpoint(
 def _aggregate(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     group_by: Literal["model", "pdf", "difficulty"],
     days: int,
     now: datetime,
@@ -101,7 +101,7 @@ def _aggregate(
     rows = session.execute(
         select(Batch, Task.file_id, Task.status)
         .join(Task, Task.task_id == Batch.task_id)
-        .where(Task.device_id == device_id, Batch.created_at >= cutoff)
+        .where(Task.user_id == user_id, Batch.created_at >= cutoff)
     ).all()
     difficulty_by_unit = _unit_difficulties(session, rows)
     groups: dict[tuple[str, str | None], _Group] = {}

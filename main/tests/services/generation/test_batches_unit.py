@@ -34,6 +34,7 @@ from infra.db.models import (
     PdfFile,
     Task,
     TextChunk,
+    User,
 )
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
@@ -72,7 +73,7 @@ def _page_content(page_number: int) -> str:
 def _seed_unit_task(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     difficulty: str = "BASIC",
     card_type: str = "QUESTION",
     custom_requirements: str | None = None,
@@ -88,12 +89,23 @@ def _seed_unit_task(
     """
     from services.decks.service import create_deck
 
-    if session.get(Device, device_id) is None:
-        session.add(Device(device_id=device_id, created_at=_NOW))
+    if session.get(User, user_id) is None:
+        session.add(
+            User(
+                user_id=user_id,
+                username=f"u-{user_id[:8]}",
+                password_hash="x",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
+    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
+        session.add(Device(device_id=user_id, created_at=_NOW))
         session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="p.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -102,15 +114,15 @@ def _seed_unit_task(
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
+    deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
-    if session.scalar(select(ApiKey).where(ApiKey.device_id == device_id)) is None:
+    if session.scalar(select(ApiKey).where(ApiKey.device_id == user_id)) is None:
         session.add(
             ApiKey(
-                device_id=device_id,
+                device_id=user_id,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -126,7 +138,8 @@ def _seed_unit_task(
     )
     task = create_task(
         session,
-        device_id=device_id,
+        user_id=user_id,
+        device_id=user_id,  # 双列过渡种子（executor Key 查找仍 device 域）
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -137,6 +150,7 @@ def _seed_unit_task(
         ),
         now=_NOW,
     )
+    task.device_id = user_id  # 双头过渡：executor Key 查找仍 device 域（Task 5 切换）
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = _NOW
@@ -208,9 +222,9 @@ def _valid_question_card() -> str:
 
 def test_plan_batches_one_batch_per_unit(session_factory: Callable[[], Session]) -> None:
     """plan_batches：每单元一批、batch_index=priority 序 1..N、generation_unit_id 必填。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device, n_units=3, plan=False)
+        task_id = _seed_unit_task(session, user_id=user, n_units=3, plan=False)
         units = session.scalars(
             select(KnowledgePoint)
             .where(KnowledgePoint.task_id == task_id)
@@ -238,11 +252,9 @@ def test_plan_batches_one_batch_per_unit(session_factory: Callable[[], Session])
 def test_process_batch_anchored_card(session_factory: Callable[[], Session]) -> None:
     """锚定 QUESTION+BASIC：合法卡入库——卡型=锚定、target_difficulty=锚定值、version=v1、
     front/back 确定性投影；评分 5 字段留 NULL 待 SCORING；Batch 兼容投影同一次调用结果。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(
-            session, device_id=device, difficulty="BASIC", card_type="QUESTION"
-        )
+        task_id = _seed_unit_task(session, user_id=user, difficulty="BASIC", card_type="QUESTION")
         assert (
             process_next_batch(
                 session, task_id=task_id, client=_client(lambda r: _ok(_valid_question_card()))
@@ -295,10 +307,10 @@ def test_process_batch_anchored_card(session_factory: Callable[[], Session]) -> 
 
 def test_process_batch_true_false_projection(session_factory: Callable[[], Session]) -> None:
     """锚定 TRUE_FALSE+APPLICATION：front=statement/back=explanation 投影 + answer_boolean 落库。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         task_id = _seed_unit_task(
-            session, device_id=device, difficulty="APPLICATION", card_type="TRUE_FALSE"
+            session, user_id=user, difficulty="APPLICATION", card_type="TRUE_FALSE"
         )
         content = json.dumps(
             {
@@ -336,9 +348,9 @@ def test_process_batch_true_false_projection(session_factory: Callable[[], Sessi
 def test_process_batch_wrong_type_rejected(session_factory: Callable[[], Session]) -> None:
     """卡型不符锚定（返回 TRUE_FALSE 但锚定 QUESTION）→ 0 合法卡 → FAILED 重试路径；
     重试成功 → SUCCEEDED（尝试数 = 账本权威，Batch.retry_count 兼容投影）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device, card_type="QUESTION")
+        task_id = _seed_unit_task(session, user_id=user, card_type="QUESTION")
         wrong = json.dumps(
             {
                 "cards": [
@@ -391,9 +403,9 @@ def test_process_batch_wrong_type_rejected(session_factory: Callable[[], Session
 
 def test_process_batch_multi_card_rejected(session_factory: Callable[[], Session]) -> None:
     """多卡输出 → generator-output schema v2 maxItems=1 原子拒绝 → FAILED 重试路径。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device, card_type="QUESTION")
+        task_id = _seed_unit_task(session, user_id=user, card_type="QUESTION")
         multi = json.dumps(
             {
                 "cards": [
@@ -420,9 +432,9 @@ def test_process_batch_multi_card_rejected(session_factory: Callable[[], Session
 
 def test_process_batch_invalid_json_rejected(session_factory: Callable[[], Session]) -> None:
     """非 JSON 响应 → 输出非法 → FAILED 重试路径（不 panic）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device)
+        task_id = _seed_unit_task(session, user_id=user)
         assert (
             process_next_batch(session, task_id=task_id, client=_client(lambda r: _ok("not json")))
             == 1
@@ -442,9 +454,9 @@ def test_process_batch_empty_cards_source_insufficient(
 ) -> None:
     """合法显式空数组 = 安全弃权（§5.3）：单元 SKIPPED + SOURCE_INSUFFICIENT，不重试；
     账本记 SUCCESS（调用本身成功），覆盖=0。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device)
+        task_id = _seed_unit_task(session, user_id=user)
         assert (
             process_next_batch(
                 session, task_id=task_id, client=_client(lambda r: _ok('{"cards": []}'))
@@ -483,9 +495,9 @@ def test_process_batch_empty_cards_source_insufficient(
 def test_process_batch_budget_exhausted_skipped(session_factory: Callable[[], Session]) -> None:
     """非法输出 3 次尝试（generation_retry_limit=2）→ 预算耗尽 → 批次 SKIPPED；
     尝试数（账本）为预算权威，Batch.retry_count=3 兼容投影，无第二套预算。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device)
+        task_id = _seed_unit_task(session, user_id=user)
         bad = json.dumps(
             {"cards": [{"type": "QUESTION"}]}, ensure_ascii=False
         )  # 缺 question/answer
@@ -524,11 +536,11 @@ def test_process_batch_prompt_shape_and_page_input(session_factory: Callable[[],
     """请求形状：稳定 system（generator v3 + generator-output schema v2 原文）+ 动态
     user（<GENERATOR_INPUT> 安全 JSON：学习目标/锚定/有序页文本/自定义要求）；max_tokens=768；
     原文中的信封边界字符转义（可逆）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         task_id = _seed_unit_task(
             session,
-            device_id=device,
+            user_id=user,
             card_type="QUESTION",
             custom_requirements="使用简洁中文",
         )
@@ -572,14 +584,14 @@ def test_process_batch_input_char_cap_truncates_pages(
     session_factory: Callable[[], Session],
 ) -> None:
     """页文本总量 ≤ generator_max_input_chars：超预算页按页序确定性截断（纵深防御）。"""
-    device = _uuid()
+    user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
         generator_max_input_chars=200,  # 页 1（140 字符）可容纳，页 2 超预算跳过
         _env_file=None,  # type: ignore[call-arg]
     )
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device, settings=settings)
+        task_id = _seed_unit_task(session, user_id=user, settings=settings)
         captured: dict[str, object] = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -602,9 +614,9 @@ def test_process_batch_started_committed_before_chat(
 ) -> None:
     """任何 chat 调用前必须先有已提交的 STARTED 行：chat 进行中（mock handler 内）从
     另一连接可见 STARTED 已提交 + 批次抢占 PROCESSING 已提交。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device)
+        task_id = _seed_unit_task(session, user_id=user)
 
         def handler(request: httpx.Request) -> httpx.Response:
             with session_factory() as check:
@@ -626,10 +638,10 @@ def test_batch_ledger_same_transaction_crash_recovery(
     """§9 硬规则：终态与卡入库同事务——提交失败时保留 STARTED（崩溃模拟 → rollback 后
     账本仍 STARTED、卡未入库、批次 PROCESSING）；恢复（遗留 STARTED→UNKNOWN +
     PROCESSING 复位 FAILED）后按账本预算继续（尝试 2 成功，预算计数含 UNKNOWN）。"""
-    device = _uuid()
+    user = _uuid()
     # 阶段 1：成功 chat 后终态提交失败（模拟崩溃）→ 领域写入回滚、STARTED 保留
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device)
+        task_id = _seed_unit_task(session, user_id=user)
         assert (
             process_next_batch(
                 session, task_id=task_id, client=_client(lambda r: _ok(_valid_question_card()))
@@ -690,9 +702,9 @@ def test_process_batch_retryable_upstream_retries_within_budget(
 
     T17 起 adapter 内部对 500 自动重试 1 次（同一次逻辑调用）：连续 2 次 500 才构成
     一次逻辑 FAILED（calls 1/2 = 第一次逻辑调用内部耗尽），calls 3 才是第二次逻辑调用。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device)
+        task_id = _seed_unit_task(session, user_id=user)
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -738,9 +750,9 @@ def test_process_batch_key_error_raises_to_fail_task(
 ) -> None:
     """401（retryable=False，Key 错误）→ 记账 FAILED 后上抛 AppError（executor 任务
     FAILED，spec §6.3），不进入预算重试（调用数 1）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device)
+        task_id = _seed_unit_task(session, user_id=user)
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -766,9 +778,9 @@ def test_process_batch_no_source_pages_skipped_without_call(
 ) -> None:
     """单元无可用来源页（source_chunk_ids 空）→ 不发调用直接 SKIPPED
     （SOURCE_INSUFFICIENT 纵深防御分支）、单元 SKIPPED、无账本行、卡 0。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_unit_task(session, device_id=device, no_source_chunks=True)
+        task_id = _seed_unit_task(session, user_id=user, no_source_chunks=True)
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:

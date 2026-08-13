@@ -32,7 +32,7 @@ def _now() -> str:
 def list_decks_endpoint(
     request: Request, session: Annotated[Session, Depends(get_db_session)]
 ) -> JSONResponse:
-    items = list_decks(session, device_id=request.state.device_id, now=_now())
+    items = list_decks(session, user_id=request.state.principal.user_id, now=_now())
     return JSONResponse(content={"items": items})
 
 
@@ -42,13 +42,13 @@ def create_deck_endpoint(
     payload: DeckCreate,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = request.url.path
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        deck = create_deck(session, device_id=device_id, name=payload.name, now=_now())
+        deck = create_deck(session, user_id=user_id, name=payload.name, now=_now())
         session.flush()
         data: dict[str, Any] = {
             "deck_id": deck.deck_id,
@@ -67,7 +67,7 @@ def create_deck_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -83,7 +83,7 @@ def get_deck_endpoint(
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    data = get_deck(session, device_id=request.state.device_id, deck_id=deck_id, now=_now())
+    data = get_deck(session, user_id=request.state.principal.user_id, deck_id=deck_id, now=_now())
     return JSONResponse(content=data)
 
 
@@ -94,19 +94,19 @@ def rename_deck_endpoint(
     payload: DeckUpdateRequest,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/decks/{deck_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        rename_deck(session, device_id=device_id, deck_id=deck_id, name=payload.name, now=_now())
+        rename_deck(session, user_id=user_id, deck_id=deck_id, name=payload.name, now=_now())
         # 返回真实进度视图（改名可能发生在有卡片的牌组上）
-        return 200, get_deck(session, device_id=device_id, deck_id=deck_id, now=_now())
+        return 200, get_deck(session, user_id=user_id, deck_id=deck_id, now=_now())
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -122,18 +122,18 @@ def delete_deck_endpoint(
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> Response:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/decks/{deck_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        delete_deck(session, device_id=device_id, deck_id=deck_id)
+        delete_deck(session, user_id=user_id, deck_id=deck_id)
         return 204, {}
 
     _replayed, status, _body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,

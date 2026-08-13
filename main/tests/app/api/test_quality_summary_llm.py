@@ -1,6 +1,6 @@
 """quality-summary 新口径 API 测试（LLM 升级 T12；spec §8 权威口径）。
 
-真实 SQLite（迁移后 schema）+ TestClient；直接种子 Device/PdfFile/Deck/Task/
+真实 SQLite（迁移后 schema）+ TestClient；直接种子 User/PdfFile/Deck/Task/
 KnowledgePoint/Batch/Card（不经执行器）——聚焦聚合语义：
 
 - 各评分均分只以对应字段非 NULL 的卡为分母（NULL 不计 0 分）；
@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from app.api.observability import _unit_difficulties
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import Batch, Card, Device, KnowledgePoint, PdfFile, Task
+from infra.db.models import Batch, Card, KnowledgePoint, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from tests.conftest import auth_headers
@@ -60,6 +60,19 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    from sqlalchemy import text
+
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    assert row is not None
+    return str(row)
+
+
 def _device(client: TestClient) -> dict[str, str]:
     """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
     return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
@@ -69,14 +82,23 @@ def _session(db_path: Path) -> Session:
     return create_session_factory(create_db_engine(f"sqlite:///{db_path}"))()
 
 
-def _seed_base(db_path: Path, *, device_id: str) -> tuple[str, str]:
-    """devices + PdfFile + 牌组 → (file_id, deck_id)。"""
+def _seed_base(db_path: Path, *, user_id: str) -> tuple[str, str]:
+    """users + PdfFile + 牌组 → (file_id, deck_id)。"""
     with _session(db_path) as session:
-        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
-        session.flush()
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    password_hash="x",
+                    created_at="2026-08-11T00:00:00.000Z",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
         pdf = PdfFile(
             file_id=_uuid(),
-            device_id=device_id,
+            user_id=user_id,
             filename="b.pdf",
             storage_key=_uuid(),
             size_bytes=10,
@@ -85,20 +107,20 @@ def _seed_base(db_path: Path, *, device_id: str) -> tuple[str, str]:
         )
         session.add(pdf)
         session.flush()
-        deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
         session.commit()
         return pdf.file_id, deck.deck_id
 
 
-def _seed_task(db_path: Path, *, device_id: str, file_id: str) -> str:
+def _seed_task(db_path: Path, *, user_id: str, file_id: str) -> str:
     """COMPLETED 任务（观测窗口内；聚合只读任务状态）。"""
     task_id = _uuid()
     with _session(db_path) as session:
         session.add(
             Task(
                 task_id=task_id,
-                device_id=device_id,
+                user_id=user_id,
                 file_id=file_id,
                 status="COMPLETED",
                 selected_chapters="[]",
@@ -168,7 +190,7 @@ def _seed_card(
     db_path: Path,
     *,
     deck_id: str,
-    device_id: str,
+    user_id: str,
     item_id: str,
     position: int,
     evidence: int | None = None,
@@ -184,7 +206,7 @@ def _seed_card(
             Card(
                 card_id=card_id,
                 deck_id=deck_id,
-                device_id=device_id,
+                user_id=user_id,
                 source="GENERATED",
                 position=position,
                 front=f"front-{position}",
@@ -210,13 +232,13 @@ def test_summary_null_scores_not_zero(ctx: tuple[TestClient, Path]) -> None:
     scored_card_count 按 rubric_total_score 非 NULL（1），eligible = 2。"""
     client, db_path = ctx
     device = _device(client)
-    file_id, deck_id = _seed_base(db_path, device_id=device["X-Device-ID"])
-    task_id = _seed_task(db_path, device_id=device["X-Device-ID"], file_id=file_id)
+    file_id, deck_id = _seed_base(db_path, user_id=_user_id(db_path))
+    task_id = _seed_task(db_path, user_id=_user_id(db_path), file_id=file_id)
     _seed_batch(db_path, task_id=task_id, item_ids=["item-a", "item-b"])
     _seed_card(
         db_path,
         deck_id=deck_id,
-        device_id=device["X-Device-ID"],
+        user_id=_user_id(db_path),
         item_id="item-a",
         position=1,
         evidence=2,
@@ -225,9 +247,7 @@ def test_summary_null_scores_not_zero(ctx: tuple[TestClient, Path]) -> None:
         learning=1,
         total=5,
     )
-    _seed_card(
-        db_path, deck_id=deck_id, device_id=device["X-Device-ID"], item_id="item-b", position=2
-    )
+    _seed_card(db_path, deck_id=deck_id, user_id=_user_id(db_path), item_id="item-b", position=2)
 
     resp = client.get("/observability/quality-summary", headers=device)
     assert resp.status_code == 200
@@ -247,8 +267,8 @@ def test_summary_difficulty_group_by_unit(ctx: tuple[TestClient, Path]) -> None:
     SKIPPED 无卡批次进 BASIC 组，coverage=0 计入 coverage_avg。"""
     client, db_path = ctx
     device = _device(client)
-    file_id, _deck_id = _seed_base(db_path, device_id=device["X-Device-ID"])
-    task_id = _seed_task(db_path, device_id=device["X-Device-ID"], file_id=file_id)
+    file_id, _deck_id = _seed_base(db_path, user_id=_user_id(db_path))
+    task_id = _seed_task(db_path, user_id=_user_id(db_path), file_id=file_id)
     unit_id = _seed_unit(db_path, task_id=task_id, target_difficulty="BASIC")
     _seed_batch(
         db_path,
@@ -277,13 +297,13 @@ def test_summary_sampling_rate_and_rubric_version(ctx: tuple[TestClient, Path]) 
     cost_estimate 标注 scope == generation-stage-only。"""
     client, db_path = ctx
     device = _device(client)
-    file_id, deck_id = _seed_base(db_path, device_id=device["X-Device-ID"])
-    task_id = _seed_task(db_path, device_id=device["X-Device-ID"], file_id=file_id)
+    file_id, deck_id = _seed_base(db_path, user_id=_user_id(db_path))
+    task_id = _seed_task(db_path, user_id=_user_id(db_path), file_id=file_id)
     _seed_batch(db_path, task_id=task_id, rubric_version="v2", item_ids=["item-a", "item-b"])
     _seed_card(
         db_path,
         deck_id=deck_id,
-        device_id=device["X-Device-ID"],
+        user_id=_user_id(db_path),
         item_id="item-a",
         position=1,
         evidence=2,
@@ -292,9 +312,7 @@ def test_summary_sampling_rate_and_rubric_version(ctx: tuple[TestClient, Path]) 
         learning=1,
         total=5,
     )
-    _seed_card(
-        db_path, deck_id=deck_id, device_id=device["X-Device-ID"], item_id="item-b", position=2
-    )
+    _seed_card(db_path, deck_id=deck_id, user_id=_user_id(db_path), item_id="item-b", position=2)
 
     resp = client.get("/observability/quality-summary", headers=device)
     assert resp.status_code == 200
@@ -312,10 +330,10 @@ def test_summary_sampling_rate_and_rubric_version(ctx: tuple[TestClient, Path]) 
 def test_unit_difficulties_chunks_large_in_query(ctx: tuple[TestClient, Path]) -> None:
     """>500 个单元 id 的难度预取按 _CARD_QUERY_CHUNK 分块（SQLite 变量数上限兜底）：
     501 个 id → ≥2 次 ORM 执行（修复前恒为 1 次大 IN），且映射完整、归因正确。"""
-    client, db_path = ctx  # 双头窗口：_device(client) 需 client
-    device = _device(client)
-    file_id, _deck_id = _seed_base(db_path, device_id=device["X-Device-ID"])
-    task_id = _seed_task(db_path, device_id=device["X-Device-ID"], file_id=file_id)
+    client, db_path = ctx
+    _device(client)  # 注册 alice（后续 seed 按用户名取 user_id）
+    file_id, _deck_id = _seed_base(db_path, user_id=_user_id(db_path))
+    task_id = _seed_task(db_path, user_id=_user_id(db_path), file_id=file_id)
     unit_ids = [f"unit-{i}" for i in range(501)]
     with _session(db_path) as session:
         session.add_all(

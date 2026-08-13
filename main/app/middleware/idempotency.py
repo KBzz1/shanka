@@ -4,8 +4,10 @@ execute_idempotent 由写接口 handler 在请求级 session 内调用：
 - 首次：执行 fn(session) → INSERT 幂等记录（response_status/response_body/request_body_hash），
   与业务副作用同一事务（调用方 commit；失败回滚同时释放占位）。
 - 重复：同键同 body → 重放首次成功响应（不执行业务）；同键异 body → 409 IDEMPOTENCY_CONFLICT。
-- 并发：唯一约束 (device_id, path, idempotency_key) 抢占；后到事务（BEGIN IMMEDIATE 串行化）回滚
+- 并发：唯一约束 (user_id, path, idempotency_key) 抢占；后到事务（BEGIN IMMEDIATE 串行化）回滚
   后重读 → 重放，保证业务副作用仅一次（AC-05/AC-10）。
+- V2.2：幂等域 = user（P4-3 切换）；新行只写 user_id（满足 CHECK 双非空），
+  device_id 不再写入（旧 device 域行不可见——D-06 无访问路径）。
 """
 
 import hashlib
@@ -47,7 +49,7 @@ def get_idempotency_key(request: Request) -> str:
 def execute_idempotent[F: Callable[[Session], tuple[int, dict[str, Any]]]](
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     path: str,
     idempotency_key: str,
     request_body_hash: str,
@@ -59,7 +61,7 @@ def execute_idempotent[F: Callable[[Session], tuple[int, dict[str, Any]]]](
     """
     existing = session.scalar(
         select(IdempotencyKey).where(
-            IdempotencyKey.device_id == device_id,
+            IdempotencyKey.user_id == user_id,
             IdempotencyKey.path == path,
             IdempotencyKey.idempotency_key == idempotency_key,
         )
@@ -79,7 +81,7 @@ def execute_idempotent[F: Callable[[Session], tuple[int, dict[str, Any]]]](
         return False, status, body
 
     record = IdempotencyKey(
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=idempotency_key,
         response_status=status,
@@ -95,7 +97,7 @@ def execute_idempotent[F: Callable[[Session], tuple[int, dict[str, Any]]]](
         session.rollback()
         existing = session.scalar(
             select(IdempotencyKey).where(
-                IdempotencyKey.device_id == device_id,
+                IdempotencyKey.user_id == user_id,
                 IdempotencyKey.path == path,
                 IdempotencyKey.idempotency_key == idempotency_key,
             )

@@ -39,17 +39,22 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         yield test_client
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
+    return {
+        **auth_headers(client, username=username, password=password),
+        "X-Device-ID": str(uuid.uuid4()),
+    }
 
 
 def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-def _create_deck(client: TestClient, device: dict[str, str]) -> str:
-    resp = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()})
+def _create_deck(client: TestClient, user: dict[str, str]) -> str:
+    resp = client.post("/decks", json={"name": "D"}, headers={**user, **_idem()})
     assert resp.status_code == 201
     return str(resp.json()["deck_id"])
 
@@ -63,8 +68,8 @@ def _idempotency_rows(db_path: Path) -> int:
 
 def test_decks_api_create_and_list(client: TestClient) -> None:
     """POST /decks 创建（201 + 全字段）→ GET /decks 列表 / GET /decks/{id} 可见。"""
-    device = _device(client)
-    resp = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()})
+    user = _user(client)
+    resp = client.post("/decks", json={"name": "D"}, headers={**user, **_idem()})
     assert resp.status_code == 201
     body = resp.json()
     assert body["name"] == "D"
@@ -76,75 +81,78 @@ def test_decks_api_create_and_list(client: TestClient) -> None:
     assert body["mastery_ratio"] == 0.0
     assert body["version"] and body["created_at"] and body["updated_at"]
     deck_id = body["deck_id"]
-    resp = client.get("/decks", headers=device)
+    resp = client.get("/decks", headers=user)
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 1
     assert items[0]["deck_id"] == deck_id
-    resp = client.get(f"/decks/{deck_id}", headers=device)
+    resp = client.get(f"/decks/{deck_id}", headers=user)
     assert resp.status_code == 200
     assert resp.json()["name"] == "D"
 
 
-def test_decks_api_get_cross_device_404(client: TestClient) -> None:
-    """跨设备访问 → 404 DECK_NOT_FOUND（资源归属隔离）。"""
-    device = _device(client)
-    deck_id = _create_deck(client, device)
-    resp = client.get(f"/decks/{deck_id}", headers=_device(client))
+def test_decks_api_get_cross_user_404(client: TestClient) -> None:
+    """跨用户访问 → 404 DECK_NOT_FOUND（资源归属隔离）。"""
+    user = _user(client)
+    deck_id = _create_deck(client, user)
+    resp = client.get(f"/decks/{deck_id}", headers=_user(client, "user2", "pass-2222"))
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
 
 
 def test_decks_api_delete(client: TestClient) -> None:
     """DELETE 204 → 再 GET 404；不同 key 重复删除 → 404。"""
-    device = _device(client)
-    deck_id = _create_deck(client, device)
-    resp = client.delete(f"/decks/{deck_id}", headers={**device, **_idem()})
+    user = _user(client)
+    deck_id = _create_deck(client, user)
+    resp = client.delete(f"/decks/{deck_id}", headers={**user, **_idem()})
     assert resp.status_code == 204
-    assert client.get(f"/decks/{deck_id}", headers=device).status_code == 404
-    resp = client.delete(f"/decks/{deck_id}", headers={**device, **_idem()})
+    assert client.get(f"/decks/{deck_id}", headers=user).status_code == 404
+    resp = client.delete(f"/decks/{deck_id}", headers={**user, **_idem()})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
 
 
 def test_decks_api_delete_blocked_by_running_task(client: TestClient, tmp_path: Path) -> None:
     """删除保护：进行中任务引用该牌组 → 409 TASK_IN_PROGRESS（AppError → HTTP 映射）。"""
-    device = _device(client)
-    deck_id = _create_deck(client, device)
+    user = _user(client)
+    deck_id = _create_deck(client, user)
     engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
     with engine.begin() as conn:
+        owner_id = conn.execute(text("SELECT user_id FROM users WHERE username = 'alice'")).scalar()
+        assert owner_id is not None
         conn.execute(
             text(
-                "INSERT INTO tasks (task_id, device_id, status, selected_chapters,"
+                "INSERT INTO tasks (task_id, device_id, user_id, status, selected_chapters,"
                 " generation_config, deck_id, generated_card_count, resumable,"
                 " created_at, updated_at)"
-                " VALUES (:task_id, :device_id, 'RUNNING', '[]', '{}', :deck_id,"
+                " VALUES (:task_id, :device_id, :user_id, 'RUNNING', '[]', '{}', :deck_id,"
                 " 0, 0, :now, :now)"
             ),
             {
                 "task_id": str(uuid.uuid4()),
-                "device_id": device["X-Device-ID"],
+                "device_id": user["X-Device-ID"],
+                "user_id": str(owner_id),
                 "deck_id": deck_id,
                 "now": "2026-08-11T00:00:00.000Z",
             },
         )
-    resp = client.delete(f"/decks/{deck_id}", headers={**device, **_idem()})
+    resp = client.delete(f"/decks/{deck_id}", headers={**user, **_idem()})
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "TASK_IN_PROGRESS"
 
 
 def test_decks_api_create_requires_idempotency_key(client: TestClient) -> None:
     """写接口强制 Idempotency-Key（契约 1.3）：缺失 → 400 VALIDATION_ERROR。"""
-    resp = client.post("/decks", json={"name": "D"}, headers=_device(client))
+    resp = client.post("/decks", json={"name": "D"}, headers=_user(client))
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_decks_api_idempotency_replay_and_conflict(client: TestClient, tmp_path: Path) -> None:
     """同设备同 key 同 body：单副作用 + 重放原响应；同 key 异 body：409。"""
-    device = _device(client)
+    user = _user(client)
     key = _idem()
-    headers = {**device, **key}
+    headers = {**user, **key}
     resp1 = client.post("/decks", json={"name": "D"}, headers=headers)
     assert resp1.status_code == 201
     first = resp1.json()
@@ -155,16 +163,16 @@ def test_decks_api_idempotency_replay_and_conflict(client: TestClient, tmp_path:
     assert resp3.status_code == 409
     assert resp3.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
     # 单副作用：列表只有 1 个牌组，幂等记录仅 1 行
-    resp = client.get("/decks", headers=device)
+    resp = client.get("/decks", headers=user)
     assert len(resp.json()["items"]) == 1
     assert _idempotency_rows(tmp_path / "api.db") == 1
 
 
 def test_decks_api_idempotency_new_app_session_replays(client: TestClient, tmp_path: Path) -> None:
     """新 app/session（同库）：DB 持久化幂等记录跨会话生效 → 重放原响应。"""
-    device = _device(client)
+    user = _user(client)
     key = _idem()
-    headers = {**device, **key}
+    headers = {**user, **key}
     first = client.post("/decks", json={"name": "D"}, headers=headers)
     assert first.status_code == 201
     settings = Settings(
@@ -178,15 +186,15 @@ def test_decks_api_idempotency_new_app_session_replays(client: TestClient, tmp_p
 
 def test_decks_api_delete_idempotent_replay(client: TestClient, tmp_path: Path) -> None:
     """DELETE 成功后同 key 重放 → 204（重复提交安全返回，不 404）；不同 key 再删 → 404。"""
-    device = _device(client)
+    user = _user(client)
     key = _idem()
-    deck_id = _create_deck(client, device)
-    resp = client.delete(f"/decks/{deck_id}", headers={**device, **key})
+    deck_id = _create_deck(client, user)
+    resp = client.delete(f"/decks/{deck_id}", headers={**user, **key})
     assert resp.status_code == 204
-    resp = client.delete(f"/decks/{deck_id}", headers={**device, **key})
+    resp = client.delete(f"/decks/{deck_id}", headers={**user, **key})
     assert resp.status_code == 204  # 幂等重放：记录响应 status 204（body 存 {}）
-    assert client.get(f"/decks/{deck_id}", headers=device).status_code == 404
-    resp = client.delete(f"/decks/{deck_id}", headers={**device, **_idem()})
+    assert client.get(f"/decks/{deck_id}", headers=user).status_code == 404
+    resp = client.delete(f"/decks/{deck_id}", headers={**user, **_idem()})
     assert resp.status_code == 404  # 新 key 不再重放 → 牌组已不存在
     # 幂等记录 = 创建 1 行 + DELETE 1 行：重放不新增，404（非 2xx）不落库
     assert _idempotency_rows(tmp_path / "api.db") == 2
@@ -195,10 +203,10 @@ def test_decks_api_delete_idempotent_replay(client: TestClient, tmp_path: Path) 
 def test_decks_api_delete_failed_retry_same_key_still_404(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """失败（404）不落幂等记录：同 (device, path, key) 重试仍 404，库中无记录。"""
-    device = _device(client)
+    """失败（404）不落幂等记录：同 (user, path, key) 重试仍 404，库中无记录。"""
+    user = _user(client)
     key = _idem()
-    headers = {**device, **key}
+    headers = {**user, **key}
     deck_id = str(uuid.uuid4())
     for _ in range(2):
         resp = client.delete(f"/decks/{deck_id}", headers=headers)
@@ -209,13 +217,13 @@ def test_decks_api_delete_failed_retry_same_key_still_404(
 
 def test_decks_api_rename_and_idempotent_replay(client: TestClient) -> None:
     """牌组改名（V6 前端已实现 UI 补齐）：200 + version 递增；同键重放返回首次结果。"""
-    device = _device(client)
-    deck_id = _create_deck(client, device)
-    resp = client.get(f"/decks/{deck_id}", headers=device)
+    user = _user(client)
+    deck_id = _create_deck(client, user)
+    resp = client.get(f"/decks/{deck_id}", headers=user)
     old_version = resp.json()["version"]
 
     key = _idem()
-    headers = {**device, **key}
+    headers = {**user, **key}
     first = client.patch(f"/decks/{deck_id}", json={"name": "新名字"}, headers=headers)
     assert first.status_code == 200, first.text
     body = first.json()
@@ -227,15 +235,17 @@ def test_decks_api_rename_and_idempotent_replay(client: TestClient) -> None:
     assert replay.json() == body  # 重放返回首次响应
 
     # 空名 → 400 VALIDATION_ERROR（契约第 7 章）
-    resp = client.patch(f"/decks/{deck_id}", json={"name": ""}, headers={**device, **_idem()})
+    resp = client.patch(f"/decks/{deck_id}", json={"name": ""}, headers={**user, **_idem()})
     assert resp.status_code == 400
 
 
-def test_decks_api_rename_cross_device_404(client: TestClient) -> None:
-    """跨设备改名 → 404（资源隔离，契约 1.1）。"""
-    device = _device(client)
-    deck_id = _create_deck(client, device)
+def test_decks_api_rename_cross_user_404(client: TestClient) -> None:
+    """跨用户改名 → 404（资源隔离，契约 1.1）。"""
+    user = _user(client)
+    deck_id = _create_deck(client, user)
     resp = client.patch(
-        f"/decks/{deck_id}", json={"name": "x"}, headers={**_device(client), **_idem()}
+        f"/decks/{deck_id}",
+        json={"name": "x"},
+        headers={**_user(client, "user2", "pass-2222"), **_idem()},
     )
     assert resp.status_code == 404

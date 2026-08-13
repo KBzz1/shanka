@@ -48,7 +48,7 @@ def create_task_endpoint(
     payload: TaskCreateRequest,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = request.url.path
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -57,7 +57,9 @@ def create_task_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         task = create_task(
             session,
-            device_id=device_id,
+            user_id=user_id,
+            # 双头过渡（P4-3）：已保存 Key 校验仍按 device 域（api_key 用户域切换在 Task 5）
+            device_id=request.state.device_id,
             file_id=payload.file_id,
             deck_id=payload.deck_id,
             chapter_ids=payload.chapter_ids,
@@ -70,7 +72,7 @@ def create_task_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -87,7 +89,7 @@ def get_task_endpoint(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
     """任务详情（长任务轮询：状态、stage、已生成数、失败码、是否可继续）。"""
-    task = get_task(session, device_id=request.state.device_id, task_id=task_id)
+    task = get_task(session, user_id=request.state.principal.user_id, task_id=task_id)
     return JSONResponse(content=task_view(task))
 
 
@@ -98,7 +100,7 @@ def list_task_batches_endpoint(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
     """批次列表（契约 6.9/AC-07）：归属校验（404）→ Batch 视图列表（含 cost 估算）。"""
-    task = get_task(session, device_id=request.state.device_id, task_id=task_id)
+    task = get_task(session, user_id=request.state.principal.user_id, task_id=task_id)
     batches = session.scalars(
         select(Batch).where(Batch.task_id == task.task_id).order_by(Batch.batch_index)
     ).all()
@@ -175,7 +177,7 @@ def resume_task_endpoint(
     task_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = request.url.path
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -184,7 +186,7 @@ def resume_task_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         task = resume_task(
             session,
-            device_id=device_id,
+            user_id=user_id,
             task_id=task_id,
             now=_now(),
             orphan_timeout_minutes=settings.orphan_timeout_minutes,
@@ -193,7 +195,7 @@ def resume_task_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -209,18 +211,18 @@ def cancel_task_endpoint(
     task_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = request.url.path
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        task = cancel_task(session, device_id=device_id, task_id=task_id, now=_now())
+        task = cancel_task(session, user_id=user_id, task_id=task_id, now=_now())
         return 200, task_view(task)
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,

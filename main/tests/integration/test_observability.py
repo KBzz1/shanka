@@ -1,5 +1,5 @@
 """观测出口集成测试（契约 6.9/6.10/8.3）：批次列表（usage/版本/质量/cost 估算）、
-quality-summary 聚合（device 隔离）、metrics 文本（llm/generation/batch 指标）。
+quality-summary 聚合（user 隔离）、metrics 文本（llm/generation/batch 指标）。
 
 mock transport 全链路驱动（LLM 升级管线：规划 → 生成 → 评分，一次 scan 衔接）：
 COMPACT 2 章 → 6 生成单元（配额 BASIC 3/UNDERSTANDING 2/APPLICATION 1）→ 6 批
@@ -16,10 +16,11 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, Device, PdfFile
+from infra.db.models import ApiKey, Chapter, Device, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -128,24 +129,54 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
+    return {
+        **auth_headers(client, username=username, password=password),
+        "X-Device-ID": str(uuid.uuid4()),
+    }
 
 
 def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
-    """devices 前置 + PDF + 2 章节 + 牌组 + 真实加密 ApiKey（COMPACT → 6 知识点 → 2 批）。"""
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    assert row is not None
+    return str(row)
+
+
+def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, object]:
+    """users/devices 前置 + PDF + 2 章节 + 牌组 + 真实加密 ApiKey（COMPACT → 6 知识点 → 2 批）。
+
+    PDF/牌组 user 域（tasks 归属校验）；ApiKey/Device 保持 user 域（Task 5 前）。
+    """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    password_hash="x",
+                    created_at="2026-08-11T00:00:00.000Z",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
         session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
         session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
-            device_id=device_id,
+            user_id=user_id,
             filename="b.pdf",
             storage_key=_uuid(),
             size_bytes=10,
@@ -154,7 +185,7 @@ def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
         )
         session.add(pdf)
         session.flush()
-        deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
         chapter_ids: list[str] = []
         for i in range(2):
@@ -201,12 +232,19 @@ def _payload(seed: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _run_task(client: TestClient, db_path: Path, *, device: dict[str, str]) -> tuple[str, str]:
+def _run_task(client: TestClient, db_path: Path, *, user: dict[str, str]) -> tuple[str, str]:
     """POST 任务 → 显式 executor 扫描（mock transport 两批）→ 返回 (task_id, file_id)。"""
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    seed = _seed_context(db_path, device_id=user["X-Device-ID"], user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    # 双头过渡（P4-3）：executor Key 查找仍 user 域（Task 5 切 user）——补种双列
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE tasks SET device_id = :d WHERE task_id = :t"),
+            {"d": user["X-Device-ID"], "t": task_id},
+        )
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     n = scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory)
     assert n == 1  # 单任务执行完毕（两批）
@@ -237,9 +275,9 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
 ) -> None:
     """GET /tasks/{task_id}/batches：状态/retry/质量/usage/版本/model/http_status/duration/cost。"""
     client, db_path = ctx
-    device = _device(client)
-    task_id, _file_id = _run_task(client, db_path, device=device)
-    resp = client.get(f"/tasks/{task_id}/batches", headers=device)
+    user = _user(client)
+    task_id, _file_id = _run_task(client, db_path, user=user)
+    resp = client.get(f"/tasks/{task_id}/batches", headers=user)
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 6  # 1 单元 1 批（6 生成单元）
@@ -274,12 +312,12 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
 ) -> None:
     """GET /observability/quality-summary：Rubric 均分/覆盖/重复率/完成率/成本，group_by 三种分组。"""
     client, db_path = ctx
-    device = _device(client)
-    task_id, file_id = _run_task(client, db_path, device=device)
+    user = _user(client)
+    task_id, file_id = _run_task(client, db_path, user=user)
     _ = task_id  # 完成任务存在即可（聚合跨任务）
 
     # 默认 group_by=model & days=30
-    resp = client.get("/observability/quality-summary", headers=device)
+    resp = client.get("/observability/quality-summary", headers=user)
     assert resp.status_code == 200
     body = resp.json()
     assert body["group_by"] == "model"
@@ -304,7 +342,7 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     assert g["cost_estimate"]["scope"] == "generation-stage-only"  # 不引入账本双计
 
     # group_by=pdf：键 = PDF file_id
-    resp = client.get("/observability/quality-summary", params={"group_by": "pdf"}, headers=device)
+    resp = client.get("/observability/quality-summary", params={"group_by": "pdf"}, headers=user)
     assert resp.status_code == 200
     groups = resp.json()["groups"]
     assert len(groups) == 1
@@ -314,7 +352,7 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     # group_by=difficulty：键 = generation_unit_id → 单元 target_difficulty（确定性）；
     # 配额 BASIC 3 / UNDERSTANDING 2 / APPLICATION 1 → 每单元 1 卡同分布。
     resp = client.get(
-        "/observability/quality-summary", params={"group_by": "difficulty"}, headers=device
+        "/observability/quality-summary", params={"group_by": "difficulty"}, headers=user
     )
     assert resp.status_code == 200
     groups = resp.json()["groups"]
@@ -326,15 +364,15 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
 
 
 def test_quality_summary_isolates_by_device(ctx: tuple[TestClient, Path]) -> None:
-    """6.10 隔离口径：quality-summary 按当前 device 聚合；批次列表跨设备 404。"""
+    """6.10 隔离口径：quality-summary 按当前 user 聚合；批次列表跨设备 404。"""
     client, db_path = ctx
-    device = _device(client)
-    task_id, _file_id = _run_task(client, db_path, device=device)
+    user = _user(client)
+    task_id, _file_id = _run_task(client, db_path, user=user)
 
-    other = _device(client)
+    other = _user(client, "user2", "pass-2222")
     resp = client.get("/observability/quality-summary", headers=other)
     assert resp.status_code == 200
-    assert resp.json()["groups"] == []  # 其他设备不可见
+    assert resp.json()["groups"] == []  # 其他用户不可见
     resp = client.get(f"/tasks/{task_id}/batches", headers=other)
     assert resp.status_code == 404  # 统一 404，不暴露资源存在性
 
@@ -345,9 +383,9 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
     """8.3：mock transport 驱动全管线（规划 2 次 + 生成 6 次 + 评分 5 次）后
     /metrics 文本含 llm/generation/batch 指标（差值断言）。"""
     client, db_path = ctx
-    device = _device(client)
+    user = _user(client)
     before = client.get("/metrics").text
-    _run_task(client, db_path, device=device)
+    _run_task(client, db_path, user=user)
     after = client.get("/metrics").text
 
     # llm（生成 6 批 + 评分 5 组 = 11 次 chat；规划调用不在 llm 指标口径）
@@ -394,22 +432,22 @@ def test_cancel_metric_counts_transition_once(ctx: tuple[TestClient, Path]) -> N
     （execute_idempotent 快照，不重跑 biz）均不重复 inc（差值断言）。
     """
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
-    resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
+    user = _user(client)
+    seed = _seed_context(db_path, device_id=user["X-Device-ID"], user_id=_user_id(db_path))
+    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
     assert resp.status_code == 201  # 任务创建即 RUNNING（未跑 executor）
     task_id = resp.json()["task_id"]
     labels = ['result="CANCELLED"']
     before = _labeled_value(client.get("/metrics").text, "generation_tasks_total", labels)
     key_a = _idem()
     # 首次取消（RUNNING → CANCELLED）：计数 +1
-    r1 = client.post(f"/tasks/{task_id}/cancel", headers={**device, **key_a})
+    r1 = client.post(f"/tasks/{task_id}/cancel", headers={**user, **key_a})
     assert r1.status_code == 200 and r1.json()["status"] == "CANCELLED"
     # 不同幂等键重复取消（任务已终态）：service 早返回，不转移不计数
-    r2 = client.post(f"/tasks/{task_id}/cancel", headers={**device, **_idem()})
+    r2 = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
     assert r2.status_code == 200 and r2.json()["status"] == "CANCELLED"
     # 同键重放：走 execute_idempotent 快照，不重跑 biz
-    r3 = client.post(f"/tasks/{task_id}/cancel", headers={**device, **key_a})
+    r3 = client.post(f"/tasks/{task_id}/cancel", headers={**user, **key_a})
     assert r3.status_code == 200 and r3.json() == r1.json()
     after = _labeled_value(client.get("/metrics").text, "generation_tasks_total", labels)
     assert after - before == 1.0

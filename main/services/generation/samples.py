@@ -10,9 +10,9 @@ from services.generation.fake import generate_card
 from services.generation.validate import validate_config
 
 
-def _owned_pdf(session: Session, *, device_id: str, file_id: str) -> PdfFile:
+def _owned_pdf(session: Session, *, user_id: str, file_id: str) -> PdfFile:
     pdf = session.get(PdfFile, file_id)
-    if pdf is None or pdf.device_id != device_id:
+    if pdf is None or pdf.user_id != user_id:
         raise AppError(ErrorCode.PDF_NOT_FOUND, "PDF 不存在")
     return pdf
 
@@ -20,13 +20,13 @@ def _owned_pdf(session: Session, *, device_id: str, file_id: str) -> PdfFile:
 def generate_samples(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     file_id: str,
     chapter_ids: list[str],
     config: GenerationConfig,
 ) -> list[dict[str, object]]:
     validate_config(config)
-    pdf = _owned_pdf(session, device_id=device_id, file_id=file_id)
+    pdf = _owned_pdf(session, user_id=user_id, file_id=file_id)
     chapters = session.scalars(select(Chapter).where(Chapter.file_id == pdf.file_id)).all()
     by_id = {ch.chapter_id: ch for ch in chapters}
     missing = [cid for cid in chapter_ids if cid not in by_id]

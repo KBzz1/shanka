@@ -28,7 +28,7 @@ def dashboard_endpoint(
 ) -> JSONResponse:
     result = dashboard(
         session,
-        device_id=request.state.device_id,
+        user_id=request.state.principal.user_id,
         timezone=timezone,
         weekly_goal=weekly_goal,
         now=datetime.now(UTC),

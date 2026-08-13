@@ -12,11 +12,11 @@ from pathlib import Path
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task
+from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -131,15 +131,42 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-def _seed_context(db_path: Path, *, device_id: str, with_key: bool = True) -> dict[str, object]:
-    """devices 前置 + PDF + 2 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。"""
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    assert row is not None
+    return str(row)
+
+
+def _seed_context(
+    db_path: Path, *, device_id: str, user_id: str, with_key: bool = True
+) -> dict[str, object]:
+    """users/devices 前置 + PDF + 2 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。
+
+    PDF/牌组 user 域（tasks 归属校验）；ApiKey/Device 保持 device 域（Task 5 前）。
+    """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    password_hash="x",
+                    created_at="2026-08-11T00:00:00.000Z",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
         session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
         session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
-            device_id=device_id,
+            user_id=user_id,
             filename="b.pdf",
             storage_key=_uuid(),
             size_bytes=10,
@@ -148,7 +175,7 @@ def _seed_context(db_path: Path, *, device_id: str, with_key: bool = True) -> di
         )
         session.add(pdf)
         session.flush()
-        deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
         chapter_ids: list[str] = []
         for i in range(2):
@@ -202,7 +229,7 @@ def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, P
     CAS 接管）；selected_chapters 为 Chapter 对象数组快照（契约 3.4）。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     body = resp.json()
@@ -221,7 +248,7 @@ def test_tasks_create_missing_idempotency_key_400(ctx: tuple[TestClient, Path]) 
     """写接口强制 Idempotency-Key（契约 1.3）：缺失 → 400 VALIDATION_ERROR。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers=device)
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
@@ -231,7 +258,9 @@ def test_tasks_create_without_api_key_422(ctx: tuple[TestClient, Path]) -> None:
     """未保存可用 API Key → 422 API_KEY_NOT_SET（6.2）。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], with_key=False)
+    seed = _seed_context(
+        db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path), with_key=False
+    )
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "API_KEY_NOT_SET"
@@ -241,7 +270,7 @@ def test_tasks_create_idempotent_replay(ctx: tuple[TestClient, Path]) -> None:
     """同 key 同 body 重放：返回首次响应，任务只创建一次。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     headers = {**device, **_idem()}
     payload = _payload(seed)
     r1 = client.post("/tasks", json=payload, headers=headers)
@@ -258,7 +287,7 @@ def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> 
     """同 key 异 body → 409 IDEMPOTENCY_CONFLICT。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     headers = {**device, **_idem()}
     assert client.post("/tasks", json=_payload(seed), headers=headers).status_code == 201
     resp = client.post("/tasks", json=_payload(seed, tendency="EXTENSIVE"), headers=headers)
@@ -270,10 +299,18 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
     """长任务轮询：显式 executor 扫描后 GET 返回 COMPLETED（COMPACT=3 知识点/章 × 2 章）。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    # 双头过渡（P4-3）：executor Key 查找仍 device 域（Task 5 切 user）——
+    # 补种 device_id 双列，模拟 P4 窗口前创建的设备域任务由 executor 续跑
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE tasks SET device_id = :d WHERE task_id = :t"),
+            {"d": device["X-Device-ID"], "t": task_id},
+        )
     task_factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     final: dict[str, object] = {}
     for _ in range(10):
@@ -293,7 +330,7 @@ def test_tasks_cancel_200(ctx: tuple[TestClient, Path]) -> None:
     """POST cancel → 200 CANCELLED（已入库卡片保留，V4 取消时无卡片）。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
@@ -312,7 +349,7 @@ def test_tasks_resume_200_then_409(ctx: tuple[TestClient, Path]) -> None:
     """PAUSED+resumable=1 → resume 200 RUNNING；再 resume（RUNNING）→ 409 TASK_STATE_CONFLICT。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]

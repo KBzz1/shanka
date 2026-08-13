@@ -49,10 +49,10 @@ def _headers(client: TestClient, device_id: str, key: str | None = None) -> dict
 
 def test_stats_api_review_counts_into_dashboard(client: TestClient) -> None:
     """评级成功 → dashboard 计入：weekly_total=1、has_data=true、recall_accuracy=1.0。"""
-    device = str(uuid.uuid4())
+    user = str(uuid.uuid4())
     # 1. 建牌组
     resp = client.post(
-        "/decks", json={"name": "统计回归"}, headers=_headers(client, device, str(uuid.uuid4()))
+        "/decks", json={"name": "统计回归"}, headers=_headers(client, user, str(uuid.uuid4()))
     )
     assert resp.status_code == 201, resp.text
     deck_id = resp.json()["deck_id"]
@@ -60,7 +60,7 @@ def test_stats_api_review_counts_into_dashboard(client: TestClient) -> None:
     resp = client.post(
         f"/decks/{deck_id}/cards",
         json={"front": "q", "back": "a"},
-        headers=_headers(client, device, str(uuid.uuid4())),
+        headers=_headers(client, user, str(uuid.uuid4())),
     )
     assert resp.status_code == 201, resp.text
     card_id = resp.json()["card_id"]
@@ -73,12 +73,12 @@ def test_stats_api_review_counts_into_dashboard(client: TestClient) -> None:
             "client_event_id": str(uuid.uuid4()),
             "device_timezone": "Asia/Shanghai",
         },
-        headers=_headers(client, device, str(uuid.uuid4())),
+        headers=_headers(client, user, str(uuid.uuid4())),
     )
     assert resp.status_code == 200, resp.text
     # 4. 看板立即计入
     resp = client.get(
-        "/stats/dashboard?timezone=Asia/Shanghai&weekly_goal=50", headers=_headers(client, device)
+        "/stats/dashboard?timezone=Asia/Shanghai&weekly_goal=50", headers=_headers(client, user)
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()

@@ -37,7 +37,9 @@ def get_review_queue_endpoint(
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    items = review_queue(session, device_id=request.state.device_id, deck_id=deck_id, now=_now())
+    items = review_queue(
+        session, user_id=request.state.principal.user_id, deck_id=deck_id, now=_now()
+    )
     return JSONResponse(content={"items": items})
 
 
@@ -47,7 +49,7 @@ def submit_review_endpoint(
     payload: ReviewEventRequest,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = "/review-events"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -55,7 +57,7 @@ def submit_review_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         view = submit_review(
             session,
-            device_id=device_id,
+            user_id=user_id,
             card_id=payload.card_id,
             rating=payload.rating,
             client_event_id=payload.client_event_id,
@@ -66,7 +68,7 @@ def submit_review_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,

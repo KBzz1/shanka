@@ -13,11 +13,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task
+from infra.db.models import ApiKey, Chapter, Device, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from tests.conftest import auth_headers
@@ -74,15 +74,42 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-def _seed_context(db_path: Path, *, device_id: str, chapter_count: int = 2) -> dict[str, object]:
-    """devices 前置 + PDF + chapter_count 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。"""
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    assert row is not None
+    return str(row)
+
+
+def _seed_context(
+    db_path: Path, *, device_id: str, user_id: str, chapter_count: int = 2
+) -> dict[str, object]:
+    """users/devices 前置 + PDF + chapter_count 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。
+
+    PDF/牌组 user 域（tasks 归属校验）；ApiKey/Device 保持 device 域（Task 5 前）。
+    """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    password_hash="x",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
         session.add(Device(device_id=device_id, created_at=_NOW))
         session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
-            device_id=device_id,
+            user_id=user_id,
             filename="b.pdf",
             storage_key=_uuid(),
             size_bytes=10,
@@ -91,7 +118,7 @@ def _seed_context(db_path: Path, *, device_id: str, chapter_count: int = 2) -> d
         )
         session.add(pdf)
         session.flush()
-        deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
+        deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
         session.flush()
         chapter_ids: list[str] = []
         for i in range(chapter_count):
@@ -135,7 +162,7 @@ def test_tasks_create_201_pending_planning_view(ctx: tuple[TestClient, Path]) ->
     """POST /tasks → 201 PENDING+PLANNING：started_at/total_batch_count 为空、快照完整、新字段。"""
     client, db_path = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     body = resp.json()
@@ -157,7 +184,9 @@ def test_tasks_create_budget_exceeded_400(ctx_strict: tuple[TestClient, Path]) -
     """预算超上限（5 章 COMPACT=15 > 5）→ 400 VALIDATION_ERROR，不创建任务（spec §10）。"""
     client, db_path = ctx_strict
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"], chapter_count=5)
+    seed = _seed_context(
+        db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path), chapter_count=5
+    )
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 400
     error = resp.json()["error"]

@@ -14,7 +14,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Device, PdfFile
+from infra.db.models import PdfFile, User
 from services.pdf.parser import PageText, extract_pages
 from services.pdf.text_chunks import chunk_id_for, load_pages, page_text_map, persist_text_chunks
 
@@ -52,11 +52,20 @@ def _write_text_pages(path: Path, texts: list[str]) -> None:
 
 def _seed_pdf(session: Session, file_id: str = "pdf-1") -> None:
     """父行先落库（PRAGMA foreign_keys=ON 强制，V1 教训同款）：text_chunks.file_id FK pdf_files。"""
-    session.add(Device(device_id="dev-1", created_at="2026-08-11T00:00:00.000Z"))
+    session.add(
+        User(
+            user_id="user-1",
+            username="u-1",
+            password_hash="x",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
+    session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
     session.add(
         PdfFile(
             file_id=file_id,
-            device_id="dev-1",
+            user_id="user-1",
             filename="book.pdf",
             storage_key="k",
             size_bytes=100,

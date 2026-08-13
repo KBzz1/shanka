@@ -1,4 +1,4 @@
-"""卡片 API 集成测试（HTTP 层：创建/列表/导入/幂等/跨设备 404）。
+"""卡片 API 集成测试（HTTP 层：创建/列表/导入/幂等/跨用户 404）。
 
 API 测试在迁移后 schema 上跑：client fixture 内 alembic upgrade head 建真实表结构。
 路径无 /v1 前缀——openapi servers url 承担 /v1 语义（与 probes /healthz 同理）。
@@ -37,28 +37,33 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         yield test_client
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
+    return {
+        **auth_headers(client, username=username, password=password),
+        "X-Device-ID": str(uuid.uuid4()),
+    }
 
 
 def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-def _deck(client: TestClient, device: dict[str, str]) -> str:
-    resp = client.post("/decks", json={"name": "D"}, headers={**device, **_idem()})
+def _deck(client: TestClient, user: dict[str, str]) -> str:
+    resp = client.post("/decks", json={"name": "D"}, headers={**user, **_idem()})
     assert resp.status_code == 201
     return str(resp.json()["deck_id"])
 
 
 def test_cards_api_create_and_list(client: TestClient) -> None:
-    device = _device(client)
-    deck_id = _deck(client, device)
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
         f"/decks/{deck_id}/cards",
         json={"front": "f", "back": "b"},
-        headers={**device, **_idem()},
+        headers={**user, **_idem()},
     )
     assert resp.status_code == 201
     card = resp.json()
@@ -66,7 +71,7 @@ def test_cards_api_create_and_list(client: TestClient) -> None:
     assert card["source"] == "MANUAL"
     assert card["card_type"] == "QUESTION"
     assert card["front"] == "f" and card["back"] == "b"
-    resp = client.get(f"/decks/{deck_id}/cards", headers=device)
+    resp = client.get(f"/decks/{deck_id}/cards", headers=user)
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 1
@@ -75,12 +80,12 @@ def test_cards_api_create_and_list(client: TestClient) -> None:
 
 
 def test_cards_api_import_atomic_and_per_item_results(client: TestClient) -> None:
-    device = _device(client)
-    deck_id = _deck(client, device)
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
         f"/decks/{deck_id}/cards/import",
         json={"cards": [{"front": "f1", "back": "b1"}, {"front": "f2", "back": "b2"}]},
-        headers={**device, **_idem()},
+        headers={**user, **_idem()},
     )
     assert resp.status_code == 201
     results = resp.json()["results"]
@@ -89,27 +94,27 @@ def test_cards_api_import_atomic_and_per_item_results(client: TestClient) -> Non
     assert all(r["card_id"] for r in results)
     # final review fix：error 字段 openapi 非 nullable，成功 result 不得输出 null 键
     assert all("error" not in r for r in results)
-    resp = client.get(f"/decks/{deck_id}/cards", headers=device)
+    resp = client.get(f"/decks/{deck_id}/cards", headers=user)
     assert len(resp.json()["items"]) == 2
 
 
 def test_cards_api_import_empty_cards_422(client: TestClient) -> None:
-    device = _device(client)
-    deck_id = _deck(client, device)
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
-        f"/decks/{deck_id}/cards/import", json={"cards": []}, headers={**device, **_idem()}
+        f"/decks/{deck_id}/cards/import", json={"cards": []}, headers={**user, **_idem()}
     )
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "IMPORT_PARSE_ERROR"
 
 
-def test_cards_api_cross_device_404(client: TestClient) -> None:
-    device = _device(client)
-    deck_id = _deck(client, device)
+def test_cards_api_cross_user_404(client: TestClient) -> None:
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
         f"/decks/{deck_id}/cards",
         json={"front": "f", "back": "b"},
-        headers={**_device(client), **_idem()},
+        headers={**_user(client, "user2", "pass-2222"), **_idem()},
     )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
@@ -117,10 +122,10 @@ def test_cards_api_cross_device_404(client: TestClient) -> None:
 
 def test_cards_api_create_idempotency_replay(client: TestClient) -> None:
     """卡片创建同 key 同 body：单副作用 + 重放原响应（与牌组同一条幂等接线路径）。"""
-    device = _device(client)
+    user = _user(client)
     key = _idem()
-    deck_id = _deck(client, device)
-    headers = {**device, **key}
+    deck_id = _deck(client, user)
+    headers = {**user, **key}
     resp1 = client.post(
         f"/decks/{deck_id}/cards", json={"front": "f", "back": "b"}, headers=headers
     )
@@ -130,16 +135,16 @@ def test_cards_api_create_idempotency_replay(client: TestClient) -> None:
     )
     assert resp2.status_code == 201
     assert resp2.json() == resp1.json()  # 重放首次响应
-    resp = client.get(f"/decks/{deck_id}/cards", headers=device)
+    resp = client.get(f"/decks/{deck_id}/cards", headers=user)
     assert len(resp.json()["items"]) == 1  # 单副作用
 
 
 def test_cards_api_update_resets_review_state(client: TestClient) -> None:
     """编辑卡片（V6 前端已实现 UI 补齐）：内容覆盖 + ReviewState 重置为新卡（用户决策）。"""
-    device = _device(client)
-    deck_id = _deck(client, device)
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
-        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**user, **_idem()}
     )
     assert resp.status_code == 201
     card_id = resp.json()["card_id"]
@@ -152,14 +157,14 @@ def test_cards_api_update_resets_review_state(client: TestClient) -> None:
             "client_event_id": str(uuid.uuid4()),
             "device_timezone": "Asia/Shanghai",
         },
-        headers={**device, **_idem()},
+        headers={**user, **_idem()},
     )
     assert resp.status_code == 200
 
     resp = client.patch(
         f"/cards/{card_id}",
         json={"front": "新正面", "back": "新背面"},
-        headers={**device, **_idem()},
+        headers={**user, **_idem()},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -168,7 +173,7 @@ def test_cards_api_update_resets_review_state(client: TestClient) -> None:
     assert body["version"] != resp.json()["version"] or True  # version 为时间戳，必然变化
 
     # ReviewState 重置：到期队列里该卡回 NEW、reps=0
-    resp = client.get(f"/decks/{deck_id}/review", headers=device)
+    resp = client.get(f"/decks/{deck_id}/review", headers=user)
     assert resp.status_code == 200
     item = next(i for i in resp.json()["items"] if i["card_id"] == card_id)
     assert item["front"] == "新正面"
@@ -176,60 +181,62 @@ def test_cards_api_update_resets_review_state(client: TestClient) -> None:
     assert item["review_state"]["reps"] == 0
 
 
-def test_cards_api_update_cross_device_404(client: TestClient) -> None:
+def test_cards_api_update_cross_user_404(client: TestClient) -> None:
     """跨设备编辑 → 404（资源隔离）。"""
-    device = _device(client)
-    deck_id = _deck(client, device)
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
-        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**user, **_idem()}
     )
     card_id = resp.json()["card_id"]
     resp = client.patch(
         f"/cards/{card_id}",
         json={"front": "x", "back": "y"},
-        headers={**_device(client), **_idem()},
+        headers={**_user(client, "user2", "pass-2222"), **_idem()},
     )
     assert resp.status_code == 404
 
 
 def test_cards_api_delete_cascade(client: TestClient) -> None:
     """删除单卡：204 → 列表不含 → review 队列不含（FK 级联 review_states/review_events）。"""
-    device = _device(client)
-    deck_id = _deck(client, device)
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
-        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**user, **_idem()}
     )
     card_id = resp.json()["card_id"]
-    resp = client.delete(f"/cards/{card_id}", headers={**device, **_idem()})
+    resp = client.delete(f"/cards/{card_id}", headers={**user, **_idem()})
     assert resp.status_code == 204, resp.text
 
-    resp = client.get(f"/decks/{deck_id}/cards", headers=device)
+    resp = client.get(f"/decks/{deck_id}/cards", headers=user)
     assert all(i["card_id"] != card_id for i in resp.json()["items"])
-    resp = client.get(f"/decks/{deck_id}/review", headers=device)
+    resp = client.get(f"/decks/{deck_id}/review", headers=user)
     assert all(i["card_id"] != card_id for i in resp.json()["items"])
 
 
 def test_cards_api_delete_idempotent_replay(client: TestClient) -> None:
     """删除幂等：同键重放返回 204（契约 1.3 重复提交安全返回）。"""
-    device = _device(client)
-    deck_id = _deck(client, device)
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
-        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**user, **_idem()}
     )
     card_id = resp.json()["card_id"]
     key = _idem()
-    headers = {**device, **key}
+    headers = {**user, **key}
     assert client.delete(f"/cards/{card_id}", headers=headers).status_code == 204
     assert client.delete(f"/cards/{card_id}", headers=headers).status_code == 204
 
 
-def test_cards_api_delete_cross_device_404(client: TestClient) -> None:
+def test_cards_api_delete_cross_user_404(client: TestClient) -> None:
     """跨设备删除 → 404（资源隔离）。"""
-    device = _device(client)
-    deck_id = _deck(client, device)
+    user = _user(client)
+    deck_id = _deck(client, user)
     resp = client.post(
-        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**device, **_idem()}
+        f"/decks/{deck_id}/cards", json={"front": "q", "back": "a"}, headers={**user, **_idem()}
     )
     card_id = resp.json()["card_id"]
-    resp = client.delete(f"/cards/{card_id}", headers={**_device(client), **_idem()})
+    resp = client.delete(
+        f"/cards/{card_id}", headers={**_user(client, "user2", "pass-2222"), **_idem()}
+    )
     assert resp.status_code == 404

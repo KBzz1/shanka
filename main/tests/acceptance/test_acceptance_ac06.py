@@ -24,12 +24,12 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Card, Device, IdempotencyKey, ReviewState
+from infra.db.models import ApiKey, Card, Device, IdempotencyKey, ReviewState, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -81,13 +81,29 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _device(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
+    return {
+        **auth_headers(client, username=username, password=password),
+        "X-Device-ID": str(uuid.uuid4()),
+    }
 
 
 def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
+
+
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    assert row is not None
+    return str(row)
 
 
 def _db_factory(db_path: Path) -> sessionmaker[Session]:
@@ -95,15 +111,30 @@ def _db_factory(db_path: Path) -> sessionmaker[Session]:
 
 
 def _seed_card(
-    db_path: Path, *, device_id: str, encrypted_key: str = _ENCRYPTED_TEST_KEY
+    db_path: Path,
+    *,
+    device_id: str,
+    user_id: str,
+    encrypted_key: str = _ENCRYPTED_TEST_KEY,
 ) -> tuple[str, dict[str, object]]:
-    """devices + 牌组 + 真实加密 Key + GENERATED 卡（QUESTION, version v3）+ REVIEW 态（重写前状态）。
+    """users/devices + 牌组 + 真实加密 Key + GENERATED 卡（QUESTION, version v3）+ REVIEW 态（重写前状态）。
 
     返回 (card_id, before)：before 为原卡可迁移字段快照（「原卡全字段不变」断言基准）。
-    encrypted_key 可注入畸形值（P4b 解密失败路径）。
+    encrypted_key 可注入畸形值（P4b 解密失败路径）。卡/牌组 user 域；Key 仍 device 域（Task 5 前）。
     """
     factory = _db_factory(db_path)
     with factory() as session:
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    password_hash="x",
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
         session.add(Device(device_id=device_id, created_at=_NOW))
         session.flush()
         session.add(
@@ -116,12 +147,12 @@ def _seed_card(
             )
         )
         session.flush()
-        deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
+        deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
         session.flush()
         card = Card(
             card_id=_uuid(),
             deck_id=deck.deck_id,
-            device_id=device_id,
+            user_id=user_id,
             source="GENERATED",
             position=1,
             front="旧正面",
@@ -218,7 +249,7 @@ def test_acceptance_ac06_rewrite_succeeds(
     """AC-06-a 可重写：200，响应卡 card_id 与请求一致、front 新值、version 递增（一次 chat）。"""
     client, db_path, _ = ctx
     device = _device(client)
-    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
 
@@ -254,7 +285,9 @@ def test_acceptance_ac06_schema_invalid_preserves_card(
     """AC-06-b 通过才替换：Schema 违约响应 → 422 REWRITE_SCHEMA_INVALID，原卡全字段不变。"""
     client, db_path, _ = ctx
     device = _device(client)
-    card_id, before = _seed_card(db_path, device_id=device["X-Device-ID"])
+    card_id, before = _seed_card(
+        db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path)
+    )
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_SCHEMA_INVALID_JSON))
     headers = {**device, **_idem()}
@@ -291,7 +324,7 @@ def test_acceptance_ac06_idempotent_replay(
     """幂等重放：同键同 body 第二次 → 200 且响应体与首次一致（重放不二次 chat，chat 计数 = 1）。"""
     client, db_path, _ = ctx
     device = _device(client)
-    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
     headers = {**device, **_idem()}
@@ -319,7 +352,7 @@ def test_acceptance_ac06_idempotency_conflict(
     """幂等冲突：同键异 body → 409 IDEMPOTENCY_CONFLICT（冲突在业务前判定，不二次 chat）。"""
     client, db_path, _ = ctx
     device = _device(client)
-    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
     headers = {**device, **_idem()}
@@ -343,13 +376,13 @@ def test_acceptance_ac06_error_path_no_idempotency_record(
     """错误路径（404）幂等表无记录 + 无业务残留：下次同键重试重新执行（T3 审查 Minor 2 集成确认）。"""
     client, db_path, _ = ctx
     device = _device(client)
-    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
     key = _idem()["Idempotency-Key"]
 
-    # 跨设备查卡 → 404 CARD_NOT_FOUND（统一 404，不暴露存在性）
-    other = _device(client)
+    # 跨用户查卡 → 404 CARD_NOT_FOUND（统一 404，不暴露存在性）
+    other = _device(client, "user2", "pass-2222")
     resp = client.post(
         f"/cards/{card_id}/rewrite", json={}, headers={**other, "Idempotency-Key": key}
     )
@@ -389,7 +422,7 @@ def test_acceptance_ac06_api_key_not_set_422(
     （chat 0 不触网、幂等表无记录、原卡保留）。"""
     client, db_path, _ = ctx
     device = _device(client)
-    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     with _db_factory(db_path)() as session:
         session.execute(delete(ApiKey).where(ApiKey.device_id == device["X-Device-ID"]))
         session.commit()
@@ -425,7 +458,9 @@ def test_acceptance_ac06_corrupted_encrypted_key_502(
     client, db_path, _ = ctx
     device = _device(client)
     corrupt = base64.b64encode(b"\x00" * 12 + b"corrupted-ciphertext").decode("ascii")
-    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], encrypted_key=corrupt)
+    card_id, _ = _seed_card(
+        db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path), encrypted_key=corrupt
+    )
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
     headers = {**device, **_idem()}
@@ -450,17 +485,17 @@ def test_acceptance_ac06_corrupted_encrypted_key_502(
     )
 
 
-def test_acceptance_ac06_cross_device_404(
+def test_acceptance_ac06_cross_user_404(
     ctx: tuple[TestClient, Path, Settings],
 ) -> None:
-    """隔离（HTTP 层确认）：跨设备重写 → 404 CARD_NOT_FOUND（T3 已覆盖 service 层，
+    """隔离（HTTP 层确认）：跨用户重写 → 404 CARD_NOT_FOUND（T3 已覆盖 service 层，
     此处断言 HTTP 错误响应 code；查卡失败在 chat 之前——不暴露存在性）。"""
     client, db_path, _ = ctx
     device = _device(client)
-    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"])
+    card_id, _ = _seed_card(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     calls: dict[str, int] = {"n": 0}
     _inject_factory(client, _scripted_factory(calls, content=_REWRITTEN_JSON))
-    other = _device(client)
+    other = _device(client, "user2", "pass-2222")
 
     resp = client.post(f"/cards/{card_id}/rewrite", json={}, headers={**other, **_idem()})
     assert resp.status_code == 404

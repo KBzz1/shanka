@@ -431,9 +431,19 @@ def _run_group(
             )
             + 1
         )
+        user_id = task.user_id
+        if user_id is None:
+            # 遗留 device 域任务（P4-3）：新账本行只写 user_id（DESIGN §5.2）→ 任务无法继续
+            _fail_planning_inplace(
+                session,
+                task,
+                error_code=ErrorCode.GENERATION_FAILED.value,
+                internal_reason="PLANNING_TASK_INCOMPLETE",
+            )
+            return None
         attempt = create_attempt(
             session,
-            device_id=task.device_id,
+            user_id=user_id,
             scope_type="TASK",
             scope_id=task.task_id,
             task_id=task.task_id,

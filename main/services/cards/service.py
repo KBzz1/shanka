@@ -24,23 +24,23 @@ def _next_position(session: Session, *, deck_id: str) -> int:
     return (max_pos or 0) + 1
 
 
-def _owned_card(session: Session, *, device_id: str, card_id: str) -> Card:
-    """归属查卡（PATCH/DELETE 单卡用；跨设备统一 404，契约 1.1）。"""
-    card = session.scalar(select(Card).where(Card.card_id == card_id, Card.device_id == device_id))
+def _owned_card(session: Session, *, user_id: str, card_id: str) -> Card:
+    """归属查卡（PATCH/DELETE 单卡用；跨用户统一 404，契约 1.1）。"""
+    card = session.scalar(select(Card).where(Card.card_id == card_id, Card.user_id == user_id))
     if card is None:
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
     return card
 
 
 def update_card(
-    session: Session, *, device_id: str, card_id: str, front: str, back: str, now: str
+    session: Session, *, user_id: str, card_id: str, front: str, back: str, now: str
 ) -> Card:
     """编辑卡片（structure-contract 6.5；用户决策 2026-08-11：与重写同语义）。
 
     内容覆盖 + ReviewState 重置为新卡初始值（内容已变，旧记忆不适用）；
     version=now（与创建一致，天然递增；兼容 rewrite 的 v 数字转换逻辑）。
     """
-    card = _owned_card(session, device_id=device_id, card_id=card_id)
+    card = _owned_card(session, user_id=user_id, card_id=card_id)
     card.front = front
     card.back = back
     card.version = now
@@ -59,20 +59,20 @@ def update_card(
     return card
 
 
-def delete_card(session: Session, *, device_id: str, card_id: str) -> None:
+def delete_card(session: Session, *, user_id: str, card_id: str) -> None:
     """删除单卡（structure-contract 6.5）；review_states/review_events 由 FK ON DELETE
     CASCADE 级联清理（engine 级 PRAGMA foreign_keys=ON）。"""
-    card = _owned_card(session, device_id=device_id, card_id=card_id)
+    card = _owned_card(session, user_id=user_id, card_id=card_id)
     session.delete(card)
 
 
 def _insert_card(
-    session: Session, *, deck_id: str, device_id: str, front: str, back: str, now: str
+    session: Session, *, deck_id: str, user_id: str, front: str, back: str, now: str
 ) -> Card:
     card = Card(
         card_id=_card_id(),
         deck_id=deck_id,
-        device_id=device_id,
+        user_id=user_id,
         source="MANUAL",
         position=_next_position(session, deck_id=deck_id),
         front=front,
@@ -101,16 +101,14 @@ def _insert_card(
 
 
 def create_card(
-    session: Session, *, device_id: str, deck_id: str, front: str, back: str, now: str
+    session: Session, *, user_id: str, deck_id: str, front: str, back: str, now: str
 ) -> Card:
-    _owned(session, device_id=device_id, deck_id=deck_id)
-    return _insert_card(
-        session, deck_id=deck_id, device_id=device_id, front=front, back=back, now=now
-    )
+    _owned(session, user_id=user_id, deck_id=deck_id)
+    return _insert_card(session, deck_id=deck_id, user_id=user_id, front=front, back=back, now=now)
 
 
-def list_cards(session: Session, *, device_id: str, deck_id: str) -> list[Card]:
-    _owned(session, device_id=device_id, deck_id=deck_id)
+def list_cards(session: Session, *, user_id: str, deck_id: str) -> list[Card]:
+    _owned(session, user_id=user_id, deck_id=deck_id)
     return list(
         session.scalars(select(Card).where(Card.deck_id == deck_id).order_by(Card.position)).all()
     )
@@ -148,17 +146,17 @@ def card_view(card: Card) -> dict[str, object]:
 def import_cards(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     deck_id: str,
     cards: Iterable[tuple[str, str]],
     now: str,
 ) -> list[dict[str, object]]:
     """原子导入：同事务逐张插入；任何写入失败整体回滚（调用方 rollback），不残留部分写入。"""
-    _owned(session, device_id=device_id, deck_id=deck_id)
+    _owned(session, user_id=user_id, deck_id=deck_id)
     results: list[dict[str, object]] = []
     for index, (front, back) in enumerate(cards):
         card = _insert_card(
-            session, deck_id=deck_id, device_id=device_id, front=front, back=back, now=now
+            session, deck_id=deck_id, user_id=user_id, front=front, back=back, now=now
         )
         results.append({"index": index, "status": "CREATED", "card_id": card.card_id})
     return results

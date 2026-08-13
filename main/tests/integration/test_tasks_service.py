@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import ApiKey, Base, Chapter, Device, KnowledgePoint, PdfFile, Task
+from infra.db.models import ApiKey, Base, Chapter, Device, KnowledgePoint, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from services.tasks.service import cancel_task, create_task, get_task, resume_task
@@ -34,13 +34,26 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_context(session: Session, *, device_id: str, with_key: bool = True) -> dict[str, Any]:
-    """devices 前置 + PDF/章节/牌组 + ApiKey 种子（tasks 校验 Key）。"""
-    session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> dict[str, Any]:
+    """users/devices 前置 + PDF/章节/牌组 + ApiKey 种子（tasks 校验 Key）。
+
+    PDF/牌组 user 域（tasks 归属校验）；ApiKey/Device 保持 device 域（Task 5 前）。
+    """
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            password_hash="x",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
+    session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
+    session.add(Device(device_id=user_id, created_at="2026-08-11T00:00:00.000Z"))
     session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="b.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -49,7 +62,7 @@ def _seed_context(session: Session, *, device_id: str, with_key: bool = True) ->
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+    deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
     session.flush()
     chapter_ids = []
     chapters = []
@@ -68,7 +81,7 @@ def _seed_context(session: Session, *, device_id: str, with_key: bool = True) ->
     if with_key:
         session.add(
             ApiKey(
-                device_id=device_id,
+                device_id=user_id,
                 encrypted_key="enc",
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -110,11 +123,12 @@ def test_tasks_create_pending_snapshot_without_planning(
     """
     device = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, device_id=device)
+        ctx = _seed_context(session, user_id=device)
         session.commit()
     with session_factory() as session:
         task = create_task(
             session,
+            user_id=device,
             device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
@@ -142,11 +156,12 @@ def test_tasks_create_pending_snapshot_without_planning(
 def test_tasks_create_without_key_422(session_factory: Callable[[], Session]) -> None:
     device = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, device_id=device, with_key=False)
+        ctx = _seed_context(session, user_id=device, with_key=False)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         create_task(
             session,
+            user_id=device,
             device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
@@ -157,14 +172,15 @@ def test_tasks_create_without_key_422(session_factory: Callable[[], Session]) ->
     assert excinfo.value.code is ErrorCode.API_KEY_NOT_SET
 
 
-def test_tasks_create_cross_device_404(session_factory: Callable[[], Session]) -> None:
+def test_tasks_create_cross_user_404(session_factory: Callable[[], Session]) -> None:
     device = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, device_id=device)
+        ctx = _seed_context(session, user_id=device)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         create_task(
             session,
+            user_id=_uuid(),
             device_id=_uuid(),
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
@@ -179,7 +195,7 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
     """章节归属校验：chapter_ids 含不属于该 PDF 的章节 → PDF_NOT_FOUND（与 samples 一致）。"""
     device = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, device_id=device)
+        ctx = _seed_context(session, user_id=device)
         other_pdf = PdfFile(
             file_id=_uuid(),
             device_id=device,
@@ -201,6 +217,7 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         create_task(
             session,
+            user_id=device,
             device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
@@ -214,21 +231,22 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
 def test_tasks_get_missing_404(session_factory: Callable[[], Session]) -> None:
     device = _uuid()
     with session_factory() as session:
-        _seed_context(session, device_id=device)
+        _seed_context(session, user_id=device)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        get_task(session, device_id=device, task_id=_uuid())
+        get_task(session, user_id=device, task_id=_uuid())
     assert excinfo.value.code is ErrorCode.TASK_NOT_FOUND
 
 
 def test_tasks_cancel_keeps_cards(session_factory: Callable[[], Session]) -> None:
     device = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, device_id=device)
+        ctx = _seed_context(session, user_id=device)
         session.commit()
     with session_factory() as session:
         task = create_task(
             session,
+            user_id=device,
             device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
@@ -241,7 +259,7 @@ def test_tasks_cancel_keeps_cards(session_factory: Callable[[], Session]) -> Non
         # T8 起创建为 PENDING+PLANNING；"运行中取消" 前置由直写构造（RUNNING）
         task.status = "RUNNING"
         result = cancel_task(
-            session, device_id=device, task_id=task_id, now="2026-08-11T01:00:00.000Z"
+            session, user_id=device, task_id=task_id, now="2026-08-11T01:00:00.000Z"
         )
         session.commit()
     assert result.status == "CANCELLED"
@@ -250,11 +268,12 @@ def test_tasks_cancel_keeps_cards(session_factory: Callable[[], Session]) -> Non
 def test_tasks_resume_paused(session_factory: Callable[[], Session]) -> None:
     device = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, device_id=device)
+        ctx = _seed_context(session, user_id=device)
         session.commit()
     with session_factory() as session:
         task = create_task(
             session,
+            user_id=device,
             device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
@@ -269,13 +288,13 @@ def test_tasks_resume_paused(session_factory: Callable[[], Session]) -> None:
         task_id = task.task_id
     with session_factory() as session:
         result = resume_task(
-            session, device_id=device, task_id=task_id, now="2026-08-11T02:00:00.000Z"
+            session, user_id=device, task_id=task_id, now="2026-08-11T02:00:00.000Z"
         )
         session.commit()
     assert result.status == "RUNNING"
     # 再 resume（RUNNING 非 PAUSED）→ 409
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        resume_task(session, device_id=device, task_id=task_id, now="2026-08-11T02:00:00.000Z")
+        resume_task(session, user_id=device, task_id=task_id, now="2026-08-11T02:00:00.000Z")
     assert excinfo.value.code is ErrorCode.TASK_STATE_CONFLICT
 
 
@@ -283,11 +302,12 @@ def test_tasks_resume_orphan_running_after_timeout(session_factory: Callable[[],
     """孤儿 RUNNING（updated_at 超 30 分钟）→ resume 抢占恢复（4.1）。"""
     device = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, device_id=device)
+        ctx = _seed_context(session, user_id=device)
         session.commit()
     with session_factory() as session:
         task = create_task(
             session,
+            user_id=device,
             device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
@@ -304,7 +324,7 @@ def test_tasks_resume_orphan_running_after_timeout(session_factory: Callable[[],
         task_id = task.task_id
     with session_factory() as session:
         result = resume_task(
-            session, device_id=device, task_id=task_id, now="2026-08-11T00:30:00.000Z"
+            session, user_id=device, task_id=task_id, now="2026-08-11T00:30:00.000Z"
         )
         session.commit()
     assert result.status == "RUNNING"
@@ -315,11 +335,12 @@ def test_tasks_resume_running_fresh_conflicts(session_factory: Callable[[], Sess
     """新鲜 RUNNING（心跳内）→ resume 409 TASK_STATE_CONFLICT。"""
     device = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, device_id=device)
+        ctx = _seed_context(session, user_id=device)
         session.commit()
     with session_factory() as session:
         task = create_task(
             session,
+            user_id=device,
             device_id=device,
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
@@ -332,5 +353,5 @@ def test_tasks_resume_running_fresh_conflicts(session_factory: Callable[[], Sess
         session.commit()
         task_id = task.task_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        resume_task(session, device_id=device, task_id=task_id, now="2026-08-11T00:10:00.000Z")
+        resume_task(session, user_id=device, task_id=task_id, now="2026-08-11T00:10:00.000Z")
     assert excinfo.value.code is ErrorCode.TASK_STATE_CONFLICT

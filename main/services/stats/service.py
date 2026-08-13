@@ -42,7 +42,7 @@ def _as_utc_str(dt: datetime) -> str:
 
 
 def dashboard(
-    session: Session, *, device_id: str, timezone: str, weekly_goal: int | None, now: datetime
+    session: Session, *, user_id: str, timezone: str, weekly_goal: int | None, now: datetime
 ) -> dict[str, object]:
     tz = _parse_tz(timezone)
     start, end = _week_bounds(tz, now)
@@ -51,7 +51,7 @@ def dashboard(
     # 周内事件（按 reviewed_at 字符串比较——统一格式字典序=时间序）
     week_events = session.scalars(
         select(ReviewEvent).where(
-            ReviewEvent.device_id == device_id,
+            ReviewEvent.user_id == user_id,
             ReviewEvent.reviewed_at >= start_str,
             ReviewEvent.reviewed_at < end_str,
         )
@@ -61,7 +61,7 @@ def dashboard(
     last_week_count = (
         session.scalar(
             select(func.count(ReviewEvent.review_event_id)).where(
-                ReviewEvent.device_id == device_id,
+                ReviewEvent.user_id == user_id,
                 ReviewEvent.reviewed_at >= _as_utc_str(last_start),
                 ReviewEvent.reviewed_at < _as_utc_str(last_end),
             )
@@ -80,13 +80,13 @@ def dashboard(
     recall = good_week / weekly_total if weekly_total else None
 
     # 记忆保持率（周内非首次事件：该卡在本事件前已有更早事件）
-    non_first = [ev for ev in week_events if _is_non_first(session, device_id=device_id, ev=ev)]
+    non_first = [ev for ev in week_events if _is_non_first(session, user_id=user_id, ev=ev)]
     retention = (
         sum(1 for ev in non_first if ev.rating == "GOOD") / len(non_first) if non_first else None
     )
 
     # 首次答对率（每卡历史首个事件为 GOOD）
-    first_answer = _first_answer_accuracy(session, device_id=device_id)
+    first_answer = _first_answer_accuracy(session, user_id=user_id)
 
     # 周变化率
     week_change = (weekly_total - last_week_count) / last_week_count if last_week_count else None
@@ -95,7 +95,7 @@ def dashboard(
     goal_progress = min(weekly_total / weekly_goal, 1.0) if weekly_goal else None
 
     # 连续学习天数（截至本地当天）
-    streak = _streak_days(session, device_id=device_id, tz=tz, now=now)
+    streak = _streak_days(session, user_id=user_id, tz=tz, now=now)
 
     # 已掌握（C-03）
     mastered = (
@@ -103,7 +103,7 @@ def dashboard(
             select(func.count(Card.card_id))
             .join(ReviewState, ReviewState.card_id == Card.card_id)
             .where(
-                Card.device_id == device_id,
+                Card.user_id == user_id,
                 ReviewState.state == "REVIEW",
                 ReviewState.stability >= 21,
             )
@@ -129,10 +129,10 @@ def dashboard(
     }
 
 
-def _is_non_first(session: Session, *, device_id: str, ev: ReviewEvent) -> bool:
+def _is_non_first(session: Session, *, user_id: str, ev: ReviewEvent) -> bool:
     earlier = session.scalar(
         select(func.count(ReviewEvent.review_event_id)).where(
-            ReviewEvent.device_id == device_id,
+            ReviewEvent.user_id == user_id,
             ReviewEvent.card_id == ev.card_id,
             ReviewEvent.reviewed_at < ev.reviewed_at,
         )
@@ -140,13 +140,13 @@ def _is_non_first(session: Session, *, device_id: str, ev: ReviewEvent) -> bool:
     return bool(earlier)
 
 
-def _first_answer_accuracy(session: Session, *, device_id: str) -> float | None:
+def _first_answer_accuracy(session: Session, *, user_id: str) -> float | None:
     """每卡历史首个事件为 GOOD 的比例。"""
     cards_with_events = (
         session.execute(
             select(Card.card_id)
             .join(ReviewEvent, ReviewEvent.card_id == Card.card_id)
-            .where(Card.device_id == device_id)
+            .where(Card.user_id == user_id)
             .distinct()
         )
         .scalars()
@@ -158,7 +158,7 @@ def _first_answer_accuracy(session: Session, *, device_id: str) -> float | None:
     for card_id in cards_with_events:
         first_event = session.scalar(
             select(ReviewEvent)
-            .where(ReviewEvent.device_id == device_id, ReviewEvent.card_id == card_id)
+            .where(ReviewEvent.user_id == user_id, ReviewEvent.card_id == card_id)
             .order_by(ReviewEvent.reviewed_at, ReviewEvent.created_at)
             .limit(1)
         )
@@ -167,7 +167,7 @@ def _first_answer_accuracy(session: Session, *, device_id: str) -> float | None:
     return first_good / len(cards_with_events)
 
 
-def _streak_days(session: Session, *, device_id: str, tz: ZoneInfo, now: datetime) -> int:
+def _streak_days(session: Session, *, user_id: str, tz: ZoneInfo, now: datetime) -> int:
     local_today = now.astimezone(tz).date()
     streak = 0
     day = local_today
@@ -176,7 +176,7 @@ def _streak_days(session: Session, *, device_id: str, tz: ZoneInfo, now: datetim
         day_end = day_start + timedelta(days=1)
         count = session.scalar(
             select(func.count(ReviewEvent.review_event_id)).where(
-                ReviewEvent.device_id == device_id,
+                ReviewEvent.user_id == user_id,
                 ReviewEvent.reviewed_at >= _as_utc_str(day_start),
                 ReviewEvent.reviewed_at < _as_utc_str(day_end),
             )

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -44,7 +44,7 @@ def _uuid() -> str:
 def _seed_task(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     quantity_tendency: str = "COMPACT",
     n_units: int | None = None,
 ) -> str:
@@ -61,13 +61,24 @@ def _seed_task(
     from services.pdf.text_chunks import persist_text_chunks
     from services.tasks.service import create_task
 
-    # FK 前置守卫：devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
-    if session.get(Device, device_id) is None:
-        session.add(Device(device_id=device_id, created_at="2026-08-10T00:00:00.000Z"))
+    # FK 前置守卫：users/devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
+    if session.get(User, user_id) is None:
+        session.add(
+            User(
+                user_id=user_id,
+                username=f"u-{user_id[:8]}",
+                password_hash="x",
+                created_at="2026-08-10T00:00:00.000Z",
+                updated_at="2026-08-10T00:00:00.000Z",
+            )
+        )
+        session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
+    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
+        session.add(Device(device_id=user_id, created_at="2026-08-10T00:00:00.000Z"))
         session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="b.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -76,20 +87,20 @@ def _seed_task(
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now="2026-08-10T00:00:00.000Z")
+    deck = create_deck(session, user_id=user_id, name="D", now="2026-08-10T00:00:00.000Z")
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
     if (
         session.scalar(
-            select(ApiKey).where(ApiKey.device_id == device_id, ApiKey.status == "AVAILABLE")
+            select(ApiKey).where(ApiKey.device_id == user_id, ApiKey.status == "AVAILABLE")
         )
         is None
     ):
         session.add(
             ApiKey(
-                device_id=device_id,
+                device_id=user_id,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -105,7 +116,8 @@ def _seed_task(
     )
     task = create_task(
         session,
-        device_id=device_id,
+        user_id=user_id,
+        device_id=user_id,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -115,6 +127,7 @@ def _seed_task(
         ),
         now="2026-08-10T00:00:00.000Z",
     )
+    task.device_id = user_id  # 双列过渡：executor Key 查找仍 device 域（Task 5 切换）
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = "2026-08-10T00:00:00.000Z"
@@ -204,9 +217,9 @@ def test_concurrency_two_workers_single_effect(session_factory: Callable[[], Ses
     1 单元 = 1 批（spec §7）：worker A 抢占唯一批次并完成后，worker B 无
     PENDING/FAILED 批次可取 → 0（旧 batch_size 语义下 3 知识点 = 1 批同构）。
     """
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, device_id=device, n_units=1)
+        task_id = _seed_task(session, user_id=user, n_units=1)
     client = _client()
     with session_factory() as session:
         # worker A 取批次（PENDING→PROCESSING）
@@ -221,9 +234,9 @@ def test_concurrency_two_workers_single_effect(session_factory: Callable[[], Ses
 
 def test_concurrency_heartbeat_updates_updated_at(session_factory: Callable[[], Session]) -> None:
     """心跳：每批完成后 task.updated_at 刷新（seed 时间取安全过去值——与真实服务端时钟可观测比较）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, device_id=device)
+        task_id = _seed_task(session, user_id=user)
         seeded = session.get(Task, task_id)
         assert seeded is not None
         created_at = seeded.created_at
@@ -249,9 +262,9 @@ def test_concurrency_batch_commit_survives_crash(
     （与单次最终 commit 的差异点——Task 3 恢复语义：已完成批次保留、未完成批次经
     心跳超时孤儿恢复后重试）。
     """
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, device_id=device, quantity_tendency="BALANCED")
+        task_id = _seed_task(session, user_id=user, quantity_tendency="BALANCED")
     with session_factory() as session:
         seeded = session.get(Task, task_id)
         assert seeded is not None

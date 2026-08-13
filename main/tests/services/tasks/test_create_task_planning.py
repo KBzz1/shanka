@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import ApiKey, Base, Chapter, Device, KnowledgePoint, PdfFile, Task
+from infra.db.models import ApiKey, Base, Chapter, Device, KnowledgePoint, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from services.tasks.service import create_task, task_view
@@ -47,13 +47,26 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed(session: Session, *, device_id: str, chapter_count: int = 2) -> dict[str, Any]:
-    """devices 前置 + PDF + chapter_count 章节 + 牌组 + ApiKey 种子（tasks 校验 Key）。"""
-    session.add(Device(device_id=device_id, created_at=_NOW))
+def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str, Any]:
+    """users 前置 + PDF + chapter_count 章节 + 牌组 + ApiKey 种子（tasks 校验 Key）。
+
+    ApiKey/Device 保持 device 域种子（Task 5 前），键值同 user_id（过渡）。
+    """
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            password_hash="x",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
+    session.add(Device(device_id=user_id, created_at=_NOW))
     session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="b.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -62,7 +75,7 @@ def _seed(session: Session, *, device_id: str, chapter_count: int = 2) -> dict[s
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
+    deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
     session.flush()
     chapter_ids: list[str] = []
     chapters: list[dict[str, object]] = []
@@ -87,7 +100,7 @@ def _seed(session: Session, *, device_id: str, chapter_count: int = 2) -> dict[s
         )
     session.add(
         ApiKey(
-            device_id=device_id,
+            device_id=user_id,
             encrypted_key="enc",
             status="AVAILABLE",
             masked_key="sk-****",
@@ -120,11 +133,12 @@ def _budget_settings(tmp_path: Path, *, max_units: int) -> Settings:
 
 def test_create_task_pending_planning(session: Session) -> None:
     """创建即 PENDING+PLANNING：started_at/total_batch_count 为空、快照完整、不再同事务规划。"""
-    device = _uuid()
-    ctx = _seed(session, device_id=device)
+    user = _uuid()
+    ctx = _seed(session, user_id=user)
     task = create_task(
         session,
-        device_id=device,
+        user_id=user,
+        device_id=user,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=ctx["file_id"],
         deck_id=ctx["deck_id"],
         chapter_ids=ctx["chapter_ids"],
@@ -150,13 +164,14 @@ def test_create_task_pending_planning(session: Session) -> None:
 
 def test_create_task_budget_exceeded_rejected(session: Session, tmp_path: Path) -> None:
     """预算硬上限（spec §10）：5 章 COMPACT=15 单元 > 5 → VALIDATION_ERROR，不创建任务。"""
-    device = _uuid()
-    ctx = _seed(session, device_id=device, chapter_count=5)
+    user = _uuid()
+    ctx = _seed(session, user_id=user, chapter_count=5)
     session.info["settings"] = _budget_settings(tmp_path, max_units=5)  # executor 定式注入
     with pytest.raises(AppError) as excinfo:
         create_task(
             session,
-            device_id=device,
+            user_id=user,
+            device_id=user,  # 双头过渡：ApiKey 校验仍 device 域
             file_id=ctx["file_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
@@ -170,11 +185,12 @@ def test_create_task_budget_exceeded_rejected(session: Session, tmp_path: Path) 
 
 def test_create_task_budget_boundary_accepted(session: Session, tmp_path: Path) -> None:
     """预算等于上限（5 章 COMPACT=15 = 15）→ 正常创建 PENDING（显式 settings 参数通道）。"""
-    device = _uuid()
-    ctx = _seed(session, device_id=device, chapter_count=5)
+    user = _uuid()
+    ctx = _seed(session, user_id=user, chapter_count=5)
     task = create_task(
         session,
-        device_id=device,
+        user_id=user,
+        device_id=user,  # 双头过渡：ApiKey 校验仍 device 域
         file_id=ctx["file_id"],
         deck_id=ctx["deck_id"],
         chapter_ids=ctx["chapter_ids"],

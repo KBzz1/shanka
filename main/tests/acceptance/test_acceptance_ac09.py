@@ -53,9 +53,14 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         yield test_client
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _device(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
+    return {
+        **auth_headers(client, username=username, password=password),
+        "X-Device-ID": str(uuid.uuid4()),
+    }
 
 
 def _idem() -> dict[str, str]:
@@ -153,11 +158,11 @@ def test_acceptance_ac09_import_empty_front_or_back_422(client: TestClient) -> N
         assert resp.json()["error"]["code"] == "IMPORT_PARSE_ERROR"
 
 
-def test_acceptance_ac09_cards_cross_device_404(client: TestClient) -> None:
-    """补覆盖：cards GET 跨设备 → 404 DECK_NOT_FOUND（资源归属隔离）。"""
+def test_acceptance_ac09_cards_cross_user_404(client: TestClient) -> None:
+    """补覆盖：cards GET 跨用户 → 404 DECK_NOT_FOUND（资源归属隔离）。"""
     device = _device(client)
     deck_id = _create_deck(client, device)
-    resp = client.get(f"/decks/{deck_id}/cards", headers=_device(client))
+    resp = client.get(f"/decks/{deck_id}/cards", headers=_device(client, "user2", "pass-2222"))
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
 

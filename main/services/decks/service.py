@@ -17,10 +17,10 @@ def _deck_id() -> str:
     return str(uuid.uuid4())
 
 
-def create_deck(session: Session, *, device_id: str, name: str, now: str) -> Deck:
+def create_deck(session: Session, *, user_id: str, name: str, now: str) -> Deck:
     deck = Deck(
         deck_id=_deck_id(),
-        device_id=device_id,
+        user_id=user_id,
         name=name,
         source="MANUAL",
         version=now,
@@ -31,27 +31,27 @@ def create_deck(session: Session, *, device_id: str, name: str, now: str) -> Dec
     return deck
 
 
-def rename_deck(session: Session, *, device_id: str, deck_id: str, name: str, now: str) -> Deck:
+def rename_deck(session: Session, *, user_id: str, deck_id: str, name: str, now: str) -> Deck:
     """牌组改名（structure-contract 6.5）：version 递增供客户端缓存刷新。"""
-    deck = _owned(session, device_id=device_id, deck_id=deck_id)
+    deck = _owned(session, user_id=user_id, deck_id=deck_id)
     deck.name = name
     deck.version = now
     deck.updated_at = now
     return deck
 
 
-def _owned(session: Session, *, device_id: str, deck_id: str) -> Deck:
+def _owned(session: Session, *, user_id: str, deck_id: str) -> Deck:
     deck = session.get(Deck, deck_id)
-    if deck is None or deck.device_id != device_id:
+    if deck is None or deck.user_id != user_id:
         raise AppError(ErrorCode.DECK_NOT_FOUND, "牌组不存在")
     return deck
 
 
 def deck_progress(
-    session: Session, *, device_id: str, deck_id: str, now: str
+    session: Session, *, user_id: str, deck_id: str, now: str
 ) -> dict[str, int | float]:
     """派生进度（structure-contract 3.8/5.3）：card_count/due_count/mastered/review_count/mastery_ratio。"""
-    _owned(session, device_id=device_id, deck_id=deck_id)
+    _owned(session, user_id=user_id, deck_id=deck_id)
     card_count = (
         session.scalar(select(func.count(Card.card_id)).where(Card.deck_id == deck_id)) or 0
     )
@@ -108,33 +108,32 @@ def _to_deck_view(deck: Deck, progress: dict[str, int | float]) -> dict[str, obj
     }
 
 
-def list_decks(session: Session, *, device_id: str, now: str) -> list[dict[str, object]]:
+def list_decks(session: Session, *, user_id: str, now: str) -> list[dict[str, object]]:
     decks = session.scalars(
-        select(Deck).where(Deck.device_id == device_id).order_by(Deck.updated_at.desc())
+        select(Deck).where(Deck.user_id == user_id).order_by(Deck.updated_at.desc())
     ).all()
     result: list[dict[str, object]] = []
     for deck in decks:
         result.append(
             _to_deck_view(
-                deck, deck_progress(session, device_id=device_id, deck_id=deck.deck_id, now=now)
+                deck, deck_progress(session, user_id=user_id, deck_id=deck.deck_id, now=now)
             )
         )
     return result
 
 
-def get_deck(session: Session, *, device_id: str, deck_id: str, now: str) -> dict[str, object]:
-    deck = _owned(session, device_id=device_id, deck_id=deck_id)
-    return _to_deck_view(
-        deck, deck_progress(session, device_id=device_id, deck_id=deck_id, now=now)
-    )
+def get_deck(session: Session, *, user_id: str, deck_id: str, now: str) -> dict[str, object]:
+    deck = _owned(session, user_id=user_id, deck_id=deck_id)
+    return _to_deck_view(deck, deck_progress(session, user_id=user_id, deck_id=deck_id, now=now))
 
 
-def delete_deck(session: Session, *, device_id: str, deck_id: str) -> None:
-    deck = _owned(session, device_id=device_id, deck_id=deck_id)
+def delete_deck(session: Session, *, user_id: str, deck_id: str) -> None:
+    deck = _owned(session, user_id=user_id, deck_id=deck_id)
     blocking = (
         session.scalar(
             select(func.count(Task.task_id)).where(
                 Task.deck_id == deck_id,
+                Task.user_id == user_id,  # 一致性守卫（DESIGN §5.1）：只计本用户任务
                 Task.status.in_(["PENDING", "RUNNING", "PAUSED"]),
             )
         )
@@ -143,6 +142,8 @@ def delete_deck(session: Session, *, device_id: str, deck_id: str) -> None:
     if blocking:
         raise AppError(ErrorCode.TASK_IN_PROGRESS, "存在进行中的任务引用该牌组")
     # tasks.deck_id SET NULL（database-design §3）；cards 级联由 FK ON DELETE CASCADE 处理
-    for task in session.scalars(select(Task).where(Task.deck_id == deck_id)).all():
+    for task in session.scalars(
+        select(Task).where(Task.deck_id == deck_id, Task.user_id == user_id)
+    ).all():
         task.deck_id = None
     session.delete(deck)

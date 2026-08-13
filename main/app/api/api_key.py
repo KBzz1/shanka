@@ -4,6 +4,8 @@
   DeepSeekClient 请求级构造，try/finally close（biz 抛异常也释放）；加密密钥缺失 → 500 配置错误。
 - GET /api-key/status：只读 DB 状态（不解密不重校验）；未保存 → UNKNOWN + masked_key 空串。
 - 明文 Key 只在 handler → service → adapter 调用栈内（红线 4），响应仅返回状态与脱敏标识。
+- P4-3 中间态：execute_idempotent 已切 user 域（幂等记录与 Key 归属无关）；save_key/
+  get_status 仍按 device 域（双头窗口内行为不变——Task 5 整体切用户域）。
 """
 
 from typing import Annotated, Any
@@ -68,7 +70,8 @@ def save_api_key_endpoint(
     try:
         _replayed, status, body = execute_idempotent(
             session,
-            device_id=device_id,
+            # P4-3：幂等域统一 user 域（与 Key 归属无关）；save_key 内部仍按 device 域（Task 5 切换）
+            user_id=request.state.principal.user_id,
             path=path,
             idempotency_key=key,
             request_body_hash=body_hash,

@@ -177,8 +177,9 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         raise AppError(ErrorCode.GENERATION_FAILED, "任务不存在")
     now = task.updated_at
     deck_id = task.deck_id
-    if now is None or deck_id is None:
-        raise AppError(ErrorCode.GENERATION_FAILED, "任务数据不完整（缺少时间戳/牌组）")
+    if now is None or deck_id is None or task.user_id is None:
+        # user_id 非空是账本/卡归属写入前提（P4-3：新写入只写 user_id，DESIGN §5.2）
+        raise AppError(ErrorCode.GENERATION_FAILED, "任务数据不完整（缺少时间戳/牌组/用户）")
     unit: KnowledgePoint | None = None
     if batch.generation_unit_id is not None:
         unit = session.get(KnowledgePoint, batch.generation_unit_id)
@@ -243,7 +244,7 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     )
     attempt = create_attempt(
         session,
-        device_id=task.device_id,
+        user_id=task.user_id,
         scope_type="TASK",
         scope_id=task_id,
         task_id=task_id,
@@ -607,7 +608,7 @@ def _insert_card(
     card = Card(
         card_id=card_id,
         deck_id=deck_id,
-        device_id=task.device_id,
+        user_id=task.user_id,
         source="GENERATED",
         position=_next_position(session, deck_id=deck_id),
         front=cast(str, internal["front"]),

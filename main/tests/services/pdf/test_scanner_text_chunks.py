@@ -14,7 +14,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from infra.db.models import Device, PdfFile, TextChunk
+from infra.db.models import PdfFile, TextChunk, User
 from infra.storage.local import LocalStorage
 from services.pdf.scanner import process_pending
 from services.pdf.text_chunks import chunk_id_for
@@ -27,11 +27,20 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_pending(session: Session, *, device_id: str, storage_key: str) -> str:
-    session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+def _seed_pending(session: Session, *, user_id: str, storage_key: str) -> str:
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            password_hash="x",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
+    session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="book.pdf",
         storage_key=storage_key,
         size_bytes=100,
@@ -57,10 +66,10 @@ def test_scanner_parsed_persists_text_chunks(
     """PARSED 后完整页文本落库：一页一行、1-based 页码、确定性 chunk_id。"""
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         storage_key = storage.save(SAMPLE.read_bytes())
-        file_id = _seed_pending(session, device_id=device, storage_key=storage_key)
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
         n = process_pending(session, storage=storage)
@@ -82,10 +91,10 @@ def test_scanner_reparse_rebuilds_text_chunks(
     """重解析幂等：清理重建后仍一页一行，且同内容页标识稳定（spec §4.1）。"""
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         storage_key = storage.save(SAMPLE.read_bytes())
-        file_id = _seed_pending(session, device_id=device, storage_key=storage_key)
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
         assert process_pending(session, storage=storage) == 1
@@ -111,10 +120,10 @@ def test_scanner_delete_pdf_cascades_text_chunks(
     """删除 PDF 按 file_id 级联清理页文本（spec §4.1，FK ON DELETE CASCADE）。"""
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         storage_key = storage.save(SAMPLE.read_bytes())
-        file_id = _seed_pending(session, device_id=device, storage_key=storage_key)
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
         assert process_pending(session, storage=storage) == 1
@@ -152,10 +161,10 @@ def test_scanner_no_toc_fails_without_text_chunks(
     page[NameObject("/Resources")] = w._add_object(resources)
     with pdf_path.open("wb") as f:
         w.write(f)
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         storage_key = storage.save(pdf_path.read_bytes())
-        file_id = _seed_pending(session, device_id=device, storage_key=storage_key)
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
         n = process_pending(session, storage=storage)

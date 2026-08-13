@@ -10,11 +10,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import Card, Chapter, Device, PdfFile
+from infra.db.models import Card, Chapter, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from tests.conftest import auth_headers
 
@@ -44,9 +44,25 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _device(client: TestClient) -> dict[str, str]:
-    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID（v2.1 device 隔离语义保持）。"""
-    return {**auth_headers(client), "X-Device-ID": str(uuid.uuid4())}
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    assert row is not None
+    return str(row)
+
+
+def _user(
+    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+) -> dict[str, str]:
+    """双头过渡窗口：Bearer（模块级缓存）+ 随机 X-Device-ID；隔离语义已切 user 域（P4-3）。"""
+    return {
+        **auth_headers(client, username=username, password=password),
+        "X-Device-ID": str(uuid.uuid4()),
+    }
 
 
 def _config() -> dict[str, object]:
@@ -56,15 +72,24 @@ def _config() -> dict[str, object]:
     }
 
 
-def _seed_pdf(db_path: Path, *, device_id: str) -> dict[str, object]:
-    """devices 前置（FK 强制）+ PDF（PARSED）+ 2 章节。"""
+def _seed_pdf(db_path: Path, *, user_id: str) -> dict[str, object]:
+    """users 前置（FK 强制）+ PDF（PARSED）+ 2 章节（user 域）。"""
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
-        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
-        session.flush()
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用（不重复插入）
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    password_hash="x",
+                    created_at="2026-08-11T00:00:00.000Z",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
         pdf = PdfFile(
             file_id=_uuid(),
-            device_id=device_id,
+            user_id=user_id,
             filename="b.pdf",
             storage_key=_uuid(),
             size_bytes=10,
@@ -94,8 +119,8 @@ def test_samples_post_three_cards_without_idempotency_key(
 ) -> None:
     """合法请求：不带 Idempotency-Key 成功（幂等豁免）；3 张样卡构成正确且不入库。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_pdf(db_path, device_id=device["X-Device-ID"])
+    user = _user(client)
+    seed = _seed_pdf(db_path, user_id=_user_id(db_path))
     resp = client.post(
         "/samples",
         json={
@@ -103,7 +128,7 @@ def test_samples_post_three_cards_without_idempotency_key(
             "chapter_ids": seed["chapter_ids"],
             "generation_config": _config(),
         },
-        headers=device,  # 无 Idempotency-Key：豁免
+        headers=user,  # 无 Idempotency-Key：豁免
     )
     assert resp.status_code == 200
     cards = resp.json()["sample_cards"]
@@ -121,10 +146,10 @@ def test_samples_post_three_cards_without_idempotency_key(
         assert session.scalar(select(Card).limit(1)) is None
 
 
-def test_samples_cross_device_404(ctx: tuple[TestClient, Path]) -> None:
-    """跨设备访问他人 PDF → 404 PDF_NOT_FOUND。"""
+def test_samples_cross_user_404(ctx: tuple[TestClient, Path]) -> None:
+    """跨用户访问他人 PDF → 404 PDF_NOT_FOUND。"""
     client, db_path = ctx
-    seed = _seed_pdf(db_path, device_id=_uuid())
+    seed = _seed_pdf(db_path, user_id=_uuid())
     resp = client.post(
         "/samples",
         json={
@@ -132,7 +157,7 @@ def test_samples_cross_device_404(ctx: tuple[TestClient, Path]) -> None:
             "chapter_ids": seed["chapter_ids"],
             "generation_config": _config(),
         },
-        headers=_device(client),
+        headers=_user(client, "user2", "pass-2222"),
     )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "PDF_NOT_FOUND"
@@ -141,8 +166,8 @@ def test_samples_cross_device_404(ctx: tuple[TestClient, Path]) -> None:
 def test_samples_invalid_ratio_400(ctx: tuple[TestClient, Path]) -> None:
     """difficulty_ratio 非法（和 ≠ 1）→ 400 VALIDATION_ERROR（validate_config 统一判定）。"""
     client, db_path = ctx
-    device = _device(client)
-    seed = _seed_pdf(db_path, device_id=device["X-Device-ID"])
+    user = _user(client)
+    seed = _seed_pdf(db_path, user_id=user["X-Device-ID"])
     bad_config = _config()
     bad_config["difficulty_ratio"] = {"basic": 0.5, "understanding": 0.5, "application": 0.2}
     resp = client.post(
@@ -152,7 +177,7 @@ def test_samples_invalid_ratio_400(ctx: tuple[TestClient, Path]) -> None:
             "chapter_ids": seed["chapter_ids"],
             "generation_config": bad_config,
         },
-        headers=device,
+        headers=user,
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"

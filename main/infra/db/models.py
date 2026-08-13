@@ -134,9 +134,11 @@ class Task(Base):
     )
 
     task_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # DB 已可空（遗留列），注解暂留非空：v2.1 调用链（create_attempt 等）按非空 str 使用
-    # task.device_id，收敛需随用户侧写入落地同步收紧调用链，超出本任务边界（报告已注明）
-    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=True)
+    # DB 可空（遗留列）；P4-3 起新写入只写 user_id——注解收敛为可空，
+    # 账本/卡归属调用链按 user_id 传递（create_attempt 等）
+    device_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("devices.device_id"), nullable=True
+    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     file_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("pdf_files.file_id", ondelete="SET NULL"), nullable=True

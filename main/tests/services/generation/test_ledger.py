@@ -2,7 +2,7 @@
 
 - 基座同 tests/services/pdf/conftest.py / test_tasks_service.py：真实 SQLite +
   create_db_engine（PRAGMA foreign_keys=ON）全表建库；
-- llm_call_attempts.device_id/task_id 均 FK → 先补种 Device + Task 行；
+- llm_call_attempts.user_id/task_id 均 FK → 先补种 User + Task 行；
 - brief 中 `settings_override` fixture 在仓库不存在且账本不消费 Settings，按
   仓库约定改用本文件局部 session fixture（adaptation 见任务报告）。
 """
@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Device, Task
+from infra.db.models import Base, Device, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.generation.ledger import (
     attempt_count,
@@ -44,7 +44,14 @@ def session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
 
 
 def _seed(session: Session) -> None:
-    """FK 前置：devices + tasks（task_id="t1" 与 brief 测试常量一致）。"""
+    """FK 前置：users + devices + tasks（task_id="t1" 与 brief 测试常量一致）。
+
+    Task 保持 device 域种子（仅作 task_id 外键父行）；账本行归属切 user（P4-3）。
+    """
+    session.add(
+        User(user_id="u1", username="u-1", password_hash="x", created_at=_NOW, updated_at=_NOW)
+    )
+    session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
     session.add(Device(device_id="d1", created_at=_NOW))
     session.add(
         Task(
@@ -62,7 +69,7 @@ def test_create_then_finish_success_roundtrip(session: Session) -> None:
     _seed(session)
     att = create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",
@@ -123,7 +130,7 @@ def test_started_counts_toward_budget(session: Session) -> None:
     _seed(session)
     create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",
@@ -145,7 +152,7 @@ def test_mark_stale_unknown(session: Session) -> None:
     _seed(session)
     create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",
@@ -171,7 +178,7 @@ def test_mark_stale_unknown(session: Session) -> None:
 def test_duplicate_attempt_no_raises(session: Session) -> None:
     _seed(session)
     kw: dict[str, str] = {
-        "device_id": "d1",
+        "user_id": "u1",
         "scope_type": "TASK",
         "scope_id": "t1",
         "task_id": "t1",
@@ -196,7 +203,7 @@ def test_finish_failed_records_error(session: Session) -> None:
     _seed(session)
     att = create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",
@@ -222,7 +229,7 @@ def test_find_success_result_none_without_success(session: Session) -> None:
     _seed(session)
     create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",
@@ -252,7 +259,7 @@ def test_scoring_attempt_total_counts_all_attempts(session: Session) -> None:
     for i in (1, 2, 3):
         create_attempt(
             session,
-            device_id="d1",
+            user_id="u1",
             scope_type="TASK",
             scope_id="t1",
             task_id="t1",
@@ -266,7 +273,7 @@ def test_scoring_attempt_total_counts_all_attempts(session: Session) -> None:
         )
     create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",
@@ -286,7 +293,7 @@ def test_task_token_totals_sums_per_stage(session: Session) -> None:
     _seed(session)
     p1 = create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",
@@ -311,7 +318,7 @@ def test_task_token_totals_sums_per_stage(session: Session) -> None:
     )
     p2 = create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",
@@ -326,7 +333,7 @@ def test_task_token_totals_sums_per_stage(session: Session) -> None:
     finish_failed(session, p2, error_code="GENERATION_FAILED")  # 无 usage，不贡献 token
     g = create_attempt(
         session,
-        device_id="d1",
+        user_id="u1",
         scope_type="TASK",
         scope_id="t1",
         task_id="t1",

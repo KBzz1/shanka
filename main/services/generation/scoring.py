@@ -498,13 +498,16 @@ def _run_scoring_group(
         )
         + 1
     )
+    if task.user_id is None:
+        # 遗留 device 域任务（P4-3）：新账本行只写 user_id（DESIGN §5.2）→ 任务无法继续
+        raise AppError(ErrorCode.GENERATION_FAILED, "任务数据不完整（缺少用户）")
     # 组数据 + Prompt 在 STARTED 提交前组装（读取与占位同事务提交——chat 时无打开事务，
     # R-17 不持锁；发送内容与指纹一致由回写守卫兜底）
     units, cards_by_gen, pages_by_chunk = _load_group_data(session, group=group)
     entries = _group_entries(units, _task_unit_cards(session, task_id=task.task_id))
     attempt = create_attempt(
         session,
-        device_id=task.device_id,
+        user_id=task.user_id,
         scope_type="TASK",
         scope_id=task.task_id,
         task_id=task.task_id,

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.db.models import ApiKey, Base, Card, Device, LlmCallAttempt, ReviewState
+from infra.db.models import ApiKey, Base, Card, Device, LlmCallAttempt, ReviewState, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -32,6 +32,7 @@ assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
 _DEVICE = "dev"
+_USER = "user-1"
 _NOW = "2026-08-11T00:00:00.000Z"
 _NEW_NOW = "2026-08-11T01:00:00.000Z"
 
@@ -48,7 +49,11 @@ def _uuid() -> str:
 
 
 def _seed_card(session: Session, *, encrypted_key: str = _ENCRYPTED_TEST_KEY) -> Card:
-    """dev 设备的 GENERATED 卡 + 非初始 ReviewState + AVAILABLE Key（重写前状态）。"""
+    """user 域 GENERATED 卡 + 非初始 ReviewState + AVAILABLE Key（重写前状态）。"""
+    session.add(
+        User(user_id=_USER, username="u-1", password_hash="x", created_at=_NOW, updated_at=_NOW)
+    )
+    session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
     session.add(Device(device_id=_DEVICE, created_at=_NOW))
     session.flush()
     session.add(
@@ -61,12 +66,12 @@ def _seed_card(session: Session, *, encrypted_key: str = _ENCRYPTED_TEST_KEY) ->
         )
     )
     session.flush()
-    deck = create_deck(session, device_id=_DEVICE, name="D", now=_NOW)
+    deck = create_deck(session, user_id=_USER, name="D", now=_NOW)
     session.flush()
     card = Card(
         card_id=_uuid(),
         deck_id=deck.deck_id,
-        device_id=_DEVICE,
+        user_id=_USER,
         source="GENERATED",
         position=1,
         front="旧正面",
@@ -160,6 +165,7 @@ def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> No
     with session_factory() as session:
         card = rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements="用更简洁的语言",
@@ -229,6 +235,7 @@ def test_rewrite_dual_message_shape_and_max_tokens(
     with session_factory() as session:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements="用更简洁的语言",
@@ -275,6 +282,7 @@ def test_rewrite_ledger_success_row(session_factory: Callable[[], Session]) -> N
     with session_factory() as session:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -294,7 +302,7 @@ def test_rewrite_ledger_success_row(session_factory: Callable[[], Session]) -> N
         ).all()
         assert len(rows) == 1
         row = rows[0]
-        assert row.device_id == _DEVICE
+        assert row.user_id == _USER
         assert row.task_id is None  # 单卡重写无生成任务
         assert row.status == "SUCCESS"
         assert row.attempt_no == 1
@@ -327,6 +335,7 @@ def test_rewrite_ledger_failed_on_llm_error(session_factory: Callable[[], Sessio
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -379,6 +388,7 @@ def test_rewrite_ledger_started_committed_before_chat(
     with session_factory() as session, pytest.raises(AppError):
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -411,6 +421,7 @@ def test_rewrite_schema_invalid_preserves_card(session_factory: Callable[[], Ses
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -452,6 +463,7 @@ def test_rewrite_empty_cards_response_schema_invalid(
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -481,6 +493,7 @@ def test_rewrite_llm_error_preserves_card(session_factory: Callable[[], Session]
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -521,6 +534,7 @@ def test_rewrite_no_api_key_422(session_factory: Callable[[], Session]) -> None:
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -540,6 +554,7 @@ def test_rewrite_no_encryption_config_422(session_factory: Callable[[], Session]
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -560,6 +575,7 @@ def test_rewrite_decrypt_failure_502(session_factory: Callable[[], Session]) -> 
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -569,15 +585,16 @@ def test_rewrite_decrypt_failure_502(session_factory: Callable[[], Session]) -> 
     assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
 
 
-def test_rewrite_cross_device_404(session_factory: Callable[[], Session]) -> None:
-    """跨设备查卡 → CARD_NOT_FOUND（统一 404，不暴露存在性）。"""
+def test_rewrite_cross_user_404(session_factory: Callable[[], Session]) -> None:
+    """跨用户查卡 → CARD_NOT_FOUND（统一 404，不暴露存在性）。"""
     with session_factory() as session:
         seeded = _seed_card(session)
         card_id = seeded.card_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         rewrite_card(
             session,
-            device_id="other",
+            user_id="other",
+            device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
             now=_NEW_NOW,
@@ -612,6 +629,7 @@ def test_rewrite_true_false_response_switches_type(
     with session_factory() as session:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -669,6 +687,7 @@ def test_rewrite_multi_card_response_takes_first(
     with session_factory() as session:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,
@@ -719,6 +738,7 @@ def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> 
     with session_factory() as session:
         rewrite_card(
             session,
+            user_id=_USER,
             device_id=_DEVICE,
             card_id=card_id,
             custom_requirements=None,

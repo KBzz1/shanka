@@ -81,7 +81,7 @@ async def upload_pdf_endpoint(
     file: Annotated[UploadFile, File()],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = request.url.path
     settings: Settings = request.app.state.settings
@@ -91,7 +91,7 @@ async def upload_pdf_endpoint(
         "pdf upload received",
         extra={
             "request_id": getattr(request.state, "request_id", ""),
-            "device_id": request.state.device_id,
+            "user_id": request.state.principal.user_id,
             "size_bytes": len(data),
             "content_type": file.content_type or "",
             "file_name": file.filename or "",
@@ -113,7 +113,7 @@ async def upload_pdf_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         pdf = upload_pdf(
             session,
-            device_id=device_id,
+            user_id=user_id,
             filename=file.filename or "upload.pdf",
             size_bytes=len(data),
             storage_key=storage_key,
@@ -124,7 +124,7 @@ async def upload_pdf_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -138,7 +138,7 @@ async def upload_pdf_endpoint(
 def list_pdfs_endpoint(
     request: Request, session: Annotated[Session, Depends(get_db_session)]
 ) -> JSONResponse:
-    items = [_pdf_view(pdf) for pdf in list_pdfs(session, device_id=request.state.device_id)]
+    items = [_pdf_view(pdf) for pdf in list_pdfs(session, user_id=request.state.principal.user_id)]
     return JSONResponse(content={"items": items})
 
 
@@ -148,7 +148,7 @@ def get_pdf_endpoint(
     file_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    pdf = get_pdf(session, device_id=request.state.device_id, file_id=file_id)
+    pdf = get_pdf(session, user_id=request.state.principal.user_id, file_id=file_id)
     # 决策：详情总是返回 chapters 字段（PARSED 时查 Chapter 表；否则 None）
     chapters: list[dict[str, Any]] | None = None
     if pdf.status == "PARSED":
@@ -165,18 +165,18 @@ def delete_pdf_endpoint(
     file_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> Response:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/pdfs/{file_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        delete_pdf(session, device_id=device_id, file_id=file_id, storage=request.app.state.storage)
+        delete_pdf(session, user_id=user_id, file_id=file_id, storage=request.app.state.storage)
         return 204, {}
 
     _replayed, status, _body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -194,18 +194,18 @@ def delete_chapter_endpoint(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> Response:
     """删除章节（structure-contract 6.1）；关联知识点 chapter_id 置 null。"""
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/pdfs/{file_id}/chapters/{chapter_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        delete_chapter(session, device_id=device_id, file_id=file_id, chapter_id=chapter_id)
+        delete_chapter(session, user_id=user_id, file_id=file_id, chapter_id=chapter_id)
         return 204, {}
 
     _replayed, status, _body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
@@ -223,7 +223,7 @@ def patch_chapter_endpoint(
     payload: ChapterUpdateRequest,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    device_id: str = request.state.device_id
+    user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/pdfs/{file_id}/chapters/{chapter_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
@@ -231,7 +231,7 @@ def patch_chapter_endpoint(
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         chapter = update_chapter(
             session,
-            device_id=device_id,
+            user_id=user_id,
             file_id=file_id,
             chapter_id=chapter_id,
             name=payload.name,
@@ -244,7 +244,7 @@ def patch_chapter_endpoint(
 
     _replayed, status, body = execute_idempotent(
         session,
-        device_id=device_id,
+        user_id=user_id,
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,

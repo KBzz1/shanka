@@ -36,6 +36,7 @@ from infra.db.models import (
     PdfFile,
     Task,
     TextChunk,
+    User,
 )
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
@@ -118,7 +119,7 @@ def _card_response(card_type: str) -> str:
 def _seed_scoring_task(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     difficulties: list[str] | None = None,
     card_type: str = "QUESTION",
     n_units: int = 1,
@@ -130,12 +131,23 @@ def _seed_scoring_task(
     （generate）真实生成路径落卡。返回 task_id。"""
     from services.decks.service import create_deck
 
-    if session.get(Device, device_id) is None:
-        session.add(Device(device_id=device_id, created_at=_NOW))
+    if session.get(User, user_id) is None:
+        session.add(
+            User(
+                user_id=user_id,
+                username=f"u-{user_id[:8]}",
+                password_hash="x",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
+    if session.get(Device, user_id) is None:  # ApiKey device 域种子（Task 5 前）
+        session.add(Device(device_id=user_id, created_at=_NOW))
         session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="p.pdf",
         storage_key=_uuid(),
         size_bytes=1,
@@ -144,15 +156,15 @@ def _seed_scoring_task(
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
+    deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
     session.flush()
-    if session.scalar(select(ApiKey).where(ApiKey.device_id == device_id)) is None:
+    if session.scalar(select(ApiKey).where(ApiKey.device_id == user_id)) is None:
         session.add(
             ApiKey(
-                device_id=device_id,
+                device_id=user_id,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -168,7 +180,8 @@ def _seed_scoring_task(
     )
     task = create_task(
         session,
-        device_id=device_id,
+        user_id=user_id,
+        device_id=user_id,  # 双列过渡种子（executor Key 查找仍 device 域）
         file_id=pdf.file_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
@@ -178,6 +191,8 @@ def _seed_scoring_task(
         ),
         now=_NOW,
     )
+    # 双头过渡：executor 密钥查找仍按 device 域（Task 5 切换）——种子补 device_id 双列
+    task.device_id = user_id
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = _NOW
@@ -398,12 +413,10 @@ def test_sampling_deterministic(session_factory: Callable[[], Session]) -> None:
     全等；BASIC/UNDERSTANDING 合批、APPLICATION 逐单元；组数 ≤ max_scoring_calls_per_task。"""
     from services.generation.scoring import plan_scoring_groups
 
-    device = _uuid()
+    user = _uuid()
     difficulties = ["BASIC"] * 10 + ["UNDERSTANDING"] * 10 + ["APPLICATION"] * 10
     with session_factory() as session:
-        task_id = _seed_scoring_task(
-            session, device_id=device, difficulties=difficulties, n_units=30
-        )
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=difficulties, n_units=30)
         task = session.get(Task, task_id)
         assert task is not None
         g1 = plan_scoring_groups(session, task=task, settings=_SETTINGS)
@@ -420,7 +433,7 @@ def test_plan_groups_split_by_card_cap(session_factory: Callable[[], Session]) -
     """BASIC 合批受 scoring_max_cards_per_call 限制再拆：10 卡 + 上限 4 → 3 组（4/4/2）。"""
     from services.generation.scoring import plan_scoring_groups
 
-    device = _uuid()
+    user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
         scoring_max_cards_per_call=4,
@@ -428,7 +441,7 @@ def test_plan_groups_split_by_card_cap(session_factory: Callable[[], Session]) -
     )
     with session_factory() as session:
         task_id = _seed_scoring_task(
-            session, device_id=device, difficulties=["BASIC"], n_units=10, settings=settings
+            session, user_id=user, difficulties=["BASIC"], n_units=10, settings=settings
         )
         task = session.get(Task, task_id)
         assert task is not None
@@ -443,7 +456,7 @@ def test_plan_groups_cap_reduction_by_layer_quota(
     """组批后调用数 > max_scoring_calls_per_task → 按层配额哈希缩减（≤ 上限、确定性）。"""
     from services.generation.scoring import plan_scoring_groups
 
-    device = _uuid()
+    user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
         max_scoring_calls_per_task=5,
@@ -452,7 +465,7 @@ def test_plan_groups_cap_reduction_by_layer_quota(
     difficulties = ["BASIC"] * 10 + ["UNDERSTANDING"] * 10 + ["APPLICATION"] * 10
     with session_factory() as session:
         task_id = _seed_scoring_task(
-            session, device_id=device, difficulties=difficulties, n_units=30, settings=settings
+            session, user_id=user, difficulties=difficulties, n_units=30, settings=settings
         )
         task = session.get(Task, task_id)
         assert task is not None
@@ -467,9 +480,9 @@ def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Sessi
     账本 stage=SCORING SUCCESS（scoring_output schema v2 / rubric v2；不写 normalized_result）。"""
     from services.generation.scoring import run_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -513,11 +526,9 @@ def test_scoring_preserves_dedup_duplicate_rate(
     from services.generation.batches import _stable_uuid
     from services.generation.scoring import run_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(
-            session, device_id=device, difficulties=["BASIC"], generate=False
-        )
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"], generate=False)
         task = session.get(Task, task_id)
         assert task is not None and task.deck_id is not None
         batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
@@ -529,7 +540,7 @@ def test_scoring_preserves_dedup_duplicate_rate(
             Card(
                 card_id=_uuid(),
                 deck_id=task.deck_id,
-                device_id=device,
+                user_id=user,
                 source="GENERATED",
                 position=1,
                 front="什么是锚定卡？",
@@ -566,9 +577,9 @@ def test_scoring_version_drift_rejected(session_factory: Callable[[], Session]) 
     卡评分保持 NULL、任务仍 COMPLETED（非阻塞）。"""
     from services.generation.scoring import run_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
 
         def handler(request: httpx.Request) -> httpx.Response:
             # chat 进行中（事务外）从另一连接注入用户编辑（card.version 变更）
@@ -602,9 +613,9 @@ def test_scoring_failure_non_blocking(session_factory: Callable[[], Session]) ->
     （card_count 不变）、任务仍 COMPLETED、账本记 FAILED。"""
     from services.generation.scoring import run_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -632,9 +643,9 @@ def test_scoring_invalid_output_group_failed(session_factory: Callable[[], Sessi
     """评分输出非法（非 JSON）→ 整组 FAILED（不落部分分数）、任务仍 COMPLETED。"""
     from services.generation.scoring import run_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         run_scoring_stage(
             session, task=task, settings=_SETTINGS, client=_client(lambda r: _ok("no"))
@@ -654,9 +665,9 @@ def test_scoring_stage_cancel_guarded(session_factory: Callable[[], Session]) ->
     不覆盖 CANCELLED。"""
     from services.generation.scoring import run_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
         calls = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -683,7 +694,7 @@ def test_scoring_cap_reached_still_completes(session_factory: Callable[[], Sessi
     from services.generation.ledger import create_attempt
     from services.generation.scoring import run_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
         max_scoring_calls_per_task=2,
@@ -691,13 +702,13 @@ def test_scoring_cap_reached_still_completes(session_factory: Callable[[], Sessi
     )
     with session_factory() as session:
         task_id = _seed_scoring_task(
-            session, device_id=device, difficulties=["BASIC"], settings=settings
+            session, user_id=user, difficulties=["BASIC"], settings=settings
         )
         # 预置 2 个其他组的 SCORING 尝试（STARTED 遗留）——本组尚未尝试，但总账已达上限
         for i in (1, 2):
             create_attempt(
                 session,
-                device_id=device,
+                user_id=user,
                 scope_type="TASK",
                 scope_id=task_id,
                 task_id=task_id,
@@ -734,9 +745,9 @@ def test_enter_scoring_stage_transitions(session_factory: Callable[[], Session])
     """GENERATING → SCORING 条件更新：RUNNING+GENERATING → True；再次调用/取消后 → False。"""
     from services.generation.scoring import enter_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, stage="GENERATING", generate=False)
+        task_id = _seed_scoring_task(session, user_id=user, stage="GENERATING", generate=False)
         assert enter_scoring_stage(session, task_id=task_id, settings=_SETTINGS) is True
         task = session.get(Task, task_id)
         assert task is not None and task.stage == "SCORING"
@@ -753,9 +764,9 @@ def test_enter_scoring_stage_transitions(session_factory: Callable[[], Session])
 def test_executor_runs_scoring_after_generation(session_factory: Callable[[], Session]) -> None:
     """executor 接线：批循环结束 → enter_scoring_stage → 评分回写 → COMPLETED。
     同一 client 先服务生成调用（GENERATOR_INPUT）再服务评分调用（SCORING_INPUT）。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, stage="GENERATING", generate=False)
+        task_id = _seed_scoring_task(session, user_id=user, stage="GENERATING", generate=False)
     with session_factory() as session:
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -783,10 +794,10 @@ def test_scan_takes_over_scoring_orphan(session_factory: Callable[[], Session]) 
     from services.generation.ledger import create_attempt
     from services.generation.scoring import plan_scoring_groups
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         task_id = _seed_scoring_task(
-            session, device_id=device, difficulties=["APPLICATION", "APPLICATION"], n_units=2
+            session, user_id=user, difficulties=["APPLICATION", "APPLICATION"], n_units=2
         )
         task = session.get(Task, task_id)
         assert task is not None
@@ -794,7 +805,7 @@ def test_scan_takes_over_scoring_orphan(session_factory: Callable[[], Session]) 
         assert len(groups) == 2  # APPLICATION 逐单元
         create_attempt(
             session,
-            device_id=device,
+            user_id=user,
             scope_type="TASK",
             scope_id=task_id,
             task_id=task_id,
@@ -839,7 +850,7 @@ def test_plan_groups_split_by_input_char_cap(session_factory: Callable[[], Sessi
     → 组大小 [2, 2, 2]（card 上限 12 未触达，仅字符限拆分——确定性）。"""
     from services.generation.scoring import plan_scoring_groups
 
-    device = _uuid()
+    user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
         scoring_max_input_chars=1200,
@@ -847,7 +858,7 @@ def test_plan_groups_split_by_input_char_cap(session_factory: Callable[[], Sessi
     )
     with session_factory() as session:
         task_id = _seed_scoring_task(
-            session, device_id=device, difficulties=["BASIC"], n_units=6, settings=settings
+            session, user_id=user, difficulties=["BASIC"], n_units=6, settings=settings
         )
         task = session.get(Task, task_id)
         assert task is not None
@@ -865,9 +876,9 @@ def test_scoring_group_entries_vanished_fails_no_call(
     from infra.llm.prompts import asset_versions
     from services.generation.scoring import _run_scoring_group, plan_scoring_groups
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
         task = session.get(Task, task_id)
         assert task is not None
         groups = plan_scoring_groups(session, task=task, settings=_SETTINGS)
@@ -904,9 +915,9 @@ def test_scoring_cancel_during_call_no_writeback(session_factory: Callable[[], S
     留 NULL、账本 STARTED 保留（恢复转 UNKNOWN）、最终条件更新不覆盖 CANCELLED。"""
     from services.generation.scoring import run_scoring_stage
 
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        task_id = _seed_scoring_task(session, device_id=device, difficulties=["BASIC"])
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
 
         def handler(request: httpx.Request) -> httpx.Response:
             # chat 进行中（事务外）注入取消（另一连接——cancel handler 同款写入）

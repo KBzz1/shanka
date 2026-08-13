@@ -41,9 +41,9 @@ def _format_cutoff(now: str, minutes: int) -> str:
     return format_utc(_parse_utc(now) - timedelta(minutes=minutes))
 
 
-def _owned_task(session: Session, *, device_id: str, task_id: str) -> Task:
+def _owned_task(session: Session, *, user_id: str, task_id: str) -> Task:
     task = session.get(Task, task_id)
-    if task is None or task.device_id != device_id:
+    if task is None or task.user_id != user_id:
         raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在")
     return task
 
@@ -77,7 +77,8 @@ def task_view(task: Task) -> dict[str, object]:
 def create_task(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
+    device_id: str,  # 双头过渡（P4-3）：已保存 Key 校验仍按 device 域（Task 5 切换）
     file_id: str,
     deck_id: str,
     chapter_ids: list[str],
@@ -85,7 +86,7 @@ def create_task(
     now: str,
     settings: Settings | None = None,
 ) -> Task:
-    """创建任务：校验归属/配置/已保存 Key（无 → API_KEY_NOT_SET 422）→ 预算硬上限
+    """创建任务：校验归属（user 域）/配置/已保存 Key（device 域中间态，无 → API_KEY_NOT_SET 422）→ 预算硬上限
     （spec §10，超限 → VALIDATION_ERROR 不创建）→ 建 Task（PENDING + stage=PLANNING
     + 创建快照 JSON，started_at/total_batch_count 空）；规划由 worker CAS 接管（§6.1），
     本函数不再同事务规划。settings 注入定式同 executor：显式参数 > session.info["settings"]
@@ -93,7 +94,7 @@ def create_task(
     """
     validate_config(config)
     pdf = session.get(PdfFile, file_id)
-    if pdf is None or pdf.device_id != device_id:
+    if pdf is None or pdf.user_id != user_id:
         raise AppError(ErrorCode.PDF_NOT_FOUND, "PDF 不存在")
     # 章节归属校验：chapter_ids 全部属于 file_id，缺失/他属 → PDF_NOT_FOUND（与 samples 一致）
     chapters = session.scalars(
@@ -112,7 +113,7 @@ def create_task(
         }
         for cid in chapter_ids
     ]
-    _owned_deck(session, device_id=device_id, deck_id=deck_id)
+    _owned_deck(session, user_id=user_id, deck_id=deck_id)
     # 已保存 Key 校验（6.2：无 Key → API_KEY_NOT_SET）；只查 status=AVAILABLE 行存在，
     # 不解密（V5A 生成时才解密调用）
     key_row = session.scalar(
@@ -135,7 +136,7 @@ def create_task(
     # 规划 worker 首次 CAS 接管时原子刷新快照并转 RUNNING+PLANNING
     task = Task(
         task_id=_uuid4(),
-        device_id=device_id,
+        user_id=user_id,
         file_id=file_id,
         deck_id=deck_id,
         status="PENDING",
@@ -152,17 +153,17 @@ def create_task(
     return task
 
 
-def get_task(session: Session, *, device_id: str, task_id: str) -> Task:
-    return _owned_task(session, device_id=device_id, task_id=task_id)
+def get_task(session: Session, *, user_id: str, task_id: str) -> Task:
+    return _owned_task(session, user_id=user_id, task_id=task_id)
 
 
-def cancel_task(session: Session, *, device_id: str, task_id: str, now: str) -> Task:
+def cancel_task(session: Session, *, user_id: str, task_id: str, now: str) -> Task:
     """取消：PENDING/RUNNING/PAUSED → CANCELLED；终态任务早返回不转移。
 
     8.3 generation_tasks_total CANCELLED 只在实际状态转移时计数（不同幂等键重复
     取消不再重复 inc；同键重放走 execute_idempotent 快照，不重跑本函数）。
     """
-    task = _owned_task(session, device_id=device_id, task_id=task_id)
+    task = _owned_task(session, user_id=user_id, task_id=task_id)
     if task.status in ("COMPLETED", "FAILED", "CANCELLED"):
         return task  # 已终态：不转移不计数
     task.status = "CANCELLED"
@@ -175,7 +176,7 @@ def cancel_task(session: Session, *, device_id: str, task_id: str, now: str) -> 
 def resume_task(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     task_id: str,
     now: str,
     orphan_timeout_minutes: int = 30,
@@ -188,7 +189,7 @@ def resume_task(
     （RUNNING 继续执行无需再 resume）。SQLAlchemy update 的 rowcount 对 SQLite 有效
     （数据库级行数，非客户端估算）。
     """
-    task = _owned_task(session, device_id=device_id, task_id=task_id)
+    task = _owned_task(session, user_id=user_id, task_id=task_id)
     orphan_cutoff = _format_cutoff(now, orphan_timeout_minutes)
     result: CursorResult[Any] = cast(
         CursorResult[Any],

@@ -2,7 +2,7 @@
 
 与 brief 草稿的修正（校准说明）：
 - result["state"] / rs.state 用大写（契约 3.10 枚举，裁决 1：fsrs State .name.upper() 落库）；
-- fixture 补 devices 行（FK 强制，carry-forward：test_cards_service 已实证违约）；
+- fixture 补 users 行（FK 强制，carry-forward：test_cards_service 已实证违约）；
 - 初始难度断言 1.0（ORM CHECK 1~10 的 V1 占位值）；
 - fix round 1：Learning 卡重建 step 由 due-last_review 间隔推导（裁决 2），
   覆盖二次 GOOD +1d / 三次 GOOD 毕业 / RELEARNING 重建 GOOD → REVIEW。
@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Device, ReviewEvent, ReviewState
+from infra.db.models import Base, ReviewEvent, ReviewState, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.cards.service import create_card
 from services.decks.service import create_deck
@@ -37,21 +37,29 @@ def _uuid() -> str:
 
 
 @pytest.fixture
-def device() -> str:
+def user() -> str:
     return _uuid()
 
 
 @pytest.fixture
-def deck_and_card(session_factory: Callable[[], Session], device: str) -> tuple[str, str]:
-    """牌组+卡片归属 device；devices 行前置（FK 强制，HTTP 流由 F1 设备中间件自动建立）。"""
+def deck_and_card(session_factory: Callable[[], Session], user: str) -> tuple[str, str]:
+    """牌组+卡片归属 user；users 行前置（FK 强制，HTTP 流由注册端点建立）。"""
     with session_factory() as session:
-        session.add(Device(device_id=device, created_at="2026-08-11T00:00:00.000Z"))
+        session.add(
+            User(
+                user_id=user,
+                username=f"u-{user[:8]}",
+                password_hash="x",
+                created_at="2026-08-11T00:00:00.000Z",
+                updated_at="2026-08-11T00:00:00.000Z",
+            )
+        )
         session.flush()
-        deck = create_deck(session, device_id=device, name="D", now="2026-08-11T00:00:00.000Z")
+        deck = create_deck(session, user_id=user, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
         card = create_card(
             session,
-            device_id=device,
+            user_id=user,
             deck_id=deck.deck_id,
             front="f",
             back="b",
@@ -62,13 +70,11 @@ def deck_and_card(session_factory: Callable[[], Session], device: str) -> tuple[
 
 
 def test_review_queue_returns_due_cards_sorted(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     deck_id, card_id = deck_and_card
     with session_factory() as session:
-        items = review_queue(
-            session, device_id=device, deck_id=deck_id, now="2026-08-11T01:00:00.000Z"
-        )
+        items = review_queue(session, user_id=user, deck_id=deck_id, now="2026-08-11T01:00:00.000Z")
     assert len(items) == 1
     assert items[0]["card_id"] == card_id
     rs_view = items[0]["review_state"]
@@ -81,34 +87,32 @@ def test_review_queue_returns_due_cards_sorted(
 
 
 def test_review_queue_excludes_not_due(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     deck_id, _ = deck_and_card
     with session_factory() as session:
-        items = review_queue(
-            session, device_id=device, deck_id=deck_id, now="2026-08-10T00:00:00.000Z"
-        )
+        items = review_queue(session, user_id=user, deck_id=deck_id, now="2026-08-10T00:00:00.000Z")
     assert items == []
 
 
-def test_review_queue_cross_device_404(
+def test_review_queue_cross_user_404(
     session_factory: Callable[[], Session], deck_and_card: tuple[str, str]
 ) -> None:
     deck_id, _ = deck_and_card
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        review_queue(session, device_id=_uuid(), deck_id=deck_id, now="2026-08-11T01:00:00.000Z")
+        review_queue(session, user_id=_uuid(), deck_id=deck_id, now="2026-08-11T01:00:00.000Z")
     assert excinfo.value.code is ErrorCode.DECK_NOT_FOUND
 
 
 def test_review_queue_sorts_by_due_then_position(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     """排序（5.15/6.6，I-2）：due 不同先到期者在前；同 due 按 position 升序。"""
     deck_id, _ = deck_and_card  # 已含 00:00 创建的卡（pos 1、due 00:00）
     with session_factory() as session:
         create_card(
             session,
-            device_id=device,
+            user_id=user,
             deck_id=deck_id,
             front="f2",
             back="b2",
@@ -116,7 +120,7 @@ def test_review_queue_sorts_by_due_then_position(
         )  # pos 2、due 00:00 同前卡
         create_card(
             session,
-            device_id=device,
+            user_id=user,
             deck_id=deck_id,
             front="f3",
             back="b3",
@@ -124,9 +128,7 @@ def test_review_queue_sorts_by_due_then_position(
         )  # pos 3、due 00:30
         session.commit()
     with session_factory() as session:
-        items = review_queue(
-            session, device_id=device, deck_id=deck_id, now="2026-08-11T01:00:00.000Z"
-        )
+        items = review_queue(session, user_id=user, deck_id=deck_id, now="2026-08-11T01:00:00.000Z")
     assert len(items) == 3
     ordered: list[tuple[str, int]] = []
     for item in items:
@@ -141,7 +143,7 @@ def test_review_queue_sorts_by_due_then_position(
 
 
 def test_submit_review_updates_state_and_creates_event(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     """新卡首次 GOOD → Learning、due=now+10m（5.2 表第 1 行，R-13 3 步配置）；事件同事务落库。"""
     _, card_id = deck_and_card
@@ -149,7 +151,7 @@ def test_submit_review_updates_state_and_creates_event(
     with session_factory() as session:
         result = submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="GOOD",
             client_event_id=client_event,
@@ -175,14 +177,14 @@ def test_submit_review_updates_state_and_creates_event(
 
 
 def test_submit_review_same_client_event_replays(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     _, card_id = deck_and_card
     client_event = _uuid()
     with session_factory() as session:
         first = submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="GOOD",
             client_event_id=client_event,
@@ -193,7 +195,7 @@ def test_submit_review_same_client_event_replays(
     with session_factory() as session:
         second = submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="GOOD",
             client_event_id=client_event,
@@ -208,14 +210,14 @@ def test_submit_review_same_client_event_replays(
 
 
 def test_submit_review_same_client_event_conflict(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     _, card_id = deck_and_card
     client_event = _uuid()
     with session_factory() as session:
         submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="GOOD",
             client_event_id=client_event,
@@ -226,7 +228,7 @@ def test_submit_review_same_client_event_conflict(
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="AGAIN",
             client_event_id=client_event,
@@ -236,14 +238,14 @@ def test_submit_review_same_client_event_conflict(
     assert excinfo.value.code is ErrorCode.REVIEW_EVENT_CONFLICT
 
 
-def test_submit_review_cross_device_404(
+def test_submit_review_cross_user_404(
     session_factory: Callable[[], Session], deck_and_card: tuple[str, str]
 ) -> None:
     _, card_id = deck_and_card
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         submit_review(
             session,
-            device_id=_uuid(),
+            user_id=_uuid(),
             card_id=card_id,
             rating="GOOD",
             client_event_id=_uuid(),
@@ -254,7 +256,7 @@ def test_submit_review_cross_device_404(
 
 
 def test_submit_review_rollback_on_failure(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     """评级失败（非法 rating）→ 无事件无状态变更（同事务回滚）。"""
     _, card_id = deck_and_card
@@ -262,7 +264,7 @@ def test_submit_review_rollback_on_failure(
         with pytest.raises(AppError):
             submit_review(
                 session,
-                device_id=device,
+                user_id=user,
                 card_id=card_id,
                 rating="MAYBE",
                 client_event_id=_uuid(),
@@ -278,14 +280,14 @@ def test_submit_review_rollback_on_failure(
 
 
 def test_submit_review_learning_second_good_plus_1d(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     """Learning 卡重建（step 由 due-last_review 推导，裁决 2）：二次 GOOD → +1d（5.2 表第 2 行）。"""
     _, card_id = deck_and_card
     with session_factory() as session:
         first = submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="GOOD",
             client_event_id=_uuid(),
@@ -298,7 +300,7 @@ def test_submit_review_learning_second_good_plus_1d(
     with session_factory() as session:
         second = submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="GOOD",
             client_event_id=_uuid(),
@@ -312,7 +314,7 @@ def test_submit_review_learning_second_good_plus_1d(
 
 
 def test_submit_review_learning_graduates_and_relearning_rebuild(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     """Learning 三次 GOOD 毕业 REVIEW（5.2 表第 3 行）；REVIEW+AGAIN → RELEARNING(+10m)；
     RELEARNING 重建（step=0）GOOD → REVIEW。"""
@@ -329,7 +331,7 @@ def test_submit_review_learning_graduates_and_relearning_rebuild(
         for rating, now in steps:
             result = submit_review(
                 session,
-                device_id=device,
+                user_id=user,
                 card_id=card_id,
                 rating=rating,
                 client_event_id=_uuid(),
@@ -348,14 +350,14 @@ def test_submit_review_learning_graduates_and_relearning_rebuild(
 
 
 def test_submit_review_learning_againthen_good_plus_10m(
-    session_factory: Callable[[], Session], device: str, deck_and_card: tuple[str, str]
+    session_factory: Callable[[], Session], user: str, deck_and_card: tuple[str, str]
 ) -> None:
     """AGAIN 后 Learning 卡（last_rating=AGAIN、间隔 10m）重建 GOOD → +10m（I-1 消歧，不跳巩固步）。"""
     _, card_id = deck_and_card
     with session_factory() as session:
         submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="GOOD",
             client_event_id=_uuid(),
@@ -366,7 +368,7 @@ def test_submit_review_learning_againthen_good_plus_10m(
     with session_factory() as session:
         again = submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="AGAIN",
             client_event_id=_uuid(),
@@ -379,7 +381,7 @@ def test_submit_review_learning_againthen_good_plus_10m(
     with session_factory() as session:
         third = submit_review(
             session,
-            device_id=device,
+            user_id=user,
             card_id=card_id,
             rating="GOOD",
             client_event_id=_uuid(),

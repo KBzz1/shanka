@@ -2,7 +2,7 @@
 
 事务语义：本模块不 commit/rollback，调用方控制；review_event 与 review_state 更新同事务（database-design §3）。
 双幂等（1.3）：Idempotency-Key 层由 handler 的 execute_idempotent 处理（Task 3）；
-本模块负责 client_event_id 兜底（UNIQUE(device_id, client_event_id) 冲突 → 比对 → 重放/409；
+本模块负责 client_event_id 兜底（UNIQUE(user_id, client_event_id) 冲突 → 比对 → 重放/409；
 并发由 BEGIN IMMEDIATE 串行化，先查模式在单写者下足够）。
 
 py-fsrs 4.1.2 事实（R-13 落地，Task 1 校准；final review I-1：fsrs 类型构造/状态映射
@@ -145,10 +145,10 @@ def review_state_view(rs: ReviewState) -> dict[str, object]:
 
 
 def review_queue(
-    session: Session, *, device_id: str, deck_id: str, now: str
+    session: Session, *, user_id: str, deck_id: str, now: str
 ) -> list[dict[str, object]]:
     """到期队列（5.15/6.6）：due <= now 按 due、position 稳定排序；返回 {**card_view, review_state}。"""
-    _owned(session, device_id=device_id, deck_id=deck_id)
+    _owned(session, user_id=user_id, deck_id=deck_id)
     rows = session.execute(
         select(Card, ReviewState)
         .join(ReviewState, ReviewState.card_id == Card.card_id)
@@ -161,7 +161,7 @@ def review_queue(
 def _submit_review_inner(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     card_id: str,
     rating_value: str,
     client_event_id: str,
@@ -171,7 +171,7 @@ def _submit_review_inner(
     """执行评级（幂等原语 fn 内）：返回 (是否因 client_event_id 兜底重放, 响应视图)。"""
     _validate_timezone(device_timezone)  # M-3：非法 IANA → 400 VALIDATION_ERROR
     card = session.get(Card, card_id)
-    if card is None or card.device_id != device_id:
+    if card is None or card.user_id != user_id:
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
     rating = rating_from_str(rating_value)  # 非法 → REVIEW_EVENT_INVALID（400）
     rs = _get_review_state(session, card_id=card_id, now=now)
@@ -179,7 +179,7 @@ def _submit_review_inner(
     # client_event_id 兜底（1.3）：先查已有事件（UNIQUE(device_id, client_event_id)）
     existing = session.scalar(
         select(ReviewEvent).where(
-            ReviewEvent.device_id == device_id,
+            ReviewEvent.user_id == user_id,
             ReviewEvent.client_event_id == client_event_id,
         )
     )
@@ -210,7 +210,7 @@ def _submit_review_inner(
     session.add(
         ReviewEvent(
             review_event_id=_uuid4(),
-            device_id=device_id,
+            user_id=user_id,
             card_id=card_id,
             client_event_id=client_event_id,
             rating=rating_value,
@@ -225,7 +225,7 @@ def _submit_review_inner(
 def submit_review(
     session: Session,
     *,
-    device_id: str,
+    user_id: str,
     card_id: str,
     rating: str,
     client_event_id: str,
@@ -235,7 +235,7 @@ def submit_review(
     """评级事务入口（handler 层再包 execute_idempotent，Task 3）。"""
     _, view = _submit_review_inner(
         session,
-        device_id=device_id,
+        user_id=user_id,
         card_id=card_id,
         rating_value=rating,
         client_event_id=client_event_id,

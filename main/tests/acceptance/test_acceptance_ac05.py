@@ -30,12 +30,22 @@ from typing import cast
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Batch, Card, Chapter, Device, LlmCallAttempt, PdfFile, Task
+from infra.db.models import (
+    ApiKey,
+    Batch,
+    Card,
+    Chapter,
+    Device,
+    LlmCallAttempt,
+    PdfFile,
+    Task,
+    User,
+)
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -86,16 +96,49 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
-def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
-    """devices 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）
-    + 页文本（text_chunks——LLM 升级管线规划输入）。"""
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    assert row is not None
+    return str(row)
+
+
+def _link_device(db_path: Path, task_id: str, device: dict[str, str]) -> None:
+    """双头过渡（P4-3）：executor Key 查找仍 device 域（Task 5 切 user）——补种 device_id 双列。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE tasks SET device_id = :d WHERE task_id = :t"),
+            {"d": device["X-Device-ID"], "t": task_id},
+        )
+
+
+def _seed_context(db_path: Path, *, device_id: str, user_id: str) -> dict[str, object]:
+    """users/devices 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）
+    + 页文本（text_chunks——LLM 升级管线规划输入）。PDF/牌组 user 域；Key 仍 device 域（Task 5 前）。
+    """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    password_hash="x",
+                    created_at="2026-08-11T00:00:00.000Z",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
         session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
         session.flush()
         pdf = PdfFile(
             file_id=_uuid(),
-            device_id=device_id,
+            user_id=user_id,
             filename="b.pdf",
             storage_key=_uuid(),
             size_bytes=10,
@@ -104,7 +147,7 @@ def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
         )
         session.add(pdf)
         session.flush()
-        deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
         chapter_ids: list[str] = []
         for i in range(2):
@@ -267,10 +310,13 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     generation_item_id 防重。"""
     client, db_path, settings = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    _link_device(
+        db_path, task_id, device
+    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
 
     # 崩溃模拟（T1 模式）：扫描 = 2 次规划（2 章）+ 批 1 一次生成成功，批 2 前
     # SystemExit（绕过 executor 的 except Exception）；崩溃点 = 第 4 次调用
@@ -422,10 +468,13 @@ def test_acceptance_ac05_cancel_keeps_inserted_cards(
     """场景 2（取消保留）：任务运行中 cancel → CANCELLED + 已入库卡保留，取消后不再处理。"""
     client, db_path, _ = ctx
     device = _device(client)
-    seed = _seed_context(db_path, device_id=device["X-Device-ID"])
+    seed = _seed_context(db_path, device_id=device["X-Device-ID"], user_id=_user_id(db_path))
     resp = client.post("/tasks", json=_payload(seed), headers={**device, **_idem()})
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
+    _link_device(
+        db_path, task_id, device
+    )  # 双头过渡：executor Key 查找仍 device 域（Task 5 切 user）
 
     # 任务运行中：批 1 成功后崩溃暂停（T1 模式）→ 任务 RUNNING + 1 卡已入库
     calls: dict[str, int] = {"n": 0}
