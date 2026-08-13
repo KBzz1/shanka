@@ -3,7 +3,11 @@
 - validate_key：GET /user/balance，401→INVALID、200+is_available→AVAILABLE、200+is_available=false→
   INSUFFICIENT_BALANCE、429/5xx/网络→AppError(API_KEY_UNAVAILABLE)；200 畸形 body（非 JSON/数组）→
   API_KEY_UNAVAILABLE（上游异常口径，不逃逸为 500）；
-- chat：POST /chat/completions（thinking 开关/JSON output/usage 映射/system_fingerprint 透传/错误映射）；
+- chat：POST /chat/completions（可选 system/user + max_tokens、thinking 开关、JSON output、usage
+  映射、system_fingerprint 透传、错误映射）；
+- 错误分类（spec §6.3）：chat 401→API_KEY_UNAVAILABLE(retryable=False)、429/5xx→
+  API_KEY_UNAVAILABLE(retryable=True)、网络/超时→GENERATION_FAILED(retryable=True)、
+  解析失败→GENERATION_FAILED(retryable=False)；validate_key 保持 AppError 不变；
 - thinking 参数以 DeepSeek 官方 API 为准：启用时 `body["thinking"] = {"type": "enabled"}`，禁用时不带该键。
 - R1 live 加固：客户端构造 trust_env=False（不继承 shell 代理——HTTP_PROXY=127.0.0.1:7897 时直连；
   不可直接断言私有属性，用"构造无代理依赖的说明性用例"锁定行为）；
@@ -19,7 +23,7 @@ import pytest
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.llm.deepseek import DeepSeekClient
+from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
 
 
 def _settings(**kw: Any) -> Settings:
@@ -161,6 +165,34 @@ def test_adapter_chat_thinking_enabled() -> None:
     assert captured["json"]["thinking"] == {"type": "enabled"}  # DeepSeek 官方 thinking 参数
 
 
+def test_adapter_chat_supports_stable_system_dynamic_user_and_max_tokens() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": '{"cards":[]}'}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    client.chat(
+        "<GENERATOR_INPUT>{}</GENERATOR_INPUT>",
+        "sk-test",
+        system_prompt="稳定 Generator v3 + Schema",
+        max_tokens=768,
+    )
+    body = captured["json"]
+    assert body["messages"] == [
+        {"role": "system", "content": "稳定 Generator v3 + Schema"},
+        {"role": "user", "content": "<GENERATOR_INPUT>{}</GENERATOR_INPUT>"},
+    ]
+    assert body["max_tokens"] == 768
+
+
 def test_adapter_chat_passthrough_system_fingerprint() -> None:
     """R1 live：上游响应含 system_fingerprint → chat 返回同值透传（driver 按单元记录）。"""
 
@@ -252,3 +284,75 @@ def test_adapter_chat_upstream_error_maps() -> None:
         client.chat("p", "sk-test")
     # chat 时 Key 已保存但可能失效：401 → API_KEY_UNAVAILABLE（非 NOT_SET）
     assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
+
+
+def test_adapter_chat_401_maps_not_retryable() -> None:
+    """401 → RetryableUpstreamError(API_KEY_UNAVAILABLE, retryable=False)：Key 错误不重试（spec §6.3）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "invalid api key"}})
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(RetryableUpstreamError) as excinfo:
+        client.chat("hi", "sk-test")
+    assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
+    assert excinfo.value.retryable is False
+
+
+def _status_handler(status: int) -> Callable[[httpx.Request], httpx.Response]:
+    """返回固定状态码的上游响应 handler（避免循环变量闭包 B023）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": "upstream down"}})
+
+    return handler
+
+
+def test_adapter_chat_429_and_5xx_maps_retryable() -> None:
+    """429/5xx → RetryableUpstreamError(API_KEY_UNAVAILABLE, retryable=True)：上游暂时失败可重试。"""
+
+    for status in (429, 500, 503):
+        client = DeepSeekClient(_settings(), transport=_mock_transport(_status_handler(status)))
+        with pytest.raises(RetryableUpstreamError) as excinfo:
+            client.chat("hi", "sk-test")
+        assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
+        assert excinfo.value.retryable is True
+
+
+def test_adapter_chat_network_error_maps_retryable() -> None:
+    """网络/超时 → RetryableUpstreamError(GENERATION_FAILED, retryable=True)：上游暂时失败可重试。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network down")
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(RetryableUpstreamError) as excinfo:
+        client.chat("hi", "sk-test")
+    assert excinfo.value.code is ErrorCode.GENERATION_FAILED
+    assert excinfo.value.retryable is True
+
+
+def test_adapter_chat_parse_failure_maps_not_retryable() -> None:
+    """解析失败 → RetryableUpstreamError(GENERATION_FAILED, retryable=False)：输出错误走业务重试，不属于上游重试。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json")
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(RetryableUpstreamError) as excinfo:
+        client.chat("hi", "sk-test")
+    assert excinfo.value.code is ErrorCode.GENERATION_FAILED
+    assert excinfo.value.retryable is False
+
+
+def test_adapter_validate_key_unchanged_plain_app_error() -> None:
+    """validate_key 保持 AppError（不引入 RetryableUpstreamError 元数据，行为不变）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={})
+
+    client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
+    with pytest.raises(AppError) as excinfo:
+        client.validate_key("sk-x")
+    assert excinfo.value.code is ErrorCode.API_KEY_UNAVAILABLE
+    assert not isinstance(excinfo.value, RetryableUpstreamError)
