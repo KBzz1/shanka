@@ -51,6 +51,7 @@
 
 - 错误码为稳定字符串,客户端按 `localization_key` 映射文案;不随消息文本变化。
 - `message` 仅面向用户展示,不得包含堆栈、内部路径、SQL 或他人数据;内部细节进服务端日志(以 `request_id` 关联)。
+- **生成链路重试分类**:适配层向上区分可重试性(错误码与 HTTP 见第 7 章)——上游 401(Key 错误)不可重试 → 任务 `FAILED` 不重试;429/5xx/网络/超时可重试 → 账本预算内重试(每操作 2 次重试 = 3 次尝试);输出非法走业务重试,预算同上。
 - 完整错误码表见第 7 章。
 
 ### 1.5 API Key 安全(决策 D-03)
@@ -86,6 +87,7 @@
 | `review_state` | 复习状态 | FSRS 排程状态快照 |
 | `review_event` | 复习事件 | 评级产生的不可变记录 |
 | `AGAIN / HARD / GOOD / EASY` | 忘记 / 模糊 / 记得 /(新增)简单 | FSRS 四档评级 |
+| `generation_unit`(生成单元) | 知识点 | 最小规划单元:一个锚定卡片类型与目标难度的生成任务(见 3.6);数据库表名保持 `knowledge_points`(兼容壳) |
 
 ## 3. 资源模型(单一事实来源)
 
@@ -131,15 +133,17 @@
 | `file_id` | uuid | 创建时必填 | 删除 PDF 后置 `null`(任务保留) |
 | `deck_id` | uuid | 创建时必填 | 删除牌组后置 `null`(任务保留) |
 | `status` | enum | ✓ | 见 4.1 |
-| `stage` | enum | ✗ | `PLANNING` / `GENERATING`,仅运行期有意义 |
-| `selected_chapters` | Chapter[] | ✓ | |
+| `stage` | enum | ✗ | `PLANNING` / `GENERATING` / `SCORING`,仅运行期有意义 |
+| `selected_chapters` | Chapter[] | ✓ | 两阶段语义:PENDING 时为创建快照(保留用户请求与任务视图);首次 PLANNING 抢占时按快照 `chapter_id` 重读章节最新 `name/start_page/end_page` 原子覆盖并冻结为规划快照(见 4.1) |
 | `generation_config` | GenerationConfig | ✓ | 见 3.5 |
 | `cursor` | object | ✗ | `{ "completed_batch_count": int }` 断点续传游标 |
 | `generated_card_count` | int | ✓ | 已生成并入库卡片数 |
 | `total_batch_count` | int | ✗ | 规划完成后可返回 |
 | `completed_batch_count` | int | ✗ | |
+| `completion_reason` | string | ✗ | `NO_GENERATION_UNITS`:全组规划成功但 0 个合法单元的业务空结果(COMPLETED,见 4.1 空单元三分支) |
+| `skipped_planning_group_count` | int | ✓ | 部分规划组失败被跳过的组数(仅部分成功时 > 0) |
 | `resumable` | bool | ✓ | 是否可继续(供前端"继续任务"按钮) |
-| `failure_stage` | enum | ✗ | `PLANNING` / `GENERATING` / `WRITE_BACK` |
+| `failure_stage` | enum | ✗ | `PLANNING` / `GENERATING` / `SCORING` / `WRITE_BACK` |
 | `error_code` | string | ✗ | 失败码 |
 | `created_at` / `started_at` / `ended_at` | datetime | 按需 | |
 | `updated_at` | datetime | ✓ | 长任务轮询刷新区分 |
@@ -148,24 +152,44 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `quantity_tendency` | enum | ✓ | `COMPACT`(精简) / `BALANCED`(均衡) / `EXTENSIVE`(充分覆盖);影响知识点规划粒度:同一章节下 `COMPACT` 规划知识点数 ≤ `BALANCED` ≤ `EXTENSIVE`(可测口径) |
-| `difficulty_ratio` | object | ✓ | `{ "basic": 0.4, "understanding": 0.4, "application": 0.2 }`,和为 1 |
+| `quantity_tendency` | enum | ✓ | `COMPACT`(精简) / `BALANCED`(均衡) / `EXTENSIVE`(充分覆盖);密度只控制**单元预算(上限)**:任务总预算 = 章节数 × 每章基础单元预算 3 × 密度系数(`COMPACT`=1 / `BALANCED`=2 / `EXTENSIVE`=3),即 2 章 6/12/18。可测口径:只承诺预算上限满足 `COMPACT` < `BALANCED` < `EXTENSIVE`;Planner 允许因内容不足少产出,不同任务的实际单元数不承诺严格单调(PRD 5.4.1) |
+| `difficulty_ratio` | object | ✓ | `{ "basic": 0.4, "understanding": 0.4, "application": 0.2 }`,和为 1;三层配额(任务总配额 → 章配额 → 子配额)由代码以最大余数法确定性计算,固定顺序(BASIC < UNDERSTANDING < APPLICATION、章序、组序)消除随机性;Planner 每次调用只拿本组子配额,对某难度超配额时按输出数组相对顺序确定性截断,不重试 |
 | `custom_requirements` | string | ✗ | 仅当前任务生效 |
 
-难度枚举:`BASIC`(基础记忆) / `UNDERSTANDING`(理解分析) / `APPLICATION`(综合应用)。
+难度枚举:`BASIC`(基础记忆) / `UNDERSTANDING`(理解分析) / `APPLICATION`(综合应用);综合应用单元产出开放性问题(场景化提问)或场景判断题,不要求聚合多个原子知识点(组合规则见 3.6)。
 规则:难度比例与自定义要求均**不继承** —— "继承"语义由客户端本地保存上次配置并在新任务请求中显式携带,服务端不存储默认配置(PRD 5.4.2 / 5.4.3)。
 
-### 3.6 KnowledgePoint
+### 3.6 KnowledgePoint(生成单元)
+
+"知识点"概念改名**生成单元(GenerationUnit)**:最小规划单元 = 一个锚定卡片类型与目标难度的生成任务。数据库表名保持 `knowledge_points`(兼容壳),ORM 注释与契约称谓按生成单元更新。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `knowledge_point_id` | uuid | ✓ | |
+| `knowledge_point_id` | uuid | ✓ | 单元 ID(服务端生成) |
 | `task_id` | uuid | ✓ | |
 | `chapter_id` | uuid | 创建时必填 | 源章节删除后置 `null`(名称可从 `tasks.selected_chapters` 快照还原) |
-| `source_chunk_id` | string | ✓ | 来源分片标识 |
-| `topic` | string | ✓ | 知识点主题 |
-| `priority` | int | ✓ | |
+| `source_chunk_ids` | string[] | ✓ | 来源页文本标识列表(`text_chunks.chunk_id`,一页一个);LLM 只能引用本次调用实际提供的页,不能编造(运行时取原文以此列为权威) |
+| `source_chunk_id` | string | ✓ | 兼容投影列 = `source_chunk_ids[0]`(新单元写入;旧数据继续按此列读取) |
+| `learning_objective` | string | ✓ | 学习目标(Planner 输出,语义复用 `topic` 列;不再用"第X章-知识点N"占位) |
+| `target_difficulty` | enum | ✓ | `BASIC` / `UNDERSTANDING` / `APPLICATION`(规划锚定,旧数据为 null) |
+| `card_type` | enum | ✓ | `QUESTION` / `TRUE_FALSE`(规划锚定,旧数据为 null) |
+| `priority` | int | ✓ | 全局顺序(服务端按章序、组序、组内数组顺序合并分配,Planner 不输出数值) |
 | `status` | enum | ✓ | `PENDING` / `PROCESSED` / `SKIPPED` |
+
+**双维锚定**:卡型与目标难度是两个独立维度,规划时同时锚定、生成时遵循,互不派生。Generator 输出卡型不符合锚定 → 代码校验拒绝(进入该单元重试预算);`Card.target_difficulty` 由服务端写规划锚定值(生成时落库,评分时不再补写),不要求模型回传;内容是否达到目标难度由 Rubric 观测。
+
+**组合规则**(难度 × 卡型,规划锚定的形态约束):
+
+| 难度 | 卡型 | 形态 | 约束 |
+| --- | --- | --- | --- |
+| BASIC | QUESTION(默认) / TRUE_FALSE | 原子事实/定义直问或二值判断 | 判断题表述无歧义 |
+| UNDERSTANDING | QUESTION / TRUE_FALSE | 对比/推理/因果 | 同上 |
+| APPLICATION | QUESTION(默认) | 开放性问题(场景化提问,答案多角度分析) | 默认形态 |
+| APPLICATION | TRUE_FALSE(允许) | **场景判断题** | ① 需应用规则/概念才能判断(不能是事实换皮);② 结论可明确二值化;③ `explanation` 给出判断依据 |
+
+校验层不做语义拦截(无法可靠判断"是否事实换皮")——由 Prompt 约束 + Rubric 观测。事实换皮但内容正确、有据时主要降低 `difficulty_score` / `learning_value_score`;只有场景加入无来源条件时才降低 `evidence_score`,结论错误时才降低 `correctness_score`,不得混淆四维含义。
+
+**每单元 1 卡**(N=1 固定):Generator 输出恰好 1 张锚定类型卡,乘法放大与批部分成功歧义同步消除(批语义见 3.7)。
 
 ### 3.7 Batch(批次)
 
@@ -173,19 +197,22 @@
 | --- | --- | --- | --- |
 | `batch_id` | uuid | ✓ | |
 | `task_id` | uuid | ✓ | |
-| `batch_index` | int | ✓ | 批次序号(即游标) |
+| `generation_unit_id` | uuid | ✓ | 生成单元外键(`knowledge_points.knowledge_point_id`);**批 = 单元**:每单元 1 批、1 次生成调用,`UNIQUE(task_id, generation_unit_id)`;旧批次迁移列为 null(仅兼容) |
+| `batch_index` | int | ✓ | 批次序号(即游标)= 单元序号(1..N) |
 | `status` | enum | ✓ | `PENDING` / `PROCESSING` / `SUCCEEDED` / `FAILED` / `SKIPPED` |
-| `generated_item_ids` | string[] | ✗ | 本批产出 `generation_item_id` 列表 |
-| `retry_count` | int | ✓ | 重试计数(上限 2,共 3 次尝试,见 4.2) |
-| `coverage_rate` / `duplicate_rate` | float | ✗ | 整批质量数据(仅观测,FR-10) |
-| `difficulty_distribution` / `chapter_distribution` / `card_type_distribution` | object | ✗ | 同上,仅观测 |
+| `generated_item_ids` | string[] | ✗ | 本批产出 `generation_item_id` 列表(每单元 1 卡,成功时为单值) |
+| `retry_count` | int | ✓ | 重试计数(生成阶段兼容投影;尝试数与重试预算以 `llm_call_attempts` 账本为权威,见 4.2/8.5) |
+| `coverage_rate` / `duplicate_rate` | float | ✗ | 质量观测(FR-10);`coverage_rate` = 该单元是否产出合法卡(0/1,不再恒定 1.0),SKIPPED 批次 = 0 |
+| `difficulty_distribution` / `chapter_distribution` / `card_type_distribution` | object | ✗ | 同上,仅观测;批=单元后为单值分布 |
 | `difficulty_deviation` | float | ✗ | 难度偏差(PRD 5.10) |
-| `cache_hit_tokens` / `cache_miss_tokens` / `output_tokens` | int | ✗ | Prompt Cache 记录(FR-11) |
+| `cache_hit_tokens` / `cache_miss_tokens` / `output_tokens` | int | ✗ | Prompt Cache 记录(FR-11);**生成阶段兼容投影**,全阶段 token 权威在 `llm_call_attempts` |
 | `request_id` | string | ✗ | 模型请求标识(请求层观测,PRD 6.2) |
-| `model` / `prompt_version` / `schema_version` / `rubric_version` | string | ✗ | 版本观测(FR-11:稳定内容结构不变) |
+| `model` / `prompt_version` / `schema_version` / `rubric_version` | string | ✗ | 版本观测(FR-11):生成调用实际使用 generator-output schema 的输出版本,Card v1 是服务端投影后的第二层校验;各调用实际使用的具体 asset name+version 在 `llm_call_attempts` 逐调用记录 |
 | `duration_ms` | int | ✗ | 请求耗时 |
 | `http_status` | int | ✗ | 上游 HTTP 状态 |
 | `created_at` / `ended_at` | datetime | 按需 | |
+
+规则:SUCCEEDED = 恰好 1 张合法卡;合法显式空数组(`{"cards":[]}`)= `SOURCE_INSUFFICIENT` 直接 SKIPPED,不做相同输入的无意义重试;非法响应或锚定不符才进入重试预算,耗尽后 SKIPPED。Batch 的重试/token/版本投影必须由同一次调用结果同步写入,不得形成第二套重试预算。
 
 ### 3.8 Deck
 
@@ -217,8 +244,8 @@
 | `answer_boolean` | bool | ✗ | 仅 `TRUE_FALSE` 卡 |
 | `explanation` | string | ✗ | 仅 `TRUE_FALSE` 卡 |
 | `generation_item_id` | string | ✗ | 仅 `GENERATED` 卡;同一值最多对应一张有效卡片 |
-| `target_difficulty` | enum | ✗ | 仅 `GENERATED` 卡;生成时目标难度(`BASIC` / `UNDERSTANDING` / `APPLICATION`) |
-| `knowledge_point_ids` | uuid[] | ✗ | 仅 `GENERATED` 卡;关联知识点,综合应用卡可关联多个(PRD 5.6) |
+| `target_difficulty` | enum | ✗ | 仅 `GENERATED` 卡;规划锚定的目标难度,生成入库时由服务端写入(评分时不再补写;3.6 双维锚定) |
+| `knowledge_point_ids` | uuid[] | ✗ | 仅 `GENERATED` 卡;关联生成单元(兼容列;本工作包起生成路径不再写多知识点聚合,综合应用语义见 3.6 组合规则) |
 | `evidence_score` / `correctness_score` / `difficulty_score` / `learning_value_score` | int | ✗ | Rubric 各维度 0~3,仅 `GENERATED` 卡(PRD 5.9) |
 | `rubric_total_score` | int | ✗ | Rubric 总分 0~12,仅 `GENERATED` 卡 |
 | `version` | string | ✓ | 变更版本,客户端缓存刷新用(重写时递增,决策 C-05) |
@@ -234,7 +261,7 @@
 | `card_id` | uuid | ✓ | 与卡片一对一 |
 | `state` | enum | ✓ | `NEW` / `LEARNING` / `REVIEW` / `RELEARNING` |
 | `stability` | float | ✓ | FSRS 稳定性(天) |
-| `difficulty` | float | ✓ | FSRS 难度(0~10) |
+| `difficulty` | float | ✓ | FSRS 难度(1~10,py-fsrs 口径) |
 | `due` | datetime | ✓ | 下次到期时间(服务端时间) |
 | `last_review` | datetime | ✗ | 上次复习时间 |
 | `reps` | int | ✓ | 复习次数 |
@@ -303,32 +330,41 @@ updated_at）——样卡不入库、不参与统计与 Rubric（PRD 5.5 数据�
 ### 4.1 Task
 
 ```text
-PENDING → RUNNING ⇄ PAUSED → COMPLETED
-   │         │  │      │
-   │         │  └──────┼──→ CANCELLED(用户取消)
-   └─────────┴─────────┴──→ FAILED(系统级不可恢复)
+POST /tasks → PENDING(stage=PLANNING,创建即返回,幂等保持)
+                 │ 规划 worker CAS 抢占(并发单执行者,不需要用户 resume)
+                 ▼
+RUNNING: stage PLANNING ──规划完成──→ GENERATING ──批循环完成──→ SCORING ──评分完成──→ COMPLETED
+   │                    ⇄ PAUSED            │                      │
+   │                                        └──────────────────────┼──→ CANCELLED(用户取消)
+   └───────────────────────────────────────────────────────────────┴──→ FAILED(系统级不可恢复)
 ```
 
-- `RUNNING ⇄ PAUSED`:**PAUSED 为预留状态**——PRD 5.12 仅定义任务恢复，当前无 `pause` 端点与实现写入路径（实际只会出现 PENDING/RUNNING/COMPLETED/CANCELLED/FAILED）；前端「暂停生成」按钮为本地展示状态，不改变服务端 RUNNING。未来补暂停功能时按本状态机实现（`PAUSED → RUNNING` 原子转移 + `resumable` 抢占）。
+- **PENDING 创建语义**:`POST /tasks` 校验章节归属后写入创建时 `selected_chapters` 快照(保留用户请求与 PENDING 视图)即返回,`status=PENDING + stage=PLANNING`;任务预算超全局硬上限时创建前直接 `400 VALIDATION_ERROR`,不创建任务、不调用 Planner。
+- **PLANNING 阶段**:规划 worker 条件更新 CAS1(`status='PENDING' AND stage='PLANNING'` → `RUNNING`)抢占,同一短事务内按快照 `chapter_id` 重读章节最新 `name/start_page/end_page` 覆盖 `selected_chapters` 并冻结为**规划快照**(抢占前发生的章节页码修改进入本任务,提交后不再影响;孤儿恢复不得再次刷新);所选章节已删除或已不属于该 PDF → 任务 `FAILED`(`failure_stage=PLANNING`,内部原因区分 `CHAPTER_SNAPSHOT_STALE`)。孤儿 `RUNNING+PLANNING` 心跳超时(30 分钟)经 CAS2 接管,接管后先把遗留 STARTED 调用置 UNKNOWN 再按账本恢复。
+- **GENERATING 阶段**:生成 worker 扫描 `RUNNING + stage=GENERATING`(加 stage 条件,避免与规划中任务冲突);批次级抢占沿用 V5B 条件更新;批循环全部完成 → 条件更新 `stage=GENERATING → SCORING`。
+- **SCORING 阶段**:`RUNNING + stage=SCORING`,心跳/孤儿沿用;单次评分 LLM 失败不重试、不阻塞(账本记 FAILED/UNKNOWN,卡片保留);评分完成条件更新 `RUNNING + SCORING → COMPLETED`。`failure_stage=SCORING` 仅用于评分 worker 自身的不可恢复基础设施/数据库错误。进入 SCORING 时卡片已可读(前端显示"卡片已生成,质量统计处理中")。
+- **空单元三分支**(规划结果,决策拍板):全组成功但合法单元 0 个 → `COMPLETED`(`total/completed_batch_count=0`、`generated_card_count=0`、`completion_reason=NO_GENERATION_UNITS`,业务合法结果);全部规划组因上游/输出错误失败 → `FAILED + failure_stage=PLANNING`(不伪装成业务空结果);部分组失败 → 成功组继续生成,`skipped_planning_group_count` 记录跳过组数。
+- `RUNNING ⇄ PAUSED`:**PAUSED 为预留状态**——PRD 5.12 仅定义任务恢复，当前无 `pause` 端点与实现写入路径；前端「暂停生成」按钮为本地展示状态，不改变服务端 RUNNING。未来补暂停功能时按本状态机实现（`PAUSED → RUNNING` 原子转移 + `resumable` 抢占）。
 - 恢复(resume)时仅处理未完成批次;并发 resume 失败者返回 `409 TASK_STATE_CONFLICT`。
 - **孤儿 RUNNING 恢复**:worker 崩溃可能使任务滞留 `RUNNING`;`RUNNING` 带心跳(每批完成后更新 `updated_at`),心跳超时(30 分钟)后任务视为可恢复,允许 resume 抢占(条件更新 `status='RUNNING' AND updated_at < now-30min`)。
 - `FAILED`:仅系统级不可恢复错误(如 API Key 失效、上游持续不可用);保留已入库结果。批次级失败(Schema 重试达上限)不置 `FAILED` —— 该批 `SKIPPED`,任务继续处理其余批次(见 4.2)。
-- `CANCELLED`:用户取消,已入库卡片保留。
+- `CANCELLED`:用户取消,已入库卡片保留;cancel 覆盖 PENDING/RUNNING(含 PLANNING/GENERATING/SCORING),评分阶段取消停止后续评分但保留全部已生成卡。
 - 前端页面状态映射(FR-18):`RUNNING` = 生成中,`PAUSED` = 暂停,`COMPLETED` = 完成。
 
 ### 4.2 KnowledgePoint / Batch
 
 ```text
-KnowledgePoint: PENDING → PROCESSED
-                      └── SKIPPED
+KnowledgePoint(生成单元): PENDING → PROCESSED
+                              └── SKIPPED
 
 Batch: PENDING → PROCESSING → SUCCEEDED
                         │        └── FAILED → PROCESSING(重试上限 2 次,共 3 次尝试) → 仍失败 → SKIPPED(终态,任务继续)
-                        └── SKIPPED
+                        └── SKIPPED(含 SOURCE_INSUFFICIENT 合法弃权,不重试)
 ```
 
 已完成批次不得重复执行;已入库卡片(`generation_item_id`)不得重复写入(AC-05)。
 批次 `SKIPPED` 不代表任务失败;任务仅在系统级错误(API Key 失效、上游持续不可用)时 `FAILED`(见 4.1)。
+重试预算与尝试计数以 `llm_call_attempts` 账本为权威:同一 operation_key 的全部 STARTED/SUCCESS/FAILED/UNKNOWN 尝试计入预算(孤儿 STARTED 转 UNKNOWN 仍计数),达到预算不再发请求;调用前必须先有已提交的 STARTED 占位行。
 
 ### 4.3 卡片复习状态(FSRS)
 
@@ -341,7 +377,7 @@ NEW → LEARNING → REVIEW →(AGAIN)→ RELEARNING →(GOOD/EASY)→ REVIEW
 
 ### 4.4 任务执行架构定式
 
-- **进程内调度器**：PDF 解析、知识点规划、分批生成由 API 进程内后台循环扫描 PENDING 任务/批次执行；任务/批次状态与游标存 DB（**DB 即状态**），不引入外部任务队列（Celery/RQ/Redis）。
+- **进程内调度器**：PDF 解析、规划 worker、生成 worker、评分 worker 由 API 进程内后台循环扫描执行；规划/评分 worker 以条件更新 CAS 抢占（并发单执行者），任务/批次状态与游标存 DB（**DB 即状态**），LLM 调用尝试与全阶段 token 以 `llm_call_attempts` 账本为权威，不引入外部任务队列（Celery/RQ/Redis）。
 - **多实例演进**：孤儿 RUNNING 心跳恢复（30 分钟）+ DB 条件更新抢占已支持多 worker；未来多实例仅增加 DB 轮询调度，业务逻辑不变。
 - 禁止以性能为由提前引入任务队列。
 
@@ -430,11 +466,10 @@ Scheduler(
 
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |
-| POST | `/v1/tasks` | 接受样卡 → 创建任务并启动生成(含规划与分批) | ✓ |
-| GET | `/v1/tasks/{task_id}` | 长任务轮询:状态、stage、已生成数、批次进度、失败码、是否可继续(FR-18) | - |
+| POST | `/v1/tasks` | 接受样卡 → 创建任务(`PENDING + stage=PLANNING`,创建即返回,幂等保持),规划 worker 异步接管;任务预算超全局硬上限 → `400 VALIDATION_ERROR`(不创建) | ✓ |
+| GET | `/v1/tasks/{task_id}` | 长任务轮询:状态、stage(`PLANNING/GENERATING/SCORING`)、已生成数、批次进度、失败码、是否可继续(FR-18) | - |
 | POST | `/v1/tasks/{task_id}/resume` | 断点续传,仅处理未完成批次 | ✓ |
 | POST | `/v1/tasks/{task_id}/cancel` | 取消任务 | ✓ |
-| POST | `/v1/tasks/estimate` | 创建任务前价格预估(区间估值,单位元):请求 `{chapter_ids, generation_config}`(空章节/非法配置 → 400 VALIDATION_ERROR,校验与 POST /tasks 同);响应 `{knowledge_point_count, estimated_card_count, price_low, price_high, currency}`;纯计算、不落库、**豁免幂等键**(与 6.3 /samples 同)、不需要 API Key | 豁免 |
 
 ### 6.5 牌组与卡片(FR-03/14)
 
@@ -499,7 +534,9 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | GET | `/v1/observability/quality-summary?group_by=model\|pdf\|difficulty&days=30` | 跨任务质量聚合:Rubric 各维平均分、覆盖/重复率均值、任务完成率、成本汇总;按 group_by 分组 | - |
 
 - 隔离口径：按当前 `device_id` 聚合（与业务数据同隔离）；跨设备聚合留给未来运营后台。
-- 成本汇总（O-6）：按"价格配置常量"换算 `cache_hit_tokens` / `cache_miss_tokens` / `output_tokens` 为估算金额，hit/miss/output 分开计价；价格常量取 DeepSeek 官方定价、标注生效日期，不固化进 DB。
+- **分组键定义**：`model` = `Batch.model`；`pdf` = 任务所属 `file_id`；`difficulty` = `Batch.generation_unit_id` → 对应单元的 `target_difficulty`（**不能只依赖 Card**，否则生成失败、没有 Card 的 coverage=0 批次丢失；单元缺失/锚定缺失 → `unknown`）。聚合结果按 `rubric_version` 拆子组——查询窗口同时包含多版本时不得无标识混算。
+- **评分样本口径**：各评分维度只以对应字段非 NULL 的卡为分母（NULL 不计 0 分、不进分母）；`eligible_card_count` = 经批次归属的卡数，`scored_card_count` = `rubric_total_score` 非 NULL 的卡数，`sampling_rate` = `scored/eligible`（分母 0 时返回 null）；覆盖/重复率均值含 SKIPPED 批次（coverage=0 计入分母）。
+- 成本汇总（O-6）：按"价格配置常量"换算 `cache_hit_tokens` / `cache_miss_tokens` / `output_tokens` 为估算金额，hit/miss/output 分开计价；价格常量取 DeepSeek 官方定价、标注生效日期，不固化进 DB。**成本口径：`cost_estimate` 为 generation-stage-only**（Batch token 列为生成阶段兼容投影），不得冒充全链路成本；全链路成本按 `llm_call_attempts` 账本分 stage 汇总，禁止把 Batch 投影再次相加造成双计。
 - `/healthz`（存活）、`/readyz`（就绪:DB 连接 + 存储可写，失败 503）、`/metrics`（Prometheus 文本）、`/openapi.json`（接口文档，前端对接在线拉取）为运行观测基础端点，**豁免 X-Device-ID 鉴权**（探针/采集器无设备上下文）。
 
 ## 7. 错误码表
@@ -517,7 +554,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | | `PDF_TOC_MISSING` | 422 | 无可用目录结构(终止流程) |
 | | `PDF_NOT_FOUND` | 404 | 不存在或非本设备(统一 404,不暴露存在性) |
 | | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本设备(统一 404) |
-| API Key | `API_KEY_UNAVAILABLE` | 502 | 上游校验不可用,可重试 |
+| API Key | `API_KEY_UNAVAILABLE` | 502 | Key 缺失/解密失败或上游不可用(401/429/5xx/网络);生成链路中 401(Key 错误)不可重试 → 任务 `FAILED`,429/5xx/网络/超时可重试(账本预算内) |
 | | `API_KEY_NOT_SET` | 422 | 样卡 / 任务启动时未保存 Key |
 | 任务 | `TASK_NOT_FOUND` | 404 | |
 | | `TASK_STATE_CONFLICT` | 409 | 非法状态转移(并发 resume、重复完成) |
@@ -533,6 +570,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | | `REVIEW_EVENT_CONFLICT` | 409 | 同 `client_event_id` 但 `card_id` / `rating` 与首次不一致 |
 
 注:API Key 校验结果(`INVALID` / `INSUFFICIENT_BALANCE`)经 `200 + ApiKey.status` 返回,不产生错误响应(见 6.2)。跨设备资源访问一律返回 404,不暴露资源存在性(1.1)。
+注:生成链路重试分类(适配层 `retryable` 元数据,1.4)——上游 401(Key 错误)非重试;429/5xx/网络/超时重试;响应解析失败(`GENERATION_FAILED`)与 Schema/锚定非法属业务重试,预算同为每操作 2 次重试 = 3 次尝试,由 `llm_call_attempts` 账本计数。
 
 ## 8. 运行可观测性（观测范围仅 DeepSeek API）
 
@@ -565,17 +603,24 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 
 ### 8.4 成本观测（O-6）
 
-- 原始 token 数据(`cache_hit_tokens` / `cache_miss_tokens` / `output_tokens`)落 Batch 表,不变。
+- 原始 token 数据(`cache_hit_tokens` / `cache_miss_tokens` / `output_tokens`)落 Batch 表,为**生成阶段兼容投影**;全阶段 token 以 `llm_call_attempts` 账本为权威(分 stage 汇总)。
 - 估算成本在聚合时按"价格配置常量"换算;常量取 DeepSeek 官方定价、标注生效日期;价格调整只改配置,不动历史数据。
-- 出口:8.3 `llm_tokens_total` 与 6.10 聚合接口的成本汇总。
-- **token 用量估算模型(事前预估)**:估算常量 = 对 8.3/6.2 观测数据(Batch 实际 token)的离线校准值——`PROMPT_TOKENS_PER_KP=1500` / `OUTPUT_TOKENS_PER_KP=3300`(2026-08-12 校准自 R1 live 实测,向上取整偏保守)、`custom_requirements` 每字符 ≈0.5 token;换模型/换书籍时单点重新校准,消费方零改动。
-- 预估输入映射与 V4 规划同口径:知识点数 = 章节数 × 3 × 密度系数(`COMPACT=1/BALANCED=2/EXTENSIVE=3`),每知识点一卡。
-- 区间口径(8.3 hit/miss 边界):`price_low` = 全部 prompt 命中缓存(hit ratio 100%),`price_high` = 全部未命中(0%);output 固定价;复用本节约价档位。
+- 出口:8.3 `llm_tokens_total` 与 6.10 聚合接口的成本汇总(`cost_estimate` 标注 generation-stage-only,见 6.10)。
+- 事前价格预估(`/tasks/estimate` 与 token 用量估算模型)已删除(2026-08-12 用户拍板),由任务级全局硬上限与 6.10 事后成本观测替代。
 
 ### 8.5 评估骨架（O-5）
 
-- Rubric 评分执行者:LLM-as-judge;评分 prompt 资产: `agent_evolution/rubrics/v1/scoring-prompt.md`。
-- `rubric_version` / `prompt_version` / `schema_version` 字段值 = `agent_evolution/manifest.json` 中对应 version。
+- Rubric 评分执行者:LLM-as-judge;评分在独立 SCORING 阶段执行(4.1),评分 Prompt 资产入口:
+  `agent_evolution/manifest.json` 的 `prompts.scoring`。
+- 当前资产登记:Planner Prompt v3 / planner-output Schema v2;Generator Prompt v3 /
+  generator-output Schema v2 / 投影后 card Schema v1;Rewrite Prompt v3 / generator-output
+  Schema v2 / 投影后 card Schema v1;Scoring Prompt v2 / scoring-output Schema v2 / Rubric v2。
+  具体 path 以 manifest 为唯一权威,禁止运行时绕过 manifest 读取相对路径。
+- `rubric_version` / `prompt_version` / `schema_version` 按每次调用实际使用的入口记录,不能用
+  单个全局 schema_version 混写 card v1 与 generator/planner/scoring output v2。
+- **调用账本(`llm_call_attempts`)逐调用记录**实际使用的 `prompt_name/prompt_version`、
+  `schema_name/schema_version`、`rubric_version`(不适用列 NULL)以及 usage/状态/错误码;
+  账本是重试预算、调用上限与全阶段 token 的权威(4.2/6.10/8.4)。
 - 评分请求记录:prompt 版本 + 输入摘要 + 输出分;不落完整 prompt。
 
 ## 9. 与 PRD 的对照
@@ -593,3 +638,4 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | 6.9 质量观测 | FR-10 / FR-11 / AC-07 | 新增(审核修复) |
 | 3.9 Rubric 与关联字段 | 5.9 / 5.6 / 6.3 / AC-07 | 修复(审核) |
 | 8 运行可观测性 / 6.10 聚合观测 | PRD 8 核心指标 / FR-10 / FR-11 | 新增(设计规格 6422765) |
+| 3.5/3.6 生成单元与锚定 / 3.7 批=单元 / 4.1 任务状态机 / 6.10 分组键 | 5.4.1 / 5.6 / 5.7 | 一致(LLM 链路升级工作包契约同步) |

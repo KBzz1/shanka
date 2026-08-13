@@ -17,12 +17,13 @@
 
 ```text
 devices 1──N pdf_files 1──N chapters
+                    └──N text_chunks
 devices 1──N decks 1──N cards 1──1 review_states
-devices 1──N tasks 1──N batches
-               │ └──N knowledge_points
+devices 1──N tasks 1──N batches ──N knowledge_points
 devices 1──N review_events ──N cards
 devices 1──1 api_keys
 devices 1──N idempotency_keys
+devices 1──N llm_call_attempts
 ```
 
 ## 2. 表定义
@@ -87,15 +88,17 @@ devices 1──N idempotency_keys
 | file_id | TEXT | NULL, FK → pdf_files ON DELETE SET NULL | 删除 PDF 后任务保留,file_id 置空 |
 | deck_id | TEXT | NULL, FK → decks ON DELETE SET NULL | 目标牌组;删除牌组后置空,任务保留(审核修复) |
 | status | TEXT | NOT NULL | `PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED` |
-| stage | TEXT | NULL | `PLANNING / GENERATING` |
-| selected_chapters | TEXT | NOT NULL | 章节快照(JSON),与源 chapter 解耦 |
+| stage | TEXT | NULL | `PLANNING / GENERATING / SCORING` |
+| selected_chapters | TEXT | NOT NULL | 章节快照(JSON),与源 chapter 解耦;**两阶段语义**:POST /tasks 写入创建快照(保留用户请求与 PENDING 视图);首次 PLANNING 抢占(CAS1)同一短事务内按快照 chapter_id 重读章节最新 name/start_page/end_page 覆盖并冻结为规划快照 |
 | generation_config | TEXT | NOT NULL | 数量倾向/难度比例/自定义要求(JSON) |
 | cursor | TEXT | NULL | `{ "completed_batch_count": int }`(JSON);游标为唯一源,与 `completed_batch_count` 列同事务原子写入 |
 | generated_card_count | INTEGER | NOT NULL DEFAULT 0 | 已入库卡片数 |
 | total_batch_count | INTEGER | NULL | 规划完成后写入 |
 | completed_batch_count | INTEGER | NULL | |
+| completion_reason | TEXT | NULL | 空单元三分支:`NO_GENERATION_UNITS`(全组成功但 0 个合法单元,COMPLETED) |
+| skipped_planning_group_count | INTEGER | NOT NULL DEFAULT 0 | 部分规划组失败被跳过的组数 |
 | resumable | INTEGER | NOT NULL DEFAULT 0 | 0/1 |
-| failure_stage | TEXT | NULL | `PLANNING / GENERATING / WRITE_BACK` |
+| failure_stage | TEXT | NULL | `PLANNING / GENERATING / SCORING / WRITE_BACK` |
 | error_code | TEXT | NULL | |
 | created_at / started_at / ended_at / updated_at | TEXT | 按需 | |
 
@@ -103,39 +106,47 @@ devices 1──N idempotency_keys
 
 ### 2.6 knowledge_points
 
+表名保持 `knowledge_points`(生成单元兼容壳,契约 3.6);"知识点"语义已升级为**生成单元**——最小规划单元 = 一个锚定卡片类型与目标难度的生成任务。
+
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
-| knowledge_point_id | TEXT | PK | |
+| knowledge_point_id | TEXT | PK | 单元 ID(服务端生成) |
 | task_id | TEXT | NOT NULL, FK → tasks ON DELETE CASCADE | |
 | chapter_id | TEXT | NULL | 章节快照引用;章节删除后置空,名称经 `tasks.selected_chapters` 快照还原(契约 3.6) |
-| source_chunk_id | TEXT | NOT NULL | 来源分片标识 |
-| topic | TEXT | NOT NULL | |
-| priority | INTEGER | NOT NULL | |
+| source_chunk_ids | TEXT | NULL | 来源页文本标识列表(`text_chunks.chunk_id`,TEXT JSON,一页一个);运行时取原文以本列为权威;旧数据无值,新数据代码保证必填 |
+| source_chunk_id | TEXT | NOT NULL | 兼容投影列 = `source_chunk_ids[0]`(新单元写入;旧数据继续按此列读取) |
+| topic | TEXT | NOT NULL | 学习目标(Planner 输出,语义复用;不再"第X章-知识点N"占位) |
+| target_difficulty | TEXT | NULL | 规划锚定:`BASIC / UNDERSTANDING / APPLICATION`;旧数据无值,新数据保证必填 |
+| card_type | TEXT | NULL | 规划锚定:`QUESTION / TRUE_FALSE`;旧数据无值,新数据保证必填 |
+| priority | INTEGER | NOT NULL | 全局顺序(服务端按章序、组序、数组顺序合并分配) |
 | status | TEXT | NOT NULL | `PENDING / PROCESSED / SKIPPED` |
 
 索引:`(task_id)`。
 
 ### 2.7 batches
 
+**批 = 生成单元**:每单元 1 批、1 次生成调用(1 单元 1 卡);删除 offset 反推知识点的旧逻辑。
+
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | batch_id | TEXT | PK | |
 | task_id | TEXT | NOT NULL, FK → tasks ON DELETE CASCADE | |
-| batch_index | INTEGER | NOT NULL | 批次序号(游标) |
+| generation_unit_id | TEXT | NULL, FK → knowledge_points ON DELETE SET NULL | 生成单元外键;新数据保证必填;迁移列为 NULL 仅兼容旧批次 |
+| batch_index | INTEGER | NOT NULL | 批次序号(游标)= 单元序号(1..N) |
 | status | TEXT | NOT NULL | `PENDING / PROCESSING / SUCCEEDED / FAILED / SKIPPED` |
-| generated_item_ids | TEXT | NOT NULL DEFAULT '[]' | 本批 `generation_item_id` 列表(JSON) |
-| retry_count | INTEGER | NOT NULL DEFAULT 0 | 重试计数 |
-| coverage_rate / duplicate_rate | REAL | NULL | 整批质量(仅观测,FR-10) |
-| difficulty_distribution / chapter_distribution / card_type_distribution | TEXT | NULL | JSON,同上 |
+| generated_item_ids | TEXT | NOT NULL DEFAULT '[]' | 本批 `generation_item_id` 列表(JSON;每单元 1 卡,成功时为单值) |
+| retry_count | INTEGER | NOT NULL DEFAULT 0 | 重试计数(生成阶段兼容投影;尝试数与重试预算以 `llm_call_attempts` 为权威) |
+| coverage_rate / duplicate_rate | REAL | NULL | 质量观测(FR-10);`coverage_rate` = 该单元是否产出合法卡(0/1,不再恒 1.0),SKIPPED 批次 = 0 |
+| difficulty_distribution / chapter_distribution / card_type_distribution | TEXT | NULL | JSON,同上;批=单元后为单值分布 |
 | difficulty_deviation | REAL | NULL | 难度偏差(契约 3.7,审核修复) |
-| cache_hit_tokens / cache_miss_tokens / output_tokens | INTEGER | NULL | Prompt Cache(FR-11) |
+| cache_hit_tokens / cache_miss_tokens / output_tokens | INTEGER | NULL | Prompt Cache(FR-11);生成阶段兼容投影,全阶段 token 权威在 `llm_call_attempts` |
 | request_id | TEXT | NULL | 模型请求标识(请求层观测,PRD 6.2) |
-| model / prompt_version / schema_version / rubric_version | TEXT | NULL | 版本观测(FR-11) |
+| model / prompt_version / schema_version / rubric_version | TEXT | NULL | 版本观测(FR-11);由同一次调用结果同步写入,各调用实际 asset name+version 在 `llm_call_attempts` 逐调用记录 |
 | duration_ms | INTEGER | NULL | 请求耗时 |
 | http_status | INTEGER | NULL | 上游 HTTP 状态 |
 | created_at / ended_at | TEXT | 按需 | |
 
-唯一约束:`UNIQUE (task_id, batch_index)`(游标完整性,断点续传依据)。
+唯一约束:`UNIQUE (task_id, batch_index)`(游标完整性,断点续传依据);`UNIQUE (task_id, generation_unit_id)`(新数据必填;SQLite 下 NULL 不参与冲突,兼容旧批次)。
 
 ### 2.8 decks
 
@@ -238,6 +249,58 @@ devices 1──N idempotency_keys
 - 请求体一致性:重复请求携带相同 `Idempotency-Key` 时,比对 `request_body_hash` 与首次记录;不一致 → `409 IDEMPOTENCY_CONFLICT`(契约 1.3)。
 - 保留策略:TTL 90 天(幂等窗口只需覆盖客户端重试周期),清理任务定期删除过期记录(审核修复)。
 
+### 2.13 text_chunks
+
+按文件页码持久化文本(LLM 链路升级工作包新增):scanner PARSED 时完整解析每页文本,**一页一行、与章节解耦**——不保存 `chapter_id`,不在扫描阶段按章节切块;章节名称/页码可在 PARSED 后修改,页文本不随章节编辑、删除而重建。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| chunk_id | TEXT | PK | 服务端按 `(file_id, page_number, content_sha256)` 确定性生成;同一 PDF 内容的页标识稳定 |
+| file_id | TEXT | NOT NULL, FK → pdf_files ON DELETE CASCADE | 删除 PDF 时按 file_id 级联清理全文页数据 |
+| page_number | INTEGER | NOT NULL | 页码(一页一行) |
+| char_count | INTEGER | NOT NULL | 页字符数(规划分组/配额依据) |
+| content_sha256 | TEXT | NOT NULL | 页文本摘要(输入指纹/漂移检测依据) |
+| content | TEXT | NOT NULL | 完整页文本(功能数据;完整 PDF 文本/完整 Prompt/原文样例仍禁止写日志、审计与调用账本) |
+| created_at | TEXT | NOT NULL | |
+
+唯一约束:`UNIQUE (file_id, page_number)`。索引:`(file_id, page_number)`。
+重解析幂等:先清理该 file_id 的既有页文本再重建;章节范围内所有页均无有效文本时该章不发 Planner 请求,作为成功空结果处理。
+
+### 2.14 llm_call_attempts
+
+LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限与全阶段 token 的权威**。任何外部 chat 调用必须先有已提交的 STARTED 占位行(调用前持久化),Task 上不设冗余计数列。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| call_id | TEXT | PK | |
+| device_id | TEXT | NOT NULL, FK → devices | 数据归属 |
+| scope_type / scope_id | TEXT | NOT NULL | `TASK` / `CARD`;任务链路 scope_id=task_id,单卡重写 scope_id=card_id |
+| task_id | TEXT | NULL, FK → tasks ON DELETE CASCADE | 可空;手动/导入卡重写没有生成任务 |
+| stage | TEXT | NOT NULL | `PLANNING / GENERATING / SCORING / REWRITE` |
+| operation_key | TEXT | NOT NULL | 规划含 chapter/group/input fingerprint;生成含 batch_id;评分含确定性 group key;重写含 card_id/card_version/Idempotency-Key hash |
+| attempt_no | INTEGER | NOT NULL | 同一操作的第几次实际尝试 |
+| input_fingerprint | TEXT | NOT NULL | 输入身份(不保存完整 Prompt/原文) |
+| model | TEXT | NOT NULL | 实际模型值 |
+| prompt_name / prompt_version | TEXT | NOT NULL | 本调用实际使用的 prompt 资产名/版本 |
+| schema_name / schema_version | TEXT | NULL | 本调用实际使用的 output schema;不适用则 NULL |
+| rubric_version | TEXT | NULL | 本调用实际使用的 rubric 版本;不适用则 NULL |
+| cache_hit / cache_miss / output_tokens | INTEGER | NULL | usage 原样 |
+| http_status | INTEGER | NULL | 上游 HTTP 状态 |
+| duration_ms | INTEGER | NULL | 请求耗时 |
+| status | TEXT | NOT NULL DEFAULT 'STARTED' | `STARTED / SUCCESS / FAILED / UNKNOWN` |
+| error_code | TEXT | NULL | 失败类别 |
+| normalized_result | TEXT | NULL | 仅 PLANNING 成功时保存通过校验的规范化 units JSON;不保存原文、完整 Prompt 或原始模型响应 |
+| created_at / finished_at | TEXT | 按需 | 调用占位与结束时间 |
+
+唯一约束:`UNIQUE (scope_type, scope_id, stage, operation_key, attempt_no)`。索引:`(device_id, created_at)`、`(task_id, stage, operation_key)`。
+规则:
+
+- 重试判定:该 operation_key 的 STARTED/SUCCESS/FAILED/UNKNOWN 尝试总数达到预算 → 不再发请求;孤儿 STARTED 转 UNKNOWN 并计数,不能仅统计 FAILED。
+- 同一 `operation_key + input_fingerprint` 最多一个 SUCCESS;领域写入与调用终态在同一事务提交,禁止账本已 SUCCESS 但业务结果未落库。
+- Rewrite 的 operation_key 必须区分同一卡片的多次用户请求(不得用 `rewrite:{card_id}` 让历史失败影响后续合法重写)。
+- Scoring 上限:账本 stage=SCORING 的全部尝试数 ≤ `max_scoring_calls_per_task`(抽样预保证 + 调用前账本条件校验)。
+- 成本口径:账本是 Planner/Generator/Scoring/Rewrite 总 token 的唯一来源;Batch token 仅是 GENERATING 的兼容投影,不得再次相加双计。
+
 ## 3. 级联与并发
 
 | 删除对象 | 级联效果 |
@@ -275,7 +338,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 | devices / api_keys | 3.1 ApiKey |
 | pdf_files / chapters | 3.2 PdfFile / 3.3 Chapter |
 | tasks / generation_config | 3.4 Task / 3.5 GenerationConfig |
-| knowledge_points | 3.6 KnowledgePoint |
+| knowledge_points | 3.6 KnowledgePoint(生成单元) |
 | batches | 3.7 Batch |
 | decks | 3.8 Deck |
 | cards | 3.9 Card |
@@ -283,6 +346,8 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 | review_events | 3.11 ReviewEvent |
 | (聚合计算) | 3.12 StatsDashboard |
 | idempotency_keys | 总则 1.3 幂等约定 |
+| text_chunks | 3.6 KnowledgePoint 来源页底座(来源分片标识) |
+| llm_call_attempts | 3.7 Batch / 8.5 评估骨架(调用账本) |
 
 ## 7. 演进路径
 

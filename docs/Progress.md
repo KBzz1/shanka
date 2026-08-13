@@ -292,7 +292,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | --- | --- | --- | --- |
 | R-01 | `RESOLVED` | 要求校验 localization_key↔文案清单，但正式契约未指定清单 | 唯一位置 = `app/errors.py`（ErrorCode 注册表 + LOCALIZATION_KEYS 显式清单），派生规则 `"error." + 错误码.lower()`；`test_localization_guard` 校验派生集合与清单全等（F0-T4/T6，已实测） |
 | R-02 | `RESOLVED` | Conda 环境已创建且当前依赖已安装，但 pyproject 无 build backend/package discovery，`pip install -e .[dev]` 因多顶层包失败；实现依赖和锁也未补齐 | hatchling build backend + wheel packages 四包；pip-tools 锁定为唯一锁定方式，`requirements-dev.lock`（46 钉版本）干净环境复现通过；依赖仍只维护在 pyproject（F0-T1） |
-| R-03 | `OPEN` | agent v1 已版本化，但 CHANGELOG 明确待 V4/V5A 精修 | 修改须新版本目录 + manifest + CHANGELOG，不原地改 v1 |
+| R-03 | `PLANNED` | agent v1 已版本化，但 CHANGELOG 明确待 V4/V5A 精修 | 修改须新版本目录 + manifest + CHANGELOG，不原地改 v1；**LLM 链路升级工作包覆盖（PLANNED）**：完成本地实现与契约守卫后仍不关闭，须通过受控真实三链路（Planner→Generator→Scoring）canary 才能改 RESOLVED |
 | R-04 | `ACCEPTED` | metrics 是运行端点，但有意不进业务 OpenAPI | F1/R1 直接测试，不强行写入 OpenAPI |
 | R-05 | `ACCEPTED` | PRD 成功率/恢复率不能由单测或 60 个受控 generation units 完整证明；相同书籍/模型也限制独立性 | R1 只对预先固定抽样框中的单元失败率作带条件统计界限；另报重试、18 张描述性人工复核和自动化，不外推全书/生产质量 |
 | R-06 | `RESOLVED` | deployment.md 描述未来 Cloudflare/HTTPS 真机入口，但当前阶段明确只做本机模拟 | Tunnel、TLS、公网和真机联网属于当前 Goal 之外的后续部署；不得阻塞 F0～R1 DONE，代码只保留可配置监听和反向代理兼容性；**2026-08-11 部署工作包完成**：Cloudflare Tunnel 落地（隧道 shanka、公共主机名 shanka.kbzz1.top、cloudflared systemd 常驻、scripts/run.sh、main/data/ 集中），公网 healthz/readyz 200、真机移动网络实测 306ms（阶梯 1 可用）；设计/计划/实测记录见 superpowers/specs、superpowers/plans、frontend/backend-integration.md |

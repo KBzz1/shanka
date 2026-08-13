@@ -935,10 +935,11 @@ components:
       enum: [PENDING, RUNNING, PAUSED, COMPLETED, FAILED, CANCELLED]
     TaskStage:
       type: string
-      enum: [PLANNING, GENERATING]
+      enum: [PLANNING, GENERATING, SCORING]
+      description: 运行期阶段;PENDING 创建即 stage=PLANNING(规划 worker 异步接管)
     FailureStage:
       type: string
-      enum: [PLANNING, GENERATING, WRITE_BACK]
+      enum: [PLANNING, GENERATING, SCORING, WRITE_BACK]
     QuantityTendency:
       type: string
       enum: [COMPACT, BALANCED, EXTENSIVE]
@@ -1101,6 +1102,7 @@ components:
         - selected_chapters
         - generation_config
         - generated_card_count
+        - skipped_planning_group_count
         - resumable
         - created_at
         - updated_at
@@ -1124,6 +1126,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Chapter'
+          description: 两阶段语义:PENDING 时为创建快照;首次 PLANNING 抢占时重读章节最新页码原子覆盖并冻结为规划快照(契约 4.1)
         generation_config:
           $ref: '#/components/schemas/GenerationConfig'
         cursor:
@@ -1134,6 +1137,12 @@ components:
           type: [integer, 'null']
         completed_batch_count:
           type: [integer, 'null']
+        completion_reason:
+          type: [string, 'null']
+          description: NO_GENERATION_UNITS(全组规划成功但 0 个合法单元的业务空结果,COMPLETED)
+        skipped_planning_group_count:
+          type: integer
+          description: 部分规划组失败被跳过的组数(仅部分成功时 > 0)
         resumable:
           type: boolean
         failure_stage:
@@ -1228,7 +1237,7 @@ components:
 
     KnowledgePoint:
       type: object
-      description: 内部资源(契约 3.6);本期无独立接口,经任务详情与批次观测间接呈现
+      description: 内部资源(契约 3.6 生成单元;表名保持 knowledge_points 兼容壳);本期无独立接口,经任务详情与批次观测间接呈现。规划锚定列(target_difficulty/card_type/source_chunk_ids)与学习目标(topic 列语义)在内部表中,视图仅承载观测七字段
       required:
         - knowledge_point_id
         - task_id
@@ -1258,7 +1267,7 @@ components:
 
     Batch:
       type: object
-      description: 内部资源(契约 3.7);经 GET /v1/tasks/{task_id}/batches 观测返回(契约 6.9)
+      description: 内部资源(契约 3.7;批=生成单元,每单元 1 批 1 次生成调用,每单元 1 卡);经 GET /v1/tasks/{task_id}/batches 观测返回(契约 6.9)。generation_unit_id 为内部列(观测归因用),视图不返回;尝试数与 token 权威在 llm_call_attempts 账本,Batch token/版本列为生成阶段兼容投影
       required: [batch_id, task_id, batch_index, status, retry_count]
       properties:
         batch_id:
@@ -1622,6 +1631,7 @@ components:
       properties:
         group_by:
           type: string
+          description: model=batch.model;pdf=任务 file_id;difficulty=Batch.generation_unit_id 对应单元的 target_difficulty(单元缺失/锚定缺失为 unknown)
         groups:
           type: array
           items:
@@ -1629,11 +1639,25 @@ components:
             properties:
               key:
                 type: string
+              rubric_version:
+                type: [string, 'null']
+                description: 分组按批次 rubric_version 拆子组;跨版本窗口不混算(null 为无评分版本批次)
               card_count:
                 type: integer
+                description: 经批次归属的卡数(= eligible_card_count)
+              eligible_card_count:
+                type: integer
+                description: 评分样本候选卡数(经批次归属)
+              scored_card_count:
+                type: integer
+                description: rubric_total_score 非 NULL 的卡数(已被评分口径)
+              sampling_rate:
+                type: [number, 'null']
+                description: scored_card_count / eligible_card_count;分母 0 时为 null
               evidence_avg:
                 type: number
                 format: float
+                description: 仅以 evidence_score 非 NULL 的卡为分母(NULL 不计 0 分)
               correctness_avg:
                 type: number
                 format: float
@@ -1646,6 +1670,7 @@ components:
               coverage_avg:
                 type: number
                 format: float
+                description: 含 SKIPPED 批次(coverage=0 计入分母)
               duplicate_avg:
                 type: number
                 format: float
@@ -1664,6 +1689,9 @@ components:
                     type: number
                   total:
                     type: number
+                  scope:
+                    type: string
+                    description: 恒为 generation-stage-only(Batch token 为生成阶段兼容投影,非全链路成本)
         days:
           type: integer
         generated_at:

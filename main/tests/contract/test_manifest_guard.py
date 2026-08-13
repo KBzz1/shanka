@@ -6,8 +6,10 @@ import re
 from tests.contract.support import (
     MANIFEST_PATH,
     STRUCTURE_CONTRACT_PATH,
+    VERSION_KEYS,
     extract_version_declarations,
     load_manifest,
+    manifest_version,
 )
 
 
@@ -32,17 +34,19 @@ def test_manifest_asset_versions_and_paths_valid() -> None:
 
 
 def test_manifest_versions_match_structure_contract_declarations() -> None:
+    """红线 5：契约版本键（兼容键 + T5 扩展键共 10 键）与 manifest 对应资产逐键相等。
+
+    契约当前不显式声明版本（8.5 只引用 manifest 为唯一权威）——一旦出现
+    `<key> vN` 声明，必须与 manifest 中该资产版本完全一致。
+    """
     manifest = load_manifest()
-    prompt_versions = {entry["version"] for entry in manifest["prompts"].values()}
-    expected = {
-        "prompt_version": prompt_versions,
-        "schema_version": {entry["version"] for entry in manifest["schemas"].values()},
-        "rubric_version": {manifest["rubrics"]["main"]["version"]},
-    }
+    expected = {key: manifest_version(manifest, path) for key, path in VERSION_KEYS}
     declared = extract_version_declarations(STRUCTURE_CONTRACT_PATH.read_text(encoding="utf-8"))
-    for key, versions in expected.items():
+    for key, version in expected.items():
         if key in declared:
-            assert declared[key] in versions, f"{key}: 契约声明 {declared[key]} 与 manifest 不一致"
+            assert declared[key] == version, (
+                f"{key}: 契约声明 {declared[key]} 与 manifest 资产版本 {version} 不一致"
+            )
 
 
 def test_manifest_json_parseable() -> None:

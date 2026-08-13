@@ -184,11 +184,37 @@ def load_manifest() -> dict[str, Any]:
         return cast(dict[str, Any], json.load(f))
 
 
+# 契约版本声明键 → manifest 资产路径（Architecture AGENTS.md 6 / 红线 5）。
+# 兼容键 prompt_version/schema_version 保留 Batch 观测语义（= generator prompt /
+# generator-output schema，infra/llm/prompts.py asset_versions 注释）；其余为 T5 扩展键
+# （LLM 链路升级：调用级观测按具体 asset name+version 记录）。
+VERSION_KEYS: tuple[tuple[str, str], ...] = (
+    ("prompt_version", "prompts.generator"),
+    ("schema_version", "schemas.generator_output"),
+    ("generator_prompt_version", "prompts.generator"),
+    ("planner_prompt_version", "prompts.planner"),
+    ("rewrite_prompt_version", "prompts.rewrite"),
+    ("scoring_prompt_version", "prompts.scoring"),
+    ("card_schema_version", "schemas.card"),
+    ("planner_output_schema_version", "schemas.planner_output"),
+    ("scoring_output_schema_version", "schemas.scoring_output"),
+    ("rubric_version", "rubrics.main"),
+)
+
+
+def manifest_version(manifest: dict[str, Any], asset_path: str) -> str:
+    """`section.name` → manifest 中对应资产的 version。"""
+    section, name = asset_path.split(".", 1)
+    return cast(str, manifest[section][name]["version"])
+
+
 def extract_version_declarations(md_text: str) -> dict[str, str]:
-    """structure-contract 中显式声明的 prompt_version/schema_version/rubric_version（当前无，
-    仅 8.5 引用 manifest 对应 version）。发现声明时守卫要求与 manifest 一致（Architecture AGENTS.md 6）。"""
+    """structure-contract 中显式声明的版本键（当前无，仅 8.5 引用 manifest 对应 version）。
+
+    发现 `<key> vN` 声明时守卫要求与 manifest 对应资产一致（Architecture AGENTS.md 6）。
+    """
     result: dict[str, str] = {}
-    for key in ("prompt_version", "schema_version", "rubric_version"):
+    for key, _path in VERSION_KEYS:
         for match in re.finditer(rf"\b{key}\b[^\w]*?(v\d+)", md_text):
             result[key] = match.group(1)
             break
@@ -228,7 +254,8 @@ def parse_database_tables(md_text: str) -> dict[str, dict[str, str]]:
             continue
         first_cell = cells[1].strip()
         cols = [c.strip() for c in first_cell.split("/")]
-        if cols and all(re.fullmatch(r"[a-z_]+", c) for c in cols):
+        # 列名允许数字（如 content_sha256，LLM 链路升级工作包新增列）；首格为中文/注释不匹配
+        if cols and all(re.fullmatch(r"[a-z_][a-z_0-9]*", c) for c in cols):
             for col in cols:
                 tables[current][col] = line
     return tables
