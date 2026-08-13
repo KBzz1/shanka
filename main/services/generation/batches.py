@@ -534,12 +534,20 @@ def _validate_output_schema(raw: object) -> list[str]:
 
 
 def apply_batch_quality(
-    batch: Batch, *, unit: KnowledgePoint, cards: Sequence[Card], duplicated: int
+    batch: Batch,
+    *,
+    unit: KnowledgePoint,
+    cards: Sequence[Card],
+    duplicated: int,
+    rewrite_duplicate: bool = True,
 ) -> None:
     """批次质量观测聚合回写（spec §7/§8）：生成期与 SCORING 评分回写期共用。
 
     批=单元语义：coverage_rate = 该单元是否产出合法卡（0/1）；分布按单元锚定归因
     （target_difficulty/章节/卡型单值）；评分 5 字段不在本函数范围（Card 直写）。
+    rewrite_duplicate=False（SCORING 回写期）：不重写 duplicate_rate——dedup 观测是
+    生成期一次性记录（dedup-hit 批次 duplicate_rate=1.0），评分重写没有新信息且会把
+    该观测清零（review 1/5）。
     """
     quality = batch_quality(
         [
@@ -558,7 +566,8 @@ def apply_batch_quality(
         duplicated=duplicated,
     )
     batch.coverage_rate = quality["coverage_rate"]  # 1/1 = 1.0
-    batch.duplicate_rate = quality["duplicate_rate"]
+    if rewrite_duplicate:
+        batch.duplicate_rate = quality["duplicate_rate"]
     batch.difficulty_distribution = json.dumps(
         quality["difficulty_distribution"], ensure_ascii=False
     )

@@ -645,7 +645,9 @@ def _run_scoring_group(
         card.difficulty_score = score["difficulty_score"]
         card.learning_value_score = score["learning_value_score"]
         card.rubric_total_score = score["rubric_total_score"]
-    # Batch 质量字段由评分回写期重写（apply_batch_quality 与生成期共用聚合）
+    # Batch 质量字段由评分回写期重写（apply_batch_quality 与生成期共用聚合）；
+    # rewrite_duplicate=False：dedup 观测是生成期一次性记录（dedup-hit 批次
+    # duplicate_rate=1.0），评分重写无新信息且会清零该观测（review 1/5）
     for unit, card_ids in fresh_entries:
         batch = session.scalar(
             select(Batch).where(
@@ -657,7 +659,9 @@ def _run_scoring_group(
             continue
         unit_cards = [fresh_cards[i] for i in card_ids if i in fresh_cards]
         if unit_cards:
-            apply_batch_quality(batch, unit=unit, cards=unit_cards, duplicated=0)
+            apply_batch_quality(
+                batch, unit=unit, cards=unit_cards, duplicated=0, rewrite_duplicate=False
+            )
     finish_success(
         session,
         attempt,

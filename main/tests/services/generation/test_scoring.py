@@ -503,6 +503,61 @@ def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Sessi
     assert batch.coverage_rate == 1.0  # 批次质量字段由评分回写期重写（apply_batch_quality）
 
 
+def test_scoring_preserves_dedup_duplicate_rate(
+    session_factory: Callable[[], Session],
+) -> None:
+    """review 1/5：dedup-hit 批次（生成期 duplicated=1 → duplicate_rate=1.0）经
+    SCORING 回写后 duplicate_rate 不被清零（spec §7 观测字段保留）。"""
+    from services.generation.batches import _stable_uuid
+    from services.generation.scoring import run_scoring_stage
+
+    device = _uuid()
+    with session_factory() as session:
+        task_id = _seed_scoring_task(
+            session, device_id=device, difficulties=["BASIC"], generate=False
+        )
+        task = session.get(Task, task_id)
+        assert task is not None and task.deck_id is not None
+        batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
+        # 预置同 seed 既有卡（模拟"恢复/重入边缘"dedup 命中：生成响应与既有卡同 seed）
+        gen_item = _stable_uuid(
+            f"gen|{task_id}|{batch.batch_index}|QUESTION|什么是锚定卡？|由规划锚定的卡。"
+        )
+        session.add(
+            Card(
+                card_id=_uuid(),
+                deck_id=task.deck_id,
+                device_id=device,
+                source="GENERATED",
+                position=1,
+                front="什么是锚定卡？",
+                back="由规划锚定的卡。",
+                card_type="QUESTION",
+                question="什么是锚定卡？",
+                answer="由规划锚定的卡。",
+                generation_item_id=gen_item,
+                target_difficulty="BASIC",
+                version="v1",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        session.commit()
+        # 生成：seed 命中既有卡 → fresh=False → duplicated=1 → duplicate_rate=1.0
+        client = _client(lambda r: _ok(_card_response("QUESTION")))
+        assert process_next_batch(session, task_id=task_id, client=client) == 1
+        session.commit()
+        batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
+        assert batch.duplicate_rate == 1.0  # 前置条件：dedup 观测已记录
+        # 评分回写不得清零该观测
+        scoring_client = _client(lambda r: _ok(_scoring_response_from_request(r)))
+        run_scoring_stage(session, task=task, settings=_SETTINGS, client=scoring_client)
+        session.commit()
+        batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
+    assert batch.duplicate_rate == 1.0  # dedup 观测保留（不被评分重写清零）
+    assert batch.coverage_rate == 1.0
+
+
 def test_scoring_version_drift_rejected(session_factory: Callable[[], Session]) -> None:
     """评分调用后、回写前改 Card.version（模拟用户编辑）→ 整组 finish_failed
     （STALE_SCORING_INPUT 内部原因入日志、error_code 兜底 GENERATION_FAILED）、
