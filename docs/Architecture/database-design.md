@@ -10,7 +10,7 @@
 - **时间格式唯一规范**:`YYYY-MM-DDTHH:MM:SS.sssZ`(UTC、零填充、恒 3 位毫秒),由统一序列化函数生成;禁止 `isoformat()` 默认输出(微秒省略、`+00:00` 偏移等变体)——混合格式会破坏 `due <= now` 范围比较与排序(审核修复)。
 - **连接配置**(审核修复):`PRAGMA journal_mode=WAL;` 与 `PRAGMA foreign_keys=ON;`(SQLite 默认关闭外键)在 SQLAlchemy engine 级 connect 事件统一配置,覆盖池化连接、后台任务与迁移脚本;写事务用 `BEGIN IMMEDIATE`(engine `isolation_level='IMMEDIATE'`,进入即拿写锁,避免并发写直接 `SQLITE_BUSY`)。
 - JSON 字段(`cursor`、`generated_item_ids`、`response_body` 等)统一经序列化函数写入,保证合法 JSON,禁止手工拼接。
-- **数据主体隔离键(V2.2,决策 D-05)**:`user_id`。`users` / `auth_sessions` 表与直接归属 6 表(`pdf_files`、`tasks`、`decks`、`cards`、`review_events`、`llm_call_attempts`)的 `user_id` 列已随数据地基迁移落地,旧 `device_id` 降级为可空遗留列,双非空 CHECK(`device_id IS NOT NULL OR user_id IS NOT NULL`)保证二者至少其一;`api_keys` / `idempotency_keys` 主键改 `user_id`、`review_events` 唯一约束改 `(user_id, client_event_id)` 待主键重建任务落地,落地前该三表仍为 device_id 键(见 7.1)。所有业务表按隔离键的查询必须走索引。
+- **数据主体隔离键(V2.2,决策 D-05)**:`user_id`。`users` / `auth_sessions` 表与直接归属 6 表(`pdf_files`、`tasks`、`decks`、`cards`、`review_events`、`llm_call_attempts`)的 `user_id` 列已随数据地基迁移落地,旧 `device_id` 降级为可空遗留列,双非空 CHECK(`device_id IS NOT NULL OR user_id IS NOT NULL`)保证二者至少其一;`api_keys` / `idempotency_keys` 主键改 `user_id`、`review_events` 另加 `UNIQUE (user_id, client_event_id)`、保留原 `UNIQUE (device_id, client_event_id)` 待主键重建任务落地,落地前该三表仍为 device_id 键(见 7.1)。所有业务表按隔离键的查询必须走索引。
 - 幂等去重统一由 `idempotency_keys` 表承担(见 2.12),业务表不额外维护。
 
 ## 1. 实体关系概览
@@ -34,7 +34,7 @@ devices 1──N idempotency_keys（遗留，主键重建任务改 user_id 键�
 ## 2. 表定义
 
 > 类型均按 0 节映射规则;时间列默认 `TEXT NOT NULL`(ISO 8601 UTC);枚举列存储枚举字符串。
-> **状态说明(V2.2)**:`users` / `auth_sessions` 与直接归属 6 表的 `user_id` 列已随数据地基迁移落地(2.15/2.16);`api_keys` / `idempotency_keys` 主键改 `user_id`、`review_events` 唯一约束改 `(user_id, client_event_id)` 待主键重建任务落地(见 7.1)。
+> **状态说明(V2.2)**:`users` / `auth_sessions` 与直接归属 6 表的 `user_id` 列已随数据地基迁移落地(2.15/2.16);`api_keys` / `idempotency_keys` 主键改 `user_id`、`review_events` 另加 `UNIQUE (user_id, client_event_id)`、保留原 `UNIQUE (device_id, client_event_id)` 待主键重建任务落地(见 7.1)。
 
 ### 2.1 devices
 
@@ -239,7 +239,7 @@ devices 1──N idempotency_keys（遗留，主键重建任务改 user_id 键�
 约束与索引:
 
 - `CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(双非空:旧行 device_id、新行 user_id)。
-- 唯一约束:`UNIQUE (device_id, client_event_id)`(离线重试去重,AC-10;改 `UNIQUE (user_id, client_event_id)` 待主键重建任务落地,见 7.1)。
+- 唯一约束:`UNIQUE (device_id, client_event_id)`(离线重试去重,AC-10;另加 `UNIQUE (user_id, client_event_id)` 待主键重建任务落地,原约束保留,见 7.1)。
 - 索引:`(device_id, reviewed_at DESC)`(遗留查询);`(user_id, reviewed_at DESC)`(看板聚合);`(card_id)`。
 
 不可变记录:不提供 UPDATE / DELETE。
@@ -415,7 +415,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 
 **待落地(主键重建任务)**:
 
-- `api_keys` PK 改 `user_id`(一用户一 Key);`idempotency_keys` 主键改 `PRIMARY KEY (user_id, path, idempotency_key)`;`review_events` 唯一约束改 `UNIQUE (user_id, client_event_id)`(旧设备域幂等缓存不跨身份空间重放)。落地前该三表仍为 device_id 键(§2 相应章节同步更新)。
+- `api_keys` PK 改 `user_id`(一用户一 Key);`idempotency_keys` 主键改 `PRIMARY KEY (user_id, path, idempotency_key)`;`review_events` 另加 `UNIQUE (user_id, client_event_id)`、保留 `UNIQUE (device_id, client_event_id)`(旧设备域幂等缓存不跨身份空间重放)。落地前该三表仍为 device_id 键(§2 相应章节同步更新)。
 - downgrade fail-closed 预检:一旦存在 user-only 新行,downgrade 先做数据前置检查并 fail closed(拒绝丢弃新数据或合成 device_id)。
 
 **迁移策略**(Alembic):
