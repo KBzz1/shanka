@@ -6,6 +6,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, text
+from sqlalchemy.exc import IntegrityError
 
 from infra.db.session import create_db_engine
 
@@ -237,6 +238,60 @@ def test_review_events_user_client_unique_added_legacy_kept(
     assert {"user_id", "client_event_id"} in unique_colsets, "另加 UNIQUE 应存在"
 
 
+def test_alembic_api_keys_device_unique_added(alembic_env: tuple[Config, Path]) -> None:
+    """P4-5（P4 跟进 a）：api_keys 补回 UNIQUE (device_id)（origin='u' 列集 {device_id}）。
+
+    SQLite UNIQUE 对 NULL 视为互异——用户域行 device_id NULL 多行不冲突；遗留设备域
+    同 device_id 第二行违反唯一约束（防重兜底）。
+    """
+    config, db_path = alembic_env
+    command.upgrade(config, "head")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        assert {"device_id"} in _unique_constraint_column_sets(conn, "api_keys")
+        # 用户域行 device_id NULL：两行并存（多 NULL 不冲突）
+        for uid in ("u1", "u2"):
+            conn.execute(
+                text(
+                    "INSERT INTO users (user_id, username, password_hash, created_at, updated_at)"
+                    " VALUES (:u, :n, 'hash', '2026-01-01T00:00:00.000Z',"
+                    " '2026-01-01T00:00:00.000Z')"
+                ),
+                {"u": uid, "n": uid},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO api_keys (user_id, encrypted_key, status, masked_key, updated_at)"
+                    " VALUES (:u, 'enc', 'AVAILABLE', 'sk-****', '2026-01-01T00:00:00.000Z')"
+                ),
+                {"u": uid},
+            )
+        # 遗留设备域防重：同 device_id 第二行违反 UNIQUE
+        conn.execute(
+            text(
+                "INSERT INTO devices (device_id, first_seen_ip, user_agent, last_active_at,"
+                " created_at)"
+                " VALUES ('dev1', NULL, NULL, NULL, '2026-01-01T00:00:00.000Z')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO api_keys (device_id, encrypted_key, status, masked_key, updated_at)"
+                " VALUES ('dev1', 'enc-1', 'AVAILABLE', 'sk-****abcd',"
+                " '2026-01-01T00:00:00.000Z')"
+            )
+        )
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO api_keys (device_id, encrypted_key, status, masked_key,"
+                " updated_at)"
+                " VALUES ('dev1', 'enc-2', 'AVAILABLE', 'sk-****efgh',"
+                " '2026-01-01T00:00:00.000Z')"
+            )
+        )
+
+
 # 旧库（2a391e994f93，v2.1 终态）device 域数据行：每表 1 行，SQL 直插（不经验 ORM）。
 _LEGACY_INSERT_SQLS: tuple[str, ...] = (
     (
@@ -365,7 +420,8 @@ def test_alembic_downgrade_fail_closed_with_user_data(alembic_env: tuple[Config,
 
 
 def test_alembic_empty_and_legacy_only_downgrade_ok(alembic_env: tuple[Config, Path]) -> None:
-    """P3-T2：空库往返与纯旧 device 域数据副本 upgrade→downgrade 成功（旧行保留）。"""
+    """P3-T2：空库往返与纯旧 device 域数据副本 upgrade→downgrade 成功（旧行保留）；
+    P4 跟进 b 起含 ddc6 层 downgrade 带旧行 CI 守卫（T1 手工验证固化）。"""
     config, db_path = alembic_env
     # 空库 upgrade → downgrade → upgrade 往返
     command.upgrade(config, "head")
@@ -379,6 +435,14 @@ def test_alembic_empty_and_legacy_only_downgrade_ok(alembic_env: tuple[Config, P
             conn.execute(text(sql))
     command.upgrade(config, "head")
     command.downgrade(config, "ddc6f34e30b8")
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM api_keys")).scalar() == 1
+        assert conn.execute(text("SELECT device_id FROM api_keys")).one() == ("dev1",)
+        assert conn.execute(text("SELECT COUNT(*) FROM idempotency_keys")).scalar() == 1
+        assert conn.execute(text("SELECT device_id FROM idempotency_keys")).one() == ("dev1",)
+    # P4 跟进 b：ddc6 层 downgrade 带旧行 CI 守卫（T1 手工验证固化）——
+    # 继续降回 v2.1 基线（ddc6f34e30b8 → 2a391e994f93），旧行 device_id 原值保留、行数守恒
+    command.downgrade(config, "2a391e994f93")
     with engine.connect() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM api_keys")).scalar() == 1
         assert conn.execute(text("SELECT device_id FROM api_keys")).one() == ("dev1",)

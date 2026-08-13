@@ -39,16 +39,17 @@ class Device(Base):
 class ApiKey(Base):
     """2.2 api_keys：一用户一 Key（V2.2），加密存储（V3B 使用）。
 
-    V2.2：user_id 为数据主体隔离键与主键；device_id 为旧数据遗留列（新写入不再生成）。
-    SQLite rowid 表非 INTEGER 主键允许 NULL——user_id 主键 nullable=True 合法，旧行
-    （user_id 为 NULL）可保留，多 NULL 不冲突。
+    V2.2：user_id 为数据主体隔离键与主键（mapper 身份键同 user_id 元数据主键）；
+    device_id 为旧数据遗留列（新写入不再生成），补回 UNIQUE (device_id)（遗留设备域
+    防重；用户域行 device_id NULL 多行不冲突——SQLite UNIQUE 对 NULL 视为互异）。
 
-    SQLAlchemy ORM 限制（实测，见 P3-T2 报告）：以 user_id 为 mapper 身份键时，旧行
-    （user_id 为 NULL）经 ORM 查询被静默跳过、ORM 写入/更新抛 FlushError。因此
-    __mapper_args__ 把 mapper 身份键改写为 device_id——v2.1 设备域行（device_id 非空）
-    的读取/写入/更新继续走 ORM 原路径；元数据主键仍为 user_id（与 database-design 2.2
-    及迁移 DDL 一致，守卫 2/alembic check 不受影响）。用户域行（device_id 为 NULL）
-    对 ORM 不可见，用户侧写入落地时应改为 Core 直写或重新设计映射。
+    SQLite rowid 表非 INTEGER 主键允许 NULL——user_id 主键 nullable=True 合法，旧行
+    （user_id 为 NULL）可保留，多 NULL 不冲突。SQLAlchemy ORM 限制（实测，见 P3-T2
+    报告）：旧 device 域行（user_id 为 NULL）经 ORM 查询不组装实例（NULL 身份键行以
+    None 占位、不可寻址）、ORM 写入/更新抛 FlushError——与 D-06「旧 device 域数据无
+    访问路径」语义一致，属预期行为；用户域行（user_id 非空）ORM 读/写/更新全可用。
+    P4-5 前 mapper 身份键曾过渡改写为 device_id（P3-T2 遗留，用户域行对 ORM 不可见、
+    写侧走 Core 直写），P4-5 已移除。
     """
 
     __tablename__ = "api_keys"
@@ -57,9 +58,8 @@ class ApiKey(Base):
         CheckConstraint(
             "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_api_keys_owner_domain"
         ),
+        UniqueConstraint("device_id", name="uq_api_keys_device_id"),
     )
-    # SQLAlchemy 声明式协议读取类属性，仅初始化一次、不可变使用（RUF012 豁免）
-    __mapper_args__ = {"primary_key": ["device_id"]}  # noqa: RUF012
 
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     device_id: Mapped[str | None] = mapped_column(

@@ -59,6 +59,7 @@ users 1──N idempotency_keys（V2.2 主键重建；devices 边仅遗留行）
 | updated_at | TEXT | NOT NULL | |
 
 约束:`CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(双非空:旧行 device_id、新行 user_id)。
+唯一约束:`UNIQUE (device_id)`(遗留设备域防重;用户域行 device_id NULL 多行不冲突——SQLite UNIQUE 对 NULL 视为互异)。
 
 ### 2.3 pdf_files
 
@@ -420,9 +421,9 @@ MVP 直接基于 `review_events` 聚合(索引 `(device_id, reviewed_at DESC)` �
 
 **已落地(主键重建任务)**:
 
-- `api_keys` PK 重建为 `user_id`(一用户一 Key,`TEXT NULL PK + FK → users`);`idempotency_keys` 主键重建为 `PRIMARY KEY (user_id, path, idempotency_key)`,保留遗留 `UNIQUE (device_id, path, idempotency_key)`;`review_events` 另加 `UNIQUE (user_id, client_event_id)`,原 `UNIQUE (device_id, client_event_id)` 保留(旧设备域幂等缓存不跨身份空间重放)。
-- 三表 `device_id` 降级为可空遗留列(旧行原值保留、`user_id` 为 NULL),加双非空 `CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`。
-- downgrade fail-closed 预检:降级前检查 `users` 计数与各 owner 表 `user_id IS NOT NULL` 计数,存在用户域数据即在任何 DDL/DML 前抛异常拒绝(不丢弃新数据、不合成 device_id);空库/纯旧 device 域数据副本允许正常降级(旧行保留)。
+- `api_keys` PK 重建为 `user_id`(一用户一 Key,`TEXT NULL PK + FK → users`),并补回 `UNIQUE (device_id)`(v2.1 每设备唯一性保障随 PK 重建丢失,遗留设备域防重;用户域行 device_id NULL 多行不冲突——SQLite UNIQUE 对 NULL 视为互异);`idempotency_keys` 主键重建为 `PRIMARY KEY (user_id, path, idempotency_key)`,保留遗留 `UNIQUE (device_id, path, idempotency_key)`;`review_events` 另加 `UNIQUE (user_id, client_event_id)`,原 `UNIQUE (device_id, client_event_id)` 保留(旧设备域幂等缓存不跨身份空间重放)。
+- `api_keys`/`idempotency_keys` 两表 `device_id` 降级为可空遗留列(旧行原值保留、`user_id` 为 NULL),加双非空 `CHECK (device_id IS NOT NULL OR user_id IS NOT NULL)`(`review_events` 的降级与 CHECK 已随数据地基迁移 ddc6f34e30b8 在直接归属 6 表中落地,不属本任务)。
+- downgrade fail-closed 预检(自 a7cc699f3fd8 起生效):降级前检查 `users` 计数与各 owner 表 `user_id IS NOT NULL` 计数,存在用户域数据即在任何 DDL/DML 前抛异常拒绝(不丢弃新数据、不合成 device_id);空库/纯旧 device 域数据副本允许正常降级(旧行保留)。
 
 **迁移策略**(Alembic):
 
