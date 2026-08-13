@@ -4,11 +4,11 @@
 
 - Goal ID：`shanka-llm-account-long-run-v1`
 - Goal：先完成 LLM 链路升级（17 任务，P1），再完成账号登录替代 X-Device-ID（PRD V2.2，P2–P8）。
-- 当前状态：`P5_DONE`（LLM 后台 user_id 接续完成：后台零 session 依赖判别锁定 + logout/过期后任务继续 + 跨用户 404 + metrics 无身份 + 资产只读核对，563/0 四工具全绿；进入 P6 Android）
+- 当前状态：`P6_DONE`（Android 登录切换完成：Login/Register UI + Keystore 会话存储 + Bearer 网络层 + X-Device-ID 零残留，40/40 JVM 测试 + assembleDebug 全绿；进入 P7 test-platform v2）
 - 设计：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/DESIGN.md`（引用两份上游设计）
 - 启动提示词：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/WORKER_PROMPT.md`
 - 任务地图：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/TASKS.md`
-- 最后更新：2026-08-14 Asia/Shanghai（P5_DONE）
+- 最后更新：2026-08-14 Asia/Shanghai（P6_DONE）
 
 ## 现场快照（2026-08-13 接管时）
 
@@ -118,6 +118,17 @@
 - **验证（主 Worker 2026-08-14 实测）**：全量 **563 passed / 0 failed**（557 + 6 新增）；`ruff check .` 全过；`ruff format --check .` 272 files；`mypy .` Success（219 source files）。
 - **执行方式**：主 Worker 直接执行（验证型阶段，P2 先例）；P4 已把归属接线完成（executor Key 查找/账本/观测 user_id），P5 零生产逻辑改动。
 
+## P6 完成记录（2026-08-14，全部为真实命令/证据）
+
+- **提交**：嵌套 frontend-app 仓库 4 commits `60d62a3..f15457b`（外层仓库零提交——嵌套仓库纪律，P1 先例）。
+- **落地内容**：KeystoreSessionStore（AES/GCM + Android Keystore 别名 shanka_session_key，token 加密存储、密码零持久化）替代 SecureDeviceIdentityStore；BackendClient Bearer 注入 + register/login/logout/me 四端点 + 401 语义（AUTH_REQUIRED/AUTH_INVALID 清会话、INVALID_CREDENTIALS 不清、网络失败不误判退出）；Login/Register Compose UI（密码掩码、错误文案映射、无 legacy claim）；启动路由（session + /auth/me 决定主界面或登录页）；普通请求彻底移除 X-Device-ID。
+- **X-Device-ID 退出**：`X-Device-ID|SecureDeviceIdentityStore|shanka_device_identity` 全仓 grep 零命中（reviewer 独立复核）；androidTest 6 处断言 Bearer 化 + debug 脱敏守护换 Authorization。
+- **预存在缺陷修复**（review 三路验证，阻塞全绿验收）：ImportParser fallback 分支重复报错（errors.isEmpty() 守卫 + 判别测试）。
+- **验证**：`./gradlew test` **40/40 全绿**（AuthClientContractTest 15 + AuthViewModelTest 15 + SessionStoreContractTest 5 + ImportParserTest 3 + ReviewSchedulerTest 2）；`assembleDebug` + `assembleDebugAndroidTest` + `compileDebugAndroidTestKotlin` 全 BUILD SUCCESSFUL（reviewer --rerun-tasks 强制复跑非缓存）。
+- **SDD 过程**：4 任务 × implementer + 任务级 reviewer（同一 reviewer 全程连续审查）；1 轮 fix round（ImportParser 预存在缺陷）。
+- **未运行项**：instrumented 设备测试（本机无模拟器/真机，仅编译+打包验证——WORKER_PROMPT 验证 6 允许；BackendClientInstrumentedTest/FlashcardsAppTest 语义已更新待设备验证）。
+- **遗留登记（不阻塞）**：FlashcardsAppTest.storedSessionEntersTheMainScreen 非 hermetic（后端在线环境会 401 失败——建议后续 AppViewModel 注入缝）；logout 先网络后本地（Settings 接入时改先本地登出）；logout 无 UI 调用方（Settings 留后续）。
+
 ## 阶段账本
 
 | 阶段 | 状态 | 证据/下一步 |
@@ -128,7 +139,7 @@
 | P3 数据地基 | `DONE` | 见上 P3 完成记录：5 commits 3464e9c..89ce41d、Alembic 链 3 revisions、508/0 四工具全绿、fail-closed、旧行守恒 |
 | P4 后端切换 | `DONE` | 见上 P4 完成记录：11 commits、auth 四端点 + Bearer + 全链路 user_id、X-Device-ID 退出、557/0 四工具全绿 |
 | P5 LLM 后台 user_id 接续 | `DONE` | 见上 P5 完成记录：6 判别测试（logout/过期继续、session 零依赖、跨用户 404、metrics 无身份）+ 资产只读，563/0 四工具全绿 |
-| P6 Android | `PENDING` | 登录态、Bearer、401 处理 |
+| P6 Android | `DONE` | 见上 P6 完成记录：4 commits 60d62a3..f15457b、Keystore 会话存储 + Bearer + UI + 零残留、40/40 + assembleDebug 全绿 |
 | P7 test-platform v2 | `PENDING` | auth/isolation/core/live/ledger 场景 |
 | P8 总验收 | `PENDING` | 全量工具链、迁移副本、canary、WORKER_REPORT.md |
 

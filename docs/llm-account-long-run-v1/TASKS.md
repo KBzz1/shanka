@@ -91,9 +91,9 @@ legacy claim 部分不在本包范围**，用户 2026-08-13 决策）；行为�
 
 ### P6 Android
 
-- [ ] Login/Register 状态与界面；启动 token + /auth/me 决定入口
-- [ ] Keystore 加密会话存储替代 SecureDeviceIdentityStore；密码不持久化
-- [ ] 网络层 Bearer；普通请求移除 X-Device-ID；401 清会话回登录页；网络失败不误判退出
+- [x] Login/Register 状态与界面；启动 token + /auth/me 决定入口
+- [x] Keystore 加密会话存储替代 SecureDeviceIdentityStore；密码不持久化
+- [x] 网络层 Bearer；普通请求移除 X-Device-ID；401 清会话回登录页；网络失败不误判退出
 
 ### P7 test-platform v2
 

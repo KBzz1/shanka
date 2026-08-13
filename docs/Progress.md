@@ -344,6 +344,18 @@
 - **验证（主 Agent 2026-08-14 实测）**：全量 **563 passed / 0 failed**（557+6）；`ruff check .` 全过；`ruff format --check .` 272 files；`mypy .` Success（219 source files）。
 - 执行方式：主 Worker 直接执行（验证型阶段，P2 先例）；P4 已完成归属接线（executor Key 查找/账本/观测 user_id），P5 零生产逻辑改动。
 
+### ACC-P6 — Android 登录切换（嵌套 frontend-app 仓库）
+
+**`DONE`｜依赖：ACC-P4 后端｜覆盖：WORKER_PROMPT 目标二 §5、DESIGN §4.2~4.4 客户端侧｜2026-08-14**
+
+当前证据（2026-08-14，嵌套 frontend-app 仓库 4 commits 60d62a3..f15457b）：
+- **会话存储**：KeystoreSessionStore（AES/GCM + Keystore 别名 shanka_session_key；token 加密存 "auth_session"；密码零持久化——接口无密码参数）替代 SecureDeviceIdentityStore。
+- **网络层**：BackendClient Bearer 注入（普通请求 session 存在时带 Authorization、缺失不带；register/login 不带头）；四端点（register/login/logout/me）；401 语义（AUTH_REQUIRED/AUTH_INVALID 清会话回登录页、INVALID_CREDENTIALS 不清、网络失败不误判退出）；请求日志不记 body/Authorization。
+- **UI**：Login/Register Compose（密码掩码、loading、错误文案映射：用户名或密码错误/用户名已被占用/请求过于频繁/网络错误）；启动路由（session + /auth/me → 主界面或登录页）；无 legacy claim 提示。
+- **X-Device-ID 退出**：三关键词全仓 grep 零命中（reviewer 独立复核）；androidTest 断言 Bearer 化。
+- **验证**：`./gradlew test` 40/40 全绿；assembleDebug + assembleDebugAndroidTest BUILD SUCCESSFUL（--rerun-tasks 非缓存强制复跑）；instrumented 未运行（本机无设备，仅编译+打包——WORKER_PROMPT 验证 6）。
+- **SDD 过程**：4 任务 × implementer + 同一 reviewer 连续审查；1 fix round（预存在 ImportParser 缺陷修复——review 三路验证非本包引入）。
+
 ## 5. 依赖关系与下一步
 
 ```text
