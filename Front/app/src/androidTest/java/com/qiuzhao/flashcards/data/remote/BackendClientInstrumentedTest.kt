@@ -132,7 +132,7 @@ class BackendClientInstrumentedTest {
                 """{"period":{"start":"2026-08-10T16:00:00Z","end":"2026-08-17T16:00:00Z","week_ordinal":33},"timezone":"Asia/Shanghai","weekly_activity":[0,1,0,2,0,0,0],"weekly_total":3,"week_change_rate":0.5,"weekly_goal":60,"weekly_goal_progress":0.05,"recall_accuracy":0.8,"first_answer_accuracy":0.7,"retention_rate":0.9,"streak_days":2,"mastered_card_count":5,"updated_at":"2026-08-11T00:00:00Z","has_data":true}"""
             )
         )
-        val repository = RemoteFlashcardRepository(context, client())
+        val repository = RemoteFlashcardRepository(context, client = client())
 
         val decks = repository.refreshDecks()
         val dashboard = repository.dashboard(60)
@@ -159,7 +159,7 @@ class BackendClientInstrumentedTest {
         server.enqueue(MockResponse().setResponseCode(204))
         server.enqueue(MockResponse().setResponseCode(204))
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"items\":[]}"))
-        val repository = RemoteFlashcardRepository(context, client())
+        val repository = RemoteFlashcardRepository(context, client = client())
         val card = FlashcardEntity("card-uuid", "deck-uuid", "新问题", "新答案")
 
         assertTrue(repository.updateDeckPresentation("deck-uuid", "已改名", "azure") is ApiResult.Success)
@@ -199,7 +199,7 @@ class BackendClientInstrumentedTest {
             """{"sample_cards":[{"card_id":"sample-1","front":"样卡问题","back":"样卡答案","card_type":"QUESTION","question":null,"answer":null}]}"""
         ))
 
-        val result = RemoteFlashcardRepository(context, client()).generateSamples(
+        val result = RemoteFlashcardRepository(context, client = client()).generateSamples(
             fileId = "pdf-uuid",
             chapterIds = listOf("chapter-uuid"),
             quantity = "BALANCED",
@@ -226,7 +226,7 @@ class BackendClientInstrumentedTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"status\":\"INVALID\",\"masked_key\":\"\"}"))
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"status\":\"AVAILABLE\",\"masked_key\":\"sk-****1234\"}"))
 
-        val result = RemoteFlashcardRepository(context, client()).saveApiKey("candidate-key")
+        val result = RemoteFlashcardRepository(context, client = client()).saveApiKey("candidate-key")
 
         assertTrue(result is ApiResult.Success)
         assertEquals("AVAILABLE", (result as ApiResult.Success).value.status)
@@ -239,7 +239,7 @@ class BackendClientInstrumentedTest {
             """{"error":{"code":"API_KEY_NOT_SET","localization_key":"error.api_key_not_set"}}"""
         ))
 
-        val result = RemoteFlashcardRepository(context, client()).createTask(
+        val result = RemoteFlashcardRepository(context, client = client()).createTask(
             fileId = "pdf-uuid",
             deckId = "deck-uuid",
             chapterIds = listOf("chapter-uuid"),
@@ -262,7 +262,7 @@ class BackendClientInstrumentedTest {
             """{"error":{"code":"VALIDATION_ERROR","localization_key":"error.validation"}}"""
         ))
 
-        val result = RemoteFlashcardRepository(context, client()).generateSamples(
+        val result = RemoteFlashcardRepository(context, client = client()).generateSamples(
             fileId = "pdf-uuid",
             chapterIds = listOf("chapter-uuid"),
             quantity = "BALANCED",

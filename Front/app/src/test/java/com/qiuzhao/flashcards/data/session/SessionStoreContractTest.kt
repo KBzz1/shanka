@@ -33,4 +33,13 @@ class SessionStoreContractTest {
         store.clear()
         assertNull(store.load())
     }
+
+    @Test fun `loadQuietly swallows a throwing store and degrades to signed out`() {
+        val throwing = object : SessionStore {
+            override fun save(token: String, user: SessionUser) {}
+            override fun load(): Session? = error("keystore unavailable")
+            override fun clear() {}
+        }
+        assertNull(throwing.loadQuietly())
+    }
 }

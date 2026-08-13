@@ -27,6 +27,13 @@ data class SessionUser(val userId: String, val username: String, val createdAt: 
 data class Session(val token: String, val user: SessionUser)
 
 /**
+ * Reads the stored session without ever throwing: the interface does not promise a
+ * no-throw [SessionStore.load], and a storage failure (e.g. an unavailable Keystore)
+ * must degrade to signed-out instead of crashing the caller's request path.
+ */
+fun SessionStore.loadQuietly(): Session? = runCatching { load() }.getOrNull()
+
+/**
  * The session payload is encrypted at rest. The token is a credential, so callers must treat
  * the returned [Session] like the device id in RemoteFlashcards and never log it.
  */

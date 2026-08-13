@@ -29,6 +29,9 @@ import com.qiuzhao.flashcards.data.remote.Rating
 import com.qiuzhao.flashcards.data.remote.RemoteFlashcardRepository
 import com.qiuzhao.flashcards.data.remote.projectsForDisplay
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
+import com.qiuzhao.flashcards.ui.auth.AuthState
+import com.qiuzhao.flashcards.ui.auth.AuthViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +39,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -164,7 +168,12 @@ private object FrontendTestFixtures {
  * layer owns the encrypted device id and debug evidence; Room is deliberately not instantiated.
  */
 class AppViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = RemoteFlashcardRepository(application)
+    private val sessionStore = KeystoreSessionStore(application)
+    private val repository = RemoteFlashcardRepository(application, sessionStore = sessionStore)
+
+    /** Auth 会话状态机：登录/登出/401 清会话的全部语义集中于此，独立可测。 */
+    val auth = AuthViewModel(repository, sessionStore, viewModelScope)
+    val authState: StateFlow<AuthState> = auth.state
 
     val darkTheme: StateFlow<Boolean?> = application.dataStore.data.map { preferences ->
         if (preferences.contains(DARK_THEME)) preferences[DARK_THEME] else null
@@ -226,9 +235,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val textImportFlow: StateFlow<TextImportFlow?> = _textImportFlow
 
     init {
-        refreshDecks()
-        refreshDashboard()
+        checkSession()
+        // 业务数据只在登录态加载：登录成功或会话恢复时刷新一次；登出后不再产生 401 噪音。
+        viewModelScope.launch {
+            auth.state.map { it is AuthState.LoggedIn }.distinctUntilChanged().collect { loggedIn ->
+                if (loggedIn) {
+                    refreshDecks()
+                    refreshDashboard()
+                }
+            }
+        }
     }
+
+    fun refreshDecks() = viewModelScope.launch {
+        if (!frontendTestMode.value) logFailure("list_decks", repository.refreshDecks())
+    }
+
+    fun checkSession() = auth.checkSession()
+
+    /** 注销入口（Settings 接入点在后续任务落地）。 */
+    fun logout() = auth.logout()
+
+    fun clearAuthError() = auth.clearError()
 
     fun refreshDecks() = viewModelScope.launch {
         if (!frontendTestMode.value) logFailure("list_decks", repository.refreshDecks())
@@ -757,6 +785,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun <T> logFailure(operation: String, result: ApiResult<T>) {
-        if (result is ApiResult.Failure && BuildConfig.DEBUG) Log.w("ShankaNetwork", "op=$operation status=${result.status} code=${result.code ?: "-"} localization=${result.localizationKey ?: "-"}")
+        if (result is ApiResult.Failure) {
+            // 受保护请求 401（AUTH_REQUIRED/AUTH_INVALID）→ 清会话回登录页；凭据/网络错误不触发。
+            auth.onBusinessFailure(result)
+            if (BuildConfig.DEBUG) Log.w("ShankaNetwork", "op=$operation status=${result.status} code=${result.code ?: "-"} localization=${result.localizationKey ?: "-"}")
+        }
     }
 }

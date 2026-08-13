@@ -13,6 +13,7 @@ import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
 import com.qiuzhao.flashcards.data.session.Session
 import com.qiuzhao.flashcards.data.session.SessionStore
 import com.qiuzhao.flashcards.data.session.SessionUser
+import com.qiuzhao.flashcards.data.session.loadQuietly
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -235,7 +236,7 @@ internal class BackendClient(
             // A development server is optional for the installed app.  In
             // particular, 10.0.2.2 is only meaningful to an emulator; a
             // physical phone must never be taken down by its absence.
-            val authToken = requestAuthToken(authenticate, token, sessionStore.load())
+            val authToken = requestAuthToken(authenticate, token, sessionStore.loadQuietly())
             last = runCatching { execute(method, path, body, contentType, key, authToken) }
                 .getOrElse { unavailableResult(it) }
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
@@ -410,11 +411,22 @@ internal class BackendClient(
     }
 }
 
+/**
+ * The auth surface of the repository. Extracted as an interface so the session state machine
+ * stays JVM-testable with a fake instead of the Android-bound implementation.
+ */
+interface AuthRepository {
+    suspend fun register(username: String, password: String): ApiResult<Session>
+    suspend fun login(username: String, password: String): ApiResult<Session>
+    suspend fun refreshMe(): ApiResult<SessionUser>
+    suspend fun logout(): ApiResult<Unit>
+}
+
 internal class RemoteFlashcardRepository(
     context: Context,
     private val sessionStore: SessionStore = KeystoreSessionStore(context),
     private val client: BackendClient = BackendClient(context, sessionStore = sessionStore)
-) {
+) : AuthRepository {
     private val _decks = MutableStateFlow<List<DeckSummary>>(emptyList())
     private val cardFlows = mutableMapOf<String, MutableStateFlow<List<FlashcardEntity>>>()
     val decks: Flow<List<DeckSummary>> = _decks
@@ -429,10 +441,10 @@ internal class RemoteFlashcardRepository(
         values(value, "decks").mapNotNull(::deck).also { _decks.value = it }
     }
 
-    suspend fun register(username: String, password: String): ApiResult<Session> =
+    override suspend fun register(username: String, password: String): ApiResult<Session> =
         sessionResult(client.register(username, password))
 
-    suspend fun login(username: String, password: String): ApiResult<Session> =
+    override suspend fun login(username: String, password: String): ApiResult<Session> =
         sessionResult(client.login(username, password))
 
     /** A storage failure must never crash or surface as a login error: the session stays usable in memory. */
@@ -443,15 +455,15 @@ internal class RemoteFlashcardRepository(
     }
 
     /** Logs out with the stored token; already-signed-out is a no-op. Auth 401s still clear the store. */
-    suspend fun logout(): ApiResult<Unit> {
-        val session = sessionStore.load() ?: return ApiResult.Success(Unit)
+    override suspend fun logout(): ApiResult<Unit> {
+        val session = sessionStore.loadQuietly() ?: return ApiResult.Success(Unit)
         val result = client.logout(session.token).decode { Unit }
         if (result is ApiResult.Success || (result as? ApiResult.Failure)?.isAuthFailure() == true) runCatching { sessionStore.clear() }
         return result
     }
 
     /** 401 AUTH_REQUIRED/AUTH_INVALID means the stored session is dead; credential and network failures never clear it. */
-    suspend fun refreshMe(): ApiResult<SessionUser> {
+    override suspend fun refreshMe(): ApiResult<SessionUser> {
         val result = client.me().decode { value ->
             parseSessionUser(value.optJSONObject("user")) ?: error("Me response missing user")
         }
