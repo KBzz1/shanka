@@ -50,7 +50,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
-        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度，显式调高隔离
+        rate_limit_ip_per_second=100,  # IP 维度隔离：Bearer 注册请求计入 IP 桶，显式调高隔离
         api_key_encryption_key=_TEST_KEY_HEX,
     )
     monkeypatch.setattr("app.api.api_key.DeepSeekClient", FakeClient)

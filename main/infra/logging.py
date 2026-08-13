@@ -1,8 +1,9 @@
 """JSON 结构化日志（structure-contract 8.1）：单行 JSON，字段固定。
 
-字段：timestamp(ISO 8601 UTC) / level / request_id / device_id / task_id /
+字段：timestamp(ISO 8601 UTC) / level / request_id / user_id / task_id /
 batch_id / error_code / message；记录上的附加属性（method/path/status/
-duration_ms）以扁平键输出。敏感红线（1.5/7.1）：API Key、完整 PDF 内容、
+duration_ms）以扁平键输出。P4-6：身份字段切 user_id（device_id 已随
+X-Device-ID 退出）。敏感红线（1.5/7.1）：API Key、完整 PDF 内容、
 完整 Prompt 不落日志——请求日志不记录任何请求体。
 """
 
@@ -25,7 +26,7 @@ class JSONFormatter(logging.Formatter):
             "timestamp": format_utc(datetime.now(UTC)),
             "level": _LEVEL_ALIASES.get(record.levelname, record.levelname),
             "request_id": getattr(record, "request_id", ""),
-            "device_id": getattr(record, "device_id", ""),
+            "user_id": getattr(record, "user_id", ""),
             "task_id": getattr(record, "task_id", ""),
             "batch_id": getattr(record, "batch_id", ""),
             "error_code": getattr(record, "error_code", ""),

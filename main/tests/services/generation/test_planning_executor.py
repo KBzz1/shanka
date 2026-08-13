@@ -7,6 +7,7 @@ session_factory 定式——adaptation 见任务报告）。mock chat 从请求�
 """
 
 import json
+import logging
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -24,6 +25,7 @@ from infra.db.models import (
     Base,
     Batch,
     Chapter,
+    Device,
     KnowledgePoint,
     LlmCallAttempt,
     PdfFile,
@@ -929,3 +931,52 @@ def test_planning_mixed_skipped_and_empty_records_skips(
     assert task.skipped_planning_group_count == 1  # 部分跳过观测不丢
     assert task.total_batch_count == 0
     assert task.completed_batch_count == 0
+
+
+def test_planning_legacy_task_no_user_fails_clean(
+    session_factory: Callable[[], Session],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T3 Minor ①：legacy 任务（user_id NULL，device 域）→ run_planning 干净 FAILED
+    （PLANNING_TASK_INCOMPLETE 内部原因入日志、error_code 兜底 GENERATION_FAILED），
+    不 500、不发 LLM 调用、不产生无主账本行。"""
+    user = _uuid()
+    with session_factory() as session:
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
+        session.add(Device(device_id="legacy-dev", created_at=_NOW))
+        task = session.get(Task, task_id)
+        assert task is not None
+        task.device_id = "legacy-dev"
+        task.user_id = None  # 模拟 P4-3 前 device 域旧任务（CHECK 双非空经 device_id 满足）
+        session.commit()
+    with session_factory() as session:
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            raise AssertionError("legacy 任务不得发 LLM 调用")
+
+        # alembic env.py fileConfig(disable_existing_loggers) 会禁用未配置 logger
+        # （先跑过迁移测试时生效）——显式重新启用，保证 caplog 捕获稳定
+        monkeypatch.setattr(
+            logging.getLogger("services.generation.planning_executor"), "disabled", False
+        )
+        with caplog.at_level(logging.WARNING):
+            _claim_and_plan(session, client=_client_with_handler(handler))
+    assert calls == 0  # guard 在 create_attempt/chat 前
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        attempts = session.scalars(select(LlmCallAttempt)).all()
+    assert task is not None
+    assert task.status == "FAILED"
+    assert task.failure_stage == "PLANNING"
+    assert task.error_code == "GENERATION_FAILED"
+    assert attempts == []  # 无无主账本行
+    reasons = [
+        getattr(r, "internal_reason", None)
+        for r in caplog.records
+        if getattr(r, "message", "") == "task planning failed"
+    ]
+    assert "PLANNING_TASK_INCOMPLETE" in reasons

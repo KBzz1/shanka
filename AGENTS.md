@@ -6,9 +6,9 @@
 
 - `docs/` — 文档层级：`PRD/V2.1/prd_v2_1.md` 需求权威（做什么、为什么）；`Architecture/` 设计契约集合 + 防漂移规则（见 `Architecture/AGENTS.md`）；`frontend/` 前端对接、`superpowers/` 工作流产物、`Progress.md` 进度（层级规则见 `docs/AGENTS.md`）。
 - `main/` — FastAPI 后端（Python >= 3.12）：
-  - `app/` HTTP 出入口：`api/` 路由、`middleware/`（X-Device-ID 鉴权、Idempotency-Key 幂等、统一错误）、`schemas/` 请求/响应模型、`main.py` 装配。
+  - `app/` HTTP 出入口：`api/` 路由、`middleware/`（Bearer 认证、Idempotency-Key 幂等、统一错误）、`schemas/` 请求/响应模型、`main.py` 装配。
   - `domain/` 纯领域模型与枚举，不依赖任何其他包。
-  - `services/` 用例编排：api_key / cards / decks / generation / pdf / review / scheduling（FSRS-6）/ stats / tasks。
+  - `services/` 用例编排：auth / api_key / cards / decks / generation / pdf / review / scheduling（FSRS-6）/ stats / tasks。
   - `infra/` db（ORM 与迁移，`main/migrations/` 为 Alembic 迁移）/ storage（PDF 文件）/ llm（DeepSeek 调用、Prompt 组装）。
   - 分层依赖：`app → services → infra` 单向，均可依赖 `domain/`；禁止在 handler 中直接暴露 ORM 对象。
 - `agent_evolution/` — agent 版本化资产（prompt/schema/rubric + manifest.json），`main/infra/llm/` 按 manifest 加载；资产演进 = 新版本目录 + 更新 manifest + CHANGELOG，属技术评审级变更。

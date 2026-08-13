@@ -181,6 +181,37 @@ def test_register_login_exempt_from_idempotency_key(client: TestClient, tmp_path
     assert count == 0
 
 
+def test_logout_missing_idempotency_key_400(client: TestClient) -> None:
+    """logout 缺 Idempotency-Key → 400 VALIDATION_ERROR（写接口幂等键强制，1.3/6.11）。"""
+    headers = _auth_headers(client)
+    r = client.post("/auth/logout", headers=headers)
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_me_auth_invalid_401_carries_www_authenticate(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """me 窄竞态（T2 Minor ①）：token 经中间件 resolve 后被撤销，service 抛 AUTH_INVALID
+    的 401 路径——error_handler 统一补 WWW-Authenticate: Bearer。
+
+    HTTP 层无法在 resolve 与 handler 读库之间插入撤销，monkeypatch handler 侧
+    get_current_user 抛 AUTH_INVALID 模拟该竞态。
+    """
+    import app.api.auth as auth_api
+    from app.errors import AppError, ErrorCode
+
+    def _revoked(*args: object, **kwargs: object) -> dict[str, str]:
+        raise AppError(ErrorCode.AUTH_INVALID, "会话无效、已撤销或已过期")
+
+    monkeypatch.setattr(auth_api, "get_current_user", _revoked)
+    headers = _auth_headers(client)
+    r = client.get("/auth/me", headers=headers)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "AUTH_INVALID"
+    assert r.headers["WWW-Authenticate"] == "Bearer"
+
+
 def test_logout_idempotent_single_side_effect(client: TestClient, tmp_path: Path) -> None:
     """logout 走 execute_idempotent：首次 204 + 幂等记录仅 1 行（单副作用）。
 

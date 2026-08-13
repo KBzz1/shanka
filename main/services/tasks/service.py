@@ -114,8 +114,7 @@ def create_task(
     ]
     _owned_deck(session, user_id=user_id, deck_id=deck_id)
     # 已保存 Key 校验（6.2：无 Key → API_KEY_NOT_SET）；只查 status=AVAILABLE 行存在，
-    # 不解密（V5A 生成时才解密调用）。P4-4：按 user 域查询（列投影 Core select——
-    # ApiKey 用户域行对 ORM 不可见，P3 mapper 过渡遗留，Task 5 移除）。
+    # 不解密（V5A 生成时才解密调用）。P4-4：按 user 域查询（列投影 Core select——只取 user_id 列）。
     key_row = session.scalar(
         select(ApiKey.user_id).where(ApiKey.user_id == user_id, ApiKey.status == "AVAILABLE")
     )

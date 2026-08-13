@@ -3,7 +3,7 @@
 carry-forward（V1 教训）：engine 级 PRAGMA foreign_keys=ON（database-design 0），
 save_key 落库 ApiKey（FK → users）需 users 行前置——_seed_user 先建用户（HTTP 流中
 由 /auth/register 建立，本层显式补种）。P4-4：Key 归属 user 域（device_id 不再写入）；
-ApiKey 用户域行对 ORM 不可见（P3 mapper 过渡遗留）——断言走 Core 列投影查询。
+断言走 Core 列投影查询。
 """
 
 import uuid

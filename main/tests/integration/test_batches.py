@@ -234,6 +234,37 @@ def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[]
     assert task.completed_batch_count == len(batches)  # SKIPPED 也推进游标
 
 
+def test_batches_legacy_task_no_user_fails_clean(session_factory: Callable[[], Session]) -> None:
+    """T3 Minor ①：legacy 任务（user_id NULL，device 域）→ process_next_batch 干净
+    GENERATION_FAILED（不 500 兜底、不产生无主账本行 LlmCallAttempt、不落卡）。"""
+    from app.errors import AppError
+    from infra.db.models import Device, LlmCallAttempt
+
+    user = _uuid()
+    with session_factory() as session:
+        task_id = _seed_task_with_kps(session, user_id=user, n_kps=1)
+    with session_factory() as session:
+        kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
+        plan_batches(session, task_id=task_id, generation_units=kps, now=_NOW)
+        session.add(Device(device_id="legacy-dev", created_at=_NOW))
+        task = session.get(Task, task_id)
+        assert task is not None
+        task.device_id = "legacy-dev"
+        task.user_id = None  # 模拟 P4-3 前 device 域旧任务（CHECK 双非空经 device_id 满足）
+        session.commit()
+    client = _client_ok(session_factory)
+    with session_factory() as session:
+        session.info["settings"] = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
+        with pytest.raises(AppError) as exc_info:
+            process_next_batch(session, task_id=task_id, client=client)
+    assert exc_info.value.code.value == "GENERATION_FAILED"
+    with session_factory() as session:
+        attempts = session.scalars(select(LlmCallAttempt)).all()
+        cards = session.scalars(select(Card)).all()
+    assert attempts == []  # guard 在 create_attempt 前——无无主账本行
+    assert cards == []  # 无 user 归属的卡
+
+
 def test_batches_usage_and_versions_recorded(session_factory: Callable[[], Session]) -> None:
     user = _uuid()
     with session_factory() as session:

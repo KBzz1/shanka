@@ -25,13 +25,13 @@ def test_json_logging_single_line_with_contract_fields() -> None:
         exc_info=None,
     )
     record.request_id = "req-123"
-    record.device_id = "dev-1"
+    record.user_id = "u-1"
     data = _capture(record)
     assert set(data) >= {
         "timestamp",
         "level",
         "request_id",
-        "device_id",
+        "user_id",
         "task_id",
         "batch_id",
         "error_code",
@@ -40,6 +40,7 @@ def test_json_logging_single_line_with_contract_fields() -> None:
     assert data["message"] == "request ok"
     assert data["level"] == "INFO"
     assert data["request_id"] == "req-123"
+    assert data["user_id"] == "u-1"
 
 
 def test_json_logging_extra_attributes_flat_keys() -> None:

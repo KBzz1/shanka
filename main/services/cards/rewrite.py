@@ -60,8 +60,7 @@ def _resolve_api_key(session: Session, *, user_id: str, settings: Settings) -> s
 
     无加密配置或 api_keys 无 AVAILABLE 行 → API_KEY_NOT_SET（422，契约 ch7「样卡/任务启动时未
     保存 Key」语义）；解密失败 → API_KEY_UNAVAILABLE（502——502 留给解密失败/上游不可用）。
-    P4-4：按 user 域查询（列投影 Core select——ApiKey 用户域行对 ORM 不可见，
-    P3 mapper 过渡遗留，Task 5 移除）。
+    P4-4：按 user 域查询（列投影 Core select——只取 encrypted_key 列）。
     """
     key = key_from_settings(settings)
     encrypted = session.scalar(

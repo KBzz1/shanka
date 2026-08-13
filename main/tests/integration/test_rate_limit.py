@@ -3,11 +3,24 @@
 import uuid
 from pathlib import Path
 
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import create_app
+from app.middleware.ip_limit import IpRateLimitMiddleware
 from tests.conftest import auth_headers
+
+
+class _ManualClock:
+    """手动推进时钟（IpRateLimitMiddleware clock 注入）：窗口边界可控，不跨真实秒。"""
+
+    def __init__(self, t: float = 1000.0) -> None:
+        self.t = t
+
+    def now(self) -> float:
+        return self.t
 
 
 def _user_headers(client: TestClient) -> dict[str, str]:
@@ -82,41 +95,66 @@ def test_rate_limit_pdf_dimension_hits_429(tmp_path: Path) -> None:
     assert codes[2] == 429 and codes[3] == 429  # pdf 维度限流
 
 
+def _ip_gate_app(settings: Settings, clock: _ManualClock, *, inner_status: int = 200) -> FastAPI:
+    """IpRateLimitMiddleware 直构 app（时钟注入）：窗口边界确定，不跨真实秒边界。
+
+    与 Auth 的运行序（IP 总闸门在 Auth 外层）由 main.py 装配保证；inner_status
+    模拟下游短路（401 = Auth 未认证短路）。
+    """
+    app = FastAPI()
+    app.add_middleware(IpRateLimitMiddleware, settings=settings, clock=clock)
+
+    @app.get("/gate")
+    def gate() -> JSONResponse:
+        return JSONResponse(status_code=inner_status, content={})
+
+    return app
+
+
 def test_rate_limit_ip_dimension_blocks(tmp_path: Path) -> None:
-    """IP 5 req/s（全部接口）：用低阈值 app 验证。"""
+    """IP 5 req/s（全部接口）：手动时钟确定性断言——同窗口第 3 次 429、下一窗口复位。"""
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'rl_ip.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_ip_per_second=2,
     )
-    with TestClient(create_app(settings)) as client:
-        codes = [client.get("/healthz").status_code for _ in range(4)]
-    assert codes[:2] == [200, 200]
-    assert codes[2] == 429  # IP 维度覆盖探针（1.6 表"全部接口"）
+    clock = _ManualClock()
+    with TestClient(_ip_gate_app(settings, clock)) as client:
+        assert client.get("/gate").status_code == 200
+        assert client.get("/gate").status_code == 200
+        blocked = client.get("/gate")
+        assert blocked.status_code == 429  # IP 维度覆盖全部接口（1.6 表）
+        assert blocked.json()["error"]["code"] == "RATE_LIMITED"
+        assert int(blocked.headers["Retry-After"]) > 0
+        clock.t += 1.0  # 进入下一窗口（不跨真实秒边界）
+        assert client.get("/gate").status_code == 200
 
 
 def test_rate_limit_ip_dimension_covers_unauthenticated_traffic(tmp_path: Path) -> None:
-    """fix round 1：IP 总闸门运行于 Auth 外层——未认证流量（无 Bearer）也计入 IP 桶。
+    """fix round 1：IP 总闸门运行于 Auth 外层——未认证流量（下游 401）也计入 IP 桶。
 
     P4-3 将 Auth 移出 RateLimit 外层后，未认证请求在 Auth 401 短路，不再经过任何
     业务桶；契约 1.6「IP 5 req/s：全部接口」要求 IP 桶仍覆盖该流量（含 DB 读放大
-    面防护）——超限后 429 先于 Auth 401 短路。
+    面防护）——超限后 429 先于下游 401 短路。手动时钟确定性断言。
     """
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'rl_ip_unauth.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_ip_per_second=2,
     )
-    with TestClient(create_app(settings)) as client:
-        codes = [client.get("/decks").status_code for _ in range(3)]
-    assert codes == [401, 401, 429]  # 未认证流量计入 IP 桶：前 2 次放行至 Auth 401，第 3 次 429
-    with TestClient(create_app(settings)) as client:
-        for _ in range(2):
-            client.get("/decks")
-        resp = client.get("/decks")
-    assert resp.status_code == 429
+    clock = _ManualClock()
+    app = _ip_gate_app(settings, clock, inner_status=401)  # 单 app 实例：limiter 状态延续
+    with TestClient(app) as client:
+        codes = [client.get("/gate").status_code for _ in range(3)]
+    assert codes == [401, 401, 429]  # 未认证流量计入 IP 桶：前 2 次放行至下游 401，第 3 次 429
+    with TestClient(app) as client:
+        resp = client.get("/gate")
+    assert resp.status_code == 429  # 时钟未推进：持续超限
     assert resp.json()["error"]["code"] == "RATE_LIMITED"
     assert int(resp.headers["Retry-After"]) > 0
+    clock.t += 1.0  # 下一窗口复位
+    with TestClient(app) as client:
+        assert client.get("/gate").status_code == 401  # 放行至下游 401
 
 
 def test_rate_limit_user_scope_isolated_per_user(tmp_path: Path) -> None:

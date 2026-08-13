@@ -22,7 +22,15 @@ def register_exception_handlers(app: FastAPI) -> None:
     def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
         # 2026-08-11 联调诊断：错误码写入 request.state，请求日志可记录（此前仅 status）。
         request.state.error_code = exc.code
-        return JSONResponse(status_code=http_status(exc.code), content=exc.to_response())
+        response = JSONResponse(status_code=http_status(exc.code), content=exc.to_response())
+        # D-05/契约 1.4：受保护接口 401 一律携带 WWW-Authenticate: Bearer——auth 中间件
+        # 已对自身短路路径加头，此处统一覆盖 handler 层抛出的 AUTH_REQUIRED/AUTH_INVALID
+        # （如 me 窄竞态：token 经 resolve 后被撤销，service 抛 AUTH_INVALID 的 401 路径）。
+        # 重复设置同一值无害（handler 路径不经过 auth 中间件的加头响应）。
+        # INVALID_CREDENTIALS（login 失败）按 DESIGN §4.3 不加。
+        if exc.code in (ErrorCode.AUTH_REQUIRED, ErrorCode.AUTH_INVALID):
+            response.headers["WWW-Authenticate"] = "Bearer"
+        return response
 
     @app.exception_handler(RequestValidationError)
     def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:

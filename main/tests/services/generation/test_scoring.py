@@ -30,6 +30,7 @@ from infra.db.models import (
     Batch,
     Card,
     Chapter,
+    Device,
     KnowledgePoint,
     LlmCallAttempt,
     PdfFile,
@@ -187,7 +188,7 @@ def _seed_scoring_task(
         ),
         now=_NOW,
     )
-    # 双头过渡：executor 密钥查找仍按 device 域（Task 5 切换）——种子补 device_id 双列
+    # P4-4：executor 密钥查找已切 user 域；ApiKey 种子 device_id=NULL 满足 CHECK 双非空
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = _NOW
@@ -934,3 +935,35 @@ def test_scoring_cancel_during_call_no_writeback(session_factory: Callable[[], S
     assert task.status == "CANCELLED"  # 不被最终条件更新覆盖
     assert cards[0].rubric_total_score is None  # 不写回（守卫）
     assert [a.status for a in attempts] == ["STARTED"]  # 留给恢复转 UNKNOWN（§9）
+
+
+def test_scoring_legacy_task_no_user_fails_clean(session_factory: Callable[[], Session]) -> None:
+    """T3 Minor ①：legacy 任务（user_id NULL，device 域）→ run_scoring_stage 干净
+    GENERATION_FAILED（不 500 兜底语义、不发 LLM 调用、不产生无主账本行）。"""
+    from services.generation.scoring import run_scoring_stage
+
+    user = _uuid()
+    with session_factory() as session:
+        task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
+        session.add(Device(device_id="legacy-dev", created_at=_NOW))
+        task = session.get(Task, task_id)
+        assert task is not None
+        task.device_id = "legacy-dev"
+        task.user_id = None  # 模拟 P4-3 前 device 域旧任务（CHECK 双非空经 device_id 满足）
+        session.commit()
+    with session_factory() as session:
+        task, cards, _ = _task_with_cards(session, task_id=task_id)
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            raise AssertionError("legacy 任务不得发 LLM 调用")
+
+        with pytest.raises(AppError) as exc_info:
+            run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
+        attempts = _scoring_attempts(session, task_id=task_id)
+    assert exc_info.value.code.value == "GENERATION_FAILED"
+    assert calls == 0  # guard 在 create_attempt/chat 前
+    assert attempts == []  # 无无主账本行
+    assert len(cards) >= 1  # 种子卡保留（只读失败，不破坏已有数据）

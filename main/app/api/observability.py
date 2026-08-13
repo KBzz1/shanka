@@ -70,7 +70,7 @@ def quality_summary_endpoint(
     group_by: Literal["model", "pdf", "difficulty"] = "model",
     days: Annotated[int, Query(ge=1)] = 30,
 ) -> JSONResponse:
-    """跨任务质量聚合（6.10）：Rubric 均分 / 覆盖重复率 / 任务完成率 / 成本汇总，按 device 隔离。"""
+    """跨任务质量聚合（6.10）：Rubric 均分 / 覆盖重复率 / 任务完成率 / 成本汇总，按 user 隔离。"""
     now = SystemClock().now_utc()
     groups = _aggregate(
         session,

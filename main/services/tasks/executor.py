@@ -79,7 +79,7 @@ def _decrypt_api_key(session: Session, *, task: Task, settings: Settings) -> str
     """从 api_keys 表取 encrypted_key 解密（红线 4：仅 infra/llm 路径；明文不落日志/响应）。
 
     P4-4（原 plan Task 5 前移）：Key 归属切 user 域——按 task.user_id 查询（列投影 Core
-    select，ApiKey 用户域行对 ORM 不可见）；legacy 任务（user_id NULL）无 Key 可解析 →
+    select，只取 encrypted_key 列）；legacy 任务（user_id NULL）无 Key 可解析 →
     API_KEY_UNAVAILABLE（干净 FAILED，不 500）。
     """
     key = key_from_settings(settings)

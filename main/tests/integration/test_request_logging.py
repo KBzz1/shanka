@@ -58,7 +58,7 @@ def test_request_logging_emits_json_line(
         "timestamp",
         "level",
         "request_id",
-        "device_id",
+        "user_id",  # P4-6：身份字段切 user_id（匿名请求为空串）；device_id 已退出
         "task_id",
         "batch_id",
         "error_code",

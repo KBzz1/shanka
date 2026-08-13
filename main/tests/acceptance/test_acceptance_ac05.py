@@ -75,7 +75,7 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path, Settings]]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
-        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度（连发 >5 req/s），显式调高隔离,
+        rate_limit_ip_per_second=100,  # IP 维度隔离：Bearer 注册请求计入 IP 桶（连发 >5 req/s），显式调高隔离,
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环，显式 scan_once
     )
     with TestClient(create_app(settings)) as client:
@@ -109,7 +109,7 @@ def _user_id(db_path: Path, username: str = "alice") -> str:
 def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
     """users 前置 + PDF(PARSED) + 2 章节 + 牌组 + 真实加密 Key（executor 解密路径）
     + 页文本（text_chunks——LLM 升级管线规划输入）。PDF/牌组/Key 均 user 域（P4-4 起——
-    ApiKey 用户域 Core 直写：ORM 对用户域行不可见，P3 mapper 过渡遗留，Task 5 移除）。
+    ApiKey 用户域 Core 直写（只写所需列）。
     """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:

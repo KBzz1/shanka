@@ -76,13 +76,13 @@ def test_metrics_rate_limit_hit_recorded(tmp_path: Path) -> None:
         database_url=f"sqlite:///{tmp_path / 'm3.db'}",
         storage_path=tmp_path / "storage",
         rate_limit_write_per_minute=1,
-        rate_limit_ip_per_second=100,  # 双头窗口：Bearer 注册请求计入 IP 维度，显式调高隔离
+        rate_limit_ip_per_second=100,  # IP 维度隔离：Bearer 注册请求计入 IP 桶，显式调高隔离
     )
     write_line = 'rate_limit_hit_total{scope="write"}'
     from alembic import command
     from alembic.config import Config
 
-    # 双头过渡窗口：Bearer 经 auth 中间件 → 需迁移后 auth_sessions 表
+    # Bearer 经 auth 中间件 → 需迁移后 auth_sessions 表
     cfg = Config(str(Path(__file__).resolve().parents[3] / "main" / "alembic.ini"))
     cfg.set_main_option("sqlalchemy.url", settings.database_url)
     command.upgrade(cfg, "head")

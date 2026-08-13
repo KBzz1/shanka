@@ -176,7 +176,7 @@ def _submit_review_inner(
     rating = rating_from_str(rating_value)  # 非法 → REVIEW_EVENT_INVALID（400）
     rs = _get_review_state(session, card_id=card_id, now=now)
 
-    # client_event_id 兜底（1.3）：先查已有事件（UNIQUE(device_id, client_event_id)）
+    # client_event_id 兜底（1.3）：先查已有事件（UNIQUE(user_id, client_event_id)）
     existing = session.scalar(
         select(ReviewEvent).where(
             ReviewEvent.user_id == user_id,

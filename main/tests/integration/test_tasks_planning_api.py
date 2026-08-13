@@ -88,8 +88,7 @@ def _user_id(db_path: Path, username: str = "alice") -> str:
 def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dict[str, object]:
     """users 前置 + PDF + chapter_count 章节 + 牌组 + ApiKey（tasks 创建校验 Key）。
 
-    PDF/牌组 user 域（tasks 归属校验）；ApiKey 用户域（P4-4 起——Core 直写：
-    ApiKey 用户域行对 ORM 不可见，P3 mapper 过渡遗留，Task 5 移除）。
+    PDF/牌组 user 域（tasks 归属校验）；ApiKey 用户域（P4-4 起——Core 直写只写所需列）。
     """
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
