@@ -15,7 +15,7 @@ class LoggingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "test.log"
             shlogging.init_logger("run-123", path)
-            shlogging.set_context(suite="quick", scenario="api_smoke", device_id="dev-1")
+            shlogging.set_context(suite="quick", scenario="api_smoke", user_id="u-1")
             shlogging.event("INFO", "请求完成", method="GET", path="/decks", status=200,
                             request_id="req-1", duration_ms=12, error_code="")
             line = json.loads(path.read_text().strip())
@@ -24,10 +24,22 @@ class LoggingTest(unittest.TestCase):
             self.assertEqual(line["message"], "请求完成")
             self.assertEqual(line["suite"], "quick")
             self.assertEqual(line["scenario"], "api_smoke")
-            self.assertEqual(line["device_id"], "dev-1")
+            self.assertEqual(line["user_id"], "u-1")
             self.assertEqual(line["request_id"], "req-1")
             self.assertEqual(line["status"], 200)
+            self.assertNotIn("device_id", line)  # 账号化:身份字段只有 user_id
             self.assertIn("timestamp", line)
+
+    def test_empty_user_id_field_omitted(self) -> None:
+        """runner 在会话建立前置空 user_id;空值不落字段。"""
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "test.log"
+            shlogging.init_logger("run-1", path)
+            shlogging.set_context(suite="auth", scenario="auth", user_id="")
+            shlogging.event("INFO", "before-auth", method="GET", path="/decks")
+            line = json.loads(path.read_text().strip())
+            self.assertNotIn("user_id", line)
+            self.assertNotIn("device_id", line)
 
     def test_sensitive_fields_masked(self) -> None:
         """敏感字段统一脱敏:Authorization -> Bearer ***;password/token/api_key -> ***。"""

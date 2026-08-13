@@ -1,7 +1,8 @@
 """JSON Lines 事件日志:run_id 上下文/字段规范/脱敏(对齐后端 app.log 风格)。
 
 事件字段:必选 timestamp/level/run_id/message;请求事件另含
-suite/scenario/step/request_id/device_id/method/path/status/duration_ms/error_code。
+suite/scenario/step/request_id/user_id/method/path/status/duration_ms/error_code。
+账号化(DESIGN 4.5/8.1):日志身份字段为 user_id(不再有 device_id)。
 脱敏纪律(红线 4):敏感字段统一自动脱敏——Authorization -> Bearer ***,password/token/
 api_key 等 -> ***;调用方不得把明文凭据混入 message(register/login 等敏感路径由
 client 直接不落事件)。
@@ -20,7 +21,7 @@ _lock = threading.Lock()
 _run_id = ""
 _suite = ""
 _scenario = ""
-_device_id = ""
+_user_id = ""
 _file: TextIO | None = None
 _console = False
 
@@ -51,10 +52,10 @@ def init_logger(run_id: str, log_path: Path | None = None, console: bool = False
             _file = open(log_path, "a", encoding="utf-8")
 
 
-def set_context(*, suite: str, scenario: str, device_id: str) -> None:
-    global _suite, _scenario, _device_id
+def set_context(*, suite: str, scenario: str, user_id: str) -> None:
+    global _suite, _scenario, _user_id
     with _lock:
-        _suite, _scenario, _device_id = suite, scenario, device_id
+        _suite, _scenario, _user_id = suite, scenario, user_id
 
 
 def event(level: str, message: str, **fields: Any) -> None:
@@ -68,8 +69,8 @@ def event(level: str, message: str, **fields: Any) -> None:
         row["suite"] = _suite
     if _scenario:
         row["scenario"] = _scenario
-    if _device_id:
-        row["device_id"] = _device_id
+    if _user_id:
+        row["user_id"] = _user_id
     for k, v in fields.items():
         v = v if isinstance(v, (str, int, float, bool, type(None))) else str(v)
         row[k] = redact_field(k, v)

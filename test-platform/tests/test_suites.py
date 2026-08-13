@@ -1,4 +1,4 @@
-"""runner.suites 单元测试:套件构成与闸门逻辑(含 --device-id 移除与凭据缺失拒绝)。"""
+"""runner.suites 单元测试:套件构成与闸门逻辑(含 --device-id 移除、凭据缺失拒绝、注入参数)。"""
 import os
 import sys
 import unittest
@@ -12,15 +12,21 @@ from runner import suites
 
 class SuitesTest(unittest.TestCase):
     def test_suite_membership(self) -> None:
-        names = {s.NAME: s for s in suites.SUITES["quick"]}
-        self.assertIn("api_smoke", names)
-        self.assertNotIn("live_flow", names)
+        quick_names = {s.NAME for s in suites.SUITES["quick"]}
+        self.assertIn("api_smoke", quick_names)
+        self.assertIn("auth", quick_names)
+        self.assertNotIn("live_flow", quick_names)
+        full_names = {s.NAME for s in suites.SUITES["full"]}
+        self.assertIn("isolation", full_names)
         live_names = {s.NAME for s in suites.SUITES["live"]}
         self.assertIn("live_flow", live_names)
+        self.assertIn("isolation", live_names)
 
     def test_llm_counts(self) -> None:
         self.assertEqual(suites.llm_total("quick"), 0)
+        self.assertEqual(suites.llm_total("full"), 0)
         self.assertGreater(suites.llm_total("live"), suites.llm_total("full"))
+        self.assertEqual(suites.llm_total("live"), 3)  # live_flow 3 次,未超阈值
 
     def test_prod_gate(self) -> None:
         self.assertTrue(suites.gate_ok(environment="local", confirm_prod=False))  # local 默认放行
@@ -39,6 +45,22 @@ class SuitesTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             code = suites.main(["--environment", "local", "--suite", "quick"])
         self.assertNotEqual(code, 0)
+
+    def test_runner_injects_environment_and_run_id(self) -> None:
+        """runner 向每个场景注入 --base-url/--environment/--run-id(场景不自行生成 run_id)。"""
+        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_PASSWORD": "p"}
+        with mock.patch.dict(os.environ, env):
+            with mock.patch.object(suites.auth, "main", return_value=0) as m_auth, \
+                 mock.patch.object(suites.api_smoke, "main", return_value=0) as m_smoke:
+                code = suites.main(["--environment", "local", "--suite", "quick"])
+        self.assertEqual(code, 0)
+        for m in (m_auth, m_smoke):
+            args = m.call_args.args[0]
+            self.assertIn("--base-url", args)
+            self.assertIn("--environment", args)
+            self.assertEqual(args[args.index("--environment") + 1], "local")
+            run_id = args[args.index("--run-id") + 1]
+            self.assertTrue(run_id)  # 非空 UUID 注入
 
 
 if __name__ == "__main__":

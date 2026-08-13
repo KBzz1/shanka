@@ -1,9 +1,9 @@
-"""完整制卡流程场景(API Key → PDF → 样卡 → 任务 → 复习 → 看板)端到端联调。
+"""完整制卡流程场景(API Key → PDF → 样卡 → 任务 → 复习 → 看板 → quality-summary)端到端联调,账号 Bearer 流程。
 
 真实 Key 消耗 3 次 LLM 调用(api-key 校验 1 + samples 1 + tasks 1),LLM_CALLS=3
 供 runner 成本统计;API Key 从仓库根 .env 读取,仅内存使用,绝不输出。
 运行方式(由 runner 调度或直接):
-    python3 scenarios/flow/live_flow.py --base-url http://localhost:8000
+    python3 scenarios/flow/live_flow.py --base-url http://localhost:8000 [--environment local|prod] [--run-id UUID]
     python3 scenarios/flow/live_flow.py --skip-generate   # 到样卡为止,省 1 次 LLM 调用
 退出码 = 失败步骤数(0 = 全部通过)。
 """
@@ -23,10 +23,10 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from shanka import logging as shlogging
+from shanka import account, environments, logging as shlogging
 from shanka.cleanup import DataScope
 from shanka.client import Response, ShankaClient
-from shanka.report import check, summary
+from shanka.report import check, record, summary
 
 NAME = "live_flow"
 SUITE = "flow"
@@ -71,23 +71,29 @@ def _load_env_key() -> str:
     raise SystemExit(f"未在 {_ENV_FILE} 找到 DEEPSEEK_API_KEY")
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--base-url", default="http://localhost:8000")
-    ap.add_argument("--device-id", default=None, help="固定 X-Device-ID(默认随机)")
-    ap.add_argument("--skip-generate", action="store_true", help="跳过 POST /tasks 与评级,到样卡为止")
-    ap.add_argument("--keep", action="store_true", help="不清理创建的牌组")
-    args = ap.parse_args(argv)
+def run(
+    c: ShankaClient,
+    *,
+    environment: str,
+    username: str,
+    password: str,
+    api_key: str,
+    run_id: str,
+    skip_generate: bool,
+    keep: bool,
+) -> int:
+    shlogging.set_context(suite=SUITE, scenario=NAME, user_id="")
 
-    # 密钥仅内存使用;client 对 PUT /api-key 自动脱敏不记录(红线 4)
-    api_key = _load_env_key()
-    # 任务生成期后端事件循环阻塞,轮询请求需长超时(默认 30s 不足)
-    c = ShankaClient(args.base_url, device_id=args.device_id, timeout=60)
-    # 请求事件需含 device_id(日志规范);runner 随机设备时注入的是空串,此处回写实际设备
-    shlogging.set_context(suite=SUITE, scenario=NAME, device_id=c.device_id)
+    # 0. 会话建立(local register/已存在回落 login;prod 只 login)
+    session = account.bootstrap(c, environment=environment, username=username, password=password)
+    check("建立会话(register/login)", session is not None)
+    if session is None:
+        return summary()
+    shlogging.set_context(suite=SUITE, scenario=NAME, user_id=session["user_id"])
+    created = 1 if session["created_local_user"] else 0
     scope = DataScope(c)
 
-    # 1. API Key 保存(幂等)与状态
+    # 1. API Key 保存(幂等)与状态(密钥仅内存使用;client 对 PUT /api-key 自动脱敏不记录,红线 4)
     r = c.request("PUT", "/api-key", body={"api_key": api_key}, idempotent=True, step="api-key-put")
     check("PUT /api-key -> 200", r.status == 200, f"({r.status})")
     r = c.request("GET", "/api-key/status", step="api-key-status")
@@ -95,14 +101,14 @@ def main(argv: list[str] | None = None) -> int:
     check("GET /api-key/status -> AVAILABLE", body.get("status") == "AVAILABLE",
           f"status={body.get('status')}")
 
-    # 2. 复用已解析 PDF:列表选第一个 PARSED,取章节断言非空
+    # 2. 复用当前用户已解析 PDF:列表选第一个 PARSED,取章节断言非空
     r = c.request("GET", "/pdfs", step="pdf-list")
     check("GET /pdfs -> 200", r.status == 200, f"({r.status})")
     pdfs = [p for p in _body(r).get("items", []) if p.get("status") == "PARSED"]
     check("存在已解析 PDF", bool(pdfs), f"parsed={len(pdfs)}")
     if not pdfs:
         raise SystemExit(
-            f"无已解析 PDF(设备 {c.device_id[:8]}),请固定 --device-id 运行以复用预置数据,或先上传解析 PDF"
+            f"当前用户无已解析 PDF(parsed=0):请先上传解析 PDF 或预置测试账号数据后重跑"
         )
     file_id = pdfs[0]["file_id"]
     r = c.request("GET", f"/pdfs/{file_id}", step="pdf-detail")
@@ -125,9 +131,13 @@ def main(argv: list[str] | None = None) -> int:
     if not cards:
         raise SystemExit("样卡生成为空,无法继续")
 
-    # 4. 创建牌组 + 生成任务(--skip-generate 时到此结束)
-    if args.skip_generate:
+    # 4. 创建牌组 + 生成任务(--skip-generate 时到此结束,仍需注销会话)
+    if skip_generate:
         print("    [skip-generate] 跳过 POST /tasks 与评级,流程到样卡为止")
+        r = c.logout()
+        check("logout -> 204", r.status == 204, f"({r.status})")
+        if created:
+            record("local_test_users_created", created)
         return summary()
 
     try:
@@ -196,15 +206,71 @@ def main(argv: list[str] | None = None) -> int:
           "weekly_total" in body and "mastered_card_count" in body,
           f"weekly={body.get('weekly_total')} mastered={body.get('mastered_card_count')}")
 
-    # 7. 清理(--keep 时保留牌组)
-    if not args.keep:
+    # 7. 观测:quality-summary 按 user(Bearer 主体,跨用户不泄漏)
+    r = c.request("GET", "/observability/quality-summary", step="quality-summary")
+    body = _body(r)
+    check("GET /observability/quality-summary -> 200", r.status == 200, f"({r.status})")
+    groups = body.get("groups") if isinstance(body.get("groups"), list) else None
+    check("summary 形状(group_by/days/groups)",
+          bool(body.get("group_by")) and isinstance(body.get("days"), int) and isinstance(groups, list),
+          str(body)[:100])
+    if groups:
+        check("本次生成计入当前用户 summary",
+              any(isinstance(g, dict) and bool(g.get("card_count")) for g in groups),
+              f"groups={len(groups)}")
+    # 本地交叉断言:临时新账号(无生成)summary 必须为空——observability 按 user 隔离
+    if not environments.is_prod(environment):
+        obs_name = account.temp_username(run_id, "obs")
+        obs = account.bootstrap(c, environment=environment, username=obs_name,
+                                password=account.temp_password())
+        check("观测临时账号建立", obs is not None, f"user={obs_name}")
+        if obs is not None:
+            created += 1
+            r = c.request("GET", "/observability/quality-summary", step="obs-quality-summary")
+            body = _body(r)
+            check("临时账号 quality-summary -> 200", r.status == 200, f"({r.status})")
+            check("临时账号 summary 为空(按 user 隔离)", body.get("groups") == [], str(body)[:100])
+            r = c.logout()
+            check("临时账号 logout -> 204", r.status == 204, f"({r.status})")
+        c.set_token(session["access_token"])
+
+    # 8. 清理(--keep 时保留牌组)+ 注销会话
+    if not keep:
         scope.cleanup()
         r = c.request("GET", f"/decks/{deck_id}", step="deck-after-cleanup")
         check("清理后牌组不可见(404)", r.status == 404, f"({r.status})")
     else:
         print("    [keep] 保留测试牌组,不清理")
+    r = c.logout()
+    check("logout -> 204", r.status == 204, f"({r.status})")
 
+    if created:
+        record("local_test_users_created", created)
     return summary()
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--base-url", default="http://localhost:8000")
+    ap.add_argument("--environment", default="local", choices=list(environments.ENVIRONMENTS))
+    ap.add_argument("--run-id", default=None, help="runner 注入(临时观测账号命名);直跑时自动生成")
+    ap.add_argument("--skip-generate", action="store_true", help="跳过 POST /tasks 与评级,到样卡为止")
+    ap.add_argument("--keep", action="store_true", help="不清理创建的牌组")
+    args = ap.parse_args(argv)
+
+    try:
+        username, password = environments.credentials()
+    except environments.MissingCredentialsError as exc:
+        print(f"拒绝执行: {exc}", file=sys.stderr)
+        return 1
+
+    # 密钥仅内存使用;client 对 PUT /api-key 自动脱敏不记录(红线 4)
+    api_key = _load_env_key()
+    # 任务生成期后端事件循环阻塞,轮询请求需长超时(默认 30s 不足)
+    c = ShankaClient(args.base_url, timeout=60)
+    return run(c, environment=args.environment, username=username, password=password,
+               api_key=api_key, run_id=args.run_id or str(uuid.uuid4()),
+               skip_generate=args.skip_generate, keep=args.keep)
 
 
 if __name__ == "__main__":

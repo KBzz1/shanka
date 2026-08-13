@@ -136,7 +136,7 @@ class ClientTest(unittest.TestCase):
     def test_get_with_token_and_log(self) -> None:
         c = self._client()
         c.set_token("tok-1")
-        shlogging.set_context(suite="t", scenario="t", device_id="")
+        shlogging.set_context(suite="t", scenario="t", user_id="")
         r = c.request("GET", "/ok", step="probe")
         self.assertEqual(r.status, 200)
         self.assertEqual(r.request_id, "req-test-1")

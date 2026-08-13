@@ -1,19 +1,22 @@
-"""API 连通性冒烟场景(运行中服务的 HTTP 实链路验证)。
+"""API 连通性冒烟场景(运行中服务的 HTTP 实链路验证,账号 Bearer 流程)。
 
-覆盖:探针、鉴权(X-Device-ID 必须)、牌组列表/创建/详情、幂等重放(C-04)、
-错误响应结构、openapi 契约、metrics。不含真实密钥(生成链路见 flow/live_flow)。
+覆盖:探针、鉴权(无 Bearer 401 AUTH_REQUIRED)、会话建立(register/login,env 凭据)、
+牌组列表/创建/详情、幂等重放(C-04)、错误响应结构、openapi 契约、metrics、
+IP 限流真实生效、结束清理与 logout。不含真实密钥(生成链路见 flow/live_flow)。
 运行方式(由 runner 调度或直接):
-    python3 scenarios/baseline/api_smoke.py --base-url http://localhost:8000
+    python3 scenarios/baseline/api_smoke.py --base-url http://localhost:8000 [--environment local|prod]
 退出码 = 失败步骤数(0 = 全部通过)。
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 # 场景模块被直接执行时 sys.path[0] 是脚本所在目录(scenarios/baseline),
@@ -22,26 +25,60 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from shanka import logging as shlogging
+from shanka import account, environments, logging as shlogging
 from shanka.client import ShankaClient
-from shanka.report import check, summary
+from shanka.report import check, record, summary
 
 NAME = "api_smoke"
 SUITE = "baseline"
 LLM_CALLS = 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--base-url", default="http://localhost:8000")
-    ap.add_argument("--device-id", default=None, help="固定 X-Device-ID(默认随机)")
-    ap.add_argument("--pace", type=float, default=0.3, help="请求间隔秒(契约 IP 5 req/s)")
-    ap.add_argument("--openapi-local", default=None, help="本地 openapi 文件路径(默认运行时 /openapi.json)")
-    args = ap.parse_args(argv)
+def _same_key_post(
+    c: ShankaClient, path: str, body: dict, idem_key: str, token: str
+) -> tuple[int, dict]:
+    """手工同幂等键重放(C-04):client 每次自动新键会掩盖同键语义;Bearer 认证。"""
+    req = urllib.request.Request(
+        c.base_url + path,
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 "Idempotency-Key": idem_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode() or "{}")
 
-    c = ShankaClient(args.base_url, device_id=args.device_id, pace=args.pace)
-    # 请求事件需含 device_id(日志规范);runner 随机设备时注入的是空串,此处回写实际设备
-    shlogging.set_context(suite=SUITE, scenario=NAME, device_id=c.device_id)
+
+def _burst(c: ShankaClient, path: str, n: int) -> tuple[list[int], list[str | None]]:
+    """连发 n 个不 sleep 的请求,收集状态码与 Retry-After(IP 限流真实生效断言)。"""
+    codes: list[int] = []
+    retry_after: list[str | None] = []
+    for _ in range(n):
+        try:
+            with urllib.request.urlopen(c.base_url + path, timeout=15) as resp:
+                codes.append(resp.status)
+                retry_after.append(resp.headers.get("Retry-After"))
+        except urllib.error.HTTPError as e:
+            codes.append(e.code)
+            retry_after.append(e.headers.get("Retry-After"))
+    return codes, retry_after
+
+
+def run(
+    c: ShankaClient,
+    *,
+    environment: str,
+    username: str,
+    password: str,
+    openapi_local: str | None = None,
+    same_key_post=_same_key_post,
+    burst=_burst,
+) -> int:
+    """核心流程(同键重放/突发请求可注入,供无网络逻辑层测试)。"""
+    shlogging.set_context(suite=SUITE, scenario=NAME, user_id="")
 
     # 1. 探针(豁免鉴权)
     r = c.request("GET", "/healthz", step="healthz")
@@ -50,16 +87,22 @@ def main(argv: list[str] | None = None) -> int:
     r = c.request("GET", "/readyz", step="readyz")
     check("GET /readyz -> 200", r.status == 200, f"({r.status})")
 
-    # 2. 鉴权:无 X-Device-ID 必须 401(不经 client 的设备头,直连)
-    try:
-        with urllib.request.urlopen(c.base_url + "/decks", timeout=15) as resp:
-            status = resp.status
-    except urllib.error.HTTPError as e:
-        status = e.code
-        e.close()
-    check("GET /decks 无设备头 -> 401", status == 401, f"({status})")
+    # 2. 鉴权:无 Bearer 必须 401(客户端未持有 token 不带头)
+    r = c.request("GET", "/decks", step="no-token-decks")
+    check("GET /decks 无 Bearer -> 401", r.status == 401, f"({r.status})")
+    err = (r.json or {}).get("error") if isinstance(r.json, dict) else None
+    check("401 错误码 AUTH_REQUIRED",
+          isinstance(err, dict) and err.get("code") == "AUTH_REQUIRED", str(err)[:80])
 
-    # 3. 业务链路:列表 / 创建 / 详情
+    # 3. 会话建立:local register(已存在回落 login),prod 只 login
+    session = account.bootstrap(c, environment=environment, username=username, password=password)
+    check("建立会话(register/login)", session is not None)
+    if session is None:
+        return summary()
+    shlogging.set_context(suite=SUITE, scenario=NAME, user_id=session["user_id"])
+    created = 1 if session["created_local_user"] else 0
+
+    # 4. 业务链路:列表 / 创建 / 详情(全 Bearer)
     r = c.request("GET", "/decks", step="deck-list")
     check("GET /decks -> 200", r.status == 200, f"({r.status})")
     items = r.json.get("items") if isinstance(r.json, dict) else None
@@ -68,59 +111,40 @@ def main(argv: list[str] | None = None) -> int:
     deck_name = f"smoke-{time.time_ns() % 10**8}"
     r = c.request("POST", "/decks", body={"name": deck_name}, idempotent=True, step="deck-create")
     check("POST /decks -> 201", r.status == 201, f"({r.status})")
-    deck_id = r.json.get("deck_id") if r.status == 201 else None
+    deck_id = r.json.get("deck_id") if isinstance(r.json, dict) else None
     check("创建返回 deck_id", isinstance(deck_id, str))
     check("创建返回 name", r.json.get("name") == deck_name)
 
-    # 4. 幂等重放(C-04):同幂等键重放 -> 原结果不 409
-    #    (client 每次自动新键会掩盖同键语义,此处手工构造同键两次 POST)
-    import uuid as _uuid
-    key = str(_uuid.uuid4())
-    def _post_with_key(path: str, body: dict, idem_key: str):
-        import json as _json
-        import urllib.request as _ur
-        req = _ur.Request(
-            c.base_url + path,
-            data=_json.dumps(body).encode(),
-            headers={"X-Device-ID": c.device_id, "Content-Type": "application/json",
-                     "Idempotency-Key": idem_key},
-            method="POST",
-        )
-        try:
-            with _ur.urlopen(req, timeout=15) as resp:
-                return resp.status, _json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            return e.code, _json.loads(e.read().decode() or "{}")
-
+    # 5. 幂等重放(C-04):同幂等键重放 -> 原结果不 409
+    key = str(uuid.uuid4())
     time.sleep(c.pace)
-    st1, body1 = _post_with_key("/decks", {"name": deck_name}, key)
+    st1, body1 = same_key_post(c, "/decks", {"name": deck_name}, key, session["access_token"])
     time.sleep(c.pace)
-    st2, body2 = _post_with_key("/decks", {"name": deck_name}, key)
+    st2, body2 = same_key_post(c, "/decks", {"name": deck_name}, key, session["access_token"])
     check("幂等重放非 409", st2 in (200, 201), f"({st2})")
     check("幂等重放同 deck_id", body2.get("deck_id") == body1.get("deck_id"))
     # 创建与重放各自落库的 deck_id 全量登记(重放键与创建键不同,按 C-04 语义另建牌组)
-    created_ids = {i for i in (deck_id, body1.get("deck_id"), body2.get("deck_id")) if isinstance(i, str)}
+    created_ids = {i for i in (deck_id, body1.get("deck_id"), body2.get("deck_id"))
+                   if isinstance(i, str)}
 
-    # 5. 详情核对
+    # 6. 详情核对
     if deck_id:
         r = c.request("GET", f"/decks/{deck_id}", step="deck-detail")
         check("GET /decks/{id} -> 200", r.status == 200, f"({r.status})")
         check("详情 deck_id 一致", r.json.get("deck_id") == deck_id)
 
-    # 6. 错误结构:非法 body -> 400 VALIDATION_ERROR
+    # 7. 错误结构:非法 body -> 400 VALIDATION_ERROR
     r = c.request("POST", "/decks", body={}, idempotent=True, step="deck-invalid")
     body = r.json or {}
     check("非法 body -> 400", r.status == 400, f"({r.status})")
     err = body.get("error")
     check("错误结构含 error.code/localization_key",
-          isinstance(err, dict) and "code" in err and "localization_key" in err,
-          str(body)[:100])
+          isinstance(err, dict) and "code" in err and "localization_key" in err, str(body)[:100])
 
-    # 7. 机器契约与观测
-    if args.openapi_local:
-        import json as _json
-        with open(args.openapi_local, encoding="utf-8") as f:
-            spec = _json.load(f)
+    # 8. 机器契约与观测
+    if openapi_local:
+        with open(openapi_local, encoding="utf-8") as f:
+            spec = json.load(f)
         check("本地 openapi 含 decks 路径", "/decks" in spec.get("paths", {}))
     else:
         r = c.request("GET", "/openapi.json", step="openapi")
@@ -130,31 +154,43 @@ def main(argv: list[str] | None = None) -> int:
     r = c.request("GET", "/metrics", step="metrics")
     check("GET /metrics -> 200", r.status == 200, f"({r.status})")
 
-    # 8. 限流真实生效:连发 6 个(不 sleep)-> 至少 1 个 429 + Retry-After
-    codes: list[int] = []
-    retry_after: list[str | None] = []
-    for _ in range(6):
-        try:
-            with urllib.request.urlopen(c.base_url + "/openapi.json", timeout=15) as resp:
-                codes.append(resp.status)
-                retry_after.append(resp.headers.get("Retry-After"))
-        except urllib.error.HTTPError as e:
-            codes.append(e.code)
-            retry_after.append(e.headers.get("Retry-After"))
+    # 9. 限流真实生效:连发 6 个(不 sleep)-> 至少 1 个 429 + Retry-After
+    codes, retry_after = burst(c, "/openapi.json", 6)
     check("快速连发触发 429", codes.count(429) >= 1, f"codes={codes}")
     check("429 带 Retry-After 头", any(v is not None for v in retry_after), f"{retry_after}")
     time.sleep(1.2)  # 越过 IP 限流 1s 窗口
     r = c.request("GET", "/healthz", step="healthz-after")
     check("窗口过后恢复 200", r.status == 200, f"({r.status})")
 
-    failed = summary()
-
-    # 9. 清理创建的 smoke-* 牌组(spec 数据策略:默认随机设备不留残留;清理失败仅 WARN,不影响退出码)
+    # 10. 清理创建的 smoke-* 牌组并注销会话(清理失败仅 WARN,不影响退出码)
     for did in sorted(created_ids):
         r = c.request("DELETE", f"/decks/{did}", idempotent=True, step="deck-cleanup")
         if r.status not in (200, 204):
             shlogging.event("WARN", "清理 smoke 牌组失败", deck_id=did, status=r.status)
-    return failed
+    r = c.logout()
+    check("logout -> 204", r.status == 204, f"({r.status})")
+
+    if created:
+        record("local_test_users_created", created)
+    return summary()
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--base-url", default="http://localhost:8000")
+    ap.add_argument("--environment", default="local", choices=list(environments.ENVIRONMENTS))
+    ap.add_argument("--run-id", default=None, help="runner 注入;直跑时自动生成")
+    ap.add_argument("--pace", type=float, default=0.3, help="请求间隔秒(契约 IP 5 req/s)")
+    ap.add_argument("--openapi-local", default=None, help="本地 openapi 文件路径(默认运行时 /openapi.json)")
+    args = ap.parse_args(argv)
+    try:
+        username, password = environments.credentials()
+    except environments.MissingCredentialsError as exc:
+        print(f"拒绝执行: {exc}", file=sys.stderr)
+        return 1
+    c = ShankaClient(args.base_url, pace=args.pace)
+    return run(c, environment=args.environment, username=username, password=password,
+               openapi_local=args.openapi_local)
 
 
 if __name__ == "__main__":

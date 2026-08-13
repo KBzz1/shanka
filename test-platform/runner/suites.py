@@ -1,15 +1,16 @@
 """套件定义与调度入口:环境/套件/场景选择、成本闸门(--confirm-cost)、环境安全闸门(--confirm-prod)。
 
 套件:
-  quick — 0 次 LLM 调用,纯无 Key 冒烟;
-  full  — 非生成场景 + api_key(合计 1 次校验调用;域场景实装后扩展,本期 = quick 成员);
-  live  — full + samples/tasks/live_flow,含真实生成(LLM 合计 3,不超阈值;批量扩展后触发闸门)。
+  quick — auth + api_smoke,0 次 LLM 调用,纯无 Key 冒烟;
+  full  — 非生成场景(auth/isolation/api_smoke,0 次 LLM;域场景实装后扩展);
+  live  — full + live_flow,含真实生成(LLM 合计 3,不超阈值;批量扩展后触发闸门)。
+凭据只从环境变量读取(SHANKA_TEST_USERNAME/SHANKA_TEST_PASSWORD),缺失拒绝执行;
+run_id 由 runner 生成并注入场景,日志身份字段为 user_id(会话建立前为空)。
 """
 
 from __future__ import annotations
 
 import argparse
-import logging as py_logging
 import sys
 import uuid
 from pathlib import Path
@@ -17,13 +18,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shanka import cost, environments, logging as shlogging
+from scenarios.auth import auth
 from scenarios.baseline import api_smoke
 from scenarios.flow import live_flow
+from scenarios.isolation import isolation
 
 SUITES: dict[str, list] = {
-    "quick": [api_smoke],
-    "full": [api_smoke],       # 域场景(identity/pdf/cards/...)实装后按 spec 场景地图扩展
-    "live": [api_smoke, live_flow],
+    "quick": [auth, api_smoke],
+    "full": [auth, isolation, api_smoke],
+    "live": [auth, isolation, api_smoke, live_flow],
 }
 
 
@@ -75,8 +78,9 @@ def main(argv: list[str] | None = None) -> int:
     failed = 0
     for mod in scenarios:
         print(f"\n===== 场景 {mod.NAME} ({mod.SUITE}) =====")
-        shlogging.set_context(suite=mod.SUITE, scenario=mod.NAME, device_id="")
-        args_list = ["--base-url", base]
+        # 会话建立前的身份为空;场景建立会话后回写 user_id
+        shlogging.set_context(suite=mod.SUITE, scenario=mod.NAME, user_id="")
+        args_list = ["--base-url", base, "--environment", args.environment, "--run-id", run_id]
         failed += mod.main(args_list)
     print(f"\n套件 {args.suite} 完成, 失败步骤 {failed}, run_id={run_id}")
     return 1 if failed else 0
