@@ -80,7 +80,7 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
-    // Android's bundled org.json is a JVM test stub; parser contract tests need an implementation.
+    // Real org.json for JVM tests: android.jar only ships throwing stubs.
     testImplementation("org.json:json:20240303")
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.02.01"))
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

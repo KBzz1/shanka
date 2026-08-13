@@ -9,6 +9,10 @@ import android.util.Base64
 import android.util.Log
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.CardDraft
+import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
+import com.qiuzhao.flashcards.data.session.Session
+import com.qiuzhao.flashcards.data.session.SessionStore
+import com.qiuzhao.flashcards.data.session.SessionUser
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -153,9 +157,20 @@ sealed interface ApiResult<out T> {
 
 internal data class HttpResult(val status: Int, val body: String, val headers: Map<String, List<String>>)
 
+/** Authorization header derived from a bearer token; empty when there is no session. */
+internal fun buildAuthHeaders(token: String?): Map<String, String> =
+    if (token == null) emptyMap() else mapOf("Authorization" to "Bearer $token")
+
 /**
- * The device id is deliberately encrypted at rest. It is a credential, so all callers only
- * receive it for a request header and no logging API accepts it.
+ * Which token a request carries: an explicit override (logout) wins, otherwise the stored
+ * session supplies it, unless the endpoint is unauthenticated (register/login).
+ */
+internal fun requestAuthToken(authenticate: Boolean, tokenOverride: String?, session: Session?): String? =
+    tokenOverride ?: if (authenticate) session?.token else null
+
+/**
+ * The device id is deliberately encrypted at rest. The server dropped X-Device-ID in P4-4 and
+ * the client no longer sends it (P6-2); the class is unused and scheduled for removal in Task 4.
  */
 private class SecureDeviceIdentityStore(context: Context) {
     private val preferences = context.getSharedPreferences("remote_identity", Context.MODE_PRIVATE)
@@ -194,9 +209,12 @@ private class SecureDeviceIdentityStore(context: Context) {
     }.getOrNull()
 }
 
-internal class BackendClient(context: Context, private val baseUrl: String = defaultBaseUrl()) {
+internal class BackendClient(
+    context: Context,
+    private val baseUrl: String = defaultBaseUrl(),
+    private val sessionStore: SessionStore = KeystoreSessionStore(context)
+) {
     private val appContext = context.applicationContext
-    private val identity = SecureDeviceIdentityStore(appContext)
 
     suspend fun request(
         operation: String,
@@ -204,7 +222,9 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
         path: String,
         body: String? = null,
         contentType: String = "application/json",
-        idempotent: Boolean = method in setOf("POST", "PUT", "PATCH", "DELETE") && path != "/samples"
+        idempotent: Boolean = method in setOf("POST", "PUT", "PATCH", "DELETE") && path != "/samples",
+        authenticate: Boolean = true,
+        token: String? = null
     ): HttpResult = withContext(Dispatchers.IO) {
         val trace = UUID.randomUUID().toString().take(8)
         val key = if (idempotent) UUID.randomUUID().toString() else null
@@ -215,7 +235,8 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
             // A development server is optional for the installed app.  In
             // particular, 10.0.2.2 is only meaningful to an emulator; a
             // physical phone must never be taken down by its absence.
-            last = runCatching { execute(method, path, body, contentType, key) }
+            val authToken = requestAuthToken(authenticate, token, sessionStore.load())
+            last = runCatching { execute(method, path, body, contentType, key, authToken) }
                 .getOrElse { unavailableResult(it) }
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
             debug(requestLog(trace, operation, path, last, elapsedMs, attempt))
@@ -235,7 +256,7 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
         var last: HttpResult
         do {
             val started = System.nanoTime()
-            last = runCatching { executeMultipart(uri, key) }
+            last = runCatching { executeMultipart(uri, key, sessionStore.load()?.token) }
                 .getOrElse { unavailableResult(it) }
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
             debug(requestLog(trace, "upload_pdf", "/pdfs", last, elapsedMs, attempt))
@@ -248,13 +269,37 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
         last
     }
 
-    private fun execute(method: String, path: String, body: String?, contentType: String, key: String?): HttpResult {
+    /**
+     * The four auth endpoints. register/login are unauthenticated and deliberately skip the
+     * idempotency key (contract FR-19: no automatic retry that could silently create sessions);
+     * logout sends the explicit token so it works even when the store was replaced; me is a
+     * plain session-authenticated read.
+     */
+    suspend fun register(username: String, password: String): HttpResult = request(
+        "register", "POST", "/auth/register", credentialsBody(username, password),
+        idempotent = false, authenticate = false
+    )
+
+    suspend fun login(username: String, password: String): HttpResult = request(
+        "login", "POST", "/auth/login", credentialsBody(username, password),
+        idempotent = false, authenticate = false
+    )
+
+    suspend fun logout(token: String): HttpResult = request("logout", "POST", "/auth/logout", token = token)
+
+    suspend fun me(): HttpResult = request("me", "GET", "/auth/me")
+
+    /** Credentials travel only in the request body and never reach a log line. */
+    private fun credentialsBody(username: String, password: String): String =
+        JSONObject().put("username", username).put("password", password).toString()
+
+    private fun execute(method: String, path: String, body: String?, contentType: String, key: String?, authToken: String?): HttpResult {
         val connection = (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 8_000
             readTimeout = 25_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("X-Device-ID", identity.deviceId())
+            buildAuthHeaders(authToken).forEach { (name, value) -> setRequestProperty(name, value) }
             if (key != null) setRequestProperty("Idempotency-Key", key)
             if (body != null) {
                 doOutput = true
@@ -272,7 +317,7 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
         }
     }
 
-    private fun executeMultipart(uri: Uri, key: String): HttpResult {
+    private fun executeMultipart(uri: Uri, key: String, authToken: String?): HttpResult {
         val boundary = "----Shanka${UUID.randomUUID()}"
         val connection = (URL(baseUrl.trimEnd('/') + "/pdfs").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -280,7 +325,7 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
             readTimeout = 60_000
             doOutput = true
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("X-Device-ID", identity.deviceId())
+            buildAuthHeaders(authToken).forEach { (name, value) -> setRequestProperty(name, value) }
             setRequestProperty("Idempotency-Key", key)
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
         }
@@ -367,7 +412,8 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
 
 internal class RemoteFlashcardRepository(
     context: Context,
-    private val client: BackendClient = BackendClient(context)
+    private val sessionStore: SessionStore = KeystoreSessionStore(context),
+    private val client: BackendClient = BackendClient(context, sessionStore = sessionStore)
 ) {
     private val _decks = MutableStateFlow<List<DeckSummary>>(emptyList())
     private val cardFlows = mutableMapOf<String, MutableStateFlow<List<FlashcardEntity>>>()
@@ -381,6 +427,36 @@ internal class RemoteFlashcardRepository(
 
     suspend fun refreshDecks(): ApiResult<List<DeckSummary>> = client.request("list_decks", "GET", "/decks").decode { value ->
         values(value, "decks").mapNotNull(::deck).also { _decks.value = it }
+    }
+
+    suspend fun register(username: String, password: String): ApiResult<Session> =
+        sessionResult(client.register(username, password))
+
+    suspend fun login(username: String, password: String): ApiResult<Session> =
+        sessionResult(client.login(username, password))
+
+    /** A storage failure must never crash or surface as a login error: the session stays usable in memory. */
+    private fun sessionResult(result: HttpResult): ApiResult<Session> {
+        val parsed = result.decode { parseSession(it) ?: error("Auth session response missing user or token") }
+        if (parsed is ApiResult.Success) runCatching { sessionStore.save(parsed.value.token, parsed.value.user) }
+        return parsed
+    }
+
+    /** Logs out with the stored token; already-signed-out is a no-op. Auth 401s still clear the store. */
+    suspend fun logout(): ApiResult<Unit> {
+        val session = sessionStore.load() ?: return ApiResult.Success(Unit)
+        val result = client.logout(session.token).decode { Unit }
+        if (result is ApiResult.Success || (result as? ApiResult.Failure)?.isAuthFailure() == true) runCatching { sessionStore.clear() }
+        return result
+    }
+
+    /** 401 AUTH_REQUIRED/AUTH_INVALID means the stored session is dead; credential and network failures never clear it. */
+    suspend fun refreshMe(): ApiResult<SessionUser> {
+        val result = client.me().decode { value ->
+            parseSessionUser(value.optJSONObject("user")) ?: error("Me response missing user")
+        }
+        if (result is ApiResult.Failure && result.isAuthFailure()) runCatching { sessionStore.clear() }
+        return result
     }
 
     fun cards(deckId: String): Flow<List<FlashcardEntity>> = cardFlows.getOrPut(deckId) { MutableStateFlow(emptyList()) }
@@ -526,10 +602,30 @@ internal class RemoteFlashcardRepository(
     }
 }
 
-private fun <T> HttpResult.decode(mapper: (JSONObject) -> T): ApiResult<T> {
+internal fun <T> HttpResult.decode(mapper: (JSONObject) -> T): ApiResult<T> {
     if (status !in 200..299) return ApiResult.Failure(status, errorCode(body), errorLocalizationKey(body), errorMessage(body))
     return runCatching { mapper(objectValue(body)) }.fold({ ApiResult.Success(it) }, { ApiResult.Failure(status, "INVALID_RESPONSE", null, it.message) })
 }
+
+/** register/login body: {"user": {...}, "access_token": ..., "token_type": ..., "expires_at": ...}. */
+internal fun parseSession(value: JSONObject): Session? {
+    val user = parseSessionUser(value.optJSONObject("user")) ?: return null
+    val token = value.optString("access_token")
+    return if (token.isBlank()) null else Session(token, user)
+}
+
+/** /auth/me user object: {"user_id": ..., "username": ..., "created_at": ...}. */
+internal fun parseSessionUser(value: JSONObject?): SessionUser? {
+    if (value == null) return null
+    val userId = value.optString("user_id")
+    val username = value.optString("username")
+    if (userId.isBlank() || username.isBlank()) return null
+    return SessionUser(userId, username, value.optString("created_at"))
+}
+
+/** A 401 whose code means the stored session is dead; credential and network failures never qualify. */
+internal fun ApiResult.Failure.isAuthFailure(): Boolean =
+    status == 401 && (code == "AUTH_REQUIRED" || code == "AUTH_INVALID")
 
 private fun objectValue(body: String): JSONObject {
     if (body.isBlank()) return JSONObject()
