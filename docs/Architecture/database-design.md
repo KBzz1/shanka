@@ -19,7 +19,8 @@
 devices 1──N pdf_files 1──N chapters
                     └──N text_chunks
 devices 1──N decks 1──N cards 1──1 review_states
-devices 1──N tasks 1──N batches ──N knowledge_points
+devices 1──N tasks 1──N batches 1──1 knowledge_points
+               │ └──N knowledge_points
 devices 1──N review_events ──N cards
 devices 1──1 api_keys
 devices 1──N idempotency_keys

@@ -51,7 +51,7 @@
 
 - 错误码为稳定字符串,客户端按 `localization_key` 映射文案;不随消息文本变化。
 - `message` 仅面向用户展示,不得包含堆栈、内部路径、SQL 或他人数据;内部细节进服务端日志(以 `request_id` 关联)。
-- **生成链路重试分类**:适配层向上区分可重试性(错误码与 HTTP 见第 7 章)——上游 401(Key 错误)不可重试 → 任务 `FAILED` 不重试;429/5xx/网络/超时可重试 → 账本预算内重试(每操作 2 次重试 = 3 次尝试);输出非法走业务重试,预算同上。
+- **生成链路重试分类**:适配层向上区分可重试性(错误码与 HTTP 见第 7 章)——chat 401(Key 错误)不可重试 → 任务 `FAILED` 不重试;429/5xx/网络/超时可重试(429/5xx 记 `API_KEY_UNAVAILABLE`,网络/超时与响应解析失败内部记 `GENERATION_FAILED`)→ 账本预算内重试(每操作 2 次重试 = 3 次尝试);输出非法走业务重试,预算同上。
 - 完整错误码表见第 7 章。
 
 ### 1.5 API Key 安全(决策 D-03)
@@ -554,7 +554,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | | `PDF_TOC_MISSING` | 422 | 无可用目录结构(终止流程) |
 | | `PDF_NOT_FOUND` | 404 | 不存在或非本设备(统一 404,不暴露存在性) |
 | | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本设备(统一 404) |
-| API Key | `API_KEY_UNAVAILABLE` | 502 | Key 缺失/解密失败或上游不可用(401/429/5xx/网络);生成链路中 401(Key 错误)不可重试 → 任务 `FAILED`,429/5xx/网络/超时可重试(账本预算内) |
+| API Key | `API_KEY_UNAVAILABLE` | 502 | Key 缺失/解密失败、chat 上游 401/429/5xx 或校验链路(validate_key)上游不可用(含网络);生成链路中 401(Key 错误)不可重试 → 任务 `FAILED`,429/5xx 可重试(账本预算内);生成链路网络/超时与响应解析失败内部记 `GENERATION_FAILED`(重试预算同) |
 | | `API_KEY_NOT_SET` | 422 | 样卡 / 任务启动时未保存 Key |
 | 任务 | `TASK_NOT_FOUND` | 404 | |
 | | `TASK_STATE_CONFLICT` | 409 | 非法状态转移(并发 resume、重复完成) |
@@ -570,7 +570,7 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | | `REVIEW_EVENT_CONFLICT` | 409 | 同 `client_event_id` 但 `card_id` / `rating` 与首次不一致 |
 
 注:API Key 校验结果(`INVALID` / `INSUFFICIENT_BALANCE`)经 `200 + ApiKey.status` 返回,不产生错误响应(见 6.2)。跨设备资源访问一律返回 404,不暴露资源存在性(1.1)。
-注:生成链路重试分类(适配层 `retryable` 元数据,1.4)——上游 401(Key 错误)非重试;429/5xx/网络/超时重试;响应解析失败(`GENERATION_FAILED`)与 Schema/锚定非法属业务重试,预算同为每操作 2 次重试 = 3 次尝试,由 `llm_call_attempts` 账本计数。
+注:生成链路重试分类(适配层 `retryable` 元数据,1.4)——chat 401(Key 错误)非重试(任务 `FAILED`);chat 429/5xx 记 `API_KEY_UNAVAILABLE` 重试,网络/超时与响应解析失败记 `GENERATION_FAILED` 重试;Schema/锚定非法属业务重试,预算同为每操作 2 次重试 = 3 次尝试,由 `llm_call_attempts` 账本计数。
 
 ## 8. 运行可观测性（观测范围仅 DeepSeek API）
 
