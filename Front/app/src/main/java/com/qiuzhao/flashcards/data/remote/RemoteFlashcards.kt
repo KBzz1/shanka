@@ -3,9 +3,6 @@ package com.qiuzhao.flashcards.data.remote
 import android.content.Context
 import android.net.Uri
 import android.os.Build
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import android.util.Base64
 import android.util.Log
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.CardDraft
@@ -29,12 +26,7 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.KeyStore
 import java.util.UUID
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 /** Server-facing UI models. IDs are opaque UUIDs and must never be parsed as numbers. */
 data class DeckSummary(
@@ -168,47 +160,6 @@ internal fun buildAuthHeaders(token: String?): Map<String, String> =
  */
 internal fun requestAuthToken(authenticate: Boolean, tokenOverride: String?, session: Session?): String? =
     tokenOverride ?: if (authenticate) session?.token else null
-
-/**
- * The device id is deliberately encrypted at rest. The server dropped X-Device-ID in P4-4 and
- * the client no longer sends it (P6-2); the class is unused and scheduled for removal in Task 4.
- */
-private class SecureDeviceIdentityStore(context: Context) {
-    private val preferences = context.getSharedPreferences("remote_identity", Context.MODE_PRIVATE)
-    private val alias = "shanka_device_identity_key"
-
-    fun deviceId(): String {
-        preferences.getString("device_id", null)?.let { stored -> decrypt(stored)?.let { return it } }
-        return UUID.randomUUID().toString().also { preferences.edit().putString("device_id", encrypt(it)).apply() }
-    }
-
-    private fun key(): SecretKey {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (store.getKey(alias, null) as? SecretKey)?.let { return it }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        generator.init(
-            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .build()
-        )
-        return generator.generateKey()
-    }
-
-    private fun encrypt(value: String): String = Cipher.getInstance("AES/GCM/NoPadding").run {
-        init(Cipher.ENCRYPT_MODE, key())
-        Base64.encodeToString(iv + doFinal(value.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
-    }
-
-    private fun decrypt(value: String): String? = runCatching {
-        val bytes = Base64.decode(value, Base64.NO_WRAP)
-        require(bytes.size > 12)
-        Cipher.getInstance("AES/GCM/NoPadding").run {
-            init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
-            String(doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8)
-        }
-    }.getOrNull()
-}
 
 internal class BackendClient(
     context: Context,

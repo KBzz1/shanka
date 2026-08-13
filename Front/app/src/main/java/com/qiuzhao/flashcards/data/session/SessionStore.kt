@@ -35,7 +35,7 @@ fun SessionStore.loadQuietly(): Session? = runCatching { load() }.getOrNull()
 
 /**
  * The session payload is encrypted at rest. The token is a credential, so callers must treat
- * the returned [Session] like the device id in RemoteFlashcards and never log it.
+ * the returned [Session] as secret and never log it.
  */
 class KeystoreSessionStore(context: Context) : SessionStore {
     private val preferences: SharedPreferences =

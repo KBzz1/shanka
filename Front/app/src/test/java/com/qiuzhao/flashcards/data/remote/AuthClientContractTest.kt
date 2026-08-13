@@ -19,16 +19,14 @@ class AuthClientContractTest {
     private val user = SessionUser(userId = "user-1", username = "alice", createdAt = "2026-08-14T00:00:00Z")
     private val session = Session(token = "token-1", user = user)
 
-    @Test fun `buildAuthHeaders adds Bearer only, never a device id`() {
+    @Test fun `buildAuthHeaders adds the bearer token and nothing else`() {
         val headers = buildAuthHeaders("token-1")
         assertEquals(mapOf("Authorization" to "Bearer token-1"), headers)
-        assertFalse(headers.containsKey("X-Device-ID"))
     }
 
     @Test fun `buildAuthHeaders without a token is empty`() {
         val headers = buildAuthHeaders(null)
         assertTrue(headers.isEmpty())
-        assertFalse(headers.containsKey("X-Device-ID"))
     }
 
     @Test fun `signed in requests carry the stored session token`() {

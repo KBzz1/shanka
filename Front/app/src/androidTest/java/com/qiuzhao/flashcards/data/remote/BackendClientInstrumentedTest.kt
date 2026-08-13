@@ -3,6 +3,8 @@ package com.qiuzhao.flashcards.data.remote
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import android.net.Uri
+import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
+import com.qiuzhao.flashcards.data.session.SessionUser
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import okhttp3.mockwebserver.MockResponse
@@ -33,22 +35,31 @@ class BackendClientInstrumentedTest {
         debugLog.delete()
     }
 
-    private fun client() = BackendClient(context, server.url("").toString().trimEnd('/'))
+    /**
+     * The auth contract sends `Authorization: Bearer <token>` on authenticated requests, so the
+     * client is always built with a stored fake session (P6-2 dropped the device identity header).
+     */
+    private fun client(): BackendClient {
+        val sessionStore = KeystoreSessionStore(context).apply {
+            save("test-token", SessionUser(userId = "user-1", username = "alice", createdAt = "2026-08-14T00:00:00Z"))
+        }
+        return BackendClient(context, server.url("").toString().trimEnd('/'), sessionStore = sessionStore)
+    }
 
-    @Test fun addsDeviceIdentityAndIdempotencyOnlyForWrites() = runBlocking {
+    @Test fun addsBearerAuthAndIdempotencyOnlyForWrites() = runBlocking {
         val client = client()
         server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
         client.request("list_decks", "GET", "/decks")
         val read = server.takeRequest()
         assertEquals("/decks", read.path)
-        assertNotNull(read.getHeader("X-Device-ID"))
+        assertEquals("Bearer test-token", read.getHeader("Authorization"))
         assertEquals(null, read.getHeader("Idempotency-Key"))
 
         server.enqueue(MockResponse().setResponseCode(201).setBody("{}"))
         client.request("create_deck", "POST", "/decks", "{\"name\":\"test\"}")
         val write = server.takeRequest()
         assertEquals("POST", write.method)
-        assertNotNull(write.getHeader("X-Device-ID"))
+        assertEquals("Bearer test-token", write.getHeader("Authorization"))
         assertNotNull(write.getHeader("Idempotency-Key"))
     }
 
@@ -59,7 +70,7 @@ class BackendClientInstrumentedTest {
         val request = server.takeRequest()
         assertEquals("/samples", request.path)
         assertEquals(null, request.getHeader("Idempotency-Key"))
-        assertNotNull(request.getHeader("X-Device-ID"))
+        assertEquals("Bearer test-token", request.getHeader("Authorization"))
     }
 
     @Test fun retries429OnceUsingTheSameIdempotencyKey() = runBlocking {
@@ -96,7 +107,7 @@ class BackendClientInstrumentedTest {
             val request = server.takeRequest()
             assertEquals("POST", request.method)
             assertEquals("/pdfs", request.path)
-            assertNotNull(request.getHeader("X-Device-ID"))
+            assertEquals("Bearer test-token", request.getHeader("Authorization"))
             assertNotNull(request.getHeader("Idempotency-Key"))
             assertTrue(request.body.readUtf8().contains("name=\"file\""))
         } finally {
@@ -117,7 +128,7 @@ class BackendClientInstrumentedTest {
         assertTrue(saved.contains("status=201"))
         assertTrue(saved.contains("request_id=request-evidence"))
         assertFalse(saved.contains(requestBody))
-        assertFalse(saved.contains(sent.getHeader("X-Device-ID")!!))
+        assertFalse(saved.contains(sent.getHeader("Authorization")!!))
         assertFalse(saved.contains(sent.getHeader("Idempotency-Key")!!))
     }
 
@@ -190,7 +201,7 @@ class BackendClientInstrumentedTest {
         assertEquals("/decks", server.takeRequest().path)
         listOf(rename, edit, deleteCard, deleteChapter, deleteDeck).forEach { request ->
             assertNotNull(request.getHeader("Idempotency-Key"))
-            assertNotNull(request.getHeader("X-Device-ID"))
+            assertEquals("Bearer test-token", request.getHeader("Authorization"))
         }
     }
 
