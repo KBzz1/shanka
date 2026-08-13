@@ -6,15 +6,19 @@
   （日志区分，error_code 用兜底 GENERATION_FAILED）；CAS2 孤儿恢复（心跳超时接管 +
   遗留 STARTED 转 UNKNOWN）。不 commit——由调用方提交保证"接管与快照冻结原子性"。
 - `run_planning`：快照选页 → 按 planner_max_input_chars 连续页拆组（组数超上限 →
-  FAILED）→ 三层配额（任务→章→组子配额）→ 每组：账本恢复复用 / 预算 / STARTED
-  心跳 commit → 事务外 chat → 校验截断 → 终态+心跳 commit → 合并去重 → 条件落库
-  （KnowledgePoint + plan_batches + stage=GENERATING + 难度分布 cursor）。空单元
-  三分支（§6.4）：全组失败 → FAILED+PLANNING；全组成功但 0 单元 → COMPLETED +
-  NO_GENERATION_UNITS；部分成功 → GENERATING + skipped_planning_group_count。
+  FAILED）→ 三层配额（任务→章→组子配额）→ 每组：输入漂移守卫 / 账本恢复复用 /
+  预算 / STARTED 心跳 commit → 事务外 chat → 校验截断 → 终态+心跳 commit → 合并去重
+  → 条件落库（KnowledgePoint + plan_batches + stage=GENERATING + 难度分布 cursor）。
+  空单元三分支（§6.4）：全组失败 → FAILED+PLANNING；全组成功但 0 单元（或部分失败
+  +0 成功单元）→ COMPLETED + NO_GENERATION_UNITS（skipped 计数保留观测）；部分成功
+  → GENERATING + skipped_planning_group_count。
 - 红线 4：normalized_result 只保存通过校验的规范化 units JSON（含服务端 priority），
   不保存完整 Prompt、原文或原始模型响应；账本不落 usage 以外的敏感内容。
-- 时钟：`now` 显式参数定式（claim 由调用方注入）；run_planning 心跳走
-  SystemClock（ledger.py 同款 _now 兜底约定）。
+- 时钟：`now` 显式参数定式（claim 由调用方注入）；run_planning 每次尝试/心跳/终态
+  各自读取新时钟（SystemClock，ledger.py 同款 _now 兜底约定）——心跳必须真实推进，
+  避免长运行任务被 CAS2 误判孤儿接管；CAS1 的 started_at 用 claim 注入时刻。
+- 终态一律条件更新（WHERE RUNNING+PLANNING）：并发取消/转移不覆盖；Key 错误、输入
+  漂移与快照非法等即时失败同款 guard（review fix 2/5）。
 """
 
 import hashlib
@@ -31,7 +35,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.errors import AppError, ErrorCode
 from infra.clock import SystemClock
-from infra.db.models import Chapter, KnowledgePoint, Task, TextChunk
+from infra.db.models import Chapter, KnowledgePoint, LlmCallAttempt, Task, TextChunk
 from infra.db.session import format_utc
 from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
 from infra.llm.prompts import asset_versions, load_asset, safe_json_dumps
@@ -206,17 +210,49 @@ def run_planning(
     session: Session, task: Task, *, settings: Settings, client: DeepSeekClient
 ) -> None:
     """执行规划（spec §6.2）：选页拆组 → 组调用（账本恢复/预算/STARTED→chat→终态）→
-    合并去重 → 三分支条件落库。LLM 调用始终在事务外（§3/§6.2 硬规则）。"""
-    now = _now_utc()
+    合并去重 → 三分支条件落库。LLM 调用始终在事务外（§3/§6.2 硬规则）。
+
+    时钟：不捕获 run 级冻结 now——每次尝试/心跳/终态各自读取新时钟（review fix 1：
+    心跳必须真实推进，否则长运行任务会被 CAS2 误判孤儿接管）。
+    """
     versions = asset_versions()
-    snapshot = json.loads(task.selected_chapters)
-    assert isinstance(snapshot, list)
+    try:
+        snapshot = json.loads(task.selected_chapters)
+    except (ValueError, TypeError):
+        _fail_planning_inplace(
+            session,
+            task,
+            error_code=ErrorCode.GENERATION_FAILED.value,
+            internal_reason="PLANNING_SNAPSHOT_INVALID",
+        )
+        return
+    if not isinstance(snapshot, list):
+        _fail_planning_inplace(
+            session,
+            task,
+            error_code=ErrorCode.GENERATION_FAILED.value,
+            internal_reason="PLANNING_SNAPSHOT_INVALID",
+        )
+        return
     chapters: list[dict[str, Any]] = [dict(e) for e in snapshot if isinstance(e, dict)]
     if not chapters:
+        # 快照无有效章节：不静默返回（review fix 5）——任务 FAILED，避免 RUNNING+PLANNING 悬挂
+        _fail_planning_inplace(
+            session,
+            task,
+            error_code=ErrorCode.GENERATION_FAILED.value,
+            internal_reason="PLANNING_SNAPSHOT_INVALID",
+        )
         return
     file_id = task.file_id
     if file_id is None:
-        return  # 任务数据不完整（创建时必填；防御性短路）
+        _fail_planning_inplace(
+            session,
+            task,
+            error_code=ErrorCode.GENERATION_FAILED.value,
+            internal_reason="PLANNING_TASK_INCOMPLETE",
+        )
+        return
     # 1. 快照选页 + 连续页拆组（§4.2）；组数超上限 → FAILED（§6.3 硬上限）
     chapter_groups: list[list[list[TextChunk]]] = []
     for entry in chapters:
@@ -234,7 +270,7 @@ def run_planning(
             extra={"task_id": task.task_id, "groups": total_groups},
         )
         _finish_planning_failed(
-            session, task, error_code=ErrorCode.GENERATION_FAILED.value, now=now, skipped=0
+            session, task, error_code=ErrorCode.GENERATION_FAILED.value, skipped=0
         )
         return
     # 2. 三层配额（§3.5）：任务总配额 → 章配额 → 组子配额（char_count 占比）
@@ -272,30 +308,25 @@ def run_planning(
                 chapter=entry,
                 custom_requirements=config.get("custom_requirements"),
                 versions=versions,
-                now=now,
             )
             if units is None:
                 skipped_groups += 1
             else:
                 merged.extend((u, entry["chapter_id"]) for u in units)
     if task.status != "RUNNING":
-        return  # Key 错误等内部失败已置 FAILED（或外部转移）→ 不再落最终事务
+        return  # Key 错误/输入漂移等内部失败已置 FAILED（或外部转移）→ 不再落最终事务
     # 4. 合并：跨组指纹去重 + 全局 priority（§6.2）
     final_units = _merge_units(merged)
     # 5. 空单元三分支（§6.4）
     if total_groups > 0 and skipped_groups == total_groups:
         _finish_planning_failed(
-            session,
-            task,
-            error_code=ErrorCode.GENERATION_FAILED.value,
-            now=now,
-            skipped=skipped_groups,
+            session, task, error_code=ErrorCode.GENERATION_FAILED.value, skipped=skipped_groups
         )
         return
     if not final_units:
-        _finish_planning_empty(session, task, now=now)
+        _finish_planning_empty(session, task, skipped=skipped_groups)
         return
-    _finish_planning_generating(session, task, units=final_units, skipped=skipped_groups, now=now)
+    _finish_planning_generating(session, task, units=final_units, skipped=skipped_groups)
 
 
 def _split_groups(pages: list[TextChunk], *, max_chars: int) -> list[list[TextChunk]]:
@@ -335,9 +366,29 @@ def _run_group(
     chapter: dict[str, Any],
     custom_requirements: Any,
     versions: dict[str, str],
-    now: str,
 ) -> list[dict[str, Any]] | None:
-    """单组规划：恢复复用 → 预算 → 尝试循环。返回规范化 units；None = 组 SKIPPED 或停止。"""
+    """单组规划：输入漂移守卫 → 恢复复用 → 预算 → 尝试循环。返回规范化 units；
+    None = 组 SKIPPED、停止或任务已 FAILED（Key 错误/输入漂移）。"""
+    # §6.2 输入漂移守卫：该 operation_key 已有账本尝试但 fingerprint 与重推导不一致
+    # → 不得错误复用/续跑旧结果，任务以规划输入漂移失败（fail fast，不发调用）
+    drifted = session.scalar(
+        select(LlmCallAttempt.call_id)
+        .where(
+            LlmCallAttempt.task_id == task.task_id,
+            LlmCallAttempt.stage == _PLANNING_STAGE,
+            LlmCallAttempt.operation_key == operation_key,
+            LlmCallAttempt.input_fingerprint != fingerprint,
+        )
+        .limit(1)
+    )
+    if drifted is not None:
+        _fail_planning_inplace(
+            session,
+            task,
+            error_code=ErrorCode.GENERATION_FAILED.value,
+            internal_reason="PLANNING_INPUT_DRIFT",
+        )
+        return None
     saved = find_success_result(
         session,
         task_id=task.task_id,
@@ -376,6 +427,7 @@ def _run_group(
         session.refresh(task)
         if task.status != "RUNNING" or task.stage != _PLANNING_STAGE:
             return None  # 已取消/转移 → 立即停止，不得再付费调用
+        attempt_now = _now_utc()  # 每次尝试取新时钟（review fix 1：心跳真实推进）
         attempt_no = (
             attempt_count(
                 session, task_id=task.task_id, stage=_PLANNING_STAGE, operation_key=operation_key
@@ -397,32 +449,37 @@ def _run_group(
             prompt_version=versions["planner_prompt_version"],
             schema_name="planner_output",
             schema_version=versions["planner_output_schema_version"],
-            now=now,
+            now=attempt_now,
         )
-        task.updated_at = now  # 心跳与 STARTED 占位同事务（§9 调用前先有已提交 STARTED 行）
+        task.updated_at = attempt_now  # 心跳与 STARTED 占位同事务（§9 调用前先有已提交 STARTED 行）
         session.commit()
         try:
             result = client.chat(
                 user_prompt, system_prompt=system_prompt, max_tokens=_PLANNER_MAX_OUTPUT_TOKENS
             )
         except RetryableUpstreamError as exc:
+            finish_now = _now_utc()
             if exc.code is ErrorCode.API_KEY_UNAVAILABLE and not exc.retryable:
-                # Key 错误（401，§6.3）：任务 FAILED + PLANNING，不重试
-                finish_failed(session, attempt, error_code=exc.code.value, now=now)
-                task.updated_at = now
+                # Key 错误（401，§6.3）：条件更新 FAILED + PLANNING，不重试
+                # （review fix 2：guard 失败/并发取消 → 不覆盖 CANCELLED）
+                finish_failed(session, attempt, error_code=exc.code.value, now=finish_now)
+                task.updated_at = finish_now
                 session.commit()
-                _fail_planning_inplace(task, error_code=exc.code.value, now=now)
+                _fail_planning_inplace(session, task, error_code=exc.code.value)
                 return None
             # 上游暂时失败（429/5xx/网络）与输出解析失败 → 预算内重试（§6.3）
-            finish_failed(session, attempt, error_code=exc.code.value, now=now)
-            task.updated_at = now
+            finish_failed(session, attempt, error_code=exc.code.value, now=finish_now)
+            task.updated_at = finish_now
             session.commit()
             if _attempt_total(session, task, operation_key) >= budget:
                 return None
             continue
         except Exception:  # noqa: BLE001 —— 未预期异常按输出类失败走预算重试
-            finish_failed(session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=now)
-            task.updated_at = now
+            finish_now = _now_utc()
+            finish_failed(
+                session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=finish_now
+            )
+            task.updated_at = finish_now
             session.commit()
             if _attempt_total(session, task, operation_key) >= budget:
                 return None
@@ -439,12 +496,16 @@ def _run_group(
                 page_chars=page_chars,
             )
         except (ValueError, TypeError, AppError):
-            finish_failed(session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=now)
-            task.updated_at = now
+            finish_now = _now_utc()
+            finish_failed(
+                session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=finish_now
+            )
+            task.updated_at = finish_now
             session.commit()
             if _attempt_total(session, task, operation_key) >= budget:
                 return None
             continue
+        finish_now = _now_utc()
         finish_success(
             session,
             attempt,
@@ -452,9 +513,9 @@ def _run_group(
             http_status=result["http_status"],
             duration_ms=result["duration_ms"],
             normalized_result=json.dumps(units, ensure_ascii=False),
-            now=now,
+            now=finish_now,
         )
-        task.updated_at = now
+        task.updated_at = finish_now
         session.commit()
         return units
 
@@ -520,17 +581,39 @@ def _merge_units(merged: list[tuple[dict[str, Any], str]]) -> list[dict[str, Any
     return result
 
 
-def _fail_planning_inplace(task: Task, *, error_code: str, now: str) -> None:
-    """Key 错误等即时失败：任务 FAILED + failure_stage=PLANNING（调用方 commit 落库）。"""
+def _fail_planning_inplace(
+    session: Session,
+    task: Task,
+    *,
+    error_code: str,
+    internal_reason: str | None = None,
+) -> bool:
+    """Key 错误/输入漂移/快照非法等即时失败（review fix 2/5）：条件更新
+    WHERE RUNNING+PLANNING（rowcount=0 → 并发取消/转移，不落 FAILED，返回 False）；
+    内部原因按 CHAPTER_SNAPSHOT_STALE 约定经日志区分。"""
+    now = _now_utc()
+    if not _planning_guard_update(
+        session,
+        task,
+        values={
+            "status": "FAILED",
+            "failure_stage": _PLANNING_STAGE,
+            "error_code": error_code,
+            "ended_at": now,
+            "resumable": 0,
+        },
+    ):
+        return False
     task.status = "FAILED"
     task.failure_stage = _PLANNING_STAGE
     task.error_code = error_code
     task.ended_at = now
     task.resumable = 0
-    logger.warning(
-        "task planning failed",
-        extra={"task_id": task.task_id, "error_code": error_code},
-    )
+    extra: dict[str, object] = {"task_id": task.task_id, "error_code": error_code}
+    if internal_reason is not None:
+        extra["internal_reason"] = internal_reason
+    logger.warning("task planning failed", extra=extra)
+    return True
 
 
 def _planning_guard_update(session: Session, task: Task, *, values: dict[str, Any]) -> bool:
@@ -554,10 +637,9 @@ def _planning_guard_update(session: Session, task: Task, *, values: dict[str, An
     return True
 
 
-def _finish_planning_failed(
-    session: Session, task: Task, *, error_code: str, now: str, skipped: int
-) -> None:
+def _finish_planning_failed(session: Session, task: Task, *, error_code: str, skipped: int) -> None:
     """全部规划组失败（§6.4 分支 2）→ FAILED + failure_stage=PLANNING（条件更新）。"""
+    now = _now_utc()
     if not _planning_guard_update(
         session,
         task,
@@ -587,8 +669,10 @@ def _finish_planning_failed(
     )
 
 
-def _finish_planning_empty(session: Session, task: Task, *, now: str) -> None:
-    """全组成功但 0 个合法单元（§6.4 分支 1）→ COMPLETED + NO_GENERATION_UNITS（条件更新）。"""
+def _finish_planning_empty(session: Session, task: Task, *, skipped: int) -> None:
+    """0 个合法单元（§6.4 分支 1：全组成功；review fix 4：部分失败+0 成功单元同样
+    落到本分支）→ COMPLETED + NO_GENERATION_UNITS（条件更新），skipped 计数保留观测。"""
+    now = _now_utc()
     if not _planning_guard_update(
         session,
         task,
@@ -597,6 +681,7 @@ def _finish_planning_empty(session: Session, task: Task, *, now: str) -> None:
             "completion_reason": "NO_GENERATION_UNITS",
             "total_batch_count": 0,
             "completed_batch_count": 0,
+            "skipped_planning_group_count": skipped,
             "ended_at": now,
             "resumable": 0,
             "updated_at": now,
@@ -607,19 +692,25 @@ def _finish_planning_empty(session: Session, task: Task, *, now: str) -> None:
     task.completion_reason = "NO_GENERATION_UNITS"
     task.total_batch_count = 0
     task.completed_batch_count = 0
+    task.skipped_planning_group_count = skipped
     task.ended_at = now
     task.resumable = 0
     logger.info(
         "task planning empty result",
-        extra={"task_id": task.task_id, "completion_reason": "NO_GENERATION_UNITS"},
+        extra={
+            "task_id": task.task_id,
+            "completion_reason": "NO_GENERATION_UNITS",
+            "skipped_planning_group_count": skipped,
+        },
     )
 
 
 def _finish_planning_generating(
-    session: Session, task: Task, *, units: list[dict[str, Any]], skipped: int, now: str
+    session: Session, task: Task, *, units: list[dict[str, Any]], skipped: int
 ) -> None:
     """最终短事务（§6.2 step 7）：条件更新 → 写 KnowledgePoint + plan_batches +
     stage=GENERATING + skipped 计数 + 难度分布 cursor。rowcount=0 → 回滚返回。"""
+    now = _now_utc()
     if not _planning_guard_update(session, task, values={"stage": "GENERATING", "updated_at": now}):
         return
     kps: list[KnowledgePoint] = []

@@ -706,3 +706,226 @@ def test_planning_no_text_chapter_is_empty_success(
     assert calls == 0
     assert task.status == "COMPLETED"
     assert task.completion_reason == "NO_GENERATION_UNITS"
+
+
+# ---------- review fix 覆盖测试（1-4） ----------
+
+
+def test_planning_heartbeat_refreshes_per_attempt(
+    session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review fix 1：心跳时钟每次尝试/终态取新读数——不冻结在 run 起始时刻。
+
+    FrozenClock 每次读取 +2 分钟：首次读数（run 起始）= 01:02，终态 updated_at 必须
+    使用更晚读数（否则长运行任务会被 CAS2 按 30 分钟孤儿窗口误判接管）。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import services.generation.planning_executor as planning_mod
+    from infra.clock import FrozenClock
+
+    base = datetime(2026, 8, 12, 1, 0, 0, tzinfo=UTC)
+    steps = iter(FrozenClock(base + timedelta(minutes=2 * i)) for i in range(1, 20))
+    monkeypatch.setattr(planning_mod, "SystemClock", lambda: next(steps))
+
+    device = _uuid()
+    with session_factory() as session:
+        task_id, _, _ = _seed_planning_task(session, device_id=device)
+        client = _client_with_handler(
+            lambda request: _ok_response(_planning_response_from_request(request))
+        )
+        _claim_and_plan(session, client=client)
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+    assert task is not None
+    assert task.stage == "GENERATING"
+    # 首次读数 = 01:02（run 起始）；终态心跳必须推进到更晚读数
+    assert task.updated_at is not None
+    assert task.updated_at > "2026-08-12T01:02:00.000Z"
+
+
+def test_planning_key_error_cancel_race_preserves_cancelled(
+    session_factory: Callable[[], Session],
+) -> None:
+    """review fix 2：401 Key 错误路径的条件更新——finish 提交后、guard 前注入取消
+    → rowcount=0 → FAILED 不覆盖 CANCELLED。"""
+    device = _uuid()
+    with session_factory() as session:
+        task_id, _, _ = _seed_planning_task(session, device_id=device)
+        chatted = False
+        injected = False
+        original_refresh = session.refresh
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal chatted
+            chatted = True
+            return httpx.Response(401, json={"error": {"message": "invalid api key"}})
+
+        def refresh_with_cancel(
+            instance: object,
+            attribute_names: Any = None,
+            with_for_update: Any = None,
+        ) -> None:
+            nonlocal injected
+            # 401 已发生后的下一次 Task 刷新 = _fail_planning_inplace 的 guard 刷新
+            # → 注入 CANCELLED（另一连接）
+            if not injected and isinstance(instance, Task) and chatted:
+                injected = True
+                with session_factory() as cancel_session:
+                    task_row = cancel_session.get(Task, task_id)
+                    assert task_row is not None
+                    task_row.status = "CANCELLED"
+                    task_row.ended_at = _NOW
+                    task_row.updated_at = _NOW
+                    cancel_session.commit()
+            original_refresh(instance, attribute_names, with_for_update)
+
+        session.refresh = refresh_with_cancel  # type: ignore[method-assign]
+        _claim_and_plan(session, client=_client_with_handler(handler))
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
+        ).all()
+    assert task.status == "CANCELLED"  # 不被 guard-less FAILED 覆盖
+    assert [a.status for a in attempts] == ["FAILED"]  # 账本 401 失败已记（预算消耗）
+
+
+def test_planning_fingerprint_drift_fails_task(
+    session_factory: Callable[[], Session],
+) -> None:
+    """review fix 3（§6.2）：账本 fingerprint 与重推导不一致 → 输入漂移失败
+    （FAILED + PLANNING + 兜底错误码），fail fast 不发调用、不复用旧结果。"""
+    device = _uuid()
+    with session_factory() as session:
+        task_id, chapter_id, file_id = _seed_planning_task(session, device_id=device)
+        from infra.db.models import TextChunk
+
+        pages = list(
+            session.scalars(
+                select(TextChunk)
+                .where(TextChunk.file_id == file_id)
+                .order_by(TextChunk.page_number)
+            ).all()
+        )
+        op_key = f"planning:{chapter_id}:0"
+        # 用错误 fingerprint 预置一次 SUCCESS（模拟规划输入漂移：分组/配额/版本变化）
+        attempt = create_attempt(
+            session,
+            device_id=device,
+            scope_type="TASK",
+            scope_id=task_id,
+            task_id=task_id,
+            stage="PLANNING",
+            operation_key=op_key,
+            input_fingerprint="stale-fingerprint",
+            attempt_no=1,
+            model="m",
+            prompt_name="planner",
+            prompt_version="v3",
+            now=_NOW,
+        )
+        finish_success(
+            session,
+            attempt,
+            usage={
+                "prompt_cache_hit_tokens": 0,
+                "prompt_cache_miss_tokens": 1,
+                "completion_tokens": 1,
+            },
+            http_status=200,
+            duration_ms=1,
+            normalized_result='{"units": []}',
+            now=_NOW,
+        )
+        session.commit()
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return _ok_response(_planning_response_from_request(request))
+
+        client = _client_with_handler(handler)
+        _claim_and_plan(session, client=client)
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+    assert calls == 0  # 漂移失败不发任何调用
+    assert task.status == "FAILED"
+    assert task.failure_stage == "PLANNING"
+    assert task.error_code == "GENERATION_FAILED"
+
+
+def test_planning_mixed_skipped_and_empty_records_skips(
+    session_factory: Callable[[], Session],
+) -> None:
+    """review fix 4（§6.4）：部分组跳过 + 其余成功但 0 单元 → COMPLETED
+    NO_GENERATION_UNITS 且 skipped_planning_group_count 保留观测。"""
+    device = _uuid()
+    settings = Settings(
+        api_key_encryption_key="aa" * 32,
+        planner_max_input_chars=300,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    with session_factory() as session:
+        task_id, chapter_id, file_id = _seed_planning_task(
+            session, device_id=device, chapter_start_page=1, chapter_end_page=4
+        )
+        from infra.db.models import TextChunk
+
+        pages = list(
+            session.scalars(
+                select(TextChunk)
+                .where(TextChunk.file_id == file_id)
+                .order_by(TextChunk.page_number)
+            ).all()
+        )
+        # 镜像子配额：组 0（页 1-3，300 字符）拿满配额；组 1（页 4，100 字符）零配额
+        task_quota = allocate_task_quota(3, 0.4, 0.4, 0.2)
+        chapter_quotas = allocate_chapter_quota(task_quota, 1)
+        sub_quotas = allocate_group_quota(chapter_quotas[0], [300, 100])
+        op_key0 = f"planning:{chapter_id}:0"
+        fp0 = group_fingerprint(pages[:3], sub_quotas[0], asset_versions())
+        for attempt_no in (1, 2, 3):
+            att = create_attempt(
+                session,
+                device_id=device,
+                scope_type="TASK",
+                scope_id=task_id,
+                task_id=task_id,
+                stage="PLANNING",
+                operation_key=op_key0,
+                input_fingerprint=fp0,
+                attempt_no=attempt_no,
+                model="m",
+                prompt_name="planner",
+                prompt_version="v3",
+                now=_NOW,
+            )
+            att.status = ("STARTED", "FAILED", "UNKNOWN")[attempt_no - 1]
+            att.finished_at = _NOW
+        session.commit()
+        calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            return _ok_response('{"units": []}')
+
+        client = _client_with_handler(handler)
+        task = claim_planning_task(session, orphan_timeout_minutes=30, now=_CLAIM_NOW)
+        assert task is not None
+        session.commit()
+        run_planning(session, task, settings=settings, client=client)
+        session.commit()
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+    assert calls == 1  # 组 0 预算耗尽跳过；仅组 1 调用（成功空结果）
+    assert task.status == "COMPLETED"
+    assert task.completion_reason == "NO_GENERATION_UNITS"
+    assert task.skipped_planning_group_count == 1  # 部分跳过观测不丢
+    assert task.total_batch_count == 0
+    assert task.completed_batch_count == 0
