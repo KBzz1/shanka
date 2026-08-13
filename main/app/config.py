@@ -52,6 +52,20 @@ class Settings(BaseSettings):
     )
     # 孤儿 RUNNING 任务恢复阈值（V5B 4.5：超过该分钟数无心跳视为孤儿，Task 2 恢复消费）
     orphan_timeout_minutes: int = 30
+    # LLM 硬上限与预算（spec §10 全局硬上限、§8 scoring、§6.2/§6.3 planning；可运维调整）
+    # 规划（§4.2 选页 / §6.2 组数上限）：按页文本累计字符拆组，组数超限 → 任务 FAILED
+    planner_max_input_chars: int = 20_000
+    max_planner_groups_per_task: int = 30
+    # 生成预算（§10 POST 校验）：任务预算超上限直接 VALIDATION_ERROR；单元页数与原文输入双限
+    max_generation_units_per_task: int = 300
+    max_source_pages_per_unit: int = 8
+    generator_max_input_chars: int = 10_000
+    # 评分（§8 分层抽样）：组批受卡片数与输入字符双限，调用数超限按确定性抽样缩减
+    max_scoring_calls_per_task: int = 60
+    scoring_max_cards_per_call: int = 12
+    scoring_max_input_chars: int = 15_000
+    # 规划重试（§6.3 账本为权威）：每组预算 2 次重试（共 3 次尝试），超限组 SKIPPED
+    planning_retry_limit: int = 2
     # 敏感项：禁止打印、复制、写入日志/响应/任务明细；`repr=False` 防意外入日志
     deepseek_api_key: str | None = Field(default=None, repr=False)
     # API Key 加密密钥（database-design 2.2：环境变量，32 字节 hex；缺失时 PUT /api-key 不可用）

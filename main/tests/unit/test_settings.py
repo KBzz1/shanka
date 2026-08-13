@@ -29,6 +29,20 @@ def test_settings_defaults() -> None:
     assert settings.deepseek_timeout_seconds == 60.0
 
 
+def test_new_hard_limits_defaults() -> None:
+    # LLM 链路升级（spec §10 硬上限、§8 scoring、§6.2/§6.3 planning）9 个硬上限/预算字段默认值
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert settings.planner_max_input_chars == 20_000
+    assert settings.max_generation_units_per_task == 300
+    assert settings.max_planner_groups_per_task == 30
+    assert settings.max_source_pages_per_unit == 8
+    assert settings.generator_max_input_chars == 10_000
+    assert settings.max_scoring_calls_per_task == 60
+    assert settings.scoring_max_cards_per_call == 12
+    assert settings.scoring_max_input_chars == 15_000
+    assert settings.planning_retry_limit == 2
+
+
 def test_settings_env_var_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
     assert Settings(_env_file=None).database_url == "sqlite:///:memory:"  # type: ignore[call-arg]
