@@ -22,6 +22,7 @@ dependencies = [
   "pypdf>=4.0",  # V3A PDF 生命周期：文本层 + 书签目录解析（services/pdf/parser.py）
   "python-multipart>=0.0.9",  # V3A Task 4：POST /pdfs multipart 上传解析（fastapi File 依赖）
   "cryptography>=42.0",  # V3B Task 1：AES-256-GCM API Key 加密（infra/llm/crypto.py，database-design 2.2）
+  "argon2-cffi>=23.1.0",  # P4-1：Argon2id 密码哈希（services/auth/password.py，DESIGN §4.2）
   "jsonschema>=4.20",  # V5A Task 1：card.schema.json 校验器（services/generation/schema_validator.py，5.8 Schema 唯一入库门槛）
 ]
 
