@@ -1,10 +1,11 @@
 """观测出口集成测试（契约 6.9/6.10/8.3）：批次列表（usage/版本/质量/cost 估算）、
 quality-summary 聚合（device 隔离）、metrics 文本（llm/generation/batch 指标）。
 
-mock transport 驱动两批（COMPACT 2 章 = 6 知识点 = 2 批）后经 API 断言：
-每批 3 张合法卡（q0..q2/a0..a2），usage hit=2/miss=8/output=5，model deepseek-v4-flash。
-Rubric（deterministic fake）：evidence=1（q 长 2）、correctness=1（a 长 2）、
-difficulty 按 kp priority 轮换（0/1/2 → 平均 1.0）、learning=2（无 explanation）。
+mock transport 全链路驱动（LLM 升级管线：规划 → 生成 → 评分，一次 scan 衔接）：
+COMPACT 2 章 → 6 生成单元（配额 BASIC 3/UNDERSTANDING 2/APPLICATION 1）→ 6 批
+（1 单元 1 批）→ 每批 1 张合法卡 → 6 卡；评分 mock 返回确定性分数
+（evidence=1/correctness=1/difficulty=1/learning=2，总分代码计算 5）；
+usage 统一 hit=2/miss=8/output=5，model deepseek-v4-flash，rubric_version v2。
 """
 
 import json
@@ -23,6 +24,7 @@ from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from services.decks.service import create_deck
+from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.executor import scan_once as scan_tasks
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
@@ -36,16 +38,58 @@ _PER_BATCH_COST = pytest.approx(2 * 0.5e-6 + 8 * 2e-6 + 5 * 8e-6)  # 0.000057 �
 
 
 def _client_factory(api_key: str) -> DeepSeekClient:
-    """mock transport：每批 3 张合法卡 + usage（cache hit/miss）——cost 估算可算。"""
+    """mock transport 全链路分派：<PLANNER_INPUT> → 按请求配额产出锚定单元（引用请求内
+    组页）；<SCORING_INPUT> → ID 守恒的确定性分数；其余（<GENERATOR_INPUT>）→ 1 张合法卡
+    （1 单元 1 批）。usage 统一 hit=2/miss=8/output=5——cost 估算可算。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(3)]
+        body = json.loads(request.content)
+        user = body["messages"][-1]["content"]
+        if "<PLANNER_INPUT>" in user:
+            payload = json.loads(
+                user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
+            )
+            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+            units: list[dict[str, object]] = []
+            for difficulty, quota in payload["difficulty_quota"].items():
+                for _ in range(quota):
+                    units.append(
+                        {
+                            "source_chunk_ids": [chunk_ids[0]],
+                            "learning_objective": f"知识点{len(units)}",
+                            "target_difficulty": difficulty,
+                            "card_type": "QUESTION",
+                        }
+                    )
+            content = json.dumps({"units": units}, ensure_ascii=False)
+        elif "<SCORING_INPUT>" in user:
+            payload = json.loads(
+                user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0]
+            )
+            content = json.dumps(
+                {
+                    "scores": [
+                        {
+                            "generation_item_id": item["generation_item_id"],
+                            "evidence_score": 1,
+                            "correctness_score": 1,
+                            "difficulty_score": 1,
+                            "learning_value_score": 2,
+                        }
+                        for item in payload["items"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        else:  # 生成调用：1 单元 1 批 → 每批 1 张合法卡
+            content = json.dumps(
+                {"cards": [{"type": "QUESTION", "question": "q0", "answer": "a0"}]},
+                ensure_ascii=False,
+            )
         return httpx.Response(
             200,
             json={
-                "choices": [
-                    {"message": {"content": json.dumps({"cards": cards}, ensure_ascii=False)}}
-                ],
+                "choices": [{"message": {"content": content}}],
                 "usage": {
                     "prompt_tokens": 10,
                     "completion_tokens": 5,
@@ -122,6 +166,13 @@ def _seed_context(db_path: Path, *, device_id: str) -> dict[str, object]:
             session.add(ch)
             session.flush()
             chapter_ids.append(ch.chapter_id)
+        # 页文本（规划 worker 选页拆组的前提；第 2 页两章共享引用）
+        persist_text_chunks(
+            session,
+            file_id=pdf.file_id,
+            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2, 3)],
+            now="2026-08-11T00:00:00.000Z",
+        )
         session.add(
             ApiKey(
                 device_id=device_id,
@@ -189,11 +240,11 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
     resp = client.get(f"/tasks/{task_id}/batches", headers=device)
     assert resp.status_code == 200
     items = resp.json()["items"]
-    assert len(items) == 2
+    assert len(items) == 6  # 1 单元 1 批（6 生成单元）
     first = items[0]
     assert first["status"] == "SUCCEEDED"
     assert first["retry_count"] == 0
-    assert len(first["generated_item_ids"]) == 3  # 本批 3 张合法卡
+    assert len(first["generated_item_ids"]) == 1  # 本批 1 张合法卡（批=单元）
     # usage（FR-11 Prompt Cache 记录）
     assert first["cache_hit_tokens"] == 2
     assert first["cache_miss_tokens"] == 8
@@ -206,11 +257,11 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
     assert first["http_status"] == 200
     assert isinstance(first["duration_ms"], int)
     assert first["request_id"] is None  # carry-forward 决策：视图保留字段，R1 live 上游 id 透传
-    # 质量（Rubric 批次汇总；kp priority 并列无稳定排序（SQLite）→ 只断言档位集合与卡数）
-    assert first["coverage_rate"] == 1.0  # 3 卡 / 3 知识点
+    # 质量（批=单元：分布按单元锚定单值）
+    assert first["coverage_rate"] == 1.0  # 1 卡 / 1 单元
     assert first["duplicate_rate"] == 0.0
     assert set(first["difficulty_distribution"]) <= {"BASIC", "UNDERSTANDING", "APPLICATION"}
-    assert sum(first["difficulty_distribution"].values()) == 3
+    assert sum(first["difficulty_distribution"].values()) == 1
     assert first["difficulty_deviation"] == 0.0  # V5A 简化（观测字段结构完整）
     # 成本估算（8.4 价格常量，仅观测）
     assert first["cost_estimate"] == _PER_BATCH_COST
@@ -234,16 +285,21 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     assert len(body["groups"]) == 1
     g = body["groups"][0]
     assert g["key"] == "deepseek-v4-flash"
+    assert g["rubric_version"] == "v2"  # 卡经批次归属 → 批次 rubric_version
     assert g["card_count"] == 6
-    assert g["evidence_avg"] == 1.0  # q 长度 < 10
-    assert g["correctness_avg"] == 1.0  # a 长度 < 10
-    assert g["difficulty_avg"] == 1.0  # 难度轮换 0/1/2 平均
-    assert g["learning_value_avg"] == 2.0  # 无 explanation
+    assert g["eligible_card_count"] == 6
+    assert g["scored_card_count"] == 6
+    assert g["sampling_rate"] == 1.0
+    assert g["evidence_avg"] == 1.0
+    assert g["correctness_avg"] == 1.0
+    assert g["difficulty_avg"] == 1.0
+    assert g["learning_value_avg"] == 2.0
     assert g["coverage_avg"] == 1.0
     assert g["duplicate_avg"] == 0.0
     assert g["task_completion_rate"] == 1.0  # 1 个 COMPLETED / 1 个任务
-    assert g["cost_estimate"]["total"] == pytest.approx(0.000114)  # 2 批 × 0.000057
+    assert g["cost_estimate"]["total"] == pytest.approx(0.000342)  # 6 批 × 0.000057
     assert g["cost_estimate"]["cache_hit"] > 0
+    assert g["cost_estimate"]["scope"] == "generation-stage-only"  # 不引入账本双计
 
     # group_by=pdf：键 = PDF file_id
     resp = client.get("/observability/quality-summary", params={"group_by": "pdf"}, headers=device)
@@ -253,15 +309,18 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     assert groups[0]["key"] == file_id
     assert groups[0]["card_count"] == 6
 
-    # group_by=difficulty：键 = 批次难度分布计数最大档（同数取字典序最小，确定性）。
-    # kp 按 priority 并列排序不稳定（SQLite 不保证并列顺序）→ 只断言档位集合与总卡数。
+    # group_by=difficulty：键 = generation_unit_id → 单元 target_difficulty（确定性）；
+    # 配额 BASIC 3 / UNDERSTANDING 2 / APPLICATION 1 → 每单元 1 卡同分布。
     resp = client.get(
         "/observability/quality-summary", params={"group_by": "difficulty"}, headers=device
     )
     assert resp.status_code == 200
     groups = resp.json()["groups"]
-    assert {g["key"] for g in groups} <= {"BASIC", "UNDERSTANDING", "APPLICATION"}
-    assert sum(g["card_count"] for g in groups) == 6
+    by_key = {g["key"]: g for g in groups}
+    assert set(by_key) == {"BASIC", "UNDERSTANDING", "APPLICATION"}
+    assert by_key["BASIC"]["card_count"] == 3
+    assert by_key["UNDERSTANDING"]["card_count"] == 2
+    assert by_key["APPLICATION"]["card_count"] == 1
 
 
 def test_quality_summary_isolates_by_device(ctx: tuple[TestClient, Path]) -> None:
@@ -281,35 +340,36 @@ def test_quality_summary_isolates_by_device(ctx: tuple[TestClient, Path]) -> Non
 def test_metrics_text_includes_llm_generation_batch_metrics(
     ctx: tuple[TestClient, Path],
 ) -> None:
-    """8.3：mock transport 驱动两批后 /metrics 文本含 llm/generation/batch 指标（差值断言）。"""
+    """8.3：mock transport 驱动全管线（规划 2 次 + 生成 6 次 + 评分 5 次）后
+    /metrics 文本含 llm/generation/batch 指标（差值断言）。"""
     client, db_path = ctx
     device = _device()
     before = client.get("/metrics").text
     _run_task(client, db_path, device=device)
     after = client.get("/metrics").text
 
-    # llm（每批一次 chat；2 批）
+    # llm（生成 6 批 + 评分 5 组 = 11 次 chat；规划调用不在 llm 指标口径）
     ok_labels = ['model="deepseek-v4-flash"', 'http_status="200"']
     assert (
         _labeled_value(after, "llm_requests_total", ok_labels)
         - _labeled_value(before, "llm_requests_total", ok_labels)
-    ) == 2.0
+    ) == 11.0
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="cache_hit"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="cache_hit"'])
-    ) == 4.0  # 2 批 × 2
+    ) == 22.0  # 11 次 × 2
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="cache_miss"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="cache_miss"'])
-    ) == 16.0  # 2 批 × 8
+    ) == 88.0  # 11 次 × 8
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="output"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="output"'])
-    ) == 10.0  # 2 批 × 5
+    ) == 55.0  # 11 次 × 5
     assert (
         _plain_value(after, "llm_request_duration_seconds_count")
         - _plain_value(before, "llm_request_duration_seconds_count")
-    ) == 2.0
+    ) == 11.0
     # generation（1 个任务 COMPLETED）
     assert (
         _labeled_value(after, "generation_tasks_total", ['result="COMPLETED"'])

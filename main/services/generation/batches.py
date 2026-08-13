@@ -416,21 +416,16 @@ def _finish_attempt_failed(
 
 
 def _skip_batch(batch: Batch, *, task: Task, now: str, unit: KnowledgePoint | None) -> None:
-    """批次 SKIPPED 落库（spec §7/§8）：覆盖=0；分布按单元锚定归因（无单元时置空分布）。"""
+    """批次 SKIPPED 落库（spec §7/§8）：覆盖=0；分布三列置 NULL——无卡不产幽灵单值分布
+    （spec §8 口径修正：覆盖=0 与 {单元:1} 分布同列矛盾；单元锚定归因走 generation_unit_id）。"""
     batch.status = "SKIPPED"
     batch.coverage_rate = 0.0
     batch.duplicate_rate = 0.0
     batch.difficulty_deviation = 0.0
+    batch.difficulty_distribution = None
+    batch.chapter_distribution = None
+    batch.card_type_distribution = None
     if unit is not None:
-        batch.difficulty_distribution = json.dumps(
-            {unit.target_difficulty or "unknown": 1}, ensure_ascii=False
-        )
-        batch.chapter_distribution = json.dumps(
-            {unit.chapter_id or "unknown": 1}, ensure_ascii=False
-        )
-        batch.card_type_distribution = json.dumps(
-            {unit.card_type or "unknown": 1}, ensure_ascii=False
-        )
         unit.status = "SKIPPED"
     _finish_batch(batch, task, now)
 
