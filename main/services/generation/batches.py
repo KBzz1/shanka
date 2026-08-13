@@ -70,9 +70,7 @@ logger = logging.getLogger(__name__)
 # process_next_batch 直接调用（无 executor session.info 注入）时的兜底默认，与 Settings 默认一致
 _DEFAULT_RETRY_LIMIT = 2
 _DEFAULT_MAX_INPUT_CHARS = 10_000
-
-# generator max_tokens（spec §5.7/§10 默认 768；Settings 化由契约同步任务落地前保持常量）
-_GENERATOR_MAX_OUTPUT_TOKENS = 768
+_DEFAULT_MAX_OUTPUT_TOKENS = 768
 
 _GENERATING_STAGE = "GENERATING"
 
@@ -165,6 +163,11 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         settings.generator_max_input_chars
         if isinstance(settings, Settings)
         else _DEFAULT_MAX_INPUT_CHARS
+    )
+    max_output_tokens = (
+        settings.generator_max_output_tokens
+        if isinstance(settings, Settings)
+        else _DEFAULT_MAX_OUTPUT_TOKENS
     )
     batch = _claim_next_batch(session, task_id=task_id)  # 条件更新抢占（并发单执行者）
     if batch is None:
@@ -260,7 +263,7 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         result = client.chat(
             user_prompt,
             system_prompt=system_prompt,
-            max_tokens=_GENERATOR_MAX_OUTPUT_TOKENS,
+            max_tokens=max_output_tokens,
         )
     except RetryableUpstreamError as exc:
         if exc.code is ErrorCode.API_KEY_UNAVAILABLE and not exc.retryable:

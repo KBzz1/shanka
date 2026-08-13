@@ -220,6 +220,7 @@ def rewrite_card_endpoint(
             device_id=device_id,
             card_id=card_id,
             custom_requirements=custom_requirements,
+            idempotency_key=key,
             now=_now(),
             settings=request.app.state.settings,
             client_factory=getattr(request.app.state, "client_factory", None),

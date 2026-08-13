@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     scoring_max_input_chars: int = 15_000
     # 规划重试（§6.3 账本为权威）：每组预算 2 次重试（共 3 次尝试），超限组 SKIPPED
     planning_retry_limit: int = 2
+    # 输出上限（§5.7 JSON 截断防线 / §10：可运维调整，不是制卡字数规则；
+    # Scoring 每次仍按 item 数计算更小的实际值 min(上限, 256 + 128 × items)）
+    planner_max_output_tokens: int = 2048
+    generator_max_output_tokens: int = 768
+    rewrite_max_output_tokens: int = 768
+    scoring_max_output_tokens: int = 4096
     # 敏感项：禁止打印、复制、写入日志/响应/任务明细；`repr=False` 防意外入日志
     deepseek_api_key: str | None = Field(default=None, repr=False)
     # API Key 加密密钥（database-design 2.2：环境变量，32 字节 hex；缺失时 PUT /api-key 不可用）

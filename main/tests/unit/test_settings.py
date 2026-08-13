@@ -41,6 +41,11 @@ def test_new_hard_limits_defaults() -> None:
     assert settings.scoring_max_cards_per_call == 12
     assert settings.scoring_max_input_chars == 15_000
     assert settings.planning_retry_limit == 2
+    # §5.7/§10 输出上限（JSON 截断防线；Scoring 每次仍按 item 数取更小实际值）
+    assert settings.planner_max_output_tokens == 2048
+    assert settings.generator_max_output_tokens == 768
+    assert settings.rewrite_max_output_tokens == 768
+    assert settings.scoring_max_output_tokens == 4096
 
 
 def test_settings_env_var_override(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3,10 +3,12 @@
 种子写入真实加密 Key（rewrite_card 解密路径）；client_factory 注入 mock transport（不触网）。
 """
 
+import hashlib
 import json
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -16,10 +18,11 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.db.models import ApiKey, Base, Card, Device, ReviewState
+from infra.db.models import ApiKey, Base, Card, Device, LlmCallAttempt, ReviewState
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
+from infra.llm.prompts import load_asset
 from services.cards.rewrite import rewrite_card
 from services.decks.service import create_deck
 
@@ -113,13 +116,12 @@ def _rewrite_cards_json() -> str:
     )
 
 
-def _client_returning(content: str) -> tuple[DeepSeekClient, list[str]]:
-    """mock transport client + 捕获的 prompt（断言 Prompt 组装：附加要求 + JSON Schema 拼接）。"""
-    captured: list[str] = []
+def _client_returning(content: str) -> tuple[DeepSeekClient, list[dict[str, Any]]]:
+    """mock transport client + 捕获的请求体（断言双消息组装与 max_tokens）。"""
+    captured: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        captured.append(body["messages"][0]["content"])
+        captured.append(json.loads(request.content))
         return httpx.Response(
             200,
             json={
@@ -169,10 +171,13 @@ def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> No
         replaced_id = card.card_id
     assert replaced_id == card_id
     assert len(captured) == 1
-    assert '"custom_requirements":"用更简洁的语言"' in captured[0]
-    assert "请严格按以下 JSON Schema 输出：" in captured[0]
-    assert "<REWRITE_INPUT>" in captured[0] and "</REWRITE_INPUT>" in captured[0]
-    assert "旧正面" in captured[0] and "旧背面" in captured[0]
+    system, user = captured[0]["messages"][0], captured[0]["messages"][1]
+    assert system["role"] == "system" and user["role"] == "user"
+    # 信封与动态内容在 user 消息（system 只承载稳定资产）
+    assert '"custom_requirements":"用更简洁的语言"' in user["content"]
+    assert "<REWRITE_INPUT>" in user["content"] and "</REWRITE_INPUT>" in user["content"]
+    assert "旧正面" in user["content"] and "旧背面" in user["content"]
+    assert "旧正面" not in system["content"]
     with session_factory() as session:
         stored = session.get(Card, card_id)
         assert stored is not None
@@ -210,6 +215,190 @@ def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> No
         assert stored.difficulty_score is None
         assert stored.learning_value_score is None
         assert stored.rubric_total_score is None
+
+
+def test_rewrite_dual_message_shape_and_max_tokens(
+    session_factory: Callable[[], Session],
+) -> None:
+    """§5.7 Rewrite 行：messages[0]=system（rewrite v3 + generator-output schema v2 原文，
+    不含动态内容）、messages[1]=user（仅 <REWRITE_INPUT> 信封，不含资产）；max_tokens=768。"""
+    with session_factory() as session:
+        seeded = _seed_card(session)
+        card_id = seeded.card_id
+    client, captured = _client_returning(_rewrite_cards_json())
+    with session_factory() as session:
+        rewrite_card(
+            session,
+            device_id=_DEVICE,
+            card_id=card_id,
+            custom_requirements="用更简洁的语言",
+            now=_NEW_NOW,
+            settings=_SETTINGS,
+            client_factory=lambda _api_key: client,
+        )
+        session.commit()
+    assert len(captured) == 1
+    body = captured[0]
+    assert body["max_tokens"] == 768
+    assert body["response_format"] == {"type": "json_object"}
+    messages = body["messages"]
+    assert len(messages) == 2
+    system, user = messages[0], messages[1]
+    assert system["role"] == "system" and user["role"] == "user"
+    rewrite_asset = load_asset("prompts", "rewrite")
+    schema_text = load_asset("schemas", "generator_output")
+    assert rewrite_asset in system["content"]
+    assert "<GENERATOR_OUTPUT_SCHEMA>" in system["content"]
+    assert schema_text.strip() in system["content"]  # schema v2 原文在 system
+    # system 只承载稳定资产：不含动态原卡/用户要求（资产文档对 <REWRITE_INPUT>
+    # 协议的说明属稳定文本，非动态数据）
+    assert "旧正面" not in system["content"]
+    assert "用更简洁的语言" not in system["content"]
+    # user 仅信封：不含资产与 schema
+    assert user["content"].startswith("<REWRITE_INPUT>")
+    assert user["content"].endswith("</REWRITE_INPUT>")
+    assert "旧正面" in user["content"]
+    assert '"custom_requirements":"用更简洁的语言"' in user["content"]
+    assert rewrite_asset not in user["content"]
+    assert "<GENERATOR_OUTPUT_SCHEMA>" not in user["content"]
+    assert schema_text.strip() not in user["content"]
+
+
+def test_rewrite_ledger_success_row(session_factory: Callable[[], Session]) -> None:
+    """§9：REWRITE 账本——scope_type=CARD/scope_id=card_id/task_id 空；成功 SUCCESS +
+    usage 三列 + 资产版本；normalized_result 不写；operation_key 含卡 ID/版本/幂等键 hash。"""
+    with session_factory() as session:
+        seeded = _seed_card(session)
+        card_id = seeded.card_id
+    client, _ = _client_returning(_rewrite_cards_json())
+    idempotency_key = str(uuid.uuid4())
+    with session_factory() as session:
+        rewrite_card(
+            session,
+            device_id=_DEVICE,
+            card_id=card_id,
+            custom_requirements=None,
+            idempotency_key=idempotency_key,
+            now=_NEW_NOW,
+            settings=_SETTINGS,
+            client_factory=lambda _api_key: client,
+        )
+        session.commit()
+    with session_factory() as session:
+        rows = session.scalars(
+            select(LlmCallAttempt).where(
+                LlmCallAttempt.scope_type == "CARD",
+                LlmCallAttempt.scope_id == card_id,
+                LlmCallAttempt.stage == "REWRITE",
+            )
+        ).all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.device_id == _DEVICE
+        assert row.task_id is None  # 单卡重写无生成任务
+        assert row.status == "SUCCESS"
+        assert row.attempt_no == 1
+        assert row.error_code is None
+        assert row.operation_key == (
+            f"rewrite:{card_id}:v3:{hashlib.sha256(idempotency_key.encode()).hexdigest()[:16]}"
+        )
+        assert row.prompt_name == "rewrite"
+        assert row.prompt_version == "v3"
+        assert row.schema_name == "generator_output"
+        assert row.schema_version == "v2"
+        assert row.cache_hit == 2 and row.cache_miss == 8 and row.output_tokens == 5
+        assert row.http_status == 200
+        assert row.normalized_result is None  # REWRITE 不写规范化结果（红线 4）
+        # 指纹不含原文（红线 4）
+        assert "旧正面" not in (row.input_fingerprint or "")
+        assert "旧答案" not in (row.input_fingerprint or "")
+
+
+def test_rewrite_ledger_failed_on_llm_error(session_factory: Callable[[], Session]) -> None:
+    """§9：LLM 调用异常 → 账本 REWRITE FAILED（独立 commit 落库），原卡保留。"""
+    with session_factory() as session:
+        seeded = _seed_card(session)
+        card_id = seeded.card_id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("upstream unreachable")
+
+    client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+    with session_factory() as session, pytest.raises(AppError) as excinfo:
+        rewrite_card(
+            session,
+            device_id=_DEVICE,
+            card_id=card_id,
+            custom_requirements=None,
+            now=_NEW_NOW,
+            settings=_SETTINGS,
+            client_factory=lambda _api_key: client,
+        )
+    assert excinfo.value.code is ErrorCode.GENERATION_FAILED
+    with session_factory() as session:
+        row = session.scalar(
+            select(LlmCallAttempt).where(
+                LlmCallAttempt.scope_type == "CARD",
+                LlmCallAttempt.scope_id == card_id,
+                LlmCallAttempt.stage == "REWRITE",
+            )
+        )
+        assert row is not None
+        assert row.status == "FAILED"
+        assert row.error_code == "GENERATION_FAILED"
+        assert row.task_id is None
+        card = session.get(Card, card_id)
+        assert card is not None
+        assert card.front == "旧正面"  # 原卡保留
+        assert card.version == "v3"
+
+
+def test_rewrite_ledger_started_committed_before_chat(
+    session_factory: Callable[[], Session],
+) -> None:
+    """§9 硬规则：chat 前 STARTED 已提交——transport 抛异常前用第二 session 观测到
+    STARTED 行（模拟调用进行中进程崩溃后的观测）；异常后账本 FAILED 落库。"""
+    with session_factory() as session:
+        seeded = _seed_card(session)
+        card_id = seeded.card_id
+    observed: list[tuple[str, int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        with session_factory() as observer:
+            rows = observer.scalars(
+                select(LlmCallAttempt).where(
+                    LlmCallAttempt.scope_type == "CARD",
+                    LlmCallAttempt.scope_id == card_id,
+                    LlmCallAttempt.stage == "REWRITE",
+                )
+            ).all()
+            observed.extend((r.status, r.attempt_no) for r in rows)
+        raise httpx.ConnectError("upstream unreachable")
+
+    client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+    with session_factory() as session, pytest.raises(AppError):
+        rewrite_card(
+            session,
+            device_id=_DEVICE,
+            card_id=card_id,
+            custom_requirements=None,
+            now=_NEW_NOW,
+            settings=_SETTINGS,
+            client_factory=lambda _api_key: client,
+        )
+    # 发调用前第二 session 已可见已提交 STARTED（adapter 内部 HTTP 重试会再次进入
+    # transport——同一次逻辑调用内，观测到的仍是同一行 STARTED）
+    assert observed and all(r == ("STARTED", 1) for r in observed)
+    with session_factory() as session:
+        row = session.scalar(
+            select(LlmCallAttempt).where(
+                LlmCallAttempt.scope_type == "CARD",
+                LlmCallAttempt.scope_id == card_id,
+                LlmCallAttempt.stage == "REWRITE",
+            )
+        )
+        assert row is not None
+        assert row.status == "FAILED"
 
 
 def test_rewrite_schema_invalid_preserves_card(session_factory: Callable[[], Session]) -> None:

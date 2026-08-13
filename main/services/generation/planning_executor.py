@@ -59,9 +59,6 @@ from services.pdf.text_chunks import load_pages
 
 logger = logging.getLogger(__name__)
 
-# planner max_tokens（spec §5.7/§10 默认 2048；Settings 化由契约同步任务落地前保持常量）
-_PLANNER_MAX_OUTPUT_TOKENS = 2048
-
 _PLANNING_STAGE = "PLANNING"
 _UTC_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"  # database-design 0：UTC、恒 3 位毫秒
 
@@ -455,7 +452,9 @@ def _run_group(
         session.commit()
         try:
             result = client.chat(
-                user_prompt, system_prompt=system_prompt, max_tokens=_PLANNER_MAX_OUTPUT_TOKENS
+                user_prompt,
+                system_prompt=system_prompt,
+                max_tokens=settings.planner_max_output_tokens,
             )
         except RetryableUpstreamError as exc:
             finish_now = _now_utc()

@@ -153,13 +153,16 @@ def mark_stale_unknown(
     return result.rowcount
 
 
-def attempt_count(session: Session, *, task_id: str, stage: str, operation_key: str) -> int:
-    """预算口径：该 operation_key 的 STARTED/SUCCESS/FAILED/UNKNOWN 尝试总数（§9 重试判定）。"""
+def attempt_count(session: Session, *, task_id: str | None, stage: str, operation_key: str) -> int:
+    """预算口径：该 operation_key 的 STARTED/SUCCESS/FAILED/UNKNOWN 尝试总数（§9 重试判定）。
+
+    task_id=None 过滤 task_id IS NULL（REWRITE 行：手动/导入卡重写无生成任务）。
+    """
     total = session.scalar(
         select(func.count())
         .select_from(LlmCallAttempt)
         .where(
-            LlmCallAttempt.task_id == task_id,
+            LlmCallAttempt.task_id.is_(task_id),
             LlmCallAttempt.stage == stage,
             LlmCallAttempt.operation_key == operation_key,
             LlmCallAttempt.status.in_(_COUNTED_STATUSES),

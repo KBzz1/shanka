@@ -66,11 +66,10 @@ logger = logging.getLogger(__name__)
 _SCORING_STAGE = "SCORING"
 _MERGED_DIFFICULTIES = ("BASIC", "UNDERSTANDING")
 
-# scoring max_tokens（spec §5.7：min(4096, 256 + 128 × items_count)；
-# Settings 化由契约同步任务落地前保持常量）
+# scoring max_tokens 公式（spec §5.7）：min(settings.scoring_max_output_tokens,
+# 256 + 128 × items_count)——上限 Settings 化，基数/每项为公式常量
 _SCORING_MAX_TOKENS_BASE = 256
 _SCORING_MAX_TOKENS_PER_ITEM = 128
-_SCORING_MAX_TOKENS_CAP = 4096
 
 
 @dataclass(frozen=True)
@@ -430,10 +429,11 @@ def _build_scoring_prompts(
     return system_prompt, user_prompt
 
 
-def _scoring_max_tokens(item_count: int) -> int:
-    """评分输出上限（spec §5.7）：min(4096, 256 + 128 × items_count)。"""
+def _scoring_max_tokens(item_count: int, *, settings: Settings) -> int:
+    """评分输出上限（spec §5.7）：min(settings.scoring_max_output_tokens,
+    256 + 128 × items_count)。"""
     return min(
-        _SCORING_MAX_TOKENS_CAP,
+        settings.scoring_max_output_tokens,
         _SCORING_MAX_TOKENS_BASE + _SCORING_MAX_TOKENS_PER_ITEM * item_count,
     )
 
@@ -538,7 +538,7 @@ def _run_scoring_group(
         )
         return
     system_prompt, user_prompt = _build_scoring_prompts(entries, cards_by_gen, pages_by_chunk)
-    max_tokens = _scoring_max_tokens(sum(len(ids) for _, ids in entries))
+    max_tokens = _scoring_max_tokens(sum(len(ids) for _, ids in entries), settings=settings)
     session.commit()  # §9：STARTED 占位 + 心跳先提交，之后才发调用
     try:
         result = client.chat(user_prompt, system_prompt=system_prompt, max_tokens=max_tokens)
