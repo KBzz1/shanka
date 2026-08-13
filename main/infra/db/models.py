@@ -382,9 +382,10 @@ class IdempotencyKey(Base):
     device_id 为旧数据遗留列（新写入不再生成）；遗留 UNIQUE (device_id, path,
     idempotency_key) 保留（旧设备域幂等缓存不跨身份空间重放，SQLite 多 NULL 不冲突）。
     SQLite rowid 表非 INTEGER 主键允许 NULL——user_id 主键 nullable=True 合法，旧行
-    （user_id 为 NULL）可保留。注意：两个不同设备的旧行若 (path, idempotency_key) 相同，
-    新主键 (NULL, path, idempotency_key) 会冲突——迁移将显式失败而非丢行（幂等键为
-    随机 UUID，跨设备同键实际不存在）。
+    （user_id 为 NULL）可保留。跨设备旧行 (path, idempotency_key) 相同也不会冲突：
+    SQLite 对 PK/UNIQUE 中的 NULL 视为互异，多行 (NULL, path, idempotency_key)
+    并存（实测探针证伪「冲突即失败」旧表述）；跨设备同键去重实际由保留的
+    UNIQUE (device_id, path, idempotency_key) 兜底。
 
     SQLAlchemy ORM 限制（实测，见 P3-T2 报告）：复合主键含 NULL 时需
     allow_partial_pks=True，否则旧行（user_id 为 NULL）经 ORM 查询被静默跳过、
