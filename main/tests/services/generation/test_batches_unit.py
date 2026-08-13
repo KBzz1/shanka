@@ -662,5 +662,8 @@ def test_batch_ledger_same_transaction_crash_recovery(
     assert task.status == "COMPLETED"
     assert batch.status == "SUCCEEDED"
     assert batch.retry_count == 1  # 尝试 2 - 1 成功次
-    assert [a.status for a in attempts] == ["UNKNOWN", "SUCCESS"]  # 孤儿 STARTED → UNKNOWN
+    # 孤儿 STARTED → UNKNOWN（GENERATING 账本行；T11 起任务完成后经 SCORING 阶段，
+    # 本测试 mock 只服务生成调用——SCORING 行单独观测，不混入生成预算口径）
+    generating = [a for a in attempts if a.stage == "GENERATING"]
+    assert [a.status for a in generating] == ["UNKNOWN", "SUCCESS"]
     assert len(cards) == 1 and cards[0].card_type == "QUESTION"

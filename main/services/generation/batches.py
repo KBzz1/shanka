@@ -533,20 +533,30 @@ def _validate_output_schema(raw: object) -> list[str]:
     return [f"{err.json_path or err.path}: {err.message}" for err in validator.iter_errors(raw)]
 
 
-def _record_rubric(batch: Batch, *, unit: KnowledgePoint, card: Card, duplicated: int) -> None:
-    """批次 SUCCEEDED 时质量观测（spec §7/§8）：评分 5 字段留 NULL 待 SCORING（T11 回写）；
-    质量聚合：coverage=1（0/1 语义）、分布按单元锚定（单值）；target_difficulty 由规划
-    锚定在入库时落库（_insert_card），删除 priority 轮换假分配。"""
-    q: dict[str, Any] = {
-        "type": card.card_type,
-        "question": card.question,
-        "answer": card.answer,
-        "statement": card.statement,
-        "explanation": card.explanation,
-        "target_difficulty": unit.target_difficulty,
-        "chapter_id": unit.chapter_id,
-    }
-    quality = batch_quality([q], total_kps=1, duplicated=duplicated)
+def apply_batch_quality(
+    batch: Batch, *, unit: KnowledgePoint, cards: Sequence[Card], duplicated: int
+) -> None:
+    """批次质量观测聚合回写（spec §7/§8）：生成期与 SCORING 评分回写期共用。
+
+    批=单元语义：coverage_rate = 该单元是否产出合法卡（0/1）；分布按单元锚定归因
+    （target_difficulty/章节/卡型单值）；评分 5 字段不在本函数范围（Card 直写）。
+    """
+    quality = batch_quality(
+        [
+            {
+                "type": c.card_type,
+                "question": c.question,
+                "answer": c.answer,
+                "statement": c.statement,
+                "explanation": c.explanation,
+                "target_difficulty": unit.target_difficulty,
+                "chapter_id": unit.chapter_id,
+            }
+            for c in cards
+        ],
+        total_kps=1,
+        duplicated=duplicated,
+    )
     batch.coverage_rate = quality["coverage_rate"]  # 1/1 = 1.0
     batch.duplicate_rate = quality["duplicate_rate"]
     batch.difficulty_distribution = json.dumps(
@@ -555,6 +565,13 @@ def _record_rubric(batch: Batch, *, unit: KnowledgePoint, card: Card, duplicated
     batch.chapter_distribution = json.dumps(quality["chapter_distribution"], ensure_ascii=False)
     batch.card_type_distribution = json.dumps(quality["card_type_distribution"], ensure_ascii=False)
     batch.difficulty_deviation = quality["difficulty_deviation"]
+
+
+def _record_rubric(batch: Batch, *, unit: KnowledgePoint, card: Card, duplicated: int) -> None:
+    """批次 SUCCEEDED 时质量观测（spec §7/§8）：评分 5 字段留 NULL 待 SCORING（T11 回写）；
+    质量聚合（coverage/分布）经 apply_batch_quality 与评分回写期共用；
+    target_difficulty 由规划锚定在入库时落库（_insert_card）。"""
+    apply_batch_quality(batch, unit=unit, cards=[card], duplicated=duplicated)
 
 
 def _insert_card(

@@ -409,10 +409,12 @@ def test_executor_cancel_between_batches_preserves_cancelled(
 def test_executor_full_flow_plan_then_generate(
     session_factory: Callable[[], Session],
 ) -> None:
-    """T9 接线：一次扫描 = 规划 worker（CAS 抢占 + 规划落库）→ 生成 worker（批生成）→ COMPLETED。
+    """T9/T11 接线：一次扫描 = 规划 worker（CAS 抢占 + 规划落库）→ 生成 worker（批生成）
+    → 评分 worker（SCORING 回写）→ COMPLETED。
 
-    mock 首次 chat 返回合法 planner 单元（引用请求内组页），后续返回 1 张合法卡
-    （1 单元 = 1 批 = 1 卡）；断言规划与生成在同一次 process_running_tasks 中衔接。
+    mock 首次 chat 返回合法 planner 单元（引用请求内组页），随后返回 1 张合法卡
+    （1 单元 = 1 批 = 1 卡），评分调用（<SCORING_INPUT>）返回 ID 守恒的分数；
+    断言规划/生成/评分在同一次 process_running_tasks 中衔接。
     """
     device = _uuid()
     with session_factory() as session:
@@ -422,9 +424,28 @@ def test_executor_full_flow_plan_then_generate(
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        if calls == 1:  # 规划调用：从 <PLANNER_INPUT> 提取组页 → 合法单元
-            body = json.loads(request.content)
-            user = body["messages"][-1]["content"]
+        body = json.loads(request.content)
+        user = body["messages"][-1]["content"]
+        if "<SCORING_INPUT>" in user:  # 评分调用：ID 集合守恒的合法分数
+            payload = json.loads(
+                user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0]
+            )
+            content = json.dumps(
+                {
+                    "scores": [
+                        {
+                            "generation_item_id": item["generation_item_id"],
+                            "evidence_score": 2,
+                            "correctness_score": 3,
+                            "difficulty_score": 2,
+                            "learning_value_score": 2,
+                        }
+                        for item in payload["items"]
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        elif calls == 1:  # 规划调用：从 <PLANNER_INPUT> 提取组页 → 合法单元
             payload = json.loads(
                 user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
             )
@@ -471,9 +492,10 @@ def test_executor_full_flow_plan_then_generate(
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
     assert n == 1
-    assert calls == 2  # 1 次规划 + 1 次生成（同一扫描轮内衔接）
+    assert calls == 3  # 1 次规划 + 1 次生成 + 1 次评分（同一扫描轮内衔接，T11 SCORING 阶段）
     assert task.status == "COMPLETED"
     assert len(kps) == 1
     assert kps[0].topic == "全流程目标"
     assert len(cards) == 1
+    assert cards[0].rubric_total_score == 9  # 评分回写（代码计算四维和）
     assert task.generated_card_count == 1

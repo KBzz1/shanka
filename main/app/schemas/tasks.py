@@ -48,7 +48,7 @@ class Task(BaseModel):
     file_id: str | None
     deck_id: str | None
     status: str  # PENDING/RUNNING/PAUSED/COMPLETED/FAILED/CANCELLED
-    stage: str | None  # PLANNING/GENERATING
+    stage: str | None  # PLANNING/GENERATING/SCORING
     selected_chapters: list[Chapter]
     generation_config: GenerationConfig
     cursor: TaskCursor | None
@@ -56,7 +56,7 @@ class Task(BaseModel):
     total_batch_count: int | None
     completed_batch_count: int | None
     resumable: bool
-    failure_stage: str | None  # PLANNING/GENERATING/WRITE_BACK
+    failure_stage: str | None  # PLANNING/GENERATING/SCORING/WRITE_BACK
     error_code: str | None
     completion_reason: str | None  # NO_GENERATION_UNITS 等空单元三分支（spec §6.4）
     skipped_planning_group_count: int  # 部分规划组失败被跳过的组数（spec §6.4）

@@ -1,6 +1,6 @@
 """executor.py：任务执行器（4.4 定式：进程内 DB 驱动；V5A adapter 分批执行）。
 
-扫描一轮 = 规划 worker + 生成 worker（spec §6.1）：
+扫描一轮 = 规划 worker + 生成 worker + 评分 worker（spec §6.1/§8）：
 
 - 规划 worker：先 claim_planning_task（CAS1 首次接管 + 章节快照冻结 / CAS2 孤儿恢复，
   每次扫描至多接管一个 PLANNING 任务）→ run_planning（选页拆组/账本恢复/组调用/合并
@@ -10,8 +10,13 @@
   transport）→ 循环 process_next_batch 直至无待处理批次；V5B：每批完成后心跳刷新
   task.updated_at（服务端时钟，孤儿恢复判据）并 commit（批次事务粒度：批次状态+游标+
   心跳同事务落库，长任务中间状态可观测，崩溃后已完成批次保留、未完成批次可恢复）→
-  全部批次终态 → 任务 COMPLETED。
-系统级错误（adapter 抛 API_KEY_UNAVAILABLE/GENERATION_FAILED）→ 任务 FAILED（4.1）；
+  批循环结束 → enter_scoring_stage（条件更新 stage=GENERATING → SCORING）→
+  run_scoring_stage（评分回写，内部条件更新 RUNNING+SCORING → COMPLETED）。
+- 评分 worker：扫描 `status='RUNNING' AND stage='SCORING'` 任务——心跳超时的孤儿
+  （在途 worker 崩溃）经 CAS 条件更新接管 + mark_stale_unknown + 重跑 run_scoring_stage
+  （账本为已尝试游标）；心跳新鲜（在途 worker 存活）不干预。
+系统级错误（adapter 抛 API_KEY_UNAVAILABLE/GENERATION_FAILED）→ 任务 FAILED（4.1），
+failure_stage 按 task.stage 归因（PLANNING/GENERATING/SCORING）；
 批次级失败（Schema 重试达上限）→ 批次 SKIPPED，任务继续（4.2）。V4 fake 不再用于任务执行
 （样卡仍用 fake）。
 """
@@ -36,6 +41,7 @@ from infra.metrics import GENERATION_TASKS_DURATION_SECONDS, GENERATION_TASKS_TO
 from services.generation.batches import plan_batches, process_next_batch
 from services.generation.ledger import mark_stale_unknown
 from services.generation.planning_executor import claim_planning_task, run_planning
+from services.generation.scoring import enter_scoring_stage, run_scoring_stage
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +98,15 @@ def _heartbeat_stale(updated_at: str | None, now: str, timeout_minutes: int) -> 
     except ValueError:
         return False
     return age > timedelta(minutes=timeout_minutes)
+
+
+def _format_cutoff(now: str, minutes: int) -> str:
+    """now - minutes 的 format_utc 字符串（SCORING 孤儿接管 CAS 条件用；字符串比较=时间序）。"""
+    try:
+        dt = datetime.fromisoformat(now)
+    except ValueError:
+        return now
+    return format_utc(dt - timedelta(minutes=minutes))
 
 
 def _recover_generating_orphans(session: Session, *, task: Task, settings: Settings) -> None:
@@ -193,14 +208,39 @@ def process_running_tasks(
         except Exception:  # noqa: BLE001
             _fail_task(task, error_code=ErrorCode.GENERATION_FAILED.value)
             logger.warning("task execution unexpected failure", extra={"task_id": task.task_id})
-    # 处理任务数：同一任务规划 + 生成同轮衔接只计一次
+    # 评分 worker 扫描：RUNNING + stage=SCORING（spec §8：心跳超时孤儿可 CAS 接管；
+    # 心跳新鲜 = 在途 worker 存活，跳过）
+    scoring_tasks = session.scalars(
+        select(Task)
+        .where(Task.status == "RUNNING", Task.stage == "SCORING")
+        .order_by(Task.created_at)
+    ).all()
+    acted = 0
+    for task in scoring_tasks:
+        try:
+            acted += _execute_scoring_task(
+                session, task, settings=settings, client_factory=client_factory
+            )
+        except AppError as exc:
+            # 评分 worker 不可恢复错误（资产加载失败等）→ FAILED + failure_stage=SCORING
+            _fail_task(task, error_code=exc.code.value)
+            logger.warning(
+                "task scoring failed",
+                extra={"task_id": task.task_id, "error_code": exc.code.value},
+            )
+        except Exception:  # noqa: BLE001
+            _fail_task(task, error_code=ErrorCode.GENERATION_FAILED.value)
+            logger.warning("task scoring unexpected failure", extra={"task_id": task.task_id})
+    # 处理任务数：同一任务规划 + 生成同轮衔接只计一次；SCORING 孤儿接管按实际行动计数
     claimed_id = claimed.task_id if claimed is not None else None
-    return sum(1 for task in tasks if task.task_id != claimed_id) + (1 if claimed else 0)
+    return sum(1 for task in tasks if task.task_id != claimed_id) + (1 if claimed else 0) + acted
 
 
-def _fail_task(task: Task, *, error_code: str, failure_stage: str = "GENERATING") -> None:
+def _fail_task(task: Task, *, error_code: str, failure_stage: str | None = None) -> None:
+    """任务 FAILED 落库；failure_stage 缺省从当前 stage 派生（GENERATING/SCORING
+    分支的 worker 错误各自归因——spec 6.4/8：failure_stage 增加 SCORING）。"""
     task.status = "FAILED"
-    task.failure_stage = failure_stage
+    task.failure_stage = failure_stage or task.stage or "GENERATING"
     task.error_code = error_code
     task.ended_at = task.updated_at
     task.resumable = 0
@@ -252,21 +292,72 @@ def _execute_task(
             session.refresh(task)
             if task.status != "RUNNING":
                 break
+        # 批循环结束 → SCORING 阶段（spec §8 独立阶段）：条件更新 stage='GENERATING' → 'SCORING'
+        # （取消/转移 → rowcount=0 → 不进入评分）；评分 worker 异常上抛 → 调用方 FAILED（failure_stage
+        # 由 task.stage=SCORING 派生）
+        if enter_scoring_stage(session, task_id=task.task_id, settings=settings):
+            session.refresh(task)
+            run_scoring_stage(session, task=task, settings=settings, client=client)
+            session.refresh(task)
+            if task.status == "COMPLETED":
+                _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
     finally:
         client.close()
-    # 终态条件更新（final review I-1）：不覆盖批次间隙已落库的 CANCELLED——WHERE status='RUNNING'
-    # 原子转移，rowcount=0 → 状态已被他方转移（取消等）→ 跳过 COMPLETED 落库与观测
+
+
+def _execute_scoring_task(
+    session: Session,
+    task: Task,
+    *,
+    settings: Settings,
+    client_factory: ClientFactory | None,
+) -> int:
+    """SCORING 孤儿接管（spec §8 + CAS2 同款心跳判据）：仅心跳超时的 RUNNING+SCORING
+    任务可被接管（新鲜心跳 = 在途 worker 存活，跳过不干预）；CAS 条件更新接管后
+    mark_stale_unknown（遗留 STARTED → UNKNOWN，仍计上限）+ 重跑 run_scoring_stage
+    （账本为已尝试游标：已尝试组跳过、未尝试组续跑）。返回实际行动数（1 = 接管，0 = 跳过）。"""
+    _require_str(task.updated_at, "任务数据不完整（缺少时间戳）")
+    now = format_utc(SystemClock().now_utc())
+    if not _heartbeat_stale(task.updated_at, now, settings.orphan_timeout_minutes):
+        return 0  # 心跳新鲜 → 在途 worker 存活，不干预
+    cutoff = _format_cutoff(now, settings.orphan_timeout_minutes)
     result = cast(
         CursorResult[Any],
         session.execute(
             update(Task)
-            .where(Task.task_id == task.task_id, Task.status == "RUNNING")
-            .values(status="COMPLETED", ended_at=task.updated_at, resumable=0)
+            .where(
+                Task.task_id == task.task_id,
+                Task.status == "RUNNING",
+                Task.stage == "SCORING",
+                Task.updated_at < cutoff,
+            )
+            .values(updated_at=now)
         ),
     )
-    if result.rowcount == 1:
+    if result.rowcount == 0:
+        return 0  # 已被其他 worker 接管或状态已转移
+    session.refresh(task)
+    marked = mark_stale_unknown(session, task_id=task.task_id, stage="SCORING", now=now)
+    if marked:
+        logger.info(
+            "scoring orphan recovery",
+            extra={"task_id": task.task_id, "started_to_unknown": marked},
+        )
+    session.commit()  # 接管心跳 + 遗留 STARTED→UNKNOWN 原子提交
+    api_key = _decrypt_api_key(session, task=task, settings=settings)
+    client = (
+        client_factory(api_key)
+        if client_factory is not None
+        else DeepSeekClient(settings, api_key=api_key)
+    )
+    try:
+        run_scoring_stage(session, task=task, settings=settings, client=client)
         session.refresh(task)
-        _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
+        if task.status == "COMPLETED":
+            _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
+    finally:
+        client.close()
+    return 1
 
 
 def scan_once(
