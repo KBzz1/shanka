@@ -7,7 +7,9 @@
   解析失败→GENERATION_FAILED；日志仅上游状态码/异常类型（不记录异常链、不引用 Key 明文）。
 - 错误分类（spec §6.3）：chat 抛 RetryableUpstreamError——401 与解析失败 retryable=False（Key 错误 /
   输出错误不属上游重试分类），429/5xx/网络/超时 retryable=True（账本预算内重试）；validate_key 保持 AppError。
-- thinking 参数（DeepSeek 官方 API）：启用时请求体 `"thinking": {"type": "enabled"}`，禁用时不携带。
+- thinking 参数（DeepSeek 官方 API）：启用 `"thinking": {"type": "enabled"}`，禁用显式携带
+  `"thinking": {"type": "disabled"}`（上游默认启用 thinking，省略会被 reasoning 挤掉 content——
+  T17 canary 实测根因）。
 - trust_env=False：不继承 shell 代理（本机 HTTP_PROXY=127.0.0.1:7897，直连不绕代理）；transport 可注入（mock 测试）。
 - R1 live：chat 返回 `system_fingerprint`（上游可能无此字段 → None），driver 按单元透传记录。
 """
@@ -117,8 +119,12 @@ class DeepSeekClient:
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        if self.settings.deepseek_thinking:
-            body["thinking"] = {"type": "enabled"}
+        # T17 canary 修复：上游对 deepseek-v4-flash 默认启用 thinking，不携带参数时
+        # reasoning 可能烧满 max_tokens 挤掉 content（finish=length + 空 content，
+        # 真实 canary 实测 5/5 复现）——禁用时必须显式携带 disabled。
+        body["thinking"] = (
+            {"type": "enabled"} if self.settings.deepseek_thinking else {"type": "disabled"}
+        )
         start = time.monotonic()
         # 内部 HTTP 重试（SDK 等价行为，T17 canary 修复）：429/5xx/网络/超时自动重试 1 次
         # （同一次逻辑调用内，账本 attempt 语义不变）；401 与解析失败不重试。

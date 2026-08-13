@@ -137,7 +137,9 @@ def test_adapter_chat_request_shape_thinking_off_json() -> None:
     body = captured["json"]
     assert body["model"] == "deepseek-v4-flash"
     assert body["response_format"] == {"type": "json_object"}
-    assert "thinking" not in body  # thinking disabled → 请求不带该参数
+    # T17 canary 修复：上游默认启用 thinking，不携带参数时 reasoning 可能烧满 max_tokens
+    # 挤掉 content（finish=length + 空 content）——disabled 必须显式携带
+    assert body["thinking"] == {"type": "disabled"}
     assert result["content"] == '{"ok": true}'
     assert result["usage"] == {
         "prompt_tokens": 10,
