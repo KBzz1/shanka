@@ -1,0 +1,109 @@
+# LLM 链路升级 + 账号登录与测试平台：合并长程任务执行状态
+
+## Goal Lock
+
+- Goal ID：`shanka-llm-account-long-run-v1`
+- Goal：先完成 LLM 链路升级（17 任务，P1），再完成账号登录替代 X-Device-ID（PRD V2.2，P2–P8）。
+- 当前状态：`P1_DONE`（LLM 链路升级完成，基线 a874944，进入 P2 账号阶段）
+- 设计：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/DESIGN.md`（引用两份上游设计）
+- 启动提示词：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/WORKER_PROMPT.md`
+- 任务地图：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/TASKS.md`
+- 最后更新：2026-08-13 Asia/Shanghai（P1_DONE）
+
+## 现场快照（2026-08-13 接管时）
+
+- 分支：`main`；HEAD：`8cd0cb5010316359e45003a985ddab2fe35c6188`（与设计期快照一致，无新提交）
+- Alembic head：`ead86a96d103`（`main/migrations/versions/` 仅 initial + `0002`，无 LLM 0003）
+- 未提交差量（17 修改 + 未跟踪资产）—— 属本包 P1 施工中产物，不是外部任务，不得覆盖：
+  - `agent_evolution/`：`CHANGELOG.md`、`manifest.json`、`prompts/AGENTS.md`、`rubrics/AGENTS.md`、
+    `schemas/AGENTS.md`；未跟踪 `prompts/v3/`、`rubrics/v2/`、`schemas/v2/`
+  - `docs/Architecture/structure-contract.md`（8.5 节资产登记口径改写中）
+  - `docs/superpowers/specs/2026-08-12-llm-pipeline-upgrade-design.md`（+249 行差量，spec 仍在改）
+  - `main/`：`infra/llm/deepseek.py`、`infra/llm/prompts.py`、`services/cards/rewrite.py`、
+    `tests/acceptance/test_acceptance_ac04_ac07.py`、`tests/contract/test_manifest_guard.py`、
+    `tests/integration/test_batches.py`、`tests/integration/test_cards_rewrite.py`、
+    `tests/integration/test_observability.py`、`tests/unit/test_deepseek_adapter.py`、
+    `tests/unit/test_prompts.py`；未跟踪 `tests/contract/test_prompt_assets_v3.py`
+- 聚焦测试复核（2026-08-12/13 两次）：
+  - 命令：`cd main && /home/kbzz1/miniconda3/bin/conda run -n shanka-backend python -m pytest -q tests/unit/test_prompts.py tests/unit/test_deepseek_adapter.py tests/contract/test_prompt_assets_v3.py tests/contract/test_manifest_guard.py tests/integration/test_cards_rewrite.py`
+  - 结果：`45 passed, 1 warning`，退出码 0。
+  - 结论边界：只证明当前落盘 v3/v2 资产与已接线增量的聚焦测试通过；不证明 LLM 升级完成。
+- 原账号包 `docs/account-auth-test-platform-long-run-v1/` 状态为 `WAITING_FOR_LLM_BASELINE`；其
+  "等待外部 worker 交接"的 Gate 0 已被本包 §2.2 改写为内部 P1 完成门禁，该目录保留为历史冻结设计。
+
+## 范围变更记录
+
+- 2026-08-13（用户决策）：**不做老数据迁移/认领**。合并任务包删除：legacy-claim/ticket 端点、
+  claim ticket 机制、legacy 表复制、事件 ID 重映射、API Key 密文搬运、Android 认领提示与
+  test-platform legacy 场景；owner 表改为加 user_id 列（新写入必填），旧 device_id 行原样保留
+  （不迁不删、无访问路径），清理属后续单独发布。上游账号设计 §4.4/§5.3 的 legacy 部分不在本包范围。
+- 已同步到 `WORKER_PROMPT.md`、`DESIGN.md`、`TASKS.md`；上游只读文件未改动。
+
+## 恢复入口
+
+- 最后已验证 checkpoint：P0 现场核验完成（2026-08-13）；实现开始 T1。
+- 当前阶段：P1 LLM 升级实施（17 任务，subagent-driven，TDD 步骤以 LLM plan 为唯一权威）。
+- P0 核验证据（2026-08-13，全部为真实命令）：
+  - `git rev-parse HEAD` → `8cd0cb5010316359e45003a985ddab2fe35c6188`（与快照一致，无新提交）
+  - `python -m alembic heads` → `ead86a96d103`（`migrations/versions/` 仅 initial + 0002，无 0003）
+  - `git status --short --branch` → 17 修改 + 8 未跟踪项，与现场快照逐项一致（用户差量保护清单成立）
+  - 聚焦测试：`cd main && /home/kbzz1/miniconda3/bin/conda run -n shanka-backend python -m pytest -q
+    tests/unit/test_prompts.py tests/unit/test_deepseek_adapter.py tests/contract/test_prompt_assets_v3.py
+    tests/contract/test_manifest_guard.py tests/integration/test_cards_rewrite.py`
+    → `45 passed, 1 warning in 0.31s`，退出码 0
+  - `.env` 存在且权限 `-rw-------`（600）✓（T17 canary 可用）
+- 差量↔plan 一致性判定：无不可恢复漂移，P1 可继续。已施工 vs 缺失：
+  - 已有施工（保留，不重做）：T5 资产文件（prompts/v3、rubrics/v2、schemas/v2）+ manifest 切换 +
+    CHANGELOG + prompts.py `safe_json_dumps`（但 `asset_versions()` 8 键扩展与 `load_schema_asset`
+    缺失 → T5 未完）；T6 部分（deepseek.py chat 已支持 system_prompt+max_tokens，缺
+    `RetryableUpstreamError` → T6 未完）；rewrite 安全 JSON 信封（spec §5.5）；相关测试版本断言
+    （test_prompts/test_deepseek_adapter/test_manifest_guard/test_prompt_assets_v3/test_batches/
+    test_observability/test_cards_rewrite/test_acceptance_ac04_ac07）；structure-contract 8.5 节。
+  - 缺失（按 plan 补齐）：T1–T4、T7–T13、T14（除 8.5）、T15–T17 无施工。
+- 若 P0 发现差量不可恢复漂移：只在本文件追加证据，回传 `BLOCKED_ON_LLM_WORKTREE`。
+- P1 完成（门禁见 DESIGN.md §2.2）后记录 `LLM_BASELINE_COMMIT` 与真实 Alembic head，进入 P2。
+
+## P1 完成记录（2026-08-13，全部为真实命令/账本证据）
+
+- **`LLM_BASELINE_COMMIT` = `a874944`**（fix(llm-upgrade): final review 收尾——rewrite 账本/双消息/max_tokens Settings 化）；P1 提交范围 main 分支 `8cd0cb5..a874944`（24 commits）+ 嵌套 frontend-app 仓库 `2a9f6b7`。
+- **Alembic head = `2a391e994f93`**（0003 llm_pipeline_upgrade，空库 upgrade→downgrade→upgrade 往返 + `alembic check` 零漂移，T1 实测）。
+- **17 任务全部完成且 review-clean**（SDD：每任务 implementer + spec/质量 reviewer 双审；T9/T11/T12/T14 各 1 轮 fix、全部 scoped re-review clean；最终整支审查 3 个 Important 经收尾修复 a874944 闭环）。
+- **本地实现证据（LOCAL_IMPLEMENTATION_DONE）**：全量 **500 passed / 0 failed**；`ruff check .`、`ruff format --check .`（247 files）、`mypy .`（196 source files）四工具全绿（主 Worker 2026-08-13 实测）；契约守卫 44/44。
+- **受控真实 canary（PRODUCTION_VALIDATED）**：真实 DeepSeek 单任务 Planner→Generator→Scoring 全链路**连续 3 次全 PASS**（每任务账本 7 行全 SUCCESS、评分 3/3 回写、成本 ≈¥0.015~0.029/次，全战役 ≈¥0.06 ≤ ¥3 上限；用户授权付费调用）；canary 暴露 2 个 mock 掩盖缺陷并修复（adapter 内部 HTTP 重试 ×1；thinking 显式禁用——上游默认启用 reasoning 挤掉 content 空响应根因），各带判别测试与全量回归。
+- **R-03 已 RESOLVED**（docs/Progress.md 第 6 节 + LLM-P1 工作包条目 DONE）；spec 状态行完成说明（用户裁决：按 plan 更新）。
+- 遗留登记（不阻塞 P2）：PRD 5.4.2 行 231/238 残留（spec §12 范围外，V2.2 收敛）；Settings.batch_size 死配置、build_generation_prompt 死代码、tasks/CLAUDE.md 陈旧表述（清理项）；REWRITE 孤儿 STARTED 无恢复路径（观测噪声，无预算影响）。
+
+## 阶段账本
+
+| 阶段 | 状态 | 证据/下一步 |
+| --- | --- | --- |
+| P0 现场基线核验 | `DONE` | HEAD 8cd0cb5；Alembic head ead86a96d103；聚焦 45 passed；差量一致无漂移 |
+| P1 LLM 升级 17 任务 | `DONE` | `LLM_BASELINE_COMMIT`=a874944；Alembic 2a391e994f93；500/0 四工具全绿；canary 3/3；R-03 RESOLVED（见上 P1 完成记录） |
+| P2 契约 V2.2 | `PENDING` | 依赖 P1 基线冻结（已满足，待开工） |
+| P3 数据地基 | `PENDING` | 真实 0003 head 上的下一 revision + 往返/fail-closed（无 legacy claim） |
+| P4 后端切换 | `PENDING` | auth、Bearer、user_id 归属 |
+| P5 LLM 后台 user_id 接续 | `PENDING` | 归属改造，不改 LLM 语义 |
+| P6 Android | `PENDING` | 登录态、Bearer、401 处理 |
+| P7 test-platform v2 | `PENDING` | auth/isolation/core/live/ledger 场景 |
+| P8 总验收 | `PENDING` | 全量工具链、迁移副本、canary、WORKER_REPORT.md |
+
+## 变更纪律
+
+- 本文件只记录实际状态和证据，不把计划勾选当完成。
+- 不覆盖用户差量；发现与当前任务重叠的未提交文件时先停在 P0 核对。
+- 不在未获授权时部署、push、迁移生产库，不迁移/认领/删除旧 device_id 数据（清理属后续单独发布）。
+- 每个阶段完成、验证完成、策略变化或上下文退出前更新本文件。
+- 两份上游设计（LLM spec/plan、账号 DESIGN）只读；实现冲突先归因、记录，再按设计忠实性处理。
+
+## 最终门禁
+
+- [x] P1 完成：17 任务真实证据 + canary 通过 + Progress 登记（R-03 RESOLVED）+ `LLM_BASELINE_COMMIT`。
+- [ ] V2.2 正式契约与实现一致。
+- [ ] X-Device-ID 已退出普通运行时认证/授权面。
+- [ ] 用户隔离、会话、幂等与敏感数据测试通过。
+- [ ] Planner/Generator/Scoring/Rewrite 与 ledger 已按 user_id 接续（语义冻结不回改）。
+- [ ] Android 与 test-platform v2 已完成并验证。
+- [ ] 全量质量工具真实通过，未运行项明确报告。
+- [ ] `WORKER_REPORT.md` 已记录改动、命令、退出码、计数、风险与未完成项。
+
+未全部满足时不得把本 Goal 报告为完成。
