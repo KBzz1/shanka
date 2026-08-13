@@ -95,6 +95,30 @@ def test_rate_limit_ip_dimension_blocks(tmp_path: Path) -> None:
     assert codes[2] == 429  # IP 维度覆盖探针（1.6 表"全部接口"）
 
 
+def test_rate_limit_ip_dimension_covers_unauthenticated_traffic(tmp_path: Path) -> None:
+    """fix round 1：IP 总闸门运行于 Auth 外层——未认证流量（无 Bearer）也计入 IP 桶。
+
+    P4-3 将 Auth 移出 RateLimit 外层后，未认证请求在 Auth 401 短路，不再经过任何
+    业务桶；契约 1.6「IP 5 req/s：全部接口」要求 IP 桶仍覆盖该流量（含 DB 读放大
+    面防护）——超限后 429 先于 Auth 401 短路。
+    """
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'rl_ip_unauth.db'}",
+        storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=2,
+    )
+    with TestClient(create_app(settings)) as client:
+        codes = [client.get("/decks").status_code for _ in range(3)]
+    assert codes == [401, 401, 429]  # 未认证流量计入 IP 桶：前 2 次放行至 Auth 401，第 3 次 429
+    with TestClient(create_app(settings)) as client:
+        for _ in range(2):
+            client.get("/decks")
+        resp = client.get("/decks")
+    assert resp.status_code == 429
+    assert resp.json()["error"]["code"] == "RATE_LIMITED"
+    assert int(resp.headers["Retry-After"]) > 0
+
+
 def test_rate_limit_user_scope_isolated_per_user(tmp_path: Path) -> None:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'rl_iso.db'}",

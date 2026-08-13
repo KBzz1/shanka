@@ -1,13 +1,14 @@
-"""限流中间件（structure-contract 1.6；红线 3）。
+"""限流中间件——业务维度（structure-contract 1.6；红线 3）。
 
 维度判定（1.6 表）：
-- IP 5 req/s：全部接口（含探针，采集器例外由部署层处理——契约字面"全部接口"）。
 - 写操作 60 req/min/user：全部写接口（POST/PUT/PATCH/DELETE），
   被专门维度覆盖的接口（/api-key、/samples、/pdfs）除外。
 - PUT /api-key 10 次/时/user；POST /samples 20 次/时/user；POST /pdfs 10 次/时/user。
 - auth 维度（P4-3 切换）：POST /auth/register|/auth/login 20 次/时/IP，键=client_ip；
   login 用户名桶（10 次/时/用户名）在 auth service 内复用 RateLimiter（本模块公开
   RateLimiter 与 retry_after_estimate），body 在 BodyCapture 内层不可读（裁决）。
+- IP 5 req/s 总闸门（覆盖全部接口含探针与未认证流量）已移交 ip_limit.py
+  （fix round 1：IP 层运行于 Auth 外层，本模块位于 Auth 内层管不到未认证流量）。
 
 业务维度键（P4-3）：request.state.principal.user_id（Auth 运行于本中间件外层）；
 豁免路径无 principal 且 scope=None，不进入业务维度。
@@ -87,7 +88,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp, settings: Settings) -> None:
         super().__init__(app)
         self.settings = settings
-        self._ip_limiter = RateLimiter(limit=settings.rate_limit_ip_per_second, window_seconds=1)
         self._write_limiter = RateLimiter(
             limit=settings.rate_limit_write_per_minute, window_seconds=60
         )
@@ -106,9 +106,6 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         client_ip = request.client.host if request.client else "unknown"
-        allowed, retry_after = self._ip_limiter.check(client_ip)
-        if not allowed:
-            return self._rate_limited(request, "ip", retry_after)
         scope = self._scope(request)
         if scope is not None:
             # auth 维度键 = IP；业务维度键 = principal.user_id（运行于 Auth 内层，
@@ -132,7 +129,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     def _scope(self, request: Request) -> str | None:
-        """1.6 维度判定：None = 仅 IP 维度。
+        """1.6 维度判定：None = 不进入业务维度（IP 总闸门归 ip_limit.py，Auth 外层）。
 
         fix round 1（契约 1.6 专门维度生效）：实际路由无 /v1 前缀（servers url 承担 /v1），
         专门维度改按无前缀路径匹配，同时兼容带前缀（防御反代剥前缀场景）。

@@ -27,6 +27,7 @@ from app.middleware.auth import BearerAuthMiddleware
 from app.middleware.body_capture import BodyCaptureMiddleware
 from app.middleware.device_id import DeviceIDMiddleware
 from app.middleware.error_handler import register_exception_handlers
+from app.middleware.ip_limit import IpRateLimitMiddleware
 from app.middleware.logging import LoggingMiddleware
 from app.middleware.metrics_middleware import MetricsMiddleware
 from app.middleware.rate_limit import RateLimiter, RateLimitMiddleware
@@ -121,20 +122,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
     register_exception_handlers(app)
-    # 中间件运行序（外层→内层）：Metrics → RequestID → Auth → RateLimit → DeviceID →
-    # Logging → BodyCapture → 路由。Starlette add_middleware 为 insert(0) 语义
+    # 中间件运行序（外层→内层）：Metrics → RequestID → IpRateLimit → Auth → RateLimit →
+    # DeviceID → Logging → BodyCapture → 路由。Starlette add_middleware 为 insert(0) 语义
     # （后加者在外层），故按目标运行序倒序添加；历史沿革：Task 6 在 Logging 之后插入
     # DeviceID，Task 9 在 DeviceID 与 RequestID 之间插入 RateLimit（键用原始头，运行于
     # DeviceID 外层），Task 10 追加 Metrics（最外层），Task 4/V1 在添加序最前加入
     # BodyCapture（运行序最内、路由前，位于 Logging 内层——幂等 body 捕获须先于路由
     # handler 完成），P4-2 在 RateLimit 与 DeviceID 之间插入 BearerAuth（双头过渡窗口，
     # 认证先于设备鉴权），P4-3 将 Auth 移出 RateLimit 外层（限流业务维度键改读
-    # principal.user_id；P4-4 移除 DeviceID 后 Auth 紧邻 RateLimit 内层）。
+    # principal.user_id；P4-4 移除 DeviceID 后 Auth 紧邻 RateLimit 内层），P4-3 fix
+    # round 1 在 Auth 外层补 IpRateLimit（IP 5 req/s 总闸门——覆盖未认证 401 流量，
+    # 契约 1.6「全部接口」；业务维度限流位于 Auth 内层管不到该流量）。
     app.add_middleware(BodyCaptureMiddleware)  # 添加序最前 → 运行序最内（路由前）
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(DeviceIDMiddleware)
     app.add_middleware(RateLimitMiddleware, settings=settings)  # 运行序位于 DeviceID 外层
     app.add_middleware(BearerAuthMiddleware)  # P4-3：运行序位于 RateLimit 外层（先认证再限流）
+    app.add_middleware(
+        IpRateLimitMiddleware, settings=settings
+    )  # fix round 1：运行序位于 Auth 外层（IP 总闸门覆盖未认证流量）
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(MetricsMiddleware)  # 添加序最后 → 运行序最外层（统计所有响应含 401/429）
     app.include_router(probes.router)
