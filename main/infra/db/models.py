@@ -1,4 +1,4 @@
-"""ORM 模型（database-design 2.1~2.12 一一对应，契约守卫 2 校验）。
+"""ORM 模型（database-design 2.1~2.12 一一对应 + 本包新增表，契约守卫 2 校验）。
 
 类型映射（database-design §0）：UUID→TEXT、时间→TEXT(ISO 8601 UTC)、JSON→TEXT、
 布尔→INTEGER(0/1)、小数→REAL、枚举→TEXT。
@@ -114,6 +114,12 @@ class Task(Base):
     started_at: Mapped[str | None] = mapped_column(String, nullable=True)
     ended_at: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    completion_reason: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # 空单元三分支：NO_GENERATION_UNITS 等
+    skipped_planning_group_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
 
 
 class KnowledgePoint(Base):
@@ -131,13 +137,21 @@ class KnowledgePoint(Base):
     topic: Mapped[str] = mapped_column(String, nullable=False)
     priority: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)  # PENDING/PROCESSED/SKIPPED
+    target_difficulty: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # BASIC/UNDERSTANDING/APPLICATION（规划锚定）
+    card_type: Mapped[str | None] = mapped_column(String, nullable=True)  # QUESTION/TRUE_FALSE
+    source_chunk_ids: Mapped[str | None] = mapped_column(Text, nullable=True)  # TEXT JSON 数组
 
 
 class Batch(Base):
     """2.7 batches：生成批次（游标完整性 UNIQUE(task_id, batch_index)）。"""
 
     __tablename__ = "batches"
-    __table_args__ = (UniqueConstraint("task_id", "batch_index", name="uq_batches_task_index"),)
+    __table_args__ = (
+        UniqueConstraint("task_id", "batch_index", name="uq_batches_task_index"),
+        UniqueConstraint("task_id", "generation_unit_id", name="uq_batches_task_unit"),
+    )
 
     batch_id: Mapped[str] = mapped_column(String, primary_key=True)
     task_id: Mapped[str] = mapped_column(
@@ -165,6 +179,11 @@ class Batch(Base):
     http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[str | None] = mapped_column(String, nullable=True)
     ended_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    generation_unit_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("knowledge_points.knowledge_point_id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class Deck(Base):
@@ -295,3 +314,71 @@ class IdempotencyKey(Base):
         String, nullable=False
     )  # 首次请求体 SHA-256(hex)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class TextChunk(Base):
+    """text_chunks：页文本一页一行、与章节解耦（spec §4.1；file_id 删除级联清理）。"""
+
+    __tablename__ = "text_chunks"
+    __table_args__ = (
+        UniqueConstraint("file_id", "page_number", name="uq_text_chunks_file_page"),
+        Index("ix_text_chunks_file_page", "file_id", "page_number"),
+    )
+
+    chunk_id: Mapped[str] = mapped_column(String, primary_key=True)
+    file_id: Mapped[str] = mapped_column(
+        String, ForeignKey("pdf_files.file_id", ondelete="CASCADE"), nullable=False
+    )
+    page_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    char_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class LlmCallAttempt(Base):
+    """llm_call_attempts：LLM 调用账本（spec §9；调用前 STARTED 占位，重试/上限/成本权威）。"""
+
+    __tablename__ = "llm_call_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_type",
+            "scope_id",
+            "stage",
+            "operation_key",
+            "attempt_no",
+            name="uq_llm_call_attempts_scope_attempt_no",
+        ),
+        Index("ix_llm_call_attempts_device_created", "device_id", "created_at"),
+        Index("ix_llm_call_attempts_task_stage_operation", "task_id", "stage", "operation_key"),
+    )
+
+    call_id: Mapped[str] = mapped_column(String, primary_key=True)
+    device_id: Mapped[str] = mapped_column(String, ForeignKey("devices.device_id"), nullable=False)
+    scope_type: Mapped[str] = mapped_column(String, nullable=False)  # TASK/CARD
+    scope_id: Mapped[str] = mapped_column(String, nullable=False)
+    task_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=True
+    )
+    stage: Mapped[str] = mapped_column(
+        String, nullable=False
+    )  # PLANNING/GENERATING/SCORING/REWRITE
+    operation_key: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    prompt_name: Mapped[str] = mapped_column(String, nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String, nullable=False)
+    schema_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    schema_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    rubric_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    cache_hit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_miss: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="STARTED")
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    normalized_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
