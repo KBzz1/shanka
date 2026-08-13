@@ -68,11 +68,11 @@ legacy claim 部分不在本包范围**，用户 2026-08-13 决策）；行为�
 
 ### P3 数据地基
 
-- [ ] 基于 P1 门禁记录的真实 Alembic head 创建下一 revision（不硬编码 `0004`）
-- [ ] users / auth_sessions 新表；owner 表加 user_id 列（新写入必填，历史 device_id 行保留不动）
-- [ ] 空库/副本 upgrade→downgrade→upgrade；存在新用户数据时 downgrade fail closed
-- [ ] `alembic check` 零漂移；计数/FK/索引守恒；PDF storage manifest 前后一致（无新增 missing/orphan）
-- [ ] 旧 device_id 数据不迁移/不认领/不删除（用户决策）；无 API Key 密文搬运
+- [x] 基于 P1 门禁记录的真实 Alembic head 创建下一 revision（不硬编码 `0004`）
+- [x] users / auth_sessions 新表；owner 表加 user_id 列（新写入必填，历史 device_id 行保留不动）
+- [x] 空库/副本 upgrade→downgrade→upgrade；存在新用户数据时 downgrade fail closed
+- [x] `alembic check` 零漂移；计数/FK/索引守恒；PDF storage manifest 前后一致（无新增 missing/orphan）
+- [x] 旧 device_id 数据不迁移/不认领/不删除（用户决策）；无 API Key 密文搬运
 
 ### P4 后端切换
 

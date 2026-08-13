@@ -4,11 +4,11 @@
 
 - Goal ID：`shanka-llm-account-long-run-v1`
 - Goal：先完成 LLM 链路升级（17 任务，P1），再完成账号登录替代 X-Device-ID（PRD V2.2，P2–P8）。
-- 当前状态：`P2_DONE`（账号契约 V2.2 完成：PRD V2.2 + 原子契约同步，500/0 四工具全绿；进入 P3 数据地基）
+- 当前状态：`P3_DONE`（数据地基完成：users/auth_sessions + owner 表 user_id 迁移 + fail-closed + 旧行守恒，508/0 四工具全绿；进入 P4 后端切换）
 - 设计：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/DESIGN.md`（引用两份上游设计）
 - 启动提示词：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/WORKER_PROMPT.md`
 - 任务地图：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/TASKS.md`
-- 最后更新：2026-08-13 Asia/Shanghai（P1_DONE）
+- 最后更新：2026-08-14 Asia/Shanghai（P3_DONE）
 
 ## 现场快照（2026-08-13 接管时）
 
@@ -79,6 +79,19 @@
 - **验证（主 Worker 2026-08-13 实测）**：`python -m pytest` **500 passed / 0 failed**（契约守卫 44/44）；`ruff check .` 全过；`ruff format --check .` 247 files；`mypy .` Success（196 source files）。修复 1 个 P2 自身缺陷：openapi Unauthorized 描述含 `WWW-Authenticate: Bearer`（冒号空格）被 YAML 判为映射分隔符 → 折叠标量修复。
 - **边界**：P2 只落契约与错误码注册，不含 auth 端点/中间件/ORM/迁移实现；最终门禁「V2.2 正式契约与实现一致」待 P8。
 
+## P3 完成记录（2026-08-14，全部为真实命令/账本证据）
+
+- **Alembic 链**：`2a391e994f93 → ddc6f34e30b8 → a7cc699f3fd8`（真实 heads 派生，不硬编码 0004）；空库 `upgrade head`（5 revisions 全链）+ `alembic check` 零漂移（主 Worker 实测，exit 0）。
+- **提交范围**：main 分支 `3464e9c..89ce41d`（5 commits：90e01e3 数据地基 / 503dea7 T1 review 修复 / d07f316 主键重建+fail-closed / 5be727a+89ce41d final review 注释修复）。
+- **schema 落地**（database-design §2 与 ORM 同批翻新，守卫强制一致）：users/auth_sessions 新表；8 个 owner 表 user_id 列 + device_id 降级遗留 NULL + CHECK 双非空；api_keys PK→user_id、idempotency_keys PK→(user_id, path, idempotency_key) + 保留遗留 UNIQUE(device_id, path, idempotency_key)；review_events 另加 UNIQUE(user_id, client_event_id)。
+- **旧数据保留（D-06）**：9 表 SQL 直插旧库副本 upgrade 行数守恒（自动化判别测试）+ final reviewer 双层 downgrade 实测无丢失；PDF storage manifest 零差量；无密文搬运。
+- **downgrade fail-closed**：users 非空或任一 owner 表 user_id 非空 → 任何 DDL/DML 前拒绝；空库/纯旧副本正常降级。
+- **env.py 连接层关闭 FK 强制**（防 batch 重建级联清空，reviewer 核实必要且正确）+ SQLAlchemy NULL 主键三重限制的 ApiKey mapper 改写 / api_key 覆盖路径 Core 化（reviewer 裁决为 v2.1 行为不回归的必要等价手段）。
+- **验证（主 Worker 2026-08-14 实测）**：`python -m pytest` **508 passed / 0 failed**；`ruff check .` 全过；`ruff format --check .` 249 files；`mypy .` Success（198 source files）。
+- **SDD 审查**：2 任务 × implementer + 任务级 reviewer 双审；整支 final review（fable）With fixes → 2 fix rounds 闭环 → clean。
+- **P4 跟进清单**：见 docs/Progress.md ACC-P3 条目（① api_keys UNIQUE(device_id) 决策、② ddc6 层 CI 断言、③ §7.1 措辞、④ 写侧债务三条）。
+- **边界**：P3 只落数据层（ORM/迁移/测试），不改 services/app 业务逻辑（唯一例外：api_key 覆盖路径 Core 化——语义逐字等价，v2.1 按 device_id 行为不回归由全量回归背书）。
+
 ## 阶段账本
 
 | 阶段 | 状态 | 证据/下一步 |
@@ -86,7 +99,7 @@
 | P0 现场基线核验 | `DONE` | HEAD 8cd0cb5；Alembic head ead86a96d103；聚焦 45 passed；差量一致无漂移 |
 | P1 LLM 升级 17 任务 | `DONE` | `LLM_BASELINE_COMMIT`=a874944；Alembic 2a391e994f93；500/0 四工具全绿；canary 3/3；R-03 RESOLVED（见上 P1 完成记录） |
 | P2 契约 V2.2 | `DONE` | 见上 P2 完成记录：PRD V2.2 + 四契约文档原子同步 + 500/0 四工具全绿 |
-| P3 数据地基 | `PENDING` | 真实 0003 head 上的下一 revision + 往返/fail-closed（无 legacy claim） |
+| P3 数据地基 | `DONE` | 见上 P3 完成记录：5 commits 3464e9c..89ce41d、Alembic 链 3 revisions、508/0 四工具全绿、fail-closed、旧行守恒 |
 | P4 后端切换 | `PENDING` | auth、Bearer、user_id 归属 |
 | P5 LLM 后台 user_id 接续 | `PENDING` | 归属改造，不改 LLM 语义 |
 | P6 Android | `PENDING` | 登录态、Bearer、401 处理 |

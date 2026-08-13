@@ -2,7 +2,7 @@
 
 本文是后续 Goal 的唯一进度与状态地图，不建立并列计划或看板。需求权威为 [PRD v2.2](PRD/V2.2/prd_v2_2.md)（继承 v2.1），实现以 [Architecture](Architecture/AGENTS.md) 的防漂移规则为准。Superpowers plan 只细化当前一个工作包的实施步骤，不定义项目状态，也不替代正式契约。
 
-最后事实审计：2026-08-13。
+最后事实审计：2026-08-14。
 
 ## 1. 状态与事实基线
 
@@ -302,6 +302,22 @@
 - **验证**：`python -m pytest` 500 passed / 0 failed（契约守卫 44/44）；`ruff check .` 全过；`ruff format --check .` 247 files；`mypy .` Success（196 source files）——主 Agent 2026-08-13 实测。
 - 边界声明：本包只落契约与错误码注册，不含 auth 端点/中间件/ORM/迁移实现（P3 数据地基、P4 后端切换）；最终门禁「V2.2 正式契约与实现一致」待 P8 总验收。
 
+### ACC-P3 — 账号数据地基（users/auth_sessions + owner 表 user_id 迁移，不含业务切换）
+
+**`DONE`｜依赖：ACC-P2 契约｜覆盖：database-design §7.1 落地、FR-19 数据层、D-05/D-06 数据语义｜2026-08-14**
+
+任务包：`docs/llm-account-long-run-v1/`。执行计划：`docs/superpowers/plans/2026-08-13-account-data-foundation.md`（2 任务，superpowers:subagent-driven-development 逐任务 implementer + reviewer 双审 + 整支 final review）。
+
+当前证据（2026-08-14，main 分支 5 commits 3464e9c..89ce41d）：
+- **Alembic 链**（真实 heads 派生，不硬编码 0004）：`2a391e994f93 → ddc6f34e30b8`（users/auth_sessions 新表 + 6 个直接归属表 pdf_files/tasks/decks/cards/review_events/llm_call_attempts 加 user_id、device_id 降级 NULL、CHECK 双非空 + 查询索引）→ `a7cc699f3fd8`（api_keys PK→user_id、idempotency_keys PK→(user_id, path, idempotency_key) + 保留遗留 UNIQUE(device_id, path, idempotency_key)、review_events 另加 UNIQUE(user_id, client_event_id)、downgrade fail-closed）。
+- **旧数据保留（D-06）**：9 表 device 域行 SQL 直插旧库副本 → upgrade head 行数守恒、device_id 原值、user_id NULL（自动化判别测试）；final reviewer 双层 downgrade 实测（head→2a391e994f93 带旧行、ddc6f34e30b8→2a391e994f93 带旧行）无丢失；PDF storage manifest（file_id/storage_key/size_bytes）前后零差量。
+- **fail-closed downgrade**：users 非空或任一 owner 表 user_id 非空 → 任何 DDL/DML 前 RuntimeError 拒绝（测试断言拒绝后表集合不变）；空库/纯旧副本正常降级。
+- **env.py 迁移连接层关闭 FK 强制**：防 batch 重建 FK 父表时 DROP 旧表隐式级联清空子表（reviewer 核实必要且正确；带数据旧库 12 表行数守恒实测旁证）。
+- **SQLAlchemy NULL 主键三重限制**（brief 未预见的 ORM 层事实：查询静默跳过/写入 FlushError/更新 FlushError）→ 两处必要等价手段（reviewer 逐字语义对比 + 全库调用点 grep 核查裁决）：ApiKey mapper 身份键改写 device_id（元数据主键仍 user_id，守卫/alembic 不受影响）+ api_key 覆盖路径 Core 条件 UPDATE（唯一 UPDATE 路径）——v2.1 按 device_id 写入与查询行为不回归。
+- **验证（主 Agent 2026-08-14 实测）**：全量 **508 passed / 0 failed**；`ruff check .` 全过；`ruff format --check .` 249 files；`mypy .` Success（198 source files）；空库 `alembic upgrade head`（5 revisions 全链）+ `alembic check` 零漂移 exit 0；契约守卫全绿（含 idempotency PK 列序按 doc 主键行逐字校验）。
+- **SDD 过程**：2 任务 × implementer + 任务级 reviewer；整支 final review（fable）With fixes → 2 fix rounds（NULL 主键冲突注释失实改述——SQLite PK/UNIQUE 多 NULL 互异、两行并存）→ clean。
+- **P4 跟进清单（须写入 P4 阶段组织）**：① api_keys 每设备唯一性 DB 保障随 PK 重建静默丢失（补 UNIQUE(device_id) 迁移或文档化决策，须在用户域写入落地前完成）；② ddc6 层 downgrade 带旧行 CI 断言；③ §7.1 fail-closed 生效范围一句 + 任务归属措辞修正；④ 写侧债务三条——ApiKey 用户域行（device_id NULL）对 ORM 不可见（get_status 会返回 UNKNOWN、save_key 会误 INSERT 撞 PK，需 Core 直写或重映射）、IdempotencyKey NULL 主键行 update/delete 会 FlushError（当前无此类路径）、tasks.device_id 注解 Mapped[str] 待随用户侧写入收敛（3 处 create_attempt 调用点）。
+
 ## 5. 依赖关系与下一步
 
 ```text
@@ -351,7 +367,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | FR-15～16 / AC-10 | V2 | FSRS/statistics + acceptance |
 | FR-17 / AC-08、11 后端本机部分 | V3B（全局脱敏 F0/F1） | security/log capture + acceptance |
 | FR-18 | F1 + 各纵向包 | OpenAPI/contract + endpoint tests |
-| FR-19 / AC-12 | ACC-P2（契约）+ P3/P4（实现） | 契约同步；实现随账号后端切换工作包 |
+| FR-19 / AC-12 | ACC-P2（契约）+ ACC-P3（数据层）+ P4（业务切换） | 契约同步 + 数据地基落地；业务切换随 P4 |
 | database-design | F1 + V1～V6 各闭环 | migration/ORM contract + integration |
 | O-1～O-6 | F0/F1 + V5A | probe/metrics/log/quality tests |
 | deployment / PRD HTTPS | 当前 Goal 外 | 保留供应商中立的 HTTPS 要求；明确启动联网部署后再实测，不计入 F0～R1 完成条件 |
