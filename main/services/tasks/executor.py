@@ -18,7 +18,7 @@
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from sqlalchemy import select, update
@@ -28,12 +28,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings
 from app.errors import AppError, ErrorCode
 from infra.clock import SystemClock
-from infra.db.models import ApiKey, KnowledgePoint, Task
+from infra.db.models import ApiKey, Batch, KnowledgePoint, Task
 from infra.db.session import format_utc
 from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from infra.metrics import GENERATION_TASKS_DURATION_SECONDS, GENERATION_TASKS_TOTAL
 from services.generation.batches import plan_batches, process_next_batch
+from services.generation.ledger import mark_stale_unknown
 from services.generation.planning_executor import claim_planning_task, run_planning
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,49 @@ def _decrypt_api_key(session: Session, *, task: Task, settings: Settings) -> str
         return decrypt_key(row.encrypted_key, key)
     except Exception:  # noqa: BLE001 —— 解密失败（畸形 payload/密钥不符）统一 API_KEY_UNAVAILABLE
         raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 解密失败") from None
+
+
+def _heartbeat_stale(updated_at: str | None, now: str, timeout_minutes: int) -> bool:
+    """心跳超时判据（CAS2 同款）：updated_at 早于 now - timeout → 可判定为孤儿。"""
+    if updated_at is None:
+        return False
+    try:
+        age = datetime.fromisoformat(now) - datetime.fromisoformat(updated_at)
+    except ValueError:
+        return False
+    return age > timedelta(minutes=timeout_minutes)
+
+
+def _recover_generating_orphans(session: Session, *, task: Task, settings: Settings) -> None:
+    """GENERATING 孤儿恢复（spec §9 恢复语义 + CAS2 同款心跳判据）。
+
+    process_next_batch 在调用前提交"抢占 + STARTED 占位"，进程崩溃会遗留 PROCESSING
+    批次与 STARTED 账本行（不随事务回滚）。心跳超时的任务视为孤儿：遗留 STARTED →
+    UNKNOWN（仍计入重试预算，防崩溃恢复后突破预算），卡在 PROCESSING 的批次复位
+    FAILED（可重新抢占，按账本尝试数续跑，不重复付费）。心跳新鲜（并发 worker 存活）
+    时不干预，避免误伤在途批次。
+    """
+    now = format_utc(SystemClock().now_utc())
+    if not _heartbeat_stale(task.updated_at, now, settings.orphan_timeout_minutes):
+        return
+    marked = mark_stale_unknown(session, task_id=task.task_id, stage="GENERATING", now=now)
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(Batch)
+            .where(Batch.task_id == task.task_id, Batch.status == "PROCESSING")
+            .values(status="FAILED")
+        ),
+    )
+    if marked or result.rowcount:
+        logger.info(
+            "generating orphan recovery",
+            extra={
+                "task_id": task.task_id,
+                "started_to_unknown": marked,
+                "processing_to_failed": result.rowcount,
+            },
+        )
 
 
 def process_running_tasks(
@@ -170,17 +214,24 @@ def _execute_task(
     settings: Settings,
     client_factory: ClientFactory | None,
 ) -> None:
-    """执行单个任务：plan_batches（若未建）→ 解密 Key 构造 client → 循环 process_next_batch → COMPLETED。"""
+    """执行单个任务：GENERATING 孤儿恢复（心跳超时）→ plan_batches（若未建）→ 解密 Key
+    构造 client → 循环 process_next_batch → COMPLETED。"""
     _require_str(task.updated_at, "任务数据不完整（缺少时间戳）")
     _require_str(task.deck_id, "任务数据不完整（缺少牌组）")
-    session.info["settings"] = settings  # batches.py 消费（batch_size/retry_limit）
+    session.info["settings"] = settings  # batches.py 消费（retry_limit/输入字符上限）
+    _recover_generating_orphans(session, task=task, settings=settings)
     kps = session.scalars(
         select(KnowledgePoint)
         .where(KnowledgePoint.task_id == task.task_id)
         .order_by(KnowledgePoint.priority)
     ).all()
     if task.total_batch_count is None and kps:
-        plan_batches(session, task_id=task.task_id, knowledge_points=kps)
+        plan_batches(
+            session,
+            task_id=task.task_id,
+            generation_units=kps,
+            now=format_utc(SystemClock().now_utc()),
+        )
         session.flush()
     api_key = _decrypt_api_key(session, task=task, settings=settings)
     client = (

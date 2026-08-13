@@ -1,22 +1,10 @@
-"""services.generation.rubric 单元测试（5.9：4 维度 0-3 分总分 0-12，Rubric 不影响入库）。"""
+"""services.generation.rubric 单元测试（5.9：Rubric 不影响入库）。
 
-from services.generation.rubric import batch_quality, score_card
+T10 起 fake 评分（score_card）退役——Card 评分字段由 SCORING 阶段（T11）LLM 评分回写，
+本文件只保留 batch_quality 分布聚合用例（评分用例随 T10 删除，见任务报告）。
+"""
 
-
-def test_rubric_score_deterministic_and_in_range() -> None:
-    card = {"type": "QUESTION", "question": "q" * 20, "answer": "a" * 20}
-    s1 = score_card(card)
-    s2 = score_card(card)
-    assert s1 == s2  # deterministic
-    for k in ("evidence_score", "correctness_score", "difficulty_score", "learning_value_score"):
-        assert 0 <= s1[k] <= 3
-    assert 0 <= s1["rubric_total_score"] <= 12
-
-
-def test_rubric_score_different_for_different_cards() -> None:
-    rich = {"type": "QUESTION", "question": "q" * 50, "answer": "a" * 50, "explanation": "e" * 30}
-    poor = {"type": "QUESTION", "question": "q", "answer": ""}
-    assert score_card(rich)["rubric_total_score"] >= score_card(poor)["rubric_total_score"]
+from services.generation.rubric import batch_quality
 
 
 def test_rubric_batch_quality_shape() -> None:

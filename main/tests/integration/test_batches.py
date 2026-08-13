@@ -1,4 +1,9 @@
-"""分批生成集成测试：批次状态机/重试/游标/原子推进（真实 SQLite + mock transport）。"""
+"""分批生成集成测试：批次状态机/重试/游标/原子推进（真实 SQLite + mock transport）。
+
+T10 起批=单元（spec §7）：每单元一批 + generation_unit_id 外键；账本为重试预算权威
+（Batch.retry_count 只是兼容投影）；fake 评分退役 → 评分 5 字段留 NULL 待 SCORING
+（brief Step 5：既有批次测试按 T16 前最小修改跑通）。
+"""
 
 import json
 import uuid
@@ -12,11 +17,14 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Batch, Card, KnowledgePoint, Task
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.deepseek import DeepSeekClient
 from services.generation.batches import plan_batches, process_next_batch
+from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.service import create_task
+
+_NOW = "2026-08-11T00:00:00.000Z"
 
 
 @pytest.fixture
@@ -36,7 +44,7 @@ def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> 
 
     # FK 前置守卫：devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
     if session.get(Device, device_id) is None:
-        session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+        session.add(Device(device_id=device_id, created_at=_NOW))
         session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
@@ -45,11 +53,11 @@ def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> 
         storage_key=_uuid(),
         size_bytes=1,
         status="PARSED",
-        created_at="2026-08-11T00:00:00.000Z",
+        created_at=_NOW,
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, device_id=device_id, name="D", now="2026-08-11T00:00:00.000Z")
+    deck = create_deck(session, device_id=device_id, name="D", now=_NOW)
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
@@ -60,7 +68,7 @@ def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> 
             encrypted_key="enc",
             status="AVAILABLE",
             masked_key="sk-****",
-            updated_at="2026-08-11T00:00:00.000Z",
+            updated_at=_NOW,
         )
     )
     session.flush()
@@ -74,15 +82,44 @@ def _seed_task_with_kps(session: Session, *, device_id: str, n_kps: int = 4) -> 
             quantity_tendency="COMPACT",
             difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
         ),
-        now="2026-08-11T00:00:00.000Z",
+        now=_NOW,
     )
+    task.status = "RUNNING"
+    task.stage = "GENERATING"
+    task.updated_at = _NOW
+    persist_text_chunks(
+        session,
+        file_id=pdf.file_id,
+        pages=[{"page_number": pn, "content": f"<第{pn}页>内容" * 20} for pn in (1, 2)],
+        now=_NOW,
+    )
+    session.flush()
+    chunks = session.scalars(
+        select(TextChunk).where(TextChunk.file_id == pdf.file_id).order_by(TextChunk.page_number)
+    ).all()
+    units = [
+        KnowledgePoint(
+            knowledge_point_id=str(uuid.uuid4()),
+            task_id=task.task_id,
+            chapter_id=ch.chapter_id,
+            source_chunk_id=chunks[0].chunk_id,  # 兼容投影（spec §3.1）
+            topic=f"学习目标{i + 1}",
+            priority=i + 1,
+            status="PENDING",
+            target_difficulty="BASIC",
+            card_type="QUESTION",
+            source_chunk_ids=json.dumps([c.chunk_id for c in chunks], ensure_ascii=False),
+        )
+        for i in range(n_kps)
+    ]
+    session.add_all(units)
     session.commit()
     return task.task_id
 
 
-def _valid_cards_json(n: int = 2) -> str:
-    cards = [{"type": "QUESTION", "question": f"q{i}", "answer": f"a{i}"} for i in range(n)]
-    return json.dumps({"cards": cards}, ensure_ascii=False)
+def _valid_cards_json() -> str:
+    # T10 批=单元：每单元恰好 1 张锚定类型卡（generator-output schema v2 maxItems=1）
+    return json.dumps({"cards": [{"type": "QUESTION", "question": "q", "answer": "a"}]})
 
 
 def _client_ok(session_factory: Callable[[], Session]) -> DeepSeekClient:
@@ -113,12 +150,13 @@ def test_batches_plan_and_process_all(session_factory: Callable[[], Session]) ->
     with session_factory() as session:
         task = session.get(Task, task_id)
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
-        plan_batches(session, task_id=task_id, knowledge_points=kps)
+        plan_batches(session, task_id=task_id, generation_units=kps, now=_NOW)
         session.commit()
         total_batches = len(session.scalars(select(Batch).where(Batch.task_id == task_id)).all())
-    assert total_batches >= 1
+    assert total_batches == len(kps)  # T10：1 单元 = 1 批
     client = _client_ok(session_factory)
     with session_factory() as session:
+        session.info["settings"] = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
         processed = 0
         while True:
             n = process_next_batch(session, task_id=task_id, client=client)
@@ -135,39 +173,30 @@ def test_batches_plan_and_process_all(session_factory: Callable[[], Session]) ->
     assert all(b.status == "SUCCEEDED" for b in batches)
     assert task.completed_batch_count == total_batches  # 游标原子推进
     assert task.total_batch_count == total_batches
-    assert len(cards) > 0
+    assert len(cards) == total_batches  # 每单元 1 卡
     assert all(c.source == "GENERATED" for c in cards)
-    # T3 审查 carry-forward：SUCCEEDED 批次 Rubric 值断言（AC-04/07；仅观测不影响入库）
+    # T10：批=单元 → coverage=0/1；Rubric 评分字段留 NULL 待 SCORING（T11 回写）
     assert all(b.rubric_version == "v2" for b in batches)
+    assert all(b.coverage_rate == 1.0 for b in batches)
     assert all(
-        c.evidence_score is not None
-        and c.correctness_score is not None
-        and c.difficulty_score is not None
-        and c.learning_value_score is not None
-        and c.rubric_total_score is not None
-        and 0 < c.rubric_total_score <= 12
+        c.evidence_score is None
+        and c.correctness_score is None
+        and c.difficulty_score is None
+        and c.learning_value_score is None
+        and c.rubric_total_score is None
         for c in cards
-    )
-    assert all(
-        b.coverage_rate is not None
-        and b.duplicate_rate is not None
-        and b.difficulty_distribution is not None
-        and b.chapter_distribution is not None
-        and b.card_type_distribution is not None
-        and b.difficulty_deviation is not None
-        for b in batches
     )
 
 
 def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[], Session]) -> None:
-    """非法输出（Schema 校验失败）→ 重试 2 次 → SKIPPED，任务继续（4.2）。"""
+    """非法输出（Schema 校验失败）→ 重试预算耗尽（1+limit 次尝试）→ SKIPPED，任务继续。"""
     device = _uuid()
     with session_factory() as session:
-        task_id = _seed_task_with_kps(session, device_id=device)
+        task_id = _seed_task_with_kps(session, device_id=device, n_kps=1)
     with session_factory() as session:
         task = session.get(Task, task_id)
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
-        plan_batches(session, task_id=task_id, knowledge_points=kps)
+        plan_batches(session, task_id=task_id, generation_units=kps, now=_NOW)
         session.commit()
 
     def bad_handler(request: httpx.Request) -> httpx.Response:
@@ -179,6 +208,7 @@ def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[]
         Settings(api_key_encryption_key="aa" * 32), transport=httpx.MockTransport(bad_handler)
     )
     with session_factory() as session:
+        session.info["settings"] = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
         attempts = 0
         while True:  # 无待处理批次（返回 0）时终止——验证 break 路径
             if process_next_batch(session, task_id=task_id, client=client) == 0:
@@ -191,20 +221,21 @@ def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[]
     assert task is not None
     assert attempts == 3  # 契约 3.7：最多 2 次重试共 3 次尝试（每批）
     assert all(b.status == "SKIPPED" for b in batches)
-    assert all(b.retry_count == 2 for b in batches)  # 重试计数 = 2（3 次尝试）
+    assert all(b.retry_count == 3 for b in batches)  # T10：投影 = 账本尝试数（预算权威）
     assert task.completed_batch_count == len(batches)  # SKIPPED 也推进游标
 
 
 def test_batches_usage_and_versions_recorded(session_factory: Callable[[], Session]) -> None:
     device = _uuid()
     with session_factory() as session:
-        task_id = _seed_task_with_kps(session, device_id=device)
+        task_id = _seed_task_with_kps(session, device_id=device, n_kps=1)
     with session_factory() as session:
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
-        plan_batches(session, task_id=task_id, knowledge_points=kps)
+        plan_batches(session, task_id=task_id, generation_units=kps, now=_NOW)
         session.commit()
     client = _client_ok(session_factory)
     with session_factory() as session:
+        session.info["settings"] = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
         process_next_batch(session, task_id=task_id, client=client)
         session.commit()
     with session_factory() as session:

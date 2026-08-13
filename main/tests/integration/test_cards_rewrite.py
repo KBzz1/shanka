@@ -204,12 +204,12 @@ def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> No
         assert rs.last_review is None
         assert rs.last_rating is None
         assert rs.updated_at == _NEW_NOW
-        # Rubric 5 字段落卡非 None（AC-06：低分照常替换）
-        assert stored.evidence_score is not None
-        assert stored.correctness_score is not None
-        assert stored.difficulty_score is not None
-        assert stored.learning_value_score is not None
-        assert stored.rubric_total_score is not None
+        # T10 起 fake 评分退役：重写不写评分字段（原值保留，待 SCORING 回写；低分照常替换）
+        assert stored.evidence_score == 1  # 种子原值保留
+        assert stored.correctness_score is None
+        assert stored.difficulty_score is None
+        assert stored.learning_value_score is None
+        assert stored.rubric_total_score is None
 
 
 def test_rewrite_schema_invalid_preserves_card(session_factory: Callable[[], Session]) -> None:
@@ -447,13 +447,12 @@ def test_rewrite_true_false_response_switches_type(
         assert stored.front == stored.statement  # front/back 由 statement/explanation 派生
         assert stored.back == stored.explanation
         assert stored.version == "v4"
-        # Rubric 评分正常（5 字段非 None 且总分 > 0）
-        assert stored.evidence_score is not None
-        assert stored.correctness_score is not None
-        assert stored.difficulty_score is not None
-        assert stored.learning_value_score is not None
-        assert stored.rubric_total_score is not None
-        assert stored.rubric_total_score > 0
+        # T10 起 fake 评分退役：重写不写评分字段（原值保留，待 SCORING 回写）
+        assert stored.evidence_score == 1  # 种子原值保留
+        assert stored.correctness_score is None
+        assert stored.difficulty_score is None
+        assert stored.learning_value_score is None
+        assert stored.rubric_total_score is None
         # ReviewState 同正常路径原子重置
         assert rs.state == "NEW"
         assert rs.difficulty == 1.0

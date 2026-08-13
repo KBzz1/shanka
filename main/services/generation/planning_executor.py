@@ -734,8 +734,8 @@ def _finish_planning_generating(
         )
     session.add_all(kps)
     session.flush()
-    # plan_batches 已按新签名（1 单元 1 批 + generation_unit_id；spec §7）
-    plan_batches(session, task_id=task.task_id, knowledge_points=kps)
+    # plan_batches 新签名（1 单元 1 批 + generation_unit_id + 显式 now；spec §7）
+    plan_batches(session, task_id=task.task_id, generation_units=kps, now=now)
     task.stage = "GENERATING"
     task.skipped_planning_group_count = skipped
     task.cursor = json.dumps(

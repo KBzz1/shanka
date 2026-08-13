@@ -8,7 +8,8 @@
 - 失败保留：卡不存在/跨设备 CARD_NOT_FOUND（404）；无 Key API_KEY_NOT_SET（422）；
   解密失败 API_KEY_UNAVAILABLE（502）；响应解析/Schema 违约 REWRITE_SCHEMA_INVALID（422，
   保留原卡不做任何写）；LLM 调用异常由 adapter 抛 GENERATION_FAILED/API_KEY_UNAVAILABLE。
-- Rubric 只观测（AC-06：低分照常替换）：score_card 5 字段落卡，不影响替换结果。
+- Rubric 评分字段（evidence/correctness/difficulty/learning_value/rubric_total）由
+  SCORING 阶段回写，重写期留 NULL（T10 起 fake 评分退役，brief Step 4）。
 - 8.3 观测：chat 成功后 observe_llm_call 上报（批次生成与单卡重写共用 llm_metrics）。
 - 事务归 services：本函数不做 commit，调用方（handler 幂等包装）commit。
 """
@@ -28,7 +29,6 @@ from infra.llm.deepseek import DeepSeekClient
 from infra.llm.prompts import load_asset, safe_json_dumps
 from services.generation.llm_metrics import observe_llm_call
 from services.generation.response_parse import parse_cards_json, to_internal_card
-from services.generation.rubric import score_card
 from services.generation.schema_validator import load_card_schema, validate_card
 
 
@@ -159,22 +159,7 @@ def rewrite_card(
     answer_boolean = internal.get("answer_boolean")
     card.answer_boolean = int(answer_boolean) if isinstance(answer_boolean, bool) else None
     card.generation_item_id = str(uuid.uuid4())  # 新版本新标识，旧标识随覆盖作废（PRD 5.13）
-    # Rubric 观测（AC-06：低分照常替换）；target_difficulty 保留原值
-    scores = score_card(
-        {
-            "type": card.card_type,
-            "question": card.question,
-            "answer": card.answer,
-            "statement": card.statement,
-            "explanation": card.explanation,
-            "target_difficulty": card.target_difficulty,
-        }
-    )
-    card.evidence_score = scores["evidence_score"]
-    card.correctness_score = scores["correctness_score"]
-    card.difficulty_score = scores["difficulty_score"]
-    card.learning_value_score = scores["learning_value_score"]
-    card.rubric_total_score = scores["rubric_total_score"]
+    # Rubric 评分字段留 NULL 待 SCORING 回写（T10 起 fake 评分退役）；target_difficulty 保留原值
     card.version = _next_version(card.version)
     card.updated_at = now
     # ReviewState 原子重置（2.10 新建卡初始值）
