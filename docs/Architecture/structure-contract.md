@@ -36,6 +36,8 @@
   - `client_event_id` — 复习事件幂等标识,用户内唯一;
   - `generation_item_id` 为空的卡片(manual / imported)由 `Idempotency-Key` 保证不重复写入。
 - 读操作无需幂等键。
+- logout 顺序重放语义:撤销成功后同键重试将先被认证闸门 401(AUTH_INVALID)拦截(幂等重放不可达),
+  幂等键的实际作用是并发双发单副作用;终态一致(会话确已撤销)。
 
 ### 1.4 错误响应
 
@@ -572,12 +574,14 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 | --- | --- | --- | --- |
 | POST | `/v1/auth/register` | 创建用户并建立会话;`{ username, password }`;201 返回 AuthSessionResponse(3.15);用户名冲突 → `409 USERNAME_TAKEN` | - |
 | POST | `/v1/auth/login` | 校验凭据并建立新会话;200 返回 AuthSessionResponse;失败统一 `401 INVALID_CREDENTIALS` | - |
-| POST | `/v1/auth/logout` | 撤销当前会话(仅当前);204 | - |
+| POST | `/v1/auth/logout` | 撤销当前会话(仅当前);204 | 幂等键(并发双发单副作用) |
 | GET | `/v1/auth/me` | 返回当前用户最小资料 AuthUser(3.14) | - |
 
 规则:register/login 豁免 Bearer 鉴权与 Idempotency-Key;logout/me 需要 Bearer。客户端不得自动重试
 register/login(防网络重放静默创建多条会话)。受保护接口 401(`AUTH_REQUIRED` / `AUTH_INVALID`)携带
-`WWW-Authenticate: Bearer`(1.4)。
+`WWW-Authenticate: Bearer`(1.4)。logout 的顺序重放(撤销后同键重试)因撤销 token 统一 401 在认证
+闸门先行不可达,幂等键保证并发双发单副作用(条件更新天然幂等);login 的非法格式用户名按输入
+校验惯例返回 400 VALIDATION_ERROR(非 401),不泄露账号存在性。
 认证语义(凭据/会话/限流)见 1.1 / 1.6;数据归属与隔离见 1.1 归属声明与 1.3 幂等约定。
 
 ## 7. 错误码表
@@ -592,8 +596,6 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `AUTH_INVALID` | 401 | token 非法/未知/撤销/过期;401 带 `WWW-Authenticate: Bearer` |
 | | `INVALID_CREDENTIALS` | 401 | 登录失败(用户名不存在与密码错误统一返回,不暴露账号存在性) |
 | | `USERNAME_TAKEN` | 409 | 注册用户名已被占用 |
-| 设备 | `DEVICE_ID_REQUIRED` | 401 | 缺 X-Device-ID(V2.1 遗留错误码;X-Device-ID middleware 退出后随实现移除) |
-| | `DEVICE_ID_INVALID` | 401 | 设备 ID 格式非法(V2.1 遗留错误码,同上) |
 | PDF | `PDF_UPLOAD_INVALID` | 400 | 非 PDF / 损坏 / 超限(100MB / 1000 页) |
 | | `PDF_PARSE_FAILED` | 422 | 文本层解析失败 |
 | | `PDF_TOC_MISSING` | 422 | 无可用目录结构(终止流程) |

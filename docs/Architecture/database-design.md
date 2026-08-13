@@ -39,7 +39,7 @@ users 1──N idempotency_keys（V2.2 主键重建；devices 边仅遗留行）
 
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
-| device_id | TEXT | PK | 匿名设备 ID(X-Device-ID) |
+| device_id | TEXT | PK | 旧设备 ID(X-Device-ID,V2.1 遗留;V2.2 起仅兼容审计,普通请求不再自动创建/刷新) |
 | first_seen_ip | TEXT | NULL | 首次注册 IP(风控信号,契约 1.1) |
 | user_agent | TEXT | NULL | 首次 UA(风控信号) |
 | last_active_at | TEXT | NULL | 最近活跃时间(风控信号) |

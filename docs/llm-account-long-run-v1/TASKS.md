@@ -76,11 +76,11 @@ legacy claim 部分不在本包范围**，用户 2026-08-13 决策）；行为�
 
 ### P4 后端切换
 
-- [ ] register/login/logout/me 端点；Argon2id（生产参数守卫）；dummy 校验
-- [ ] 256-bit opaque token + SHA-256 摘要；30 天有效期；logout 只撤销当前 session
-- [ ] `AuthPrincipal(user_id, session_id)`；Bearer 401 + WWW-Authenticate；跨用户统一 404
-- [ ] 全部 owner roots 与幂等域切换 user_id；X-Device-ID 退出普通认证/授权/幂等/限流
-- [ ] IP + 用户名限流；敏感路径统一脱敏（服务端 + client）
+- [x] register/login/logout/me 端点；Argon2id（生产参数守卫）；dummy 校验
+- [x] 256-bit opaque token + SHA-256 摘要；30 天有效期；logout 只撤销当前 session
+- [x] `AuthPrincipal(user_id, session_id)`；Bearer 401 + WWW-Authenticate；跨用户统一 404
+- [x] 全部 owner roots 与幂等域切换 user_id；X-Device-ID 退出普通认证/授权/幂等/限流
+- [x] IP + 用户名限流；敏感路径统一脱敏（服务端完成；client 脱敏随 P6 Android / P7 test-platform）
 
 ### P5 LLM 后台 user_id 接续
 

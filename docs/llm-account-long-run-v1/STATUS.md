@@ -4,11 +4,11 @@
 
 - Goal ID：`shanka-llm-account-long-run-v1`
 - Goal：先完成 LLM 链路升级（17 任务，P1），再完成账号登录替代 X-Device-ID（PRD V2.2，P2–P8）。
-- 当前状态：`P3_DONE`（数据地基完成：users/auth_sessions + owner 表 user_id 迁移 + fail-closed + 旧行守恒，508/0 四工具全绿；进入 P4 后端切换）
+- 当前状态：`P4_DONE`（后端切换完成：auth 端点 + Argon2id + opaque token + Bearer/AuthPrincipal + 全链路 user_id 归属 + X-Device-ID 退出，557/0 四工具全绿；进入 P5 LLM 后台 user_id 接续）
 - 设计：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/DESIGN.md`（引用两份上游设计）
 - 启动提示词：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/WORKER_PROMPT.md`
 - 任务地图：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/TASKS.md`
-- 最后更新：2026-08-14 Asia/Shanghai（P3_DONE）
+- 最后更新：2026-08-14 Asia/Shanghai（P4_DONE）
 
 ## 现场快照（2026-08-13 接管时）
 
@@ -92,6 +92,18 @@
 - **P4 跟进清单**：见 docs/Progress.md ACC-P3 条目（① api_keys UNIQUE(device_id) 决策、② ddc6 层 CI 断言、③ §7.1 措辞、④ 写侧债务三条）。
 - **边界**：P3 只落数据层（ORM/迁移/测试），不改 services/app 业务逻辑（唯一例外：api_key 覆盖路径 Core 化——语义逐字等价，v2.1 按 device_id 行为不回归由全量回归背书）。
 
+## P4 完成记录（2026-08-14，全部为真实命令/账本证据）
+
+- **提交范围**：main 分支 `1e52f96..<P4 尾 commit>`（11 commits：T1 9decae6+1283a6a / T2 0b88827 / T3 9c1c1ff+b53461c / T4 e87190e+9577904 / T5 da7ca8e / T6a d0c2c36+4888d6b / T6b 契约收尾）。
+- **账号体系落地**：services/auth（Argon2id 19456/2/1 参数守卫 + dummy 校验 + 256-bit opaque token SHA-256 摘要）、/auth 四端点（register 201/login 200/logout 204/me 200；INVALID_CREDENTIALS 401 无 WWW-Authenticate、USERNAME_TAKEN 409）、BearerAuthMiddleware（AuthPrincipal 注入；401 AUTH_REQUIRED/AUTH_INVALID 带 WWW-Authenticate: Bearer；error_handler 统一加头覆盖窄竞态）。
+- **X-Device-ID 退出**：DeviceIDMiddleware 删除；运行时代码 X-Device-ID 与 state.device_id 读取归零（grep 佐证）；devices 表不再自动创建/刷新（仅兼容审计）；errors.py 设备两码移除；structure-contract ch7 设备组移除。
+- **全链路 user_id 归属**：9 handlers + 14 services 全部切 principal.user_id；新写入不再生成 device_id；幂等域 (user_id, path, key)；限流业务维度 user_id + auth 维度（register/login IP 20/h + login 用户名 10/h）+ IP 总闸门独立中间件（ip_limit.py，未认证流量覆盖）；跨用户统一 404 一致性守卫（Card↔Deck/Task↔PDF/Deck/LlmCallAttempt↔Task）；api_keys PK→user_id 用户域 Core 直写（mapper 移除回 ORM）；UNIQUE(device_id) 迁移（e85c78b2a345，P4 跟进 a）；ddc6 层 downgrade 带旧行 CI 断言（跟进 b）；§7.1 fail-closed 生效范围与归属措辞（跟进 c）；P3 写侧债务三条全部闭环（跟进 d）。
+- **契约收尾**：openapi /auth/me 200 补 user 包装层（P2 遗留漂移修复）+ AuthRegisterRequest/AuthLoginRequest minLength/maxLength；structure-contract §1.3/§6.11 logout 顺序重放语义句 + login 400 澄清句 + logout 幂等列；database-design 2.1 devices 仅兼容审计。
+- **敏感脱敏**：日志身份字段 user_id（app+infra 双处）；敏感脱敏判别测试（Authorization/密码 sentinel 不进日志）；scanner 解析失败日志 device_id 字段移除。
+- **验证（主 Worker 2026-08-14 实测）**：`python -m pytest` **557 passed / 0 failed**（含契约守卫全等）；`ruff check .` 全过；`ruff format --check .` 271 files；`mypy .` Success（218 source files）；空库 `alembic upgrade head`（6 revisions 全链）+ `alembic check` 零漂移 exit 0。
+- **SDD 过程**：6 任务 × implementer + 任务级 reviewer；T4 边界调整裁决（Key 写侧提前、T5 收缩）；fix rounds 6 轮全部 scoped re-review clean。
+- **遗留登记（不阻塞）**：driver report["device_id"] 字段（reviewer 判定不违反 §4.5，P7 test-platform 裁决）；RateLimitMiddleware write 桶 60s 窗口 clock 注入留后续（ip 桶已注入）；tests/live driver dry-run mock 按请求区分 planner/generator 形状（P7 平台裁决）。
+
 ## 阶段账本
 
 | 阶段 | 状态 | 证据/下一步 |
@@ -100,7 +112,7 @@
 | P1 LLM 升级 17 任务 | `DONE` | `LLM_BASELINE_COMMIT`=a874944；Alembic 2a391e994f93；500/0 四工具全绿；canary 3/3；R-03 RESOLVED（见上 P1 完成记录） |
 | P2 契约 V2.2 | `DONE` | 见上 P2 完成记录：PRD V2.2 + 四契约文档原子同步 + 500/0 四工具全绿 |
 | P3 数据地基 | `DONE` | 见上 P3 完成记录：5 commits 3464e9c..89ce41d、Alembic 链 3 revisions、508/0 四工具全绿、fail-closed、旧行守恒 |
-| P4 后端切换 | `PENDING` | auth、Bearer、user_id 归属 |
+| P4 后端切换 | `DONE` | 见上 P4 完成记录：11 commits、auth 四端点 + Bearer + 全链路 user_id、X-Device-ID 退出、557/0 四工具全绿 |
 | P5 LLM 后台 user_id 接续 | `PENDING` | 归属改造，不改 LLM 语义 |
 | P6 Android | `PENDING` | 登录态、Bearer、401 处理 |
 | P7 test-platform v2 | `PENDING` | auth/isolation/core/live/ledger 场景 |

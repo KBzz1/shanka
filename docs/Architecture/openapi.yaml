@@ -108,7 +108,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuthUser'
+                type: object
+                required: [user]
+                properties:
+                  user:
+                    $ref: '#/components/schemas/AuthUser'
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -1782,9 +1786,13 @@ components:
       properties:
         username:
           type: string
+          minLength: 3
+          maxLength: 32
           description: 3~32 位,仅 [a-z0-9._-],服务端统一转小写
         password:
           type: string
+          minLength: 8
+          maxLength: 128
           format: password
           description: 8~128 字符,不截断、不 normalization
     AuthLoginRequest:
@@ -1793,9 +1801,13 @@ components:
       properties:
         username:
           type: string
+          minLength: 3
+          maxLength: 32
           description: 服务端统一转小写后匹配
         password:
           type: string
+          minLength: 8
+          maxLength: 128
           format: password
     AuthUser:
       type: object

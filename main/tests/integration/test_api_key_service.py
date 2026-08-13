@@ -66,7 +66,7 @@ def _balance_ok(request: httpx.Request) -> httpx.Response:
 
 
 def _key_row(session: Session, *, user_id: str) -> tuple[str, str, str, str] | None:
-    """用户域 Key 行（Core 列投影——ApiKey 用户域行对 ORM 不可见）。"""
+    """用户域 Key 行（Core 列投影读取——测试只取加密列，不加载完整 ORM 实例）。"""
     row = session.execute(select(*_KEY_COLUMNS).where(ApiKey.user_id == user_id)).first()
     if row is None:
         return None

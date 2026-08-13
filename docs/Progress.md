@@ -318,6 +318,22 @@
 - **SDD 过程**：2 任务 × implementer + 任务级 reviewer；整支 final review（fable）With fixes → 2 fix rounds（NULL 主键冲突注释失实改述——SQLite PK/UNIQUE 多 NULL 互异、两行并存）→ clean。
 - **P4 跟进清单（须写入 P4 阶段组织）**：① api_keys 每设备唯一性 DB 保障随 PK 重建静默丢失（补 UNIQUE(device_id) 迁移或文档化决策，须在用户域写入落地前完成）；② ddc6 层 downgrade 带旧行 CI 断言；③ §7.1 fail-closed 生效范围一句 + 任务归属措辞修正；④ 写侧债务三条——ApiKey 用户域行（device_id NULL）对 ORM 不可见（get_status 会返回 UNKNOWN、save_key 会误 INSERT 撞 PK，需 Core 直写或重映射）、IdempotencyKey NULL 主键行 update/delete 会 FlushError（当前无此类路径）、tasks.device_id 注解 Mapped[str] 待随用户侧写入收敛（3 处 create_attempt 调用点）。
 
+### ACC-P4 — 账号后端切换（auth 端点 + Bearer + 全链路 user_id + X-Device-ID 退出）
+
+**`DONE`｜依赖：ACC-P3 数据层｜覆盖：FR-19 实现、D-05/D-06 落地、DESIGN §4.2~4.5/§5.1｜2026-08-14**
+
+任务包：`docs/llm-account-long-run-v1/`。执行计划：`docs/superpowers/plans/2026-08-14-account-backend-switch.md`（6 任务，superpowers:subagent-driven-development）。
+
+当前证据（2026-08-14，main 分支 11 commits 1e52f96..<P4 尾 commit>）：
+- **账号体系**：services/auth（Argon2id 生产参数 19456/2/1 守卫 + 用户不存在时 dummy 校验抹平时序差 + 256-bit opaque token 只存 SHA-256 摘要）；/auth 四端点（register 201 / login 200 统一 401 INVALID_CREDENTIALS / logout 204 只撤销当前 session / me 200）；BearerAuthMiddleware（AuthPrincipal(user_id, session_id) 注入；豁免 register/login/探针/openapi.json；401 AUTH_REQUIRED/AUTH_INVALID 带 WWW-Authenticate: Bearer；error_handler 对两码统一加头）。
+- **X-Device-ID 退出**：DeviceIDMiddleware 删除、运行时代码 X-Device-ID/state.device_id 读取归零（grep 佐证）、devices 表停止自动注册（仅兼容审计）、errors.py 设备两码移除、structure-contract ch7 设备组移除。
+- **全链路 user_id**：9 handlers + 14 services 切 principal.user_id；新写入不再生成 device_id（旧行保留无访问路径 D-06）；幂等域 (user_id, path, key)；限流业务维度 user_id + auth 维度（register/login IP 20/h、login 用户名 10/h）+ IpRateLimitMiddleware（IP 5/s 总闸门独立于 Auth 外层，未认证流量覆盖——T3 review Important 修复）；跨用户统一 404 一致性守卫（Card↔Deck/Task↔PDF/Deck/LlmCallAttempt↔Task）；api_keys 用户域（mapper 移除、ORM 直写、UNIQUE(device_id) 迁移 e85c78b2a345、ddc6 层 CI 断言、§7.1 措辞——P4 跟进①~④全部闭环）。
+- **契约收尾**：openapi /auth/me 200 补 user 包装层（P2 遗留漂移）+ minLength/maxLength 声明；structure-contract logout 顺序重放语义句（认证闸门先行、幂等键保证并发单副作用）+ login 400 澄清句 + 6.11 logout 幂等列；database-design 2.1 devices 仅兼容审计。
+- **脱敏**：日志身份字段 user_id（app+infra JSONFormatter 双处）；判别测试（Authorization/唯一 sentinel 密码不进日志）；scanner 解析失败日志 device_id 字段移除。
+- **验证（主 Agent 2026-08-14 实测）**：全量 **557 passed / 0 failed**（契约守卫全等）；`ruff check .` 全过；`ruff format --check .` 271 files；`mypy .` Success（218 source files）；空库 `alembic upgrade head`（6 revisions）+ `alembic check` 零漂移 exit 0。
+- **SDD 过程**：6 任务 × implementer + reviewer；T4 边界调整裁决（Key 写侧提前吸收、T5 收缩）；6 轮 fix round 全部 scoped re-review clean。
+- 遗留登记：driver report["device_id"] 字段与 dry-run mock 形状（P7 平台裁决）；write 桶 60s 窗口 clock 注入（后续）。
+
 ## 5. 依赖关系与下一步
 
 ```text
@@ -367,7 +383,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | FR-15～16 / AC-10 | V2 | FSRS/statistics + acceptance |
 | FR-17 / AC-08、11 后端本机部分 | V3B（全局脱敏 F0/F1） | security/log capture + acceptance |
 | FR-18 | F1 + 各纵向包 | OpenAPI/contract + endpoint tests |
-| FR-19 / AC-12 | ACC-P2（契约）+ ACC-P3（数据层）+ P4（业务切换） | 契约同步 + 数据地基落地；业务切换随 P4 |
+| FR-19 / AC-12 | ACC-P2（契约）+ ACC-P3（数据层）+ ACC-P4（业务切换） | 后端全部落地（557 passed 四工具全绿）；Android/test-platform 随 P6/P7 |
 | database-design | F1 + V1～V6 各闭环 | migration/ORM contract + integration |
 | O-1～O-6 | F0/F1 + V5A | probe/metrics/log/quality tests |
 | deployment / PRD HTTPS | 当前 Goal 外 | 保留供应商中立的 HTTPS 要求；明确启动联网部署后再实测，不计入 F0～R1 完成条件 |
