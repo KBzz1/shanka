@@ -94,7 +94,7 @@
 
 ## P4 完成记录（2026-08-14，全部为真实命令/账本证据）
 
-- **提交范围**：main 分支 `1e52f96..<P4 尾 commit>`（11 commits：T1 9decae6+1283a6a / T2 0b88827 / T3 9c1c1ff+b53461c / T4 e87190e+9577904 / T5 da7ca8e / T6a d0c2c36+4888d6b / T6b 契约收尾）。
+- **提交范围**：main 分支 `1e52f96..8087245`（13 commits：T1 9decae6+1283a6a / T2 0b88827 / T3 9c1c1ff+b53461c / T4 e87190e+9577904 / T5 da7ca8e / T6a d0c2c36+4888d6b / T6b cfa77f4 契约收尾 / 8087245 final review Minor）。
 - **账号体系落地**：services/auth（Argon2id 19456/2/1 参数守卫 + dummy 校验 + 256-bit opaque token SHA-256 摘要）、/auth 四端点（register 201/login 200/logout 204/me 200；INVALID_CREDENTIALS 401 无 WWW-Authenticate、USERNAME_TAKEN 409）、BearerAuthMiddleware（AuthPrincipal 注入；401 AUTH_REQUIRED/AUTH_INVALID 带 WWW-Authenticate: Bearer；error_handler 统一加头覆盖窄竞态）。
 - **X-Device-ID 退出**：DeviceIDMiddleware 删除；运行时代码 X-Device-ID 与 state.device_id 读取归零（grep 佐证）；devices 表不再自动创建/刷新（仅兼容审计）；errors.py 设备两码移除；structure-contract ch7 设备组移除。
 - **全链路 user_id 归属**：9 handlers + 14 services 全部切 principal.user_id；新写入不再生成 device_id；幂等域 (user_id, path, key)；限流业务维度 user_id + auth 维度（register/login IP 20/h + login 用户名 10/h）+ IP 总闸门独立中间件（ip_limit.py，未认证流量覆盖）；跨用户统一 404 一致性守卫（Card↔Deck/Task↔PDF/Deck/LlmCallAttempt↔Task）；api_keys PK→user_id 用户域 Core 直写（mapper 移除回 ORM）；UNIQUE(device_id) 迁移（e85c78b2a345，P4 跟进 a）；ddc6 层 downgrade 带旧行 CI 断言（跟进 b）；§7.1 fail-closed 生效范围与归属措辞（跟进 c）；P3 写侧债务三条全部闭环（跟进 d）。

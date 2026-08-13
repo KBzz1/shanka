@@ -324,7 +324,7 @@
 
 任务包：`docs/llm-account-long-run-v1/`。执行计划：`docs/superpowers/plans/2026-08-14-account-backend-switch.md`（6 任务，superpowers:subagent-driven-development）。
 
-当前证据（2026-08-14，main 分支 11 commits 1e52f96..<P4 尾 commit>）：
+当前证据（2026-08-14，main 分支 13 commits 1e52f96..8087245）：
 - **账号体系**：services/auth（Argon2id 生产参数 19456/2/1 守卫 + 用户不存在时 dummy 校验抹平时序差 + 256-bit opaque token 只存 SHA-256 摘要）；/auth 四端点（register 201 / login 200 统一 401 INVALID_CREDENTIALS / logout 204 只撤销当前 session / me 200）；BearerAuthMiddleware（AuthPrincipal(user_id, session_id) 注入；豁免 register/login/探针/openapi.json；401 AUTH_REQUIRED/AUTH_INVALID 带 WWW-Authenticate: Bearer；error_handler 对两码统一加头）。
 - **X-Device-ID 退出**：DeviceIDMiddleware 删除、运行时代码 X-Device-ID/state.device_id 读取归零（grep 佐证）、devices 表停止自动注册（仅兼容审计）、errors.py 设备两码移除、structure-contract ch7 设备组移除。
 - **全链路 user_id**：9 handlers + 14 services 切 principal.user_id；新写入不再生成 device_id（旧行保留无访问路径 D-06）；幂等域 (user_id, path, key)；限流业务维度 user_id + auth 维度（register/login IP 20/h、login 用户名 10/h）+ IpRateLimitMiddleware（IP 5/s 总闸门独立于 Auth 外层，未认证流量覆盖——T3 review Important 修复）；跨用户统一 404 一致性守卫（Card↔Deck/Task↔PDF/Deck/LlmCallAttempt↔Task）；api_keys 用户域（mapper 移除、ORM 直写、UNIQUE(device_id) 迁移 e85c78b2a345、ddc6 层 CI 断言、§7.1 措辞——P4 跟进①~④全部闭环）。
