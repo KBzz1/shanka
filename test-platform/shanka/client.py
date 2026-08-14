@@ -6,6 +6,7 @@
 - register/login 不带头、不带幂等键、不自动重试(防网络重放静默创建多条会话)、
   不落请求事件(请求体含密码、响应含明文 token)。
 - logout 带 Bearer 与幂等键,无论结果清空本地 token(会话已撤销/失效,不复用)。
+- request 可选 idempotency_key:显式指定时复用该键(跨用户幂等复用场景),否则每次新键。
 - 每次请求后自动经 shanka.logging 记录请求事件(request_id 取后端 X-Request-ID);
   PUT /api-key 与 auth 凭据路径不记录事件(凭据脱敏,红线 4)。
 """
@@ -100,6 +101,7 @@ class ShankaClient:
         *,
         body: dict | None = None,
         idempotent: bool = False,
+        idempotency_key: str | None = None,
         retry: bool = True,
         step: str = "",
         auth: bool = True,
@@ -109,7 +111,10 @@ class ShankaClient:
         if auth and self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         if idempotent:
-            headers["Idempotency-Key"] = str(uuid.uuid4())
+            # idempotency_key 显式指定时复用该键(跨用户幂等复用场景);缺省每次新键
+            headers["Idempotency-Key"] = (
+                idempotency_key if idempotency_key is not None else str(uuid.uuid4())
+            )
         data = json.dumps(body).encode() if body is not None else None
         attempts = _MAX_RETRY + 1 if retry else 1
 

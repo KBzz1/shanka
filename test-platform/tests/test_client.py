@@ -260,6 +260,14 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(r.status, 201)
         self.assertNotEqual(REQ_HEADERS["/decks"]["Idempotency-Key"], "")
 
+    def test_idempotency_key_explicit_reuse(self) -> None:
+        """idempotency_key 显式指定时复用该键(跨用户幂等复用场景),不生成新键。"""
+        c = self._client()
+        r = c.request("POST", "/decks", body={"name": "x"}, idempotent=True,
+                      idempotency_key="key-shared-1", step="deck")
+        self.assertEqual(r.status, 201)
+        self.assertEqual(REQ_HEADERS["/decks"]["Idempotency-Key"], "key-shared-1")
+
     def test_api_key_put_not_logged(self) -> None:
         """红线 4:非 api-key 路径落事件,PUT /api-key 不落(凭据脱敏)。"""
         c = self._client()

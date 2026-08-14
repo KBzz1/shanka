@@ -12,10 +12,17 @@ from scenarios.isolation import isolation
 from tests import stub
 
 
-def _local_handler():
-    state = {"delete_n": 0}
+def _local_handler(evidence: dict | None = None):
+    """auth 感知的本地后端替身:按 token 分派,模拟按用户隔离与幂等重放。
 
-    def handler(method, path, body):
+    5 参 handler(method, path, body, auth, idempotency_key):auth 为当前 token
+    (register/login 路径可为 None);evidence 非 None 时记录显式幂等键的
+    keys_by_user/writes/replays/deletes 供跨用户幂等测试断言。
+    """
+    state = {"seq": 0, "decks": {}, "idem": {}}
+    ev = evidence if evidence is not None else {}
+
+    def handler(method, path, body, auth, idempotency_key):
         if path == "/auth/register":
             username = body["username"]
             return Response(201, stub.session_body(f"u-{username}", username))
@@ -23,16 +30,38 @@ def _local_handler():
             username = body["username"]
             return Response(200, stub.session_body(f"u-{username}", username))
         if path == "/decks" and method == "POST":
-            return Response(201, {"deck_id": "deck-a", "name": body["name"]})
+            if idempotency_key:
+                slot = (auth, idempotency_key)
+                ev.setdefault("keys_by_user", {}).setdefault(auth, []).append(idempotency_key)
+                if slot in state["idem"]:
+                    replays = ev.setdefault("replays", {})
+                    replays[slot] = replays.get(slot, 0) + 1
+                    return state["idem"][slot]  # 同 key 重放:原响应不新建
+            state["seq"] += 1
+            deck_id = f"deck-{state['seq']}"
+            resp = Response(201, {"deck_id": deck_id, "name": body["name"]})
+            state["decks"][deck_id] = (auth, body["name"])
+            if idempotency_key:
+                state["idem"][slot] = resp
+                ev.setdefault("writes", {})[slot] = deck_id
+            return resp
         if path == "/decks" and method == "GET":
-            return Response(200, {"items": []})  # 第二用户列表(空,不含主账号牌组)
-        if path == "/decks/deck-a" and method == "GET":
-            return Response(404, {"error": {"code": "NOT_FOUND"}})
-        if path == "/decks/deck-a" and method == "DELETE":
-            state["delete_n"] += 1
-            if state["delete_n"] == 1:
-                return Response(404, {"error": {"code": "NOT_FOUND"}})  # 跨用户删除 404
-            return Response(204, None)  # 主账号清理成功
+            items = [{"deck_id": d, "name": n} for d, (o, n) in state["decks"].items() if o == auth]
+            return Response(200, {"items": items})
+        if path.startswith("/decks/") and method == "GET":
+            deck_id = path[len("/decks/"):]
+            owner = state["decks"].get(deck_id, (None, ""))[0]
+            if owner is None or owner != auth:
+                return Response(404, {"error": {"code": "NOT_FOUND"}})
+            return Response(200, {"deck_id": deck_id})
+        if path.startswith("/decks/") and method == "DELETE":
+            deck_id = path[len("/decks/"):]
+            owner = state["decks"].get(deck_id, (None, ""))[0]
+            if owner is None or owner != auth:
+                return Response(404, {"error": {"code": "NOT_FOUND"}})  # 跨用户删除不生效
+            del state["decks"][deck_id]
+            ev.setdefault("deletes", {})[deck_id] = auth
+            return Response(204, None)
         if path == "/observability/quality-summary":
             return Response(200, {"group_by": "model", "days": 30, "groups": []})
         if path == "/auth/logout":
@@ -73,14 +102,48 @@ class IsolationScenarioTest(unittest.TestCase):
         # 主账号 + run_id 命名临时账号
         self.assertEqual([u for op, u, _ in calls if op == "register"],
                          ["tester", "t-3f2a9c81d4-iso"])
-        # 跨用户读/写 404 与列表隔离断言对应的调用
-        self.assertIn(("GET", "/decks/deck-a", None), calls)
-        self.assertIn(("DELETE", "/decks/deck-a", None), calls)
+        # 跨用户读/写 404 与列表隔离断言对应的调用(主牌组 deck-1)
+        self.assertIn(("GET", "/decks/deck-1", None), calls)
+        self.assertIn(("DELETE", "/decks/deck-1", None), calls)
         # 主账号切回(临时账号注销后 set_token 主 token)+ 两 session 注销
         self.assertIn(("set_token", "tok-u-tester", None), calls)
         self.assertEqual(calls.count(("logout", "", None)), 2)
+        # 跨用户幂等步骤:两账号 idem 牌组各自前缀清理
+        self.assertIn("跨用户幂等牌组已清理", buf.getvalue())
         # 无法安全删除的 user 行(主账号新建 1 + 临时账号 1)按 run 计数报告
         self.assertIn("local_test_users_created=2", buf.getvalue())
+
+    def test_isolation_idempotency_key_cross_user_reuse(self) -> None:
+        """不同用户同 Idempotency-Key 同 body:各自成功、互不重放(DESIGN 8.2 缺口)。"""
+        evidence: dict = {}
+        c = stub.StubClient(_local_handler(evidence))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            failed = isolation.run(
+                c, environment="local", username="tester", password="pw-123456",
+                run_id="3f2a9c81d4e54b679c1d2e3f4a5b6c7d",
+            )
+        self.assertEqual(failed, 0)
+        main = "tok-u-tester"
+        second = "tok-u-t-3f2a9c81d4-iso"
+        # 同一幂等键被两用户复用:主账号 2 次(创建 + 重放)、临时账号 1 次
+        keys_main = evidence.get("keys_by_user", {}).get(main, [])
+        keys_second = evidence.get("keys_by_user", {}).get(second, [])
+        self.assertEqual(len(keys_main), 2)
+        self.assertEqual(keys_main, keys_second * 2)
+        key = keys_second[0]
+        # 同 key 同 body:两个用户各建一张牌组,deck_id 不同
+        main_deck_id = evidence.get("writes", {}).get((main, key))
+        second_deck_id = evidence.get("writes", {}).get((second, key))
+        self.assertEqual(len(evidence.get("writes", {})), 2)  # 显式 key 仅两用户各一张
+        self.assertIsNotNone(main_deck_id)
+        self.assertIsNotNone(second_deck_id)
+        self.assertNotEqual(main_deck_id, second_deck_id)
+        # 主账号重放同 key 同 body:返回原响应、不新建
+        self.assertEqual(evidence.get("replays", {}).get((main, key)), 1)
+        # 清理:两账号 idem 牌组各自删除(前缀清理命中各自归属)
+        self.assertEqual(evidence.get("deletes", {}).get(main_deck_id), main)
+        self.assertEqual(evidence.get("deletes", {}).get(second_deck_id), second)
 
     def test_run_prod_read_only(self) -> None:
         c = stub.StubClient(_prod_handler())

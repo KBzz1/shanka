@@ -2,6 +2,8 @@
 
 local: 主账号(env 凭据,register 或 login)创建牌组;临时账号(run_id 命名,本地注册)
 跨用户访问主账号牌组 -> 404、列表不可见、写操作 404、quality-summary 为空;
+跨用户幂等键复用:两用户同 Idempotency-Key 同 body 各自成功、互不重放,
+同用户重放同 key 得原响应不新建;
 结束清理牌组与两 session。临时账号 user 行不可安全删除,按 run_id 计数写入报告字段。
 prod: 只读断言(禁自动注册):不创建资源,仅验证当前用户视角的 404 与列表形状。
 运行方式(由 runner 调度或直接):
@@ -36,8 +38,8 @@ def _logout(c: ShankaClient) -> None:
     check("logout -> 204", r.status == 204, f"({r.status})")
 
 
-def _cleanup_decks(c: ShankaClient, prefix: str) -> None:
-    """异常路径兜底:按名称前缀清理本 run 的 iso-* 牌组(尽力而为,失败仅 WARN)。"""
+def _cleanup_decks(c: ShankaClient, prefix: str, *, note: str = "异常路径残留牌组已清理") -> None:
+    """按名称前缀清理本 run 的 iso-* 牌组(尽力而为,失败仅 WARN);note 供正常路径定制措辞。"""
     r = c.request("GET", "/decks", step="cleanup-deck-list")
     items = r.json.get("items") if isinstance(r.json, dict) else None
     if not isinstance(items, list):
@@ -50,7 +52,7 @@ def _cleanup_decks(c: ShankaClient, prefix: str) -> None:
         if not isinstance(deck_id, str):
             continue
         c.request("DELETE", f"/decks/{deck_id}", idempotent=True, step="cleanup-deck-delete")
-        print(f"    [warn] 异常路径残留牌组已清理: {it.get('name')}")
+        print(f"    [warn] {note}: {it.get('name')}")
 
 
 def _readonly_prod(c: ShankaClient) -> int:
@@ -129,6 +131,42 @@ def run(c: ShankaClient, *, environment: str, username: str, password: str, run_
     body = r.json if isinstance(r.json, dict) else {}
     check("第二用户 quality-summary -> 200", r.status == 200, f"({r.status})")
     check("第二用户 summary 为空(按 user 隔离)", body.get("groups") == [], str(body)[:100])
+
+    # 跨用户幂等键复用(毛刺 #4,DESIGN 8.2 缺口):不同用户同 Idempotency-Key 同 body
+    # 各自成功、互不重放;同用户重放同 key 得原响应不新建。
+    idem_key = str(uuid.uuid4())
+    idem_body = {"name": f"iso-{run_id[:8]}-idem"}
+    r = c.request("POST", "/decks", body=idem_body, idempotent=True,
+                  idempotency_key=idem_key, step="idem-create-second")
+    check("跨用户幂等:临时账号 POST -> 201", r.status == 201, f"({r.status})")
+    second_idem_id = r.json.get("deck_id") if isinstance(r.json, dict) else None
+    check("跨用户幂等:临时账号返回 deck_id", isinstance(second_idem_id, str))
+    c.set_token(session["access_token"])
+    r = c.request("POST", "/decks", body=idem_body, idempotent=True,
+                  idempotency_key=idem_key, step="idem-create-main")
+    check("跨用户幂等:主账号 POST -> 201", r.status == 201, f"({r.status})")
+    main_idem_id = r.json.get("deck_id") if isinstance(r.json, dict) else None
+    check("跨用户幂等:主账号返回 deck_id", isinstance(main_idem_id, str))
+    if isinstance(second_idem_id, str) and isinstance(main_idem_id, str):
+        check("跨用户幂等:两用户 deck_id 不同", second_idem_id != main_idem_id,
+              f"second={second_idem_id} main={main_idem_id}")
+    # 主账号重放:同 key 同 body -> 原响应不新建(重放语义保持)
+    r = c.request("POST", "/decks", body=idem_body, idempotent=True,
+                  idempotency_key=idem_key, step="idem-replay-main")
+    replay_id = r.json.get("deck_id") if isinstance(r.json, dict) else None
+    check("跨用户幂等:主账号重放 -> 原 deck_id 不新建",
+          r.status in (200, 201) and isinstance(replay_id, str) and replay_id == main_idem_id,
+          f"({r.status}, {replay_id})")
+    r = c.request("GET", "/decks", step="idem-deck-list")
+    items = r.json.get("items") if isinstance(r.json, dict) else None
+    if isinstance(items, list):
+        check("跨用户幂等:主账号同名牌组仅一张",
+              sum(1 for it in items
+                  if isinstance(it, dict) and it.get("name") == idem_body["name"]) == 1)
+    # 清理:两账号 idem 牌组各自前缀清理(切回临时 token,保持后续注销对象正确)
+    _cleanup_decks(c, f"iso-{run_id[:8]}-idem", note="跨用户幂等牌组已清理")
+    c.set_token(second["access_token"])
+    _cleanup_decks(c, f"iso-{run_id[:8]}-idem", note="跨用户幂等牌组已清理")
 
     # 撤销临时账号会话
     _logout(c)
