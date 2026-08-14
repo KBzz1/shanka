@@ -144,7 +144,7 @@ internal fun LoginScreen(
                         designScale = scale,
                         textAlign = TextAlign.End
                     )
-                    message?.let { AuthMessage(it, scale) }
+                    message?.let { AuthMessage(it, scale) { message = null } }
                     AuthIconButton(
                         text = "完成登录",
                         icon = "login",
@@ -313,7 +313,7 @@ internal fun RegisterScreen(viewModel: AppViewModel, nav: ScreenNavigator) {
         item { AuthField("邮箱", "请输入邮箱", "alternate_email", email, { email = it }, false, scale) }
         item { AuthField("密码", "至少 6 位", "lock", password, { password = it }, true, scale) }
         item { AuthField("确认密码", "再次输入密码", "lock", confirmation, { confirmation = it }, true, scale) }
-        message?.let { text -> item { AuthMessage(text, scale) } }
+        message?.let { text -> item { AuthMessage(text, scale) { message = null } } }
         item {
             AuthPrimaryButton("完成注册", scale) {
                 viewModel.register(nickname, email, password, confirmation) { error ->
@@ -678,10 +678,27 @@ private fun AuthSecondaryButton(text: String, scale: Float, onClick: () -> Unit)
 }
 
 @Composable
-private fun AuthMessage(text: String, scale: Float) = Surface(
-    color = AppColors.Pink.background,
-    shape = RoundedCornerShape((16 * scale).dp),
-    modifier = Modifier.fillMaxWidth()
-) {
-    AppText(text, AppTextRole.Supporting, modifier = Modifier.padding((16 * scale).dp), color = AppColors.Warning, designScale = scale)
+private fun AuthMessage(text: String, scale: Float, onDismiss: () -> Unit) {
+    var countdown by remember(text) { mutableStateOf(3) }
+    LaunchedEffect(text) {
+        while (countdown > 0) {
+            delay(1_000L)
+            countdown -= 1
+        }
+        onDismiss()
+    }
+    Surface(
+        color = AppColors.Pink.background,
+        shape = RoundedCornerShape((16 * scale).dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding((16 * scale).dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AppText(text, AppTextRole.Supporting, color = AppColors.Warning, designScale = scale)
+            Spacer(Modifier.weight(1f))
+            AppText("【$countdown】", AppTextRole.Supporting, color = AppColors.Warning, designScale = scale)
+        }
+    }
 }

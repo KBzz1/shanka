@@ -121,7 +121,7 @@ class AuthViewModelTest {
         viewModel.login("alice", "wrong")
         advanceUntilIdle()
 
-        assertEquals(AuthState.LoggedOut(error = "用户名或密码错误"), viewModel.state.value)
+        assertEquals(AuthState.LoggedOut(error = "邮箱或密码错误"), viewModel.state.value)
         assertNull(store.load())
     }
 
@@ -144,14 +144,24 @@ class AuthViewModelTest {
         assertEquals(AuthState.LoggedIn(SessionUser("user-2", "bob", "2026-08-14T00:00:00Z")), viewModel.state.value)
     }
 
-    @Test fun `register maps USERNAME_TAKEN to its message`() = runTest {
-        val repository = FakeAuthRepository().apply { registerResult = failure(409, "USERNAME_TAKEN") }
+    @Test fun `register maps VALIDATION_ERROR to its table message`() = runTest {
+        val repository = FakeAuthRepository().apply { registerResult = failure(400, "VALIDATION_ERROR") }
         val viewModel = AuthViewModel(repository, InMemorySessionStore(), this)
 
         viewModel.register("bob", "bob@example.com", "secret")
         advanceUntilIdle()
 
-        assertEquals(AuthState.LoggedOut(error = "用户名已被占用"), viewModel.state.value)
+        assertEquals(AuthState.LoggedOut(error = "请求参数有误，请检查输入"), viewModel.state.value)
+    }
+
+    @Test fun `login maps an unknown code to the generic message`() = runTest {
+        val repository = FakeAuthRepository().apply { loginResult = failure(500, "NO_SUCH_CODE") }
+        val viewModel = AuthViewModel(repository, InMemorySessionStore(), this)
+
+        viewModel.login("alice", "secret")
+        advanceUntilIdle()
+
+        assertEquals(AuthState.LoggedOut(error = ErrorMessages.UNKNOWN_ERROR_MESSAGE), viewModel.state.value)
     }
 
     @Test fun `register maps RATE_LIMITED to its message`() = runTest {

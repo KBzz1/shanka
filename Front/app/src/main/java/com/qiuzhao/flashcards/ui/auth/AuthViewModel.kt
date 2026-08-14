@@ -28,12 +28,13 @@ sealed interface AuthState {
 
 const val NETWORK_ERROR_MESSAGE = "网络错误，请稍后重试"
 
-private fun ApiResult.Failure.authErrorMessage(): String = when (code) {
-    "INVALID_CREDENTIALS" -> "用户名或密码错误"
-    "USERNAME_TAKEN" -> "用户名已被占用"
-    "RATE_LIMITED" -> "请求过于频繁，请稍后重试"
-    else -> NETWORK_ERROR_MESSAGE
-}
+/**
+ * Transport failures (no HTTP response at all — BackendClient.unavailableResult produces
+ * code NETWORK_UNAVAILABLE) show the network message; every real server error code goes
+ * through the full [ErrorMessages] table, unknown codes included (generic fallback).
+ */
+private fun ApiResult.Failure.authErrorMessage(): String =
+    if (code == "NETWORK_UNAVAILABLE") NETWORK_ERROR_MESSAGE else ErrorMessages.forCode(code)
 
 /**
  * A plain state holder (deliberately not an AndroidX ViewModel) so the session logic runs on
@@ -87,8 +88,9 @@ class AuthViewModel(
     /**
      * Suspend wrappers for the upstream AuthScreen trigger points: they reuse the plain
      * [login]/[register] submit path and return the user-facing message text ([authErrorMessage]
-     * four-way mapping; null = success). Blank input and an in-flight submit return null without
-     * touching state — callers that need an onResult callback must guard those cases first.
+     * full error-code table mapping; null = success). Blank input and an in-flight submit
+     * return null without touching state — callers that need an onResult callback must guard
+     * those cases first.
      */
     suspend fun submitLogin(email: String, password: String): String? {
         if (email.isBlank() || password.isBlank() || _submitting.value) return null
