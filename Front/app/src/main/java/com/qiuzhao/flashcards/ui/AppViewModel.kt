@@ -392,44 +392,21 @@ class AppViewModel(
         }
     }
 
-    /** Local-only account shell until the authentication service is connected. */
+    /** Upstream auth screen delegates to the authenticated repository flow. */
     fun login(email: String, password: String, onResult: (String?) -> Unit) = viewModelScope.launch {
-        val normalizedEmail = email.trim()
-        when {
-            normalizedEmail.isBlank() -> onResult("请输入邮箱")
-            password.isBlank() -> onResult("请输入密码")
-            else -> {
-                getApplication<Application>().dataStore.edit { preferences ->
-                    val savedEmail = preferences[ACCOUNT_EMAIL]
-                    val savedNickname = preferences[ACCOUNT_NICKNAME]
-                    preferences[ACCOUNT_EMAIL] = normalizedEmail
-                    preferences[ACCOUNT_NICKNAME] = if (savedEmail == normalizedEmail && !savedNickname.isNullOrBlank()) {
-                        savedNickname
-                    } else normalizedEmail.substringBefore('@').ifBlank { "学习者" }
-                    preferences[ACCOUNT_LOGGED_IN] = true
-                }
-                onResult(null)
-            }
-        }
+        if (email.isBlank() || password.isBlank() || auth.submitting.value) return@launch
+        onResult(auth.submitLogin(email.trim(), password))
     }
 
-    fun register(nickname: String, email: String, password: String, confirmation: String, onResult: (String?) -> Unit) = viewModelScope.launch {
-        val normalizedNickname = nickname.trim()
-        val normalizedEmail = email.trim()
-        when {
-            normalizedNickname.isBlank() -> onResult("请输入昵称")
-            normalizedEmail.isBlank() || !normalizedEmail.contains('@') -> onResult("请输入有效邮箱")
-            password.length < 6 -> onResult("密码至少需要 6 位")
-            password != confirmation -> onResult("两次输入的密码不一致")
-            else -> {
-                getApplication<Application>().dataStore.edit { preferences ->
-                    preferences[ACCOUNT_NICKNAME] = normalizedNickname
-                    preferences[ACCOUNT_EMAIL] = normalizedEmail
-                    preferences[ACCOUNT_LOGGED_IN] = false
-                }
-                onResult(null)
-            }
+    fun register(username: String, email: String, password: String, confirmation: String, onResult: (String?) -> Unit) = viewModelScope.launch {
+        if (username.isBlank() || email.isBlank() || password.isBlank() || auth.submitting.value) {
+            return@launch
         }
+        if (!AuthViewModel.passwordsMatch(password, confirmation)) {
+            onResult(AuthViewModel.PASSWORD_MISMATCH_MESSAGE)
+            return@launch
+        }
+        onResult(auth.submitRegister(username.trim(), email.trim(), password))
     }
 
     fun startStudy(deckId: String, reviewMode: Boolean) = viewModelScope.launch {

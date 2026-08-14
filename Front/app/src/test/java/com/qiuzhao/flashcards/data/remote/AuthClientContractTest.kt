@@ -89,6 +89,20 @@ class AuthClientContractTest {
         )
     }
 
+    @Test fun `register body carries username email and password`() {
+        val body = JSONObject(registerBody("alice", "alice@example.com", "secret"))
+        assertEquals("alice", body.getString("username"))
+        assertEquals("alice@example.com", body.getString("email"))
+        assertEquals("secret", body.getString("password"))
+    }
+
+    @Test fun `login body carries email and password but never username`() {
+        val body = JSONObject(credentialsBody("alice@example.com", "secret"))
+        assertEquals("alice@example.com", body.getString("email"))
+        assertEquals("secret", body.getString("password"))
+        assertFalse(body.has("username"))
+    }
+
     @Test fun `only auth 401s clear the session, never credential or network failures`() {
         assertTrue(ApiResult.Failure(401, "AUTH_REQUIRED", null, null).isAuthFailure())
         assertTrue(ApiResult.Failure(401, "AUTH_INVALID", null, null).isAuthFailure())

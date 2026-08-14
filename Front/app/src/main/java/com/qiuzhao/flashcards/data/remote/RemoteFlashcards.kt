@@ -227,23 +227,19 @@ class BackendClient(
      * logout sends the explicit token so it works even when the store was replaced; me is a
      * plain session-authenticated read.
      */
-    suspend fun register(username: String, password: String): HttpResult = request(
-        "register", "POST", "/auth/register", credentialsBody(username, password),
+    suspend fun register(username: String, email: String, password: String): HttpResult = request(
+        "register", "POST", "/auth/register", registerBody(username, email, password),
         idempotent = false, authenticate = false
     )
 
-    suspend fun login(username: String, password: String): HttpResult = request(
-        "login", "POST", "/auth/login", credentialsBody(username, password),
+    suspend fun login(email: String, password: String): HttpResult = request(
+        "login", "POST", "/auth/login", credentialsBody(email, password),
         idempotent = false, authenticate = false
     )
 
     suspend fun logout(token: String): HttpResult = request("logout", "POST", "/auth/logout", token = token)
 
     suspend fun me(): HttpResult = request("me", "GET", "/auth/me")
-
-    /** Credentials travel only in the request body and never reach a log line. */
-    private fun credentialsBody(username: String, password: String): String =
-        JSONObject().put("username", username).put("password", password).toString()
 
     private fun execute(method: String, path: String, body: String?, contentType: String, key: String?, authToken: String?): HttpResult {
         val connection = (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
@@ -362,13 +358,20 @@ class BackendClient(
     }
 }
 
+/** Credentials travel only in the request body and never reach a log line. */
+internal fun registerBody(username: String, email: String, password: String): String =
+    JSONObject().put("username", username).put("email", email).put("password", password).toString()
+
+internal fun credentialsBody(email: String, password: String): String =
+    JSONObject().put("email", email).put("password", password).toString()
+
 /**
  * The auth surface of the repository. Extracted as an interface so the session state machine
  * stays JVM-testable with a fake instead of the Android-bound implementation.
  */
 interface AuthRepository {
-    suspend fun register(username: String, password: String): ApiResult<Session>
-    suspend fun login(username: String, password: String): ApiResult<Session>
+    suspend fun register(username: String, email: String, password: String): ApiResult<Session>
+    suspend fun login(email: String, password: String): ApiResult<Session>
     suspend fun refreshMe(): ApiResult<SessionUser>
     /**
      * Revokes the given token on the server. The token is explicit because the local store is
@@ -401,11 +404,11 @@ open class RemoteFlashcardRepository(
         values(value, "decks").mapNotNull(::deck).also { _decks.value = it }
     }
 
-    override suspend fun register(username: String, password: String): ApiResult<Session> =
-        sessionResult(client.register(username, password))
+    override suspend fun register(username: String, email: String, password: String): ApiResult<Session> =
+        sessionResult(client.register(username, email, password))
 
-    override suspend fun login(username: String, password: String): ApiResult<Session> =
-        sessionResult(client.login(username, password))
+    override suspend fun login(email: String, password: String): ApiResult<Session> =
+        sessionResult(client.login(email, password))
 
     /** A storage failure must never crash or surface as a login error: the session stays usable in memory. */
     private fun sessionResult(result: HttpResult): ApiResult<Session> {

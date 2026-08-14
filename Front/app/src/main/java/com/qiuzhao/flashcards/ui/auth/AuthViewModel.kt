@@ -74,14 +74,30 @@ class AuthViewModel(
         }
     }
 
-    fun login(username: String, password: String) {
-        if (username.isBlank() || password.isBlank()) return
-        submit { repository.login(username.trim(), password) }
+    fun login(email: String, password: String) {
+        if (email.isBlank() || password.isBlank()) return
+        scope.launch { submitLogin(email, password) }
     }
 
-    fun register(username: String, password: String) {
-        if (username.isBlank() || password.isBlank()) return
-        submit { repository.register(username.trim(), password) }
+    fun register(username: String, email: String, password: String) {
+        if (username.isBlank() || email.isBlank() || password.isBlank()) return
+        scope.launch { submitRegister(username, email, password) }
+    }
+
+    /**
+     * Suspend wrappers for the upstream AuthScreen trigger points: they reuse the plain
+     * [login]/[register] submit path and return the user-facing message text ([authErrorMessage]
+     * four-way mapping; null = success). Blank input and an in-flight submit return null without
+     * touching state — callers that need an onResult callback must guard those cases first.
+     */
+    suspend fun submitLogin(email: String, password: String): String? {
+        if (email.isBlank() || password.isBlank() || _submitting.value) return null
+        return submit { repository.login(email.trim(), password) }
+    }
+
+    suspend fun submitRegister(username: String, email: String, password: String): String? {
+        if (username.isBlank() || email.isBlank() || password.isBlank() || _submitting.value) return null
+        return submit { repository.register(username.trim(), email.trim(), password) }
     }
 
     /**
@@ -117,16 +133,21 @@ class AuthViewModel(
         }
     }
 
-    private fun submit(call: suspend () -> ApiResult<Session>) {
-        if (_submitting.value) return
-        scope.launch {
-            _submitting.value = true
-            _state.value = AuthState.LoggedOut()
-            when (val result = call()) {
-                is ApiResult.Success -> _state.value = AuthState.LoggedIn(result.value.user)
-                is ApiResult.Failure -> _state.value = AuthState.LoggedOut(error = result.authErrorMessage())
-            }
-            _submitting.value = false
+    /** Runs one login/register call; returns the user-facing error text (null = success). */
+    private suspend fun submit(call: suspend () -> ApiResult<Session>): String? {
+        _submitting.value = true
+        _state.value = AuthState.LoggedOut()
+        val error = when (val result = call()) {
+            is ApiResult.Success -> { _state.value = AuthState.LoggedIn(result.value.user); null }
+            is ApiResult.Failure -> result.authErrorMessage().also { _state.value = AuthState.LoggedOut(error = it) }
         }
+        _submitting.value = false
+        return error
+    }
+
+    companion object {
+        const val PASSWORD_MISMATCH_MESSAGE = "两次输入的密码不一致"
+        /** Confirmation is a form-layer rule; pure function so it stays JVM-testable. */
+        fun passwordsMatch(password: String, confirmation: String): Boolean = password == confirmation
     }
 }

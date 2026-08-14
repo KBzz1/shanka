@@ -6,6 +6,8 @@ import com.qiuzhao.flashcards.data.session.InMemorySessionStore
 import com.qiuzhao.flashcards.data.session.Session
 import com.qiuzhao.flashcards.data.session.SessionUser
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -22,6 +24,7 @@ import org.junit.Test
  * [AuthViewModel] is a plain state holder (not an AndroidX ViewModel) so it needs no Android
  * runtime; [AppViewModel] owns one per application and delegates to it.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class AuthViewModelTest {
 
     private val user = SessionUser(userId = "user-1", username = "alice", createdAt = "2026-08-14T00:00:00Z")
@@ -35,9 +38,18 @@ class AuthViewModelTest {
         var loginHook: (suspend () -> ApiResult<Session>)? = null
         var logoutHook: (suspend (String) -> ApiResult<Unit>)? = null
         var revokedToken: String? = null
+        var registeredUsername: String? = null
+        var registeredEmail: String? = null
+        var registeredPassword: String? = null
 
-        override suspend fun register(username: String, password: String): ApiResult<Session> = registerResult
-        override suspend fun login(username: String, password: String): ApiResult<Session> = loginHook?.invoke() ?: loginResult
+        override suspend fun register(username: String, email: String, password: String): ApiResult<Session> {
+            registeredUsername = username
+            registeredEmail = email
+            registeredPassword = password
+            return registerResult
+        }
+
+        override suspend fun login(email: String, password: String): ApiResult<Session> = loginHook?.invoke() ?: loginResult
         override suspend fun refreshMe(): ApiResult<SessionUser> = meResult
         override suspend fun logout(token: String): ApiResult<Unit> {
             revokedToken = token
@@ -126,7 +138,7 @@ class AuthViewModelTest {
     @Test fun `register success transitions to logged in`() = runTest {
         val viewModel = AuthViewModel(FakeAuthRepository(), InMemorySessionStore(), this)
 
-        viewModel.register("bob", "secret")
+        viewModel.register("bob", "bob@example.com", "secret")
         advanceUntilIdle()
 
         assertEquals(AuthState.LoggedIn(SessionUser("user-2", "bob", "2026-08-14T00:00:00Z")), viewModel.state.value)
@@ -136,7 +148,7 @@ class AuthViewModelTest {
         val repository = FakeAuthRepository().apply { registerResult = failure(409, "USERNAME_TAKEN") }
         val viewModel = AuthViewModel(repository, InMemorySessionStore(), this)
 
-        viewModel.register("bob", "secret")
+        viewModel.register("bob", "bob@example.com", "secret")
         advanceUntilIdle()
 
         assertEquals(AuthState.LoggedOut(error = "用户名已被占用"), viewModel.state.value)
@@ -146,7 +158,7 @@ class AuthViewModelTest {
         val repository = FakeAuthRepository().apply { registerResult = failure(429, "RATE_LIMITED") }
         val viewModel = AuthViewModel(repository, InMemorySessionStore(), this)
 
-        viewModel.register("bob", "secret")
+        viewModel.register("bob", "bob@example.com", "secret")
         advanceUntilIdle()
 
         assertEquals(AuthState.LoggedOut(error = "请求过于频繁，请稍后重试"), viewModel.state.value)
@@ -157,7 +169,7 @@ class AuthViewModelTest {
         val viewModel = AuthViewModel(repository, InMemorySessionStore(), this)
 
         viewModel.login("alice", "")
-        viewModel.register("", "secret")
+        viewModel.register("", "bob@example.com", "secret")
         advanceUntilIdle()
 
         assertEquals(AuthState.CheckingSession, viewModel.state.value)
@@ -233,6 +245,65 @@ class AuthViewModelTest {
         advanceUntilIdle()
 
         assertFalse(viewModel.submitting.value)
+        assertEquals(AuthState.LoggedIn(user), viewModel.state.value)
+    }
+
+    @Test fun `submitLogin returns null on blank input without touching the repository`() = runTest {
+        // T11 minors：AppViewModel.login 的空输入守卫薄包装委托此语义（onResult 不触发），
+        // 状态机层锁定「blank → null 且不发起请求、不改状态」。
+        val viewModel = AuthViewModel(FakeAuthRepository(), InMemorySessionStore(), this)
+
+        assertNull(viewModel.submitLogin("alice", ""))
+        assertNull(viewModel.submitLogin("", "secret"))
+        advanceUntilIdle()
+
+        assertEquals(AuthState.CheckingSession, viewModel.state.value)
+        assertFalse(viewModel.submitting.value)
+    }
+
+    @Test fun `submitRegister returns null on blank input without touching the repository`() = runTest {
+        val viewModel = AuthViewModel(FakeAuthRepository(), InMemorySessionStore(), this)
+
+        assertNull(viewModel.submitRegister("bob", "", "secret"))
+        assertNull(viewModel.submitRegister("", "bob@example.com", "secret"))
+        advanceUntilIdle()
+
+        assertEquals(AuthState.CheckingSession, viewModel.state.value)
+        assertFalse(viewModel.submitting.value)
+    }
+
+    @Test fun `passwordsMatch is true only for identical passwords`() {
+        assertTrue(AuthViewModel.passwordsMatch("secret-pass-1", "secret-pass-1"))
+        assertFalse(AuthViewModel.passwordsMatch("secret-pass-1", "secret-pass-2"))
+    }
+
+    @Test fun `register forwards username email and password`() = runTest {
+        val repository = FakeAuthRepository()
+        val viewModel = AuthViewModel(repository, InMemorySessionStore(), this)
+
+        assertNull(viewModel.submitRegister("  Alice  ", "Alice@Example.com", "secret-pass"))
+        advanceUntilIdle()
+
+        // 与调用一致：username 仅去首尾空白、不被小写化，email 原样透传。
+        assertEquals("Alice", repository.registeredUsername)
+        assertEquals("Alice@Example.com", repository.registeredEmail)
+        assertEquals("secret-pass", repository.registeredPassword)
+    }
+
+    @Test fun `submit while a request is in flight returns null without a second call`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val repository = FakeAuthRepository().apply { loginHook = { gate.await(); ApiResult.Success(session) } }
+        val viewModel = AuthViewModel(repository, InMemorySessionStore(), this)
+
+        val first = async { viewModel.submitLogin("alice", "secret") }
+        runCurrent()
+        assertTrue(viewModel.submitting.value)
+        // 在途提交期间的重复提交直接返回 null，不触发第二个请求。
+        assertNull(viewModel.submitLogin("alice", "secret"))
+
+        gate.complete(Unit)
+        assertNull(first.await())
+        advanceUntilIdle()
         assertEquals(AuthState.LoggedIn(user), viewModel.state.value)
     }
 }
