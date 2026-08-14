@@ -104,6 +104,6 @@ legacy claim 部分不在本包范围**，用户 2026-08-13 决策）；行为�
 
 ### P8 总验收
 
-- [ ] 全量工具链（pytest / ruff format / ruff check / mypy）、迁移副本、Android build、平台 quick/full/live
-- [ ] 敏感 sentinel 扫描；后台任务 logout 后继续 + 跨用户 404
-- [ ] `STATUS.md` 阶段账本完整；`WORKER_REPORT.md` 落盘（改动、命令、退出码、计数、风险、未完成项）
+- [x] 全量工具链（pytest 563/0 / ruff format 272 / ruff check / mypy 219）、迁移副本 6 revisions 往返、Android build（40/40 + assembleDebug）、平台自测 77/0（quick/full/live 真实后端联调未运行——后端未启动，如实声明）
+- [x] 敏感 sentinel 扫描；后台任务 logout 后继续 + 跨用户 404（P5 判别测试）
+- [x] `STATUS.md` 阶段账本完整；`WORKER_REPORT.md` 落盘（改动、命令、退出码、计数、风险、未完成项）

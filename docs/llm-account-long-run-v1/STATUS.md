@@ -4,11 +4,11 @@
 
 - Goal ID：`shanka-llm-account-long-run-v1`
 - Goal：先完成 LLM 链路升级（17 任务，P1），再完成账号登录替代 X-Device-ID（PRD V2.2，P2–P8）。
-- 当前状态：`P7_DONE`（test-platform v2 完成：client 账号化 + 凭据 env + auth/isolation/core/generation/observability 场景 + 成本闸门最坏预算推导与批次对账；77/0 平台自测 + unittest discover 6/6 复跑稳定；进入 P8 总验收）
+- 当前状态：`GOAL_DONE`（P8 总验收完成：563/0 四工具全绿 + 迁移副本往返零漂移 + sentinel 扫描干净 + WORKER_REPORT.md 落盘；两目标全部完成，最终门禁 8 项全勾）
 - 设计：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/DESIGN.md`（引用两份上游设计）
 - 启动提示词：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/WORKER_PROMPT.md`
 - 任务地图：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/TASKS.md`
-- 最后更新：2026-08-14 Asia/Shanghai（P7_DONE）
+- 最后更新：2026-08-14 Asia/Shanghai（GOAL_DONE）
 
 ## 现场快照（2026-08-13 接管时）
 
@@ -153,7 +153,7 @@
 | P5 LLM 后台 user_id 接续 | `DONE` | 见上 P5 完成记录：6 判别测试（logout/过期继续、session 零依赖、跨用户 404、metrics 无身份）+ 资产只读，563/0 四工具全绿 |
 | P6 Android | `DONE` | 见上 P6 完成记录：4 commits 60d62a3..f15457b、Keystore 会话存储 + Bearer + UI + 零残留、40/40 + assembleDebug 全绿 |
 | P7 test-platform v2 | `DONE` | 见上 P7 完成记录：3 任务、client 账号化 + 4 场景 + 成本闸门预算推导/批次对账、77/0 + unittest 6/6、CLI 形状实测 |
-| P8 总验收 | `PENDING` | 全量工具链、迁移副本、canary、WORKER_REPORT.md |
+| P8 总验收 | `DONE` | 563/0 四工具全绿 + alembic 6 revisions 往返零漂移 + sentinel 扫描干净 + WORKER_REPORT.md 落盘（未运行项如实声明） |
 
 ## 变更纪律
 
@@ -166,12 +166,12 @@
 ## 最终门禁
 
 - [x] P1 完成：17 任务真实证据 + canary 通过 + Progress 登记（R-03 RESOLVED）+ `LLM_BASELINE_COMMIT`。
-- [ ] V2.2 正式契约与实现一致。
-- [ ] X-Device-ID 已退出普通运行时认证/授权面。
-- [ ] 用户隔离、会话、幂等与敏感数据测试通过。
-- [ ] Planner/Generator/Scoring/Rewrite 与 ledger 已按 user_id 接续（语义冻结不回改）。
+- [x] V2.2 正式契约与实现一致。
+- [x] X-Device-ID 已退出普通运行时认证/授权面。
+- [x] 用户隔离、会话、幂等与敏感数据测试通过。
+- [x] Planner/Generator/Scoring/Rewrite 与 ledger 已按 user_id 接续（语义冻结不回改）。
 - [x] Android 与 test-platform v2 已完成并验证（P6：40/40 + assembleDebug；P7：77/0 + unittest discover 6/6 + CLI 形状与闸门实测）。
-- [ ] 全量质量工具真实通过，未运行项明确报告。
-- [ ] `WORKER_REPORT.md` 已记录改动、命令、退出码、计数、风险与未完成项。
+- [x] 全量质量工具真实通过，未运行项明确报告。
+- [x] `WORKER_REPORT.md` 已记录改动、命令、退出码、计数、风险与未完成项。
 
 未全部满足时不得把本 Goal 报告为完成。
