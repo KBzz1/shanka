@@ -320,7 +320,7 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | user_id | TEXT | NOT NULL, FK → users ON DELETE CASCADE | 归属用户;删除用户级联清理会话 |
 | token_hash | TEXT | UNIQUE NOT NULL | 256-bit opaque token 的 SHA-256 摘要 |
 | created_at | TEXT | NOT NULL | |
-| expires_at | TEXT | NOT NULL | 绝对有效期 30 天,无滑动续期、无 refresh |
+| expires_at | TEXT | NOT NULL | 绝对有效期 30 天；V2.4 起活跃滑动续期（见 6.11） |
 | revoked_at | TEXT | NULL | logout 只撤销当前会话 |
 
 唯一约束:`UNIQUE (token_hash)`。索引:`(user_id)`。

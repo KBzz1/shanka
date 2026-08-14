@@ -16,7 +16,8 @@ branch_labels = None
 depends_on = None
 
 # 按 user 隔离的下游表（依赖序无关——env.py 迁移连接层 FK 关闭，P3 已验证；
-# 顺序仍按依赖子→父写出以自证）
+# 顺序仍按依赖子→父写出以自证）。text_chunks 因迁移连接层 FK 关闭，需显式
+# 清空（不依赖 ORM ondelete CASCADE）。
 _USER_DOMAIN_TABLES = (
     "chapters",
     "batches",
@@ -26,6 +27,7 @@ _USER_DOMAIN_TABLES = (
     "cards",
     "decks",
     "tasks",
+    "text_chunks",
     "pdf_files",
     "llm_call_attempts",
     "api_keys",

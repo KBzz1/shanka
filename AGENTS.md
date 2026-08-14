@@ -4,7 +4,7 @@
 
 ## 仓库布局
 
-- `docs/` — 文档层级：`PRD/V2.1/prd_v2_1.md` 需求权威（做什么、为什么）；`Architecture/` 设计契约集合 + 防漂移规则（见 `Architecture/AGENTS.md`）；`frontend/` 前端对接、`superpowers/` 工作流产物、`Progress.md` 进度（层级规则见 `docs/AGENTS.md`）。
+- `docs/` — 文档层级：`PRD/V2.4/prd_v2_4.md` 需求权威（做什么、为什么）；`Architecture/` 设计契约集合 + 防漂移规则（见 `Architecture/AGENTS.md`）；`frontend/` 前端对接、`superpowers/` 工作流产物、`Progress.md` 进度（层级规则见 `docs/AGENTS.md`）。
 - `main/` — FastAPI 后端（Python >= 3.12）：
   - `app/` HTTP 出入口：`api/` 路由、`middleware/`（Bearer 认证、Idempotency-Key 幂等、统一错误）、`schemas/` 请求/响应模型、`main.py` 装配。
   - `domain/` 纯领域模型与枚举，不依赖任何其他包。

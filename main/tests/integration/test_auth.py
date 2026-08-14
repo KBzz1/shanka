@@ -289,8 +289,15 @@ def test_sliding_renewal_extends_near_expiry_session(client: TestClient, tmp_pat
     headers = _auth_headers(client, email="rene@example.com")
     engine = create_db_engine(f"sqlite:///{tmp_path / 'auth.db'}")
     # 把会话拨到「剩余 12 小时」：expires_at = now + 0.5d
+    # 不变量：expires_at 全库必须保持 format_utc 同构的 T 格式——resolve_principal
+    # 依赖字符串比较，space 格式（datetime() 输出）在同日运行时会误判过期。
     with engine.begin() as conn:
-        conn.execute(text("UPDATE auth_sessions SET expires_at = datetime('now', '+12 hours')"))
+        conn.execute(
+            text(
+                "UPDATE auth_sessions SET expires_at = "
+                "strftime('%Y-%m-%dT%H:%M:%S.000Z','now','+12 hours')"
+            )
+        )
     assert client.get("/auth/me", headers=headers).status_code == 200
     # format_utc 输出为 ISO Z 后缀；比较用 SQL：剩余应 > 29 天（已续到 ~30 天）
     with engine.connect() as conn:

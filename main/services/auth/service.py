@@ -94,7 +94,7 @@ def _create_session(
 def renew_session_if_due(
     session: Session, *, session_id: str, now: datetime, ttl_days: int
 ) -> None:
-    """滑动续期（V2.4）：剩余有效期不足 1 天时延长到 now + ttl_days。
+    """滑动续期（V2.4）：剩余有效期不足 29 天时延长到 now + ttl_days。
 
     节流：仅在 expires_at < now + (ttl_days - 1) 天 时写库 → 每会话每天至多一次
     UPDATE；活跃用户永不过期，连续 ttl_days 天无请求的会话仍自然过期。

@@ -47,7 +47,7 @@ test-platform/
 | review | ratings.py | 四档评级/排程状态 |
 | stats | dashboard.py | 看板/时区/空态 |
 
-已实装：`auth/auth.py`（NAME=`auth`，LLM_CALLS=0）、`isolation/isolation.py`（NAME=`isolation`，LLM_CALLS=0）、`baseline/api_smoke.py`（NAME=`api_smoke`，LLM_CALLS=0）、`flow/live_flow.py`（NAME=`live_flow`，LLM_CALLS=BUDGET_FIXTURE 推导最坏预算 53——废弃固定 3 假设）。
+已实装：`auth/auth.py`（NAME=`auth`，LLM_CALLS=0）、`isolation/isolation.py`（NAME=`isolation`，LLM_CALLS=0）、`baseline/api_smoke.py`（NAME=`api_smoke`，LLM_CALLS=0）、`flow/live_flow.py`（NAME=`live_flow`，LLM_CALLS=BUDGET_FIXTURE 推导最坏预算 59——废弃固定 3 假设）。
 
 ## 新增场景指引
 
