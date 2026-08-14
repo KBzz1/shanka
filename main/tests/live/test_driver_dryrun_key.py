@@ -31,7 +31,8 @@ def test_dry_run_key_insert_user_domain(tmp_path: Path) -> None:
             User(
                 user_id=user_id,
                 username="live-driver",
-                password_hash="live-driver-pass-1",  # 测试假凭据，与 driver 注册同款
+                email="live-driver@local.test",  # 测试假凭据，与 driver 注册同款（V2.4 email 登录键）
+                password_hash="live-driver-pass-1",
                 created_at=now,
                 updated_at=now,
             )

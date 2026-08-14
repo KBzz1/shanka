@@ -297,6 +297,7 @@ def test_sliding_renewal_extends_near_expiry_session(client: TestClient, tmp_pat
         remaining_days = conn.execute(
             text("SELECT (julianday(expires_at) - julianday('now')) FROM auth_sessions")
         ).scalar()
+    assert remaining_days is not None
     assert remaining_days > 29.0
 
 

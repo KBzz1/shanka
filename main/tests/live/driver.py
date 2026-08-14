@@ -347,13 +347,19 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
     app = create_app(settings)
     with TestClient(app) as client:
         # P4-4 起仅 Bearer：注册/登录 live 驱动账号（测试假凭据，非敏感信息）；
-        # report 不记录 token/密码。
+        # V2.4 起 email 为登录键，username 为展示名；report 不记录 token/密码。
         reg = client.post(
-            "/auth/register", json={"username": "live-driver", "password": "live-driver-pass-1"}
+            "/auth/register",
+            json={
+                "username": "live-driver",
+                "email": "live-driver@local.test",
+                "password": "live-driver-pass-1",
+            },
         )
         if reg.status_code == 409:
             reg = client.post(
-                "/auth/login", json={"username": "live-driver", "password": "live-driver-pass-1"}
+                "/auth/login",
+                json={"email": "live-driver@local.test", "password": "live-driver-pass-1"},
             )
         reg_body = reg.json()
         headers["Authorization"] = f"Bearer {reg_body['access_token']}"
