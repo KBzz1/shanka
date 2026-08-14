@@ -1,6 +1,6 @@
-# 结构契约 v2.2
+# 结构契约 v2.3
 
-前后端接口合同。需求依据:[PRD v2.2](../PRD/V2.2/prd_v2_2.md)(继承 [v2.1](../PRD/V2.1/prd_v2_1.md));机器可读接口定义:[openapi.yaml](openapi.yaml);持久化映射:[database-design.md](database-design.md)。
+前后端接口合同。需求依据:[PRD v2.3](../PRD/V2.3/prd_v2_3.md)(继承 [v2.2](../PRD/V2.2/prd_v2_2.md)、[v2.1](../PRD/V2.1/prd_v2_1.md));机器可读接口定义:[openapi.yaml](openapi.yaml);持久化映射:[database-design.md](database-design.md)。
 
 **字段权威声明**:本章第 3 节资源模型是字段定义的唯一来源;`openapi.yaml` schema 与 `database-design.md` 表结构均从本章派生。
 
@@ -15,7 +15,7 @@
 - **凭据规则**:用户名 3~32 位、仅 `[a-z0-9._-]`、服务端统一转小写;密码 8~128 字符、不截断、不做 normalization;密码 Argon2id(≥ memory_cost=19456 KiB / time_cost=2 / parallelism=1);登录失败统一 `401 INVALID_CREDENTIALS`(用户名不存在时做固定 dummy 校验),用户名冲突 `409 USERNAME_TAKEN`。
 - **会话规则**:256-bit 随机 opaque token,数据库只存 SHA-256 摘要;默认 30 天绝对有效期、无滑动续期、无 refresh;logout 只撤销当前会话;同一用户允许多会话。
 - **风险声明**:session token 等同于密码,泄漏后在被撤销或过期前可被冒用;缓解:注册/登录按 IP 与用户名限流(1.6)、token 只存摘要、敏感信息不落日志(1.5/8.1)。
-- **归属声明**:所有资源隐含归属当前登录 `user_id`,持久化列为 `user_id`;无 `user_id` 列的表(chapters、knowledge_points 等)经外键关联路径归属校验。v2.1 遗留的 `device_id` 数据不迁移、不认领、无访问路径(决策 D-06);`devices` 与旧 `device_id` 列仅兼容审计,不参与认证/授权。
+- **归属声明**:所有资源隐含归属当前登录 `user_id`,持久化列为 `user_id`;无 `user_id` 列的表(chapters、knowledge_points 等)经外键关联路径归属校验。V2.3 起设备架构已彻底清除——`devices` 表、`device_id` 列与设备域数据物理删除,owner 恒为 `user_id`(V2.1 历史:曾以 `device_id` 为隔离键;V2.2 曾按决策 D-06 保留旧数据,已撤销)。
 
 ### 1.2 时间与时区
 
@@ -674,7 +674,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 
 | 契约章节 | PRD 章节 | 状态 |
 | --- | --- | --- |
-| 1.1 数据主体 | V2.2 FR-19 / AC-12、D-05 / D-06 | 一致(V2.2 账号会话取代 D-02) |
+| 1.1 数据主体 | V2.2 FR-19 / AC-12、D-05；V2.3 D-06 撤销 | 一致(V2.2 账号会话取代 D-02；V2.3 设备架构彻底清除) |
 | 1.5 API Key | 5.17 / 7.1 / AC-11、D-03 | 一致(PRD 已同步修订) |
 | 3.9 判断题结构 | 5.8 / D-01 | 一致 |
 | 5 复习排程 | 5.15 / 6.6 / AC-10 | 一致(PRD 已同步修订为 FSRS) |
@@ -687,3 +687,4 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | 8 运行可观测性 / 6.10 聚合观测 | PRD 8 核心指标 / FR-10 / FR-11 | 新增(设计规格 6422765) |
 | 3.5/3.6 生成单元与锚定 / 3.7 批=单元 / 4.1 任务状态机 / 6.10 分组键 | 5.4.1 / 5.6 / 5.7 | 一致(LLM 链路升级工作包契约同步) |
 | 3.14/3.15 账号与会话 / 6.11 账号接口 / 1.6 限流 / 7 账号错误码 | V2.2 FR-19 / AC-12、D-05 | 新增(账号登录工作包契约同步) |
+| 1.1 归属声明(设备架构清除) / database-design 表结构 | V2.3(决策翻转 D-06→V2.3) | 一致(清理收尾与补做验证工作包契约同步) |

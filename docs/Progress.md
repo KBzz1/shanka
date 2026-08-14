@@ -317,6 +317,7 @@
 - **验证（主 Agent 2026-08-14 实测）**：全量 **508 passed / 0 failed**；`ruff check .` 全过；`ruff format --check .` 249 files；`mypy .` Success（198 source files）；空库 `alembic upgrade head`（5 revisions 全链）+ `alembic check` 零漂移 exit 0；契约守卫全绿（含 idempotency PK 列序按 doc 主键行逐字校验）。
 - **SDD 过程**：2 任务 × implementer + 任务级 reviewer；整支 final review（fable）With fixes → 2 fix rounds（NULL 主键冲突注释失实改述——SQLite PK/UNIQUE 多 NULL 互异、两行并存）→ clean。
 - **P4 跟进清单（须写入 P4 阶段组织）**：① api_keys 每设备唯一性 DB 保障随 PK 重建静默丢失（补 UNIQUE(device_id) 迁移或文档化决策，须在用户域写入落地前完成）；② ddc6 层 downgrade 带旧行 CI 断言；③ §7.1 fail-closed 生效范围一句 + 任务归属措辞修正；④ 写侧债务三条——ApiKey 用户域行（device_id NULL）对 ORM 不可见（get_status 会返回 UNKNOWN、save_key 会误 INSERT 撞 PK，需 Core 直写或重映射）、IdempotencyKey NULL 主键行 update/delete 会 FlushError（当前无此类路径）、tasks.device_id 注解 Mapped[str] 待随用户侧写入收敛（3 处 create_attempt 调用点）。
+- 2026-08-14 V2.3 决策翻转：D-06「不迁不删」撤销，设备数据与架构物理删除（不可逆）。
 
 ### ACC-P4 — 账号后端切换（auth 端点 + Bearer + 全链路 user_id + X-Device-ID 退出）
 
