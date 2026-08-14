@@ -4,11 +4,11 @@
 
 - Goal ID：`shanka-llm-account-long-run-v1`
 - Goal：先完成 LLM 链路升级（17 任务，P1），再完成账号登录替代 X-Device-ID（PRD V2.2，P2–P8）。
-- 当前状态：`P6_DONE`（Android 登录切换完成：Login/Register UI + Keystore 会话存储 + Bearer 网络层 + X-Device-ID 零残留，40/40 JVM 测试 + assembleDebug 全绿；进入 P7 test-platform v2）
+- 当前状态：`P7_DONE`（test-platform v2 完成：client 账号化 + 凭据 env + auth/isolation/core/generation/observability 场景 + 成本闸门最坏预算推导与批次对账；77/0 平台自测 + unittest discover 6/6 复跑稳定；进入 P8 总验收）
 - 设计：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/DESIGN.md`（引用两份上游设计）
 - 启动提示词：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/WORKER_PROMPT.md`
 - 任务地图：`/home/kbzz1/shanka_backend/docs/llm-account-long-run-v1/TASKS.md`
-- 最后更新：2026-08-14 Asia/Shanghai（P6_DONE）
+- 最后更新：2026-08-14 Asia/Shanghai（P7_DONE）
 
 ## 现场快照（2026-08-13 接管时）
 
@@ -129,6 +129,18 @@
 - **未运行项**：instrumented 设备测试（本机无模拟器/真机，仅编译+打包验证——WORKER_PROMPT 验证 6 允许；BackendClientInstrumentedTest/FlashcardsAppTest 语义已更新待设备验证）。
 - **遗留登记（不阻塞）**：FlashcardsAppTest.storedSessionEntersTheMainScreen 非 hermetic（后端在线环境会 401 失败——建议后续 AppViewModel 注入缝）；logout 先网络后本地（Settings 接入时改先本地登出）；logout 无 UI 调用方（Settings 留后续）。
 
+## P7 完成记录（2026-08-14，全部为真实命令/证据）
+
+- **提交**：外层仓库 test-platform/ 顶层目录（纯 stdlib 黑盒 HTTP，零外部依赖）3 任务 commits：`fae1485`（P7-1 client 账号化 + runner 删 --device-id）/ `1819e08` + `594d4c0`（P7-2 场景改造 + review fix）/ P7-3 成本闸门与收尾（本记录随该提交落盘）。
+- **client 账号化（DESIGN 8.1）**：register/login/set_token/logout 四端点；普通请求 set_token 后自动 Bearer（未设置不带头）；register/login 恒不带头（auth=False 显式剥离，不依赖后端豁免）/不重试/不落事件；logout 带 Bearer + 幂等键且无论结果清空本地 token；X-Device-ID 注入彻底移除；PUT /api-key 与 auth 凭据路径统一脱敏不落日志。
+- **runner 与凭据**：删除 `--device-id`；凭据只从 `SHANKA_TEST_USERNAME`/`SHANKA_TEST_PASSWORD` 读取（缺失拒绝 exit 1，不自动注册）；prod 必须 `--confirm-prod` 且只 login（禁自动注册）；run_id 由 runner 生成注入场景。
+- **场景**（无 legacy、无占位文件）：auth（401 语义/me/logout 撤销）、isolation（两用户跨用户统一 404 + quality-summary 按 user + 异常路径前缀兜底清理）、api_smoke（Bearer 化 + 同键幂等重放带 Bearer）、live_flow（API Key→PDF→samples→任务→轮询→复习→看板→summary 端到端 + 观测临时账号交叉断言）。
+- **成本闸门（DESIGN 8.3，废弃「live 固定 3 次调用」假设）**：运行前 `cost.derive_budget` 按受控 fixture（2 章 BALANCED）+ 契约默认上限镜像推导最坏预算 53 次调用（PLANNING 3 + GENERATING 36 + SCORING 12 + 固定 2；最坏输出 82944 token、最坏输入 600000 token、最坏成本 ≈¥1.86）> 阈值 3 → 必须 `--confirm-cost`（拒绝消息含逐阶段明细）；运行后经 `GET /tasks/{id}/batches` 对账实际批数/生成尝试/token/成本（报告字段 llm_budget_calls/llm_attempts_actual/llm_tokens_actual/llm_cost_actual）。**对账边界如实声明：后端无 llm_call_attempts GET 端点，PLANNING/SCORING 尝试数无 HTTP 观测入口，仅 GENERATING 阶段（批=单元账本投影）可对账。**
+- **环境性修复（T2 review 发现）**：test_client 测试服务器地址改 localhost——HTTP_PROXY=127.0.0.1:7897 环境下 urllib `proxy_bypass('127.0.0.1')==False`（NO_PROXY 的 127.* 不匹配 IP 字面量）导致间歇走代理 502；localhost 实测 bypass==True，unittest discover 6 次复跑 6/6 稳定（修复前 6 次 3 失败）。
+- **验证（主 Worker 2026-08-14 实测）**：test-platform `python -m pytest tests/` **77 passed / 0 failed**（T1 基线 29 → T2 64 → T3 77）；`python -m unittest discover -s tests` **77 tests × 6 次复跑全 OK**；CLI 形状实测：quick/full 无凭据拒绝 exit 1、live 无 `--confirm-cost` 拒绝且消息含预算明细、`--confirm-cost` 放行并打印确认行。
+- **未运行项（如实声明，WORKER_PROMPT 纪律）**：local quick/full/live 对真实后端联调**未运行**（本机后端未启动，localhost:8000 无响应）——仅以受控最小路径（`--scenario auth`/`--scenario live_flow` 对 down 后端）验证 CLI 形状、闸门与失败记账；**真实 LLM 调用未运行**（live 需成本/Key 单独确认，本任务未获确认）。
+- **SDD 过程**：3 任务 × implementer + 任务级 reviewer；T2 review Medium 1 项（register/login 带头）fix round 1/5 闭环；T3 继承 T2 3 项 minor（isolation 异常路径残留、auth --run-id help 文案、报告计数口径）+ 1 项环境性 flaky 全部闭环。
+
 ## 阶段账本
 
 | 阶段 | 状态 | 证据/下一步 |
@@ -140,7 +152,7 @@
 | P4 后端切换 | `DONE` | 见上 P4 完成记录：11 commits、auth 四端点 + Bearer + 全链路 user_id、X-Device-ID 退出、557/0 四工具全绿 |
 | P5 LLM 后台 user_id 接续 | `DONE` | 见上 P5 完成记录：6 判别测试（logout/过期继续、session 零依赖、跨用户 404、metrics 无身份）+ 资产只读，563/0 四工具全绿 |
 | P6 Android | `DONE` | 见上 P6 完成记录：4 commits 60d62a3..f15457b、Keystore 会话存储 + Bearer + UI + 零残留、40/40 + assembleDebug 全绿 |
-| P7 test-platform v2 | `PENDING` | auth/isolation/core/live/ledger 场景 |
+| P7 test-platform v2 | `DONE` | 见上 P7 完成记录：3 任务、client 账号化 + 4 场景 + 成本闸门预算推导/批次对账、77/0 + unittest 6/6、CLI 形状实测 |
 | P8 总验收 | `PENDING` | 全量工具链、迁移副本、canary、WORKER_REPORT.md |
 
 ## 变更纪律
@@ -158,7 +170,7 @@
 - [ ] X-Device-ID 已退出普通运行时认证/授权面。
 - [ ] 用户隔离、会话、幂等与敏感数据测试通过。
 - [ ] Planner/Generator/Scoring/Rewrite 与 ledger 已按 user_id 接续（语义冻结不回改）。
-- [ ] Android 与 test-platform v2 已完成并验证。
+- [x] Android 与 test-platform v2 已完成并验证（P6：40/40 + assembleDebug；P7：77/0 + unittest discover 6/6 + CLI 形状与闸门实测）。
 - [ ] 全量质量工具真实通过，未运行项明确报告。
 - [ ] `WORKER_REPORT.md` 已记录改动、命令、退出码、计数、风险与未完成项。
 

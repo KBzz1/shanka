@@ -1,10 +1,13 @@
 """完整制卡流程场景(API Key → PDF → 样卡 → 任务 → 复习 → 看板 → quality-summary)端到端联调,账号 Bearer 流程。
 
-真实 Key 消耗 3 次 LLM 调用(api-key 校验 1 + samples 1 + tasks 1),LLM_CALLS=3
-供 runner 成本统计;API Key 从仓库根 .env 读取,仅内存使用,绝不输出。
+成本闸门(DESIGN 8.3):废弃「live 固定 3 次调用」假设——LLM_CALLS 由 BUDGET_FIXTURE
+按契约默认上限推导最坏调用预算(PLANNING/GENERATING/SCORING + 固定 api-key 校验与
+samples);任务完成后经 GET /tasks/{id}/batches 对账实际尝试/token/成本(GENERATING
+阶段账本投影,PLANNING/SCORING 无 HTTP 观测入口,边界如实声明)。API Key 从仓库根
+.env 读取,仅内存使用,绝不输出。
 运行方式(由 runner 调度或直接):
     python3 scenarios/flow/live_flow.py --base-url http://localhost:8000 [--environment local|prod] [--run-id UUID]
-    python3 scenarios/flow/live_flow.py --skip-generate   # 到样卡为止,省 1 次 LLM 调用
+    python3 scenarios/flow/live_flow.py --skip-generate   # 到样卡为止,不创建任务(无对账)
 退出码 = 失败步骤数(0 = 全部通过)。
 """
 
@@ -23,14 +26,13 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from shanka import account, environments, logging as shlogging
+from shanka import account, cost, environments, logging as shlogging
 from shanka.cleanup import DataScope
 from shanka.client import Response, ShankaClient
 from shanka.report import check, record, summary
 
 NAME = "live_flow"
 SUITE = "flow"
-LLM_CALLS = 3  # api-key 校验 1 + samples 1 + tasks 1
 
 _ENV_FILE = Path("/home/kbzz1/shanka_backend/.env")  # 仓库根 .env(密钥仅内存使用)
 _POLL_INTERVAL_S = 5    # 任务轮询间隔
@@ -40,6 +42,13 @@ _GEN_CONFIG = {
     "quantity_tendency": "BALANCED",
     "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
 }
+
+# 受控 fixture:固定取前 2 章、BALANCED 密度;最坏调用预算由 cost.derive_budget 推导
+# (废弃「live 固定 3 次调用」假设——LLM_CALLS 为推导值,非手写常量)
+BUDGET_FIXTURE = {"chapters": 2, "quantity_tendency": _GEN_CONFIG["quantity_tendency"],
+                  "generate": True}
+LIVE_BUDGET = cost.derive_budget(**BUDGET_FIXTURE)
+LLM_CALLS = LIVE_BUDGET.total_calls()
 
 
 def _body(r: Response) -> dict:
@@ -179,6 +188,21 @@ def run(
                          f"stage={body.get('failure_stage')} error_code={body.get('error_code')}")
     check("任务生成卡片数 > 0", bool(body.get("generated_card_count")),
           f"cards={body.get('generated_card_count')}")
+
+    # 4.5 成本对账(DESIGN 8.3):GENERATING 阶段经 batches 观测(批=单元账本投影);
+    # PLANNING/SCORING 尝试数无 HTTP 观测入口(llm_call_attempts 无 GET 端点),边界如实声明
+    r = c.request("GET", f"/tasks/{task_id}/batches", step="task-batches")
+    check("对账: GET /tasks/{id}/batches -> 200", r.status == 200, f"({r.status})")
+    if r.status == 200:
+        rec = cost.reconcile(_body(r).get("items") or [], LIVE_BUDGET)
+        check("对账: 生成尝试/批数在预算内", rec.within_budget, rec.usage_line)
+        record("llm_budget_calls", LIVE_BUDGET.total_calls())
+        record("llm_attempts_actual", rec.generation_attempts)
+        record("llm_tokens_actual", rec.tokens)
+        record("llm_cost_actual", rec.cost_yuan)
+        print(f"    [对账] 预算: {cost.describe(LIVE_BUDGET)}")
+        print(f"    [对账] 实际(GENERATING 阶段,批=单元投影): {rec.usage_line}")
+        print("    [对账] 边界: PLANNING/SCORING 尝试数无 HTTP 观测入口,仅 GENERATING 可对账")
 
     # 5. 牌组卡片 + 复习评级(任意状态可评级,C-06)
     r = c.request("GET", f"/decks/{deck_id}/cards", step="deck-cards")

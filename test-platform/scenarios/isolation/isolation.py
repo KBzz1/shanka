@@ -36,6 +36,23 @@ def _logout(c: ShankaClient) -> None:
     check("logout -> 204", r.status == 204, f"({r.status})")
 
 
+def _cleanup_decks(c: ShankaClient, prefix: str) -> None:
+    """异常路径兜底:按名称前缀清理本 run 的 iso-* 牌组(尽力而为,失败仅 WARN)。"""
+    r = c.request("GET", "/decks", step="cleanup-deck-list")
+    items = r.json.get("items") if isinstance(r.json, dict) else None
+    if not isinstance(items, list):
+        print(f"    [warn] 异常路径牌组清理:列表失败(HTTP {r.status}),请人工核对 {prefix}* 牌组")
+        return
+    for it in items:
+        if not isinstance(it, dict) or not str(it.get("name", "")).startswith(prefix):
+            continue
+        deck_id = it.get("deck_id")
+        if not isinstance(deck_id, str):
+            continue
+        c.request("DELETE", f"/decks/{deck_id}", idempotent=True, step="cleanup-deck-delete")
+        print(f"    [warn] 异常路径残留牌组已清理: {it.get('name')}")
+
+
 def _readonly_prod(c: ShankaClient) -> int:
     """prod 只读断言:禁自动注册,不创建资源,不产生 user 行残留。"""
     r = c.request("GET", "/decks", step="deck-list")
@@ -73,6 +90,8 @@ def run(c: ShankaClient, *, environment: str, username: str, password: str, run_
     deck_id = r.json.get("deck_id") if isinstance(r.json, dict) else None
     check("创建返回 deck_id", isinstance(deck_id, str))
     if not isinstance(deck_id, str):
+        # 异常路径:POST 201 但无 deck_id——牌组可能已建,按前缀兜底清理再注销(不留 iso-* 残留)
+        _cleanup_decks(c, f"iso-{run_id[:8]}")
         _logout(c)
         if created:
             record("local_test_users_created", created)
@@ -84,6 +103,11 @@ def run(c: ShankaClient, *, environment: str, username: str, password: str, run_
                                password=account.temp_password())
     check("临时账号注册", second is not None, f"user={second_name}")
     if second is None:
+        # 异常路径:bootstrap 失败时本地 token 状态不承诺——切回主账号确定性清理;
+        # 临时账号 session 若已建而 client 未持有 token 则无法撤销,仅 WARN 登记
+        c.set_token(session["access_token"])
+        print(f"    [warn] 临时账号 {second_name} 会话可能未撤销(注册失败路径,无 token 可注销)")
+        _cleanup_decks(c, f"iso-{run_id[:8]}")
         _logout(c)
         if created:
             record("local_test_users_created", created)

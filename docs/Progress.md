@@ -21,7 +21,7 @@
 | Conda 执行环境 | `DONE`（环境基线） | 已创建 `shanka-backend`，Python 3.12.13；已安装 pyproject 当前声明依赖；editable 安装仍受 R-02 阻塞 |
 | 可运行后端 | `DONE`（F1 共享基础） | create_app 装配 + 探针 + 统一错误包装（VALIDATION_ERROR 400 / INTERNAL_ERROR 500）+ 设备鉴权（401/自动注册/探针豁免）+ request_id/JSON 日志 + 幂等原语 + 限流 + metrics；业务路由随 V1+ 纵向包逐步接入 |
 | 自动化验证 | `DONE`（R14 扩展） | 354 passed：F0 34 + F1 47 + V1 40 + V2 41 + V3A 40 + V3B 40 + V4 43 + V5A 24 + V5B 8 + V6 26 + R1 5 + R14 1（守卫）；四工具命令全绿（mypy 174 files） |
-| test-platform/ | `DONE`（第一期实现） | 测试平台独立顶层目录（2026-08-12 建立：shanka/ 核心库、scenarios/ 两场景、runner/ 调度与闸门、device/ 真机脚本）；端到端验收为 SDD Task 8；设计/计划见 superpowers/specs/2026-08-12-test-platform-design.md、superpowers/plans/2026-08-12-test-platform.md |
+| test-platform/ | `DONE`（v2 账号化） | 独立顶层目录（纯 stdlib 黑盒 HTTP）；v2 完成：client 账号化 + 凭据 env + auth/isolation/api_smoke/live_flow 四场景 + 成本闸门最坏预算推导与批次对账（DESIGN §8.3）；77/0 平台自测 + unittest discover 6/6 复跑稳定；详见 ACC-P7 |
 | DeepSeek 凭据直连 smoke | `DONE`（仅凭据/端点） | 2026-08-10 直接请求 `deepseek-v4-flash` 成功：non-thinking JSON、`finish_reason=stop`、63 input + 16 output = 79 tokens、cache hit 0；绕过了尚不存在的后端，不能完成 V3B/R1 |
 
 当前唯一正确起点是 `F0`。
@@ -356,6 +356,22 @@
 - **验证**：`./gradlew test` 40/40 全绿；assembleDebug + assembleDebugAndroidTest BUILD SUCCESSFUL（--rerun-tasks 非缓存强制复跑）；instrumented 未运行（本机无设备，仅编译+打包——WORKER_PROMPT 验证 6）。
 - **SDD 过程**：4 任务 × implementer + 同一 reviewer 连续审查；1 fix round（预存在 ImportParser 缺陷修复——review 三路验证非本包引入）。
 
+### ACC-P7 — test-platform v2（账号化 + 成本闸门 + local 验收）
+
+**`DONE`｜依赖：ACC-P4 后端｜覆盖：DESIGN §8、WORKER_PROMPT 目标二 §6/§7｜2026-08-14**
+
+任务包：`docs/llm-account-long-run-v1/`。执行计划：`docs/superpowers/plans/2026-08-14-test-platform-v2.md`（3 任务，superpowers:subagent-driven-development）。
+
+当前证据（2026-08-14，main 分支 commits fae1485 / 1819e08 / 594d4c0 / P7-3 成本闸门收尾）：
+- **client 账号化**：register/login/set_token/logout 四端点；普通请求 set_token 后自动 Bearer；register/login 恒不带头（显式剥离不依赖后端豁免）/不重试/不落事件；logout 无论结果清空本地 token；X-Device-ID 注入彻底移除；PUT /api-key 与 auth 凭据路径统一脱敏。
+- **runner 与凭据**：删 `--device-id`；凭据只从 env 读取（缺失拒绝 exit 1）；prod 必须 `--confirm-prod` 且禁自动注册；run_id 由 runner 注入。
+- **场景**（无 legacy、无占位文件）：auth（401 语义/me/logout 撤销）、isolation（跨用户统一 404 + quality-summary 按 user + 异常路径前缀兜底清理）、api_smoke（Bearer 化 + 同键幂等重放）、live_flow（端到端生成链路 + 观测临时账号交叉断言）。
+- **成本闸门（DESIGN 8.3）**：废弃「live 固定 3 次调用」假设——运行前 `cost.derive_budget` 按受控 fixture（2 章 BALANCED）+ 契约默认上限镜像推导最坏预算 53 次（PLANNING 3 + GENERATING 36 + SCORING 12 + 固定 2，最坏成本 ≈¥1.86）> 阈值 3 → 必须 `--confirm-cost`；运行后经 `GET /tasks/{id}/batches` 对账批数/生成尝试/token/成本入报告字段。**边界如实声明：后端无 llm_call_attempts GET 端点，PLANNING/SCORING 无 HTTP 观测入口，仅 GENERATING 阶段可对账。**
+- **环境性修复**：test_client 测试地址改 localhost（HTTP_PROXY 下 urllib `proxy_bypass('127.0.0.1')==False` 导致间歇代理 502）；unittest discover 6/6 复跑稳定（修复前 6 次 3 失败）。
+- **验证（主 Worker 2026-08-14 实测）**：test-platform `python -m pytest tests/` **77 passed / 0 failed**；`python -m unittest discover -s tests` **77 tests × 6 次复跑全 OK**；CLI 形状实测（quick/full 无凭据拒绝、live 无 confirm 拒绝含预算明细、--confirm-cost 放行）。
+- **未运行项（如实声明）**：local quick/full/live 对真实后端联调未运行（本机后端未启动）——仅受控最小路径验证 CLI 形状与闸门；真实 LLM 调用未运行（live 需成本/Key 单独确认，未获确认）。
+- **SDD 过程**：3 任务 × implementer + 任务级 reviewer；T2 Medium 1 项 fix round 闭环；T3 继承 T2 3 项 minor + 1 项环境性 flaky 全部闭环。
+
 ## 5. 依赖关系与下一步
 
 ```text
@@ -405,7 +421,7 @@ F0 → F1 ─┬→ V1 → V2 ────────────────�
 | FR-15～16 / AC-10 | V2 | FSRS/statistics + acceptance |
 | FR-17 / AC-08、11 后端本机部分 | V3B（全局脱敏 F0/F1） | security/log capture + acceptance |
 | FR-18 | F1 + 各纵向包 | OpenAPI/contract + endpoint tests |
-| FR-19 / AC-12 | ACC-P2（契约）+ ACC-P3（数据层）+ ACC-P4（业务切换） | 后端全部落地（557 passed 四工具全绿）；Android/test-platform 随 P6/P7 |
+| FR-19 / AC-12 | ACC-P2（契约）+ ACC-P3（数据层）+ ACC-P4（业务切换）+ ACC-P6（Android）+ ACC-P7（test-platform） | 后端全部落地（557 passed 四工具全绿）；Android P6 40/40 + assembleDebug；test-platform P7 77/0 + unittest 6/6 + CLI 形状实测 |
 | database-design | F1 + V1～V6 各闭环 | migration/ORM contract + integration |
 | O-1～O-6 | F0/F1 + V5A | probe/metrics/log/quality tests |
 | deployment / PRD HTTPS | 当前 Goal 外 | 保留供应商中立的 HTTPS 要求；明确启动联网部署后再实测，不计入 F0～R1 完成条件 |

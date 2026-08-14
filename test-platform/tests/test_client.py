@@ -128,7 +128,10 @@ class ClientTest(unittest.TestCase):
         REQ_HEADERS.clear()
 
     def _client(self) -> ShankaClient:
-        return ShankaClient(f"http://127.0.0.1:{self.port}", pace=0)
+        # localhost 而非 127.0.0.1:urllib proxy_bypass('localhost')==True(实测),
+        # 而 NO_PROXY 的 127.* 不匹配 IP 字面量(proxy_bypass('127.0.0.1')==False),
+        # 环境带 HTTP_PROXY 时 127.0.0.1 会间歇走代理 502——localhost 直连稳定
+        return ShankaClient(f"http://localhost:{self.port}", pace=0)
 
     def _log(self) -> str:
         return (Path(self.tmp.name) / "t.log").read_text()

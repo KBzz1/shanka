@@ -79,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--base-url", default="http://localhost:8000")
     ap.add_argument("--environment", default="local", choices=list(environments.ENVIRONMENTS))
-    ap.add_argument("--run-id", default=None, help="runner 注入;直跑时自动生成")
+    ap.add_argument("--run-id", default=None,
+                    help="保留参数(runner 统一注入);本场景无临时账号,不使用")
     ap.add_argument("--pace", type=float, default=0.3, help="请求间隔秒(契约 IP 5 req/s)")
     args = ap.parse_args(argv)
     try:

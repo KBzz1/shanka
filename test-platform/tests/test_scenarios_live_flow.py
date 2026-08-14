@@ -12,7 +12,7 @@ from scenarios.flow import live_flow
 from tests import stub
 
 
-def _handler(*, generate=True, prod=False):
+def _handler(*, generate=True, prod=False, batches=None):
     state = {"polls": 0, "obs": False}
 
     def handler(method, path, body):
@@ -41,6 +41,17 @@ def _handler(*, generate=True, prod=False):
             if state["polls"] < 3:
                 return Response(200, {"status": "GENERATING", "generated_card_count": 0})
             return Response(200, {"status": "COMPLETED", "generated_card_count": 3})
+        if path == "/tasks/task-1/batches":
+            if batches is not None:
+                return Response(200, {"items": batches})
+            return Response(200, {"items": [
+                {"batch_id": "b-1", "batch_index": 0, "status": "SUCCEEDED", "retry_count": 0,
+                 "cache_hit_tokens": 800, "cache_miss_tokens": 400, "output_tokens": 100,
+                 "cost_estimate": 0.0048},
+                {"batch_id": "b-2", "batch_index": 1, "status": "SUCCEEDED", "retry_count": 0,
+                 "cache_hit_tokens": 900, "cache_miss_tokens": 300, "output_tokens": 120,
+                 "cost_estimate": 0.0054},
+            ]})
         if path == "/decks/deck-1/cards":
             return Response(200, {"items": [{"card_id": "card-1"}]})
         if path == "/review-events":
@@ -85,6 +96,15 @@ class LiveFlowScenarioTest(unittest.TestCase):
             self.assertIn(path, paths)
         # 轮询至 COMPLETED(非终态轮询 2 次 + 终态 1 次)
         self.assertEqual(calls.count(("GET", "/tasks/task-1", None)), 3)
+        # 成本对账:batches 观测 + 预算/实际报告字段(最坏预算 53,实际 2 次尝试/2620 token)
+        self.assertIn(("GET", "/tasks/task-1/batches", None), calls)
+        out = buf.getvalue()
+        self.assertIn("对账: 生成尝试/批数在预算内", out)
+        self.assertIn("llm_budget_calls=53", out)
+        self.assertIn("llm_attempts_actual=2", out)
+        self.assertIn("llm_tokens_actual=2620", out)
+        self.assertIn("llm_cost_actual=0.0102", out)
+        self.assertIn("PLANNING/SCORING 尝试数无 HTTP 观测入口", out)
         # quality-summary 按 user:主账号非空、观测临时账号为空(交叉断言)
         summaries = [p for m, p, _ in calls if p == "/observability/quality-summary"]
         self.assertEqual(len(summaries), 2)
@@ -94,6 +114,22 @@ class LiveFlowScenarioTest(unittest.TestCase):
         self.assertEqual(calls.count(("logout", "", None)), 2)
         # 无法安全删除的 user 行(主账号 1 + 观测账号 1)计数报告
         self.assertIn("local_test_users_created=2", buf.getvalue())
+
+    def test_run_reconciliation_over_budget_fails(self) -> None:
+        """对账超预算(13 批 × 3 次尝试 = 39 > 36)→ FAIL 步骤,失败数 > 0。"""
+        batches = [
+            {"status": "SUCCEEDED", "retry_count": 2} for _ in range(13)
+        ]
+        c = stub.StubClient(_handler(batches=batches))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            failed = live_flow.run(
+                c, environment="local", username="tester", password="pw-123456",
+                api_key="sk-test-secret", run_id="run-x", skip_generate=False, keep=False,
+            )
+        self.assertGreater(failed, 0)
+        self.assertIn("[FAIL] 对账: 生成尝试/批数在预算内", buf.getvalue())
+        self.assertIn("生成尝试 39/36", buf.getvalue())
 
     def test_run_skip_generate_ends_after_samples_with_logout(self) -> None:
         c = stub.StubClient(_handler())

@@ -1,4 +1,5 @@
 """runner.suites 单元测试:套件构成与闸门逻辑(含 --device-id 移除、凭据缺失拒绝、注入参数)。"""
+import io
 import os
 import sys
 import unittest
@@ -26,7 +27,11 @@ class SuitesTest(unittest.TestCase):
         self.assertEqual(suites.llm_total("quick"), 0)
         self.assertEqual(suites.llm_total("full"), 0)
         self.assertGreater(suites.llm_total("live"), suites.llm_total("full"))
-        self.assertEqual(suites.llm_total("live"), 3)  # live_flow 3 次,未超阈值
+        # live_flow 调用数为 fixture 推导的最坏预算(废弃固定 3 假设),超默认阈值
+        from scenarios.flow import live_flow
+        self.assertEqual(suites.llm_total("live"), live_flow.LLM_CALLS)
+        self.assertGreater(suites.llm_total("live"), 3)
+        self.assertTrue(suites.cost.requires_confirm(suites.llm_total("live")))
 
     def test_prod_gate(self) -> None:
         self.assertTrue(suites.gate_ok(environment="local", confirm_prod=False))  # local 默认放行
@@ -61,6 +66,25 @@ class SuitesTest(unittest.TestCase):
             self.assertEqual(args[args.index("--environment") + 1], "local")
             run_id = args[args.index("--run-id") + 1]
             self.assertTrue(run_id)  # 非空 UUID 注入
+
+    def test_live_suite_requires_confirm_cost(self) -> None:
+        """live 最坏预算超阈值:无 --confirm-cost 拒绝执行(exit 1),有则放行(进入场景调度)。"""
+        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_PASSWORD": "p"}
+        with mock.patch.dict(os.environ, env):
+            code = suites.main(["--environment", "local", "--suite", "live"])
+        self.assertEqual(code, 1)
+        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_PASSWORD": "p"}
+        with mock.patch.dict(os.environ, env):
+            with mock.patch.object(suites.auth, "main", return_value=0) as m_auth, \
+                 mock.patch.object(suites.isolation, "main", return_value=0) as m_iso, \
+                 mock.patch.object(suites.api_smoke, "main", return_value=0) as m_smoke, \
+                 mock.patch.object(suites.live_flow, "main", return_value=0) as m_live, \
+                 mock.patch("sys.stdout", io.StringIO()) as out:
+                code = suites.main(
+                    ["--environment", "local", "--suite", "live", "--confirm-cost"])
+        self.assertEqual(code, 0)
+        self.assertTrue(m_auth.called and m_iso.called and m_smoke.called and m_live.called)
+        self.assertIn("成本闸门: --confirm-cost 已确认", out.getvalue())
 
 
 if __name__ == "__main__":

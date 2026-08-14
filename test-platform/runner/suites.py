@@ -3,7 +3,7 @@
 套件:
   quick — auth + api_smoke,0 次 LLM 调用,纯无 Key 冒烟;
   full  — 非生成场景(auth/isolation/api_smoke,0 次 LLM;域场景实装后扩展);
-  live  — full + live_flow,含真实生成(LLM 合计 3,不超阈值;批量扩展后触发闸门)。
+  live  — full + live_flow,含真实生成(最坏调用预算由 fixture 推导,超阈值必须 --confirm-cost)。
 凭据只从环境变量读取(SHANKA_TEST_USERNAME/SHANKA_TEST_PASSWORD),缺失拒绝执行;
 run_id 由 runner 生成并注入场景,日志身份字段为 user_id(会话建立前为空)。
 """
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--environment", default="local", choices=list(environments.ENVIRONMENTS))
     ap.add_argument("--suite", default="quick", choices=list(SUITES))
     ap.add_argument("--scenario", default=None, help="只跑指定场景(NAME)")
-    ap.add_argument("--confirm-cost", action="store_true", help="确认 LLM 调用成本(合计 > 阈值时必需)")
+    ap.add_argument("--confirm-cost", action="store_true", help="确认 LLM 最坏调用预算(合计 > 阈值时必需)")
     ap.add_argument("--confirm-prod", action="store_true", help="确认操作生产环境(禁止自动注册)")
     args = ap.parse_args(argv)
 
@@ -68,8 +68,16 @@ def main(argv: list[str] | None = None) -> int:
 
     total = cost.aggregate(scenarios)
     if cost.requires_confirm(total) and not args.confirm_cost:
-        print(f"拒绝执行:LLM 调用合计 {total} 超过阈值 {cost.THRESHOLD},需 --confirm-cost", file=sys.stderr)
+        # 预算明细:声明了 BUDGET_FIXTURE 的场景按推导预算逐项展示(0 LLM 场景无明细)
+        detail = "; ".join(
+            cost.describe(b) for b in (cost.budget_for(s) for s in scenarios) if b is not None
+        )
+        suffix = f"({detail})" if detail else ""
+        print(f"拒绝执行:LLM 最坏调用预算合计 {total} 超过阈值 {cost.THRESHOLD}{suffix},"
+              "需 --confirm-cost", file=sys.stderr)
         return 1
+    if cost.requires_confirm(total):
+        print(f"成本闸门: --confirm-cost 已确认,最坏调用预算合计 {total} 次")
 
     run_id = str(uuid.uuid4())
     base = environments.resolve(args.environment)

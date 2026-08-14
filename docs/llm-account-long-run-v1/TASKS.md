@@ -97,10 +97,10 @@ legacy claim 部分不在本包范围**，用户 2026-08-13 决策）；行为�
 
 ### P7 test-platform v2
 
-- [ ] client register/login/set_token/logout + 敏感路径脱敏；runner 删 --device-id
-- [ ] 凭据只从 SHANKA_TEST_USERNAME / SHANKA_TEST_PASSWORD；prod 显式确认且禁自动注册
-- [ ] auth / isolation / cards-review-stats / pdf / generation / observability 最小场景（无 legacy 场景）
-- [ ] 成本闸门：运行前最坏预算推导，运行后 ledger 对账；live 需成本/Key 确认
+- [x] client register/login/set_token/logout + 敏感路径脱敏；runner 删 --device-id
+- [x] 凭据只从 SHANKA_TEST_USERNAME / SHANKA_TEST_PASSWORD；prod 显式确认且禁自动注册
+- [x] auth / isolation / cards-review-stats / pdf / generation / observability 最小场景（无 legacy 场景）——auth/isolation 新实装 + api_smoke 改造 + live_flow 沿用（pdf 读取路径沿用，独立 upload_parse 场景留待域场景扩展，场景地图已登记）
+- [x] 成本闸门：运行前最坏预算推导，运行后批次对账（llm_call_attempts 无 GET 端点，GENERATING 阶段投影对账 + 边界如实声明）；live 需成本/Key 确认（本任务未获确认，未运行如实记录）
 
 ### P8 总验收
 

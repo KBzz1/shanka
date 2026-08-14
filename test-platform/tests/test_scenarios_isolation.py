@@ -95,6 +95,69 @@ class IsolationScenarioTest(unittest.TestCase):
         self.assertEqual(c.calls.count(("logout", "", None)), 1)
         self.assertNotIn("报告字段", buf.getvalue())  # 无本地 user 行残留
 
+    def test_run_deck_id_missing_cleans_up_by_prefix(self) -> None:
+        """异常路径:POST /decks 201 但无 deck_id → 按前缀兜底清理残留牌组再注销。"""
+        def handler(method, path, body):
+            if path == "/auth/register":
+                return Response(201, stub.session_body(f"u-{body['username']}", body["username"]))
+            if path == "/decks" and method == "POST":
+                return Response(201, {"ok": True})  # 缺 deck_id
+            if path == "/decks" and method == "GET":
+                return Response(200, {"items": [
+                    {"deck_id": "deck-iso", "name": "iso-3f2a9c81"},
+                    {"deck_id": "deck-other", "name": "其他牌组"},
+                ]})
+            if path == "/auth/logout":
+                return Response(204, None)
+            return Response(200, {"status": "ok"})
+
+        c = stub.StubClient(handler)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            failed = isolation.run(
+                c, environment="local", username="tester", password="pw-123456",
+                run_id="3f2a9c81d4e54b679c1d2e3f4a5b6c7d",
+            )
+        self.assertGreater(failed, 0)
+        calls = c.calls
+        self.assertIn(("DELETE", "/decks/deck-iso", None), calls)  # 前缀命中才删
+        self.assertNotIn(("DELETE", "/decks/deck-other", None), calls)
+        self.assertEqual(calls.count(("logout", "", None)), 1)
+        self.assertIn("[warn] 异常路径残留牌组已清理: iso-3f2a9c81", buf.getvalue())
+        self.assertIn("local_test_users_created=1", buf.getvalue())
+
+    def test_run_temp_account_bootstrap_failed_restores_main_and_warns(self) -> None:
+        """异常路径:临时账号注册失败 → 切回主账号清理 + WARN(临时 session 可能未撤销)。"""
+        def handler(method, path, body):
+            if path == "/auth/register" and body["username"].startswith("t-"):
+                return Response(500, {"error": {"code": "INTERNAL_ERROR"}})  # 临时账号失败
+            if path == "/auth/register":
+                return Response(201, stub.session_body("u-tester", "tester"))
+            if path == "/decks" and method == "POST":
+                return Response(201, {"deck_id": "deck-a"})
+            if path == "/decks" and method == "GET":
+                return Response(200, {"items": [{"deck_id": "deck-a", "name": "iso-3f2a9c81"}]})
+            if path == "/decks/deck-a" and method == "DELETE":
+                return Response(204, None)
+            if path == "/auth/logout":
+                return Response(204, None)
+            return Response(200, {"status": "ok"})
+
+        c = stub.StubClient(handler)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            failed = isolation.run(
+                c, environment="local", username="tester", password="pw-123456",
+                run_id="3f2a9c81d4e54b679c1d2e3f4a5b6c7d",
+            )
+        self.assertGreater(failed, 0)
+        calls = c.calls
+        # 切回主账号(确定性身份)→ 前缀清理 → 注销主账号 session
+        self.assertIn(("set_token", "tok-u-tester", None), calls)
+        self.assertIn(("DELETE", "/decks/deck-a", None), calls)
+        self.assertEqual(calls.count(("logout", "", None)), 1)
+        self.assertIn("会话可能未撤销", buf.getvalue())
+
     def test_run_no_session_early_return(self) -> None:
         c = stub.StubClient(stub.script(
             ("/auth/login", Response(401, {"error": {"code": "INVALID_CREDENTIALS"}})),
