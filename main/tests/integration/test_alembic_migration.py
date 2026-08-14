@@ -90,7 +90,7 @@ def test_alembic_0002_adds_request_body_hash(alembic_env: tuple[Config, Path]) -
 
 
 def test_alembic_users_auth_sessions_columns(alembic_env: tuple[Config, Path]) -> None:
-    """P3-T1：users/auth_sessions 列集合与约束（username/token_hash UNIQUE、user_id FK）。"""
+    """P3-T1：users/auth_sessions 列集合与约束（email/token_hash UNIQUE、user_id FK）。"""
     config, db_path = alembic_env
     command.upgrade(config, "head")
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -105,12 +105,21 @@ def test_alembic_users_auth_sessions_columns(alembic_env: tuple[Config, Path]) -
             text("SELECT sql FROM sqlite_master WHERE type='table' AND name='auth_sessions'")
         ).scalar_one()
         session_fks = conn.execute(text("PRAGMA foreign_key_list('auth_sessions')")).fetchall()
-    assert set(users) == {"user_id", "username", "password_hash", "created_at", "updated_at"}
+    assert set(users) == {
+        "user_id",
+        "username",
+        "email",
+        "password_hash",
+        "created_at",
+        "updated_at",
+    }
     assert users["user_id"][5] == 1  # PK
     assert users["username"][3] == 1  # NOT NULL
+    assert users["email"][3] == 1  # NOT NULL
     assert users["password_hash"][3] == 1
     assert users["created_at"][3] == 1 and users["updated_at"][3] == 1
-    assert "uq_users_username" in users_sql  # users.username UNIQUE
+    assert "uq_users_email" in users_sql  # users.email UNIQUE（V2.4 登录键）
+    assert "uq_users_username" not in users_sql  # V2.4 username 去唯一（展示名）
     assert set(sessions) == {
         "session_id",
         "user_id",
@@ -440,3 +449,48 @@ def test_alembic_empty_and_legacy_only_downgrade_ok(alembic_env: tuple[Config, P
     # 从 head 降过 V2.3 显式拒绝（downgrade 目标 e85c78b2a345）
     with pytest.raises(RuntimeError, match="迁移不可逆"):
         command.downgrade(config, "e85c78b2a345")
+
+
+def test_v2_4_account_data_wiped_and_downgrade_rejected(
+    alembic_env: tuple[Config, Path],
+) -> None:
+    """V2.4：升级清空 users/auth_sessions 及下游数据；downgrade 显式拒绝（fail-closed）。"""
+    config, db_path = alembic_env
+    # 沿用文件内 legacy 旧库副本 seed 模式：先 upgrade 到 V2.3 终态（b92357b079ca），
+    # 再直插账号域行（users/auth_sessions 各 1 行 + 下游 decks 1 行），随后 upgrade 到 head
+    command.upgrade(config, "b92357b079ca")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO users (user_id, username, password_hash, created_at, updated_at)"
+                " VALUES ('u1', 'alice', 'hash', '2026-01-01T00:00:00.000Z',"
+                " '2026-01-01T00:00:00.000Z')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO auth_sessions (session_id, user_id, token_hash, created_at,"
+                " expires_at, revoked_at)"
+                " VALUES ('s1', 'u1', 'th1', '2026-01-01T00:00:00.000Z',"
+                " '2026-02-01T00:00:00.000Z', NULL)"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO decks (deck_id, user_id, name, source, version, created_at,"
+                " updated_at) VALUES ('d1', 'u1', 'Deck 1', 'MANUAL', 'v1',"
+                " '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
+            )
+        )
+    command.upgrade(config, "head")
+    # 升级后账号域数据清零（users/auth_sessions/下游表）；断言沿用文件内既有单连接串行模式
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM auth_sessions")).scalar() == 0
+        assert conn.execute(text("SELECT COUNT(*) FROM decks")).scalar() == 0
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info('users')"))]
+    assert "email" in cols
+    # V2.4 downgrade 显式拒绝（fail-closed）：迁移文件 downgrade 第一行 raise
+    with pytest.raises(RuntimeError, match="迁移不可逆"):
+        command.downgrade(config, "b92357b079ca")

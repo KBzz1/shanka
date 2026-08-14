@@ -298,15 +298,17 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 ### 2.15 users
 
 账号数据主体(V2.2,决策 D-05):`user_id` 为数据主体隔离键,替代 v2.1 匿名设备隔离。
+(V2.4:登录键切换为 email,username 降为展示名。)
 
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | user_id | TEXT | PK | 服务端生成 |
-| username | TEXT | UNIQUE NOT NULL | 服务端转小写后的规范化值(3~32 位,`[a-z0-9._-]`);UNIQUE 冲突对应 `409 USERNAME_TAKEN` |
+| username | TEXT | NOT NULL | 展示名:1~24 位,中文/字母/数字/._-,可重名(无 UNIQUE) |
+| email | TEXT | NOT NULL | 登录键;服务端转小写规范化;UNIQUE(uq_users_email) |
 | password_hash | TEXT | NOT NULL | Argon2id 输出(生产参数 ≥ `memory_cost=19456 KiB, time_cost=2, parallelism=1`);绝不进入日志/响应 |
 | created_at / updated_at | TEXT | NOT NULL | |
 
-唯一约束:`UNIQUE (username)`。
+唯一约束:`UNIQUE (email)`(约束名 uq_users_email)。
 
 ### 2.16 auth_sessions
 
@@ -323,6 +325,7 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 
 唯一约束:`UNIQUE (token_hash)`。索引:`(user_id)`。
 有效判定:`revoked_at IS NULL AND expires_at > now`。
+V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structure-contract 6.11)。
 
 ## 3. 级联与并发
 
@@ -406,6 +409,12 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 - 删除不可逆:`downgrade` 第一行 `raise RuntimeError`(延续 fail-closed 精神,不假装可回滚);回退仅限恢复升级前备份。
 - owner 恒为 `user_id`;`review_events.device_timezone` 为复习事件负载字段(看板分桶),保留。
 - §0/§1/§2/§3/§4/§6 与 ORM 同批更新(见 PRD V2.3)。
+
+**V2.4 落地(2026-08-14,email 登录键)**:
+
+- 新 revision(ad7849aad10e,down_revision = b92357b079ca):12 张 user 域下游表 + `auth_sessions` + `users` 全量清空(用户裁决:存量测试账号清空重来)→ `users.username` 去唯一(drop `uq_users_username`)→ `users` 加 `email` 列(NOT NULL,登录键,约束 `uq_users_email`,服务端转小写规范化)。
+- 删除不可逆:`downgrade` 第一行 `raise RuntimeError`(fail-closed,延续 V2.3 精神);回退仅限恢复升级前备份。
+- §2.15/§2.16 与 ORM 同批更新(见 PRD V2.4)。
 
 ### 7.2 新卡类型（未来）
 

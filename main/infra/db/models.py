@@ -400,14 +400,17 @@ class LlmCallAttempt(Base):
 class User(Base):
     """2.15 users：账号数据主体（V2.2，决策 D-05；user_id 为数据主体隔离键）。
 
-    username 存服务端转小写后的规范化值；password_hash 为 Argon2id 输出，绝不进入日志/响应。
+    email 为登录键（服务端 lowercase 规范化，UNIQUE）；username 为展示名
+    （1-24 位中文/字母/数字/._-，可重名）；password_hash 为 Argon2id 输出，
+    绝不进入日志/响应。
     """
 
     __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
+    __table_args__ = (UniqueConstraint("email", name="uq_users_email"),)
 
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
     username: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str] = mapped_column(String, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
