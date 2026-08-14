@@ -602,10 +602,11 @@ cd test-platform && python3 runner/run.sh --environment local --suite live --con
 
 ### Task 10: merge 上游 ef2ed95（冲突解决落位）
 
-**Files（frontend-app 内，merge 产生的冲突面）:**
-- `Front/app/src/main/java/com/qiuzhao/flashcards/ui/AppViewModel.kt`（双方改——核心合并）
-- `Front/app/src/main/java/com/qiuzhao/flashcards/ui/Screens.kt`（本仓库改 vs 上游删除——接受上游删除）
-- `Front/app/src/main/java/com/qiuzhao/flashcards/data/ImportParser.kt`（双方改——双语义合并）
+**Files（frontend-app 内，merge 产生的冲突面——探索实测恰 4 个）:**
+- `Front/app/src/main/java/com/qiuzhao/flashcards/ui/AppViewModel.kt`（本仓库 +45 vs 上游 +307——核心合并）
+- `Front/app/src/main/java/com/qiuzhao/flashcards/ui/Screens.kt`（本仓库 +142 vs 上游整文件删除拆分 18 文件——结构性冲突）
+- `Front/app/src/main/java/com/qiuzhao/flashcards/data/ImportParser.kt`（本仓库 +2/-2 vs 上游 +5/-5——双语义合并）
+- `CLAUDE.md`（本仓库 +1 vs 上游 +51 全新）
 
 **Interfaces:**
 - Consumes: merge_base=`544891b1`；本仓库 P6 4 commits（60d62a3..f15457b）；上游 ef2ed95（127 files）。
@@ -617,10 +618,11 @@ cd test-platform && python3 runner/run.sh --environment local --suite live --con
 cd /home/kbzz1/shanka_backend/frontend-app
 git fetch origin
 git merge ef2ed95 --no-edit   # 若 fetch 后远程 head 有更新，以 merge origin/main 为准
-git status   # 列出冲突文件，期望恰为 3 个（AppViewModel.kt / Screens.kt / ImportParser.kt）+ 可能的其他
+git status   # 列出冲突文件，期望恰为 4 个（AppViewModel.kt / Screens.kt / ImportParser.kt / CLAUDE.md）
 ```
 冲突解决规则（spec §4.2 落位）：
-- **Screens.kt（modify/delete）**：接受上游删除（`git rm`）。本仓库 P6 对 Screens.kt 的改动内容（登录入口等）随 Task 11 在 MainActivity/Chrome.kt 层重新落地，不在 Screens.kt 中保留。
+- **Screens.kt（结构性冲突：modify vs 删除+拆分）**：接受上游删除（`git rm`）。先 `git diff 544891b f15457b -- Screens.kt` 逐块核对本仓库 +142 改动内容：视觉/主题类（DeckTheme/DeckThemes 等）→ 上游已在 `ui/DeckTheme.kt` 落位，弃本仓库版；登录入口/逻辑类 → 记录清单，随 Task 11 在 MainActivity/Chrome.kt 层重新落地。
+- **CLAUDE.md**：双方内容合并——上游 51 行（视觉/字体系统/上游项目说明）全留 + 本仓库后端对接说明段保留；若冲突块无法自动合并则手工拼接两段。
 - **AppViewModel.kt**：以上游文件为基底（业务函数/pdf 流程/DataStore 全部保留），**植入本仓库 P6 的 auth 状态机集成块**（对应本仓库 82-88 行）：`sessionStore`、`repository`、`auth = AuthViewModel(...)`、`authState`。上游 `login(email, password, onResult)` 与 `register(nickname, email, password, confirmation, onResult)` 函数体（DataStore 假登录）删除，替换为委托本仓库 auth 状态机（见 Task 11）；其余函数不动。
 - **ImportParser.kt**：合并双方语义——上游的 `sawQA` 段落回退抑制（上游 16/33/41 行版本）+ 本仓库的 `errors.isEmpty()` fallback 守卫（本仓库 41 行版本）。合并后逻辑：`q != null -> { sawQA = true; commit(); pendingQuestion = q }` 且 fallback 条件 `cards.isEmpty() && errors.isEmpty() && !sawQA && text.isNotBlank()`。若冲突块粒度不允许自动合并，取双方行手工拼接。
 - **build.gradle.kts**：保留本仓库 `testImplementation("org.json:json:20240303")`（上游无此依赖差异，若冲突取保留）。
@@ -653,7 +655,8 @@ git -C /home/kbzz1/shanka_backend/frontend-app commit -m "merge: 整合上游 ef
 - Modify: `frontend-app/Front/app/src/main/java/com/qiuzhao/flashcards/ui/AppViewModel.kt`（login/register 委托 auth）
 - Modify: `frontend-app/Front/app/src/main/java/com/qiuzhao/flashcards/MainActivity.kt`（三分支外壳 + 上游视觉组件）
 - Modify: `frontend-app/Front/app/src/main/java/com/qiuzhao/flashcards/ui/AuthScreen.kt`（上游视觉，错误展示接 authState）
-- Modify: `frontend-app/Front/app/src/main/java/com/qiuzhao/flashcards/ui/Chrome.kt`（登录路由处接 auth 状态）
+- Modify: `frontend-app/Front/app/src/main/java/com/qiuzhao/flashcards/ui/Chrome.kt`（删除 accountBootstrap 假账号门控；Login/Register 路由保留）
+- Modify: `frontend-app/Front/app/src/main/java/com/qiuzhao/flashcards/ui/SettingsScreen.kt`（账号区接登出按钮——上游未做的例外 UI）
 - Delete: `frontend-app/Front/app/src/main/java/com/qiuzhao/flashcards/ui/auth/AuthScreens.kt`（本仓库登录视觉全删）
 - Create: `frontend-app/Front/app/src/main/java/com/qiuzhao/flashcards/ui/auth/AuthLoading.kt`（加载态——上游未做、本仓库功能必需，例外保留并按上游设计系统适配）
 
@@ -677,7 +680,7 @@ fun register(nickname: String, email: String, password: String, confirmation: St
 ```
 （`submitLogin`/`submitRegister` 为 AuthViewModel 新增的挂起包装：复用现有 `login/register` 内部 submit 逻辑并返回 `String?` 错误文案——错误文案由本仓库 `authErrorMessage()` 四类映射产出：INVALID_CREDENTIALS/USERNAME_TAKEN/RATE_LIMITED/网络错误；implementer 以最小改动实现，不破坏现有 40 测试中 login/register 语义。）
 
-- [ ] **Step 2: MainActivity 三分支外壳 + 上游视觉组件**
+- [ ] **Step 2: MainActivity 三分支外壳 + 上游视觉组件 + 门控替换**
 
 ```kotlin
 setContent {
@@ -690,8 +693,10 @@ setContent {
     }
 }
 ```
+- **门控替换（关键）**：上游 `Chrome.kt` L159 的 `accountBootstrap.loaded && account == null → navigate(FirstLogin)` 假账号门控（DataStore 三键 ACCOUNT_LOGGED_IN/EMAIL/NICKNAME）**删除**——真实门控统一由 MainActivity 的 authState 三分支承担，避免双门控/双登录屏。上游 FirstLogin/Login/Register 三路由保留（App 内 Settings 跳登录等导航用），但进入条件不再由 accountBootstrap 驱动。
 - 上游 `LoginScreen/RegisterScreen` 内部「切到注册/登录」的导航沿用上游 ScreenNavigator（AppRoute.Login/Register 切换）；本仓库三分支只守「登录态与否」两个门。
-- 上游 `Chrome.kt` 213-216 的 Login/Register 路由保留（App 内导航到登录用）；firstLaunch 直通路径与 MainActivity 外壳二选一，以「不出现双登录屏」为准——若 Chrome.kt 已在未登录时自动落 Login 路由，则 MainActivity 仅保留 Checking 分支 + FlashcardsApp 兜底。
+- **登出入口接线（上游未做、本仓库功能必需的例外 UI）**：上游 AuthScreen 全文件无登出触发点；本仓库 logout 已实现但 Settings 未接。在**上游 SettingsScreen** 的账号区（onAvatar 附近）接登出按钮：点击 → `appViewModel.auth.logout()`（先本地登出立即回登录屏 + 后台撤销，Task 7 语义）→ 上游视觉组件样式呈现按钮。
+- 上游 accountBootstrap 相关 DataStore 键（ACCOUNT_LOGGED_IN/ACCOUNT_EMAIL/ACCOUNT_NICKNAME）与 `accountBootstrap` StateFlow 弃用清理：昵称展示改用 `auth.state` 中 `LoggedIn(user.username)`；`LocalAccount` 类型与 AccountBootstrap 数据类随假账号壳删除（视觉组件若引用 nickname 参数则改传 username）。
 
 - [ ] **Step 3: 视觉单源清理（全量剔除重复视觉）**
 
