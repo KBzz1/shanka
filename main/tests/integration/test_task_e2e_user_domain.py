@@ -206,11 +206,10 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
     assert final["generated_card_count"] == 6
     assert final["ended_at"] is not None
 
-    # 6. 归属判别：全部卡片 user_id 非空（归属切 user 域，新写入不再生成 device_id）
+    # 6. 归属判别：全部卡片 user_id 非空（归属切 user 域）
     engine = create_db_engine(f"sqlite:///{db_path}")
     with engine.connect() as conn:
-        cards = conn.execute(text("SELECT card_id, user_id, device_id, deck_id FROM cards")).all()
+        cards = conn.execute(text("SELECT card_id, user_id, deck_id FROM cards")).all()
     assert len(cards) == 6
     assert all(row[1] is not None for row in cards), "卡片 user_id 应非空（user 域归属）"
-    assert all(row[2] is None for row in cards), "新写入不再生成 device_id（决策 D-06）"
-    assert {row[3] for row in cards} == {deck_id}
+    assert {row[2] for row in cards} == {deck_id}

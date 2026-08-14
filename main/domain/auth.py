@@ -1,4 +1,4 @@
-"""认证主体（structure-contract 1.1：显式 AuthPrincipal，禁止 device_id 伪装身份）。"""
+"""认证主体（structure-contract 1.1：显式 AuthPrincipal，身份不得由其他字段伪装）。"""
 
 from dataclasses import dataclass
 

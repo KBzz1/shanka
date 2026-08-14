@@ -127,8 +127,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # DeviceID，Task 9 在 DeviceID 与 RequestID 之间插入 RateLimit（键用原始头，运行于
     # DeviceID 外层），Task 10 追加 Metrics（最外层），Task 4/V1 在添加序最前加入
     # BodyCapture（运行序最内、路由前，位于 Logging 内层——幂等 body 捕获须先于路由
-    # handler 完成），P4-2 在 RateLimit 与 DeviceID 之间插入 BearerAuth（双头过渡窗口，
-    # 认证先于设备鉴权），P4-3 将 Auth 移出 RateLimit 外层（限流业务维度键改读
+    # handler 完成），P4-3 将 Auth 移出 RateLimit 外层（限流业务维度键改读
     # principal.user_id），P4-3 fix round 1 在 Auth 外层补 IpRateLimit（IP 5 req/s
     # 总闸门——覆盖未认证 401 流量，契约 1.6「全部接口」；业务维度限流位于 Auth 内层
     # 管不到该流量），P4-4 删除 DeviceID（X-Device-ID 退出——Auth 紧邻 RateLimit 内层）。

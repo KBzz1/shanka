@@ -1,7 +1,7 @@
 """样卡 API 集成测试（迁移 schema + HTTP）。
 
 POST /samples 无副作用、不落库，豁免幂等键（structure-contract 1.3/6.3）——
-核心断言：不带 Idempotency-Key 请求成功。种子直写迁移后 DB（FK 强制：devices 前置）。
+核心断言：不带 Idempotency-Key 请求成功。种子直写迁移后 DB（FK 强制：users 前置）。
 """
 
 import uuid

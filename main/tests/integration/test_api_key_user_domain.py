@@ -1,9 +1,10 @@
-"""api_key 用户域判别测试（P4-5；P3 债务闭环：用户域行 ORM 可见、旧 device 域行无访问路径）。
+"""api_key 用户域判别测试（P4-5；P3 债务闭环：用户域行 ORM 可见、旧 device 域行随 V2.3 删除）。
 
-P3-T2 过渡期 ApiKey mapper 身份键曾改写为 device_id（用户域行对 ORM 不可见，写侧因此
-走 Core 直写）；P4-5 移除改写，身份键回 user_id 元数据主键。本文件 HTTP 链两条
-（PUT/status 用户域 + 跨用户隔离）T4 已绿——保留为回归守卫；ORM 可见性两条为本任务
-判别（mapper 移除前红、移除后绿）。
+P3-T2 过渡期 ApiKey mapper 身份键曾改写为 device_id（V2.1 历史：用户域行对 ORM 不可见，
+写侧因此走 Core 直写）；P4-5 移除改写，身份键回 user_id 元数据主键。本文件 HTTP 链两条
+（PUT/status 用户域 + 跨用户隔离）T4 已绿——保留为回归守卫；ORM 可见性为判别
+（mapper 移除前红、移除后绿）；V2.3 起旧 device 域行随不可逆迁移物理删除，判别翻转为
+「列/表不存在 + ORM 只见 user 域行」。
 """
 
 import uuid
@@ -74,7 +75,7 @@ def _user_id(db_path: Path, username: str) -> str:
 
 
 def test_put_and_status_user_domain(client: TestClient, tmp_path: Path) -> None:
-    """PUT 落库（用户域行 user_id 非空、device_id NULL）→ GET status AVAILABLE（T4 已绿守卫）。"""
+    """PUT 落库（用户域行 user_id 非空）→ GET status AVAILABLE（T4 已绿守卫）。"""
     user = auth_headers(client)
     resp = client.put("/api-key", json={"api_key": "sk-test-abcd1234"}, headers={**user, **_idem()})
     assert resp.status_code == 200
@@ -83,9 +84,10 @@ def test_put_and_status_user_domain(client: TestClient, tmp_path: Path) -> None:
 
     engine = create_db_engine(f"sqlite:///{tmp_path / 'key_user_domain.db'}")
     with engine.connect() as conn:
-        row = conn.execute(text("SELECT user_id, device_id FROM api_keys")).one()
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info(api_keys)"))}
+        row = conn.execute(text("SELECT user_id FROM api_keys")).one()
+    assert "device_id" not in cols  # V2.3：api_keys 无 device_id 列（随不可逆迁移删除）
     assert row[0] == _user_id(tmp_path / "key_user_domain.db", "alice")
-    assert row[1] is None  # 新写入不再生成 device_id（决策 D-06）
 
     st = client.get("/api-key/status", headers=user)
     assert st.status_code == 200
@@ -115,37 +117,26 @@ def test_user_domain_row_orm_visible(client: TestClient, tmp_path: Path) -> None
     with factory() as session:
         row = session.get(ApiKey, _user_id(db_path, "alice"))
     assert row is not None  # 身份键回 user_id 元数据主键：用户域行 ORM 可见
-    assert row.device_id is None
     assert "sk-test-orm0001" not in row.encrypted_key  # 红线 4：密文不含明文
 
 
 def test_legacy_device_row_invisible_to_orm(client: TestClient, tmp_path: Path) -> None:
-    """判别（P4-5）：旧 device 域行（user_id NULL）经 ORM 不组装实例（D-06 无访问路径）。
+    """判别（P4-5，V2.3 语义翻转）：旧 device 域行已随不可逆迁移物理删除，ORM 只见 user 域行。
 
-    SQLAlchemy 对 NULL 身份键行不组装 ApiKey 实例（查询结果为 None 占位）——旧行经
-    ORM 不可寻址、不可枚举，与「旧 device 域数据不迁移、不认领、无访问路径」的
-    D-06 语义一致（移除前红：mapper 身份键为 device_id 时旧行可被 ORM 返回）。
+    V2.3 起 devices 表与 api_keys.device_id 列不存在——旧 device 域行无法再被 raw
+    INSERT 构造（D-06 语义由「不可见」升级为「不存在」；V2.1 历史：mapper 身份键为
+    device_id 时旧行可被 ORM 返回，本测试曾断言 [None] 占位）。
     """
-    auth_headers(client)  # users 行前置（HTTP 流）；api_keys 仅 1 行旧 device 域行
+    auth_headers(client)  # users 行前置（HTTP 流）；api_keys 无旧 device 域行可插
     db_path = tmp_path / "key_user_domain.db"
     engine = create_db_engine(f"sqlite:///{db_path}")
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO devices (device_id, first_seen_ip, user_agent, last_active_at,"
-                " created_at)"
-                " VALUES ('dev-legacy', NULL, NULL, NULL, '2026-01-01T00:00:00.000Z')"
-            )
-        )
-        conn.execute(
-            text(
-                "INSERT INTO api_keys (device_id, encrypted_key, status, masked_key, updated_at)"
-                " VALUES ('dev-legacy', 'enc-legacy', 'AVAILABLE', 'sk-****0000',"
-                " '2026-01-01T00:00:00.000Z')"
-            )
-        )
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info(api_keys)"))}
+        tables = {
+            r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+        }
+    assert "device_id" not in cols  # V2.3：api_keys 无 device_id 列
+    assert "devices" not in tables  # V2.3：devices 表已 drop
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
-        assert session.get(ApiKey, "dev-legacy") is None  # 身份键为 user_id，旧行不可寻址
-        # NULL 主键行无法组装身份：ORM 查询结果为 None 占位而非 ApiKey 实例（不可枚举）
-        assert session.query(ApiKey).all() == [None]
+        assert session.query(ApiKey).all() == []  # ORM 只见 user 域行（旧 device 域行已删除）

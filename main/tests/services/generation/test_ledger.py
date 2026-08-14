@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Device, Task, User
+from infra.db.models import Base, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.generation.ledger import (
     attempt_count,
@@ -44,19 +44,18 @@ def session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
 
 
 def _seed(session: Session) -> None:
-    """FK 前置：users + devices + tasks（task_id="t1" 与 brief 测试常量一致）。
+    """FK 前置：users + tasks（task_id="t1" 与 brief 测试常量一致）。
 
-    Task 保持 device 域种子（仅作 task_id 外键父行）；账本行归属切 user（P4-3）。
+    Task 为 user 域种子（仅作 task_id 外键父行）；账本行归属 user（P4-3）。
     """
     session.add(
         User(user_id="u1", username="u-1", password_hash="x", created_at=_NOW, updated_at=_NOW)
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
-    session.add(Device(device_id="d1", created_at=_NOW))
     session.add(
         Task(
             task_id="t1",
-            device_id="d1",
+            user_id="u1",
             status="PENDING",
             selected_chapters="[]",
             generation_config="{}",

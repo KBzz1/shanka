@@ -67,7 +67,7 @@ def create_attempt(
 
     同一 (scope_type, scope_id, stage, operation_key, attempt_no) 只允许一次尝试；
     冲突时回滚本事务（含前序占位），由调用方决定是否重试新 attempt_no。
-    P4-3：归属列切 user_id（device_id 不再写入——DESIGN §5.2）。
+    P4-3：归属列切 user_id。
     """
     attempt = LlmCallAttempt(
         call_id=str(uuid.uuid4()),

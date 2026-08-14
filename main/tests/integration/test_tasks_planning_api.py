@@ -131,7 +131,6 @@ def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dic
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                device_id=None,
                 encrypted_key="enc",
                 status="AVAILABLE",
                 masked_key="sk-****",

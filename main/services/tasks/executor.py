@@ -83,7 +83,9 @@ def _decrypt_api_key(session: Session, *, task: Task, settings: Settings) -> str
     API_KEY_UNAVAILABLE（干净 FAILED，不 500）。
     """
     key = key_from_settings(settings)
-    if task.user_id is None:  # legacy device 域任务（D-06 无访问路径）
+    if (
+        task.user_id is None
+    ):  # 防御：user_id 缺失的历史行（V2.3 起旧 device 域行已删除，防御分支保留）
         raise AppError(ErrorCode.API_KEY_UNAVAILABLE, "API Key 不可用（加密配置缺失或未保存 Key）")
     encrypted = session.scalar(
         select(ApiKey.encrypted_key).where(

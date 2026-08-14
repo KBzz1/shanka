@@ -5,7 +5,7 @@ get_status 只返回 DB 状态（不解密不重校验——校验是写路径�
 明文 Key 只存在于调用栈（handler → service → adapter/crypto），不落库不落日志。
 
 P4-4（原 plan Task 5 前移）：Key 归属切 user 域——写入/查询一律按 user_id。
-V2.3：设备架构彻底清除——device_id 遗留列随不可逆迁移删除，本服务只操作用户域行
+V2.3：设备架构彻底清除（遗留列随不可逆迁移删除），本服务只操作用户域行
 （user_id 主键）。
 """
 

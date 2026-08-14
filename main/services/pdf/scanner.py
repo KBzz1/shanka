@@ -112,7 +112,7 @@ def process_pending(session: Session, *, storage: Any) -> int:
                 # 不能叫 message：与 JSON formatter 的日志正文字段冲突（G101）
                 "error_message": str(exc),
                 "file_id": row.file_id,
-                # device_id 不进日志（§4.5）：file_id 已足够定位（P4-6a review）
+                # 身份字段不进日志（§4.5）：file_id 已足够定位（P4-6a review）
             },
         )
         row.status = "FAILED"

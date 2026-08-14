@@ -2,8 +2,8 @@
 
 仅对写方法（POST/PUT/PATCH/DELETE）读取 body 缓存到 request.state.raw_body（bytes）；
 GET/HEAD 不读取。请求日志不记录 body（红线 4），本中间件只缓存不落日志。
-运行序：位于 Logging 内层（路由前）——Metrics → RequestID → RateLimit → DeviceID →
-Logging → BodyCapture → 路由，详见 main.py 装配。
+运行序：位于 Logging 内层（路由前）——Metrics → RequestID → IpRateLimit → Auth →
+RateLimit → Logging → BodyCapture → 路由，详见 main.py 装配。
 
 PDF 上传预检（final review I-1）：POST /pdfs 且 Content-Length 头超限 → 直接 400
 PDF_UPLOAD_INVALID，在读 body 之前拒绝——否则超大 body 先被全量缓存放大内存。

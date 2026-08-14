@@ -2,8 +2,8 @@
 
 字段：timestamp(ISO 8601 UTC) / level / request_id / user_id / task_id /
 batch_id / error_code / message；记录上的附加属性（method/path/status/
-duration_ms）以扁平键输出。P4-6：身份字段切 user_id（device_id 已随
-X-Device-ID 退出）。敏感红线（1.5/7.1）：API Key、完整 PDF 内容、
+duration_ms）以扁平键输出。P4-6：身份字段切 user_id。敏感红线（1.5/7.1）：API Key、
+完整 PDF 内容、
 完整 Prompt 不落日志——请求日志不记录任何请求体。
 """
 

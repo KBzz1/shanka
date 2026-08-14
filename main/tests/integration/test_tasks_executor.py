@@ -58,7 +58,7 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
     from services.decks.service import create_deck
     from services.pdf.text_chunks import persist_text_chunks
 
-    # 守卫插入：同 user 二次建任务（防回退用例）复用已存在的 users/devices/api_keys 行
+    # 守卫插入：同 user 二次建任务（防回退用例）复用已存在的 users/api_keys 行
     if session.get(User, user_id) is None:
         session.add(
             User(
@@ -90,7 +90,6 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -216,7 +215,6 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",

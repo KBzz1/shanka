@@ -1,7 +1,7 @@
 """services.pdf.scanner 集成测试：状态机/章节落库/失败分支/恢复。
 
-V1 教训 carry-forward：devices FK 强制（PRAGMA foreign_keys=ON），scanner 测试
-需显式建立 devices 行（见 test_pdf_service.py 同款 _ensure_device）。
+V1 教训 carry-forward：user_id FK 强制（PRAGMA foreign_keys=ON），scanner 测试
+需显式建立 users 行（见 test_pdf_service.py 同款 _ensure_user）。
 """
 
 import uuid
@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Chapter, Device, PdfFile
+from infra.db.models import Base, Chapter, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.storage.local import LocalStorage
 from services.pdf.scanner import process_pending, scan_once, validate_upload
@@ -39,17 +39,25 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _ensure_device(session: Session, device_id: str) -> None:
-    """devices 行先落库（FK 强制）：scanner 测试需显式建立。"""
-    session.add(Device(device_id=device_id, created_at="2026-08-11T00:00:00.000Z"))
+def _ensure_user(session: Session, user_id: str) -> None:
+    """users 行先落库（FK 强制）：scanner 测试需显式建立。"""
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            password_hash="x",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
     session.flush()
 
 
-def _seed_pending(session: Session, *, device_id: str, storage_key: str) -> str:
-    _ensure_device(session, device_id)
+def _seed_pending(session: Session, *, user_id: str, storage_key: str) -> str:
+    _ensure_user(session, user_id)
     pdf = PdfFile(
         file_id=_uuid(),
-        device_id=device_id,
+        user_id=user_id,
         filename="book.pdf",
         storage_key=storage_key,
         size_bytes=100,
@@ -66,10 +74,10 @@ def test_scanner_process_pending_parses_sample(
 ) -> None:
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         storage_key = storage.save(SAMPLE.read_bytes())
-        file_id = _seed_pending(session, device_id=device, storage_key=storage_key)
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
         n = process_pending(session, storage=storage)
@@ -87,10 +95,10 @@ def test_scanner_process_pending_failed_keeps_file(
     session_factory: sessionmaker[Session], storage: LocalStorage
 ) -> None:
     """损坏 PDF → FAILED + error_code，原始文件保留。"""
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         storage_key = storage.save(b"not a real pdf content")
-        file_id = _seed_pending(session, device_id=device, storage_key=storage_key)
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
         n = process_pending(session, storage=storage)
@@ -109,15 +117,15 @@ def test_scanner_scan_once_resumes_after_restart(
     """重启恢复：PENDING/PARSING 残留重新入队处理。"""
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
         key1 = storage.save(SAMPLE.read_bytes())
-        f1 = _seed_pending(session, device_id=device, storage_key=key1)
+        f1 = _seed_pending(session, user_id=user, storage_key=key1)
         # PARSING 残留（模拟崩溃）
         key2 = storage.save(SAMPLE.read_bytes())
         pdf2 = PdfFile(
             file_id=_uuid(),
-            device_id=device,
+            user_id=user,
             filename="b2.pdf",
             storage_key=key2,
             size_bytes=100,
@@ -175,12 +183,12 @@ def test_scanner_process_pending_no_toc_fails(
     T3 审查补覆盖：T1 解析器测试只到 parse_pdf 抛错；此处走完整扫描路径验证
     FAILED 终态与 error_code 落库（流程停止）。
     """
-    device = _uuid()
+    user = _uuid()
     pdf_path = tmp_path / "notoc.pdf"
     _write_text_page(pdf_path)
     with session_factory() as session:
         storage_key = storage.save(pdf_path.read_bytes())
-        file_id = _seed_pending(session, device_id=device, storage_key=storage_key)
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
         n = process_pending(session, storage=storage)

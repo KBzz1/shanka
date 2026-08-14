@@ -30,7 +30,6 @@ from infra.db.models import (
     Batch,
     Card,
     Chapter,
-    Device,
     KnowledgePoint,
     LlmCallAttempt,
     PdfFile,
@@ -162,7 +161,6 @@ def _seed_scoring_task(
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -188,7 +186,7 @@ def _seed_scoring_task(
         ),
         now=_NOW,
     )
-    # P4-4：executor 密钥查找已切 user 域；ApiKey 种子 device_id=NULL 满足 CHECK 双非空
+    # P4-4：executor 密钥查找已切 user 域
     task.status = "RUNNING"
     task.stage = "GENERATING"
     task.updated_at = _NOW
@@ -938,18 +936,16 @@ def test_scoring_cancel_during_call_no_writeback(session_factory: Callable[[], S
 
 
 def test_scoring_legacy_task_no_user_fails_clean(session_factory: Callable[[], Session]) -> None:
-    """T3 Minor ①：legacy 任务（user_id NULL，device 域）→ run_scoring_stage 干净
+    """T3 Minor ①：legacy 任务（user_id NULL 的历史行）→ run_scoring_stage 干净
     GENERATION_FAILED（不 500 兜底语义、不发 LLM 调用、不产生无主账本行）。"""
     from services.generation.scoring import run_scoring_stage
 
     user = _uuid()
     with session_factory() as session:
         task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
-        session.add(Device(device_id="legacy-dev", created_at=_NOW))
         task = session.get(Task, task_id)
         assert task is not None
-        task.device_id = "legacy-dev"
-        task.user_id = None  # 模拟 P4-3 前 device 域旧任务（CHECK 双非空经 device_id 满足）
+        task.user_id = None  # 直插模拟 user_id 缺失的历史行（SQLAlchemy 允许，无需其他表）
         session.commit()
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)

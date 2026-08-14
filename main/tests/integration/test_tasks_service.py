@@ -1,8 +1,8 @@
 """任务 service 集成测试：创建/状态机/取消/resume/校验（真实 SQLite + fake 执行）。
 
 carry-forward（V1 教训）：engine 级 PRAGMA foreign_keys=ON（database-design 0），
-pdf/deck/task/api_keys 均 FK → devices——fixture 先建设备行
-（HTTP 流中由 F1 设备中间件自动建立，本层显式补种）；tasks 校验 Key 需 ApiKey 种子。
+pdf/deck/task/api_keys 均 FK → users——fixture 先建 users 行
+（HTTP 流中由注册端点建立，本层显式补种）；tasks 校验 Key 需 ApiKey 种子。
 """
 
 import json
@@ -35,9 +35,9 @@ def _uuid() -> str:
 
 
 def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> dict[str, Any]:
-    """users/devices 前置 + PDF/章节/牌组 + ApiKey 种子（tasks 校验 Key）。
+    """users 前置 + PDF/章节/牌组 + ApiKey 种子（tasks 校验 Key）。
 
-    PDF/牌组 user 域（tasks 归属校验）；ApiKey/Device 保持 device 域（Task 5 前）。
+    PDF/牌组/ApiKey 均 user 域（P4-3/P4-4 切换）。
     """
     session.add(
         User(
@@ -80,7 +80,6 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                device_id=None,
                 encrypted_key="enc",
                 status="AVAILABLE",
                 masked_key="sk-****",

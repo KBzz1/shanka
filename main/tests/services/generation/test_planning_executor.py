@@ -25,7 +25,6 @@ from infra.db.models import (
     Base,
     Batch,
     Chapter,
-    Device,
     KnowledgePoint,
     LlmCallAttempt,
     PdfFile,
@@ -128,7 +127,6 @@ def _seed_planning_task(
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
@@ -938,17 +936,15 @@ def test_planning_legacy_task_no_user_fails_clean(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T3 Minor ①：legacy 任务（user_id NULL，device 域）→ run_planning 干净 FAILED
+    """T3 Minor ①：legacy 任务（user_id NULL 的历史行）→ run_planning 干净 FAILED
     （PLANNING_TASK_INCOMPLETE 内部原因入日志、error_code 兜底 GENERATION_FAILED），
     不 500、不发 LLM 调用、不产生无主账本行。"""
     user = _uuid()
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
-        session.add(Device(device_id="legacy-dev", created_at=_NOW))
         task = session.get(Task, task_id)
         assert task is not None
-        task.device_id = "legacy-dev"
-        task.user_id = None  # 模拟 P4-3 前 device 域旧任务（CHECK 双非空经 device_id 满足）
+        task.user_id = None  # 直插模拟 user_id 缺失的历史行（SQLAlchemy 允许，无需其他表）
         session.commit()
     with session_factory() as session:
         calls = 0

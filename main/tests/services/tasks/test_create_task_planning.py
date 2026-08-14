@@ -1,7 +1,7 @@
 """任务创建改造测试（spec §6.1/§10；Task 8）：PENDING+PLANNING 创建快照 + 预算硬上限。
 
 - 基座同 test_tasks_service.py：真实 SQLite（PRAGMA foreign_keys=ON）全表建库，
-  devices 前置 + PDF/章节/牌组 + ApiKey 种子；
+  users 前置 + PDF/章节/牌组 + ApiKey 种子；
 - brief 中 `settings_override` fixture 在仓库不存在（T7 先例同样 adaptation），按
   仓库约定显式构造 Settings：预算测试走 executor 定式 `session.info["settings"]`
   注入通道，边界测试走 create_task 显式参数通道（adaptation 见任务报告）；
@@ -50,7 +50,7 @@ def _uuid() -> str:
 def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str, Any]:
     """users 前置 + PDF + chapter_count 章节 + 牌组 + ApiKey 种子（tasks 校验 Key）。
 
-    ApiKey/Device 保持 device 域种子（Task 5 前），键值同 user_id（过渡）。
+    ApiKey user 域种子（P4-4）。
     """
     session.add(
         User(
@@ -99,7 +99,6 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
     session.execute(
         insert(ApiKey).values(
             user_id=user_id,
-            device_id=None,
             encrypted_key="enc",
             status="AVAILABLE",
             masked_key="sk-****",

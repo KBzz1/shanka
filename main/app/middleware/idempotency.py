@@ -6,8 +6,7 @@ execute_idempotent 由写接口 handler 在请求级 session 内调用：
 - 重复：同键同 body → 重放首次成功响应（不执行业务）；同键异 body → 409 IDEMPOTENCY_CONFLICT。
 - 并发：唯一约束 (user_id, path, idempotency_key) 抢占；后到事务（BEGIN IMMEDIATE 串行化）回滚
   后重读 → 重放，保证业务副作用仅一次（AC-05/AC-10）。
-- V2.2：幂等域 = user（P4-3 切换）；新行只写 user_id（满足 CHECK 双非空），
-  device_id 不再写入（旧 device 域行不可见——D-06 无访问路径）。
+- V2.2：幂等域 = user（P4-3 切换）；新行只写 user_id。
 """
 
 import hashlib

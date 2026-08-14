@@ -21,7 +21,7 @@ AC-07-c Rubric/Cache 异常不影响入库规则 → usage 缺失（token 观测
         入库 SUCCEEDED
 
 后台循环间隔拉大（3600s）隔离：测试显式调 executor.scan_once（test_tasks_api 同款"显式
-scan_once"模式）；种子直写迁移后 DB（devices 前置 + 真实加密 Key——executor 解密路径 +
+scan_once"模式）；种子直写迁移后 DB（users 前置 + 真实加密 Key——executor 解密路径 +
 text_chunks 页文本——规划输入）。
 """
 
@@ -236,7 +236,6 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",

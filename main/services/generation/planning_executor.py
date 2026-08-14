@@ -433,7 +433,7 @@ def _run_group(
         )
         user_id = task.user_id
         if user_id is None:
-            # 遗留 device 域任务（P4-3）：新账本行只写 user_id（DESIGN §5.2）→ 任务无法继续
+            # 防御：user_id 缺失的历史行（V2.3 起旧 device 域行已删除，防御分支保留）
             _fail_planning_inplace(
                 session,
                 task,

@@ -190,7 +190,6 @@ def _seed_context(db_path: Path, *, user_id: str, with_key: bool = True) -> dict
             session.execute(
                 insert(ApiKey).values(
                     user_id=user_id,
-                    device_id=None,
                     encrypted_key=_ENCRYPTED_TEST_KEY,
                     status="AVAILABLE",
                     masked_key="sk-****",

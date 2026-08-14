@@ -61,7 +61,6 @@ def _seed_card(session: Session) -> Card:
     session.execute(
         insert(ApiKey).values(
             user_id=_USER,
-            device_id=None,
             encrypted_key=_ENCRYPTED_TEST_KEY,
             status="AVAILABLE",
             masked_key="sk-****",

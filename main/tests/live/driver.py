@@ -190,15 +190,14 @@ def _save_dry_run_key(
 ) -> None:
     """dry-run Key 直插：用户域 Core 直写（与 services/api_key/service.py save_key 同款）。
 
-    device_id=NULL（DESIGN §5.2：新写入不得生成 device_id）；测试直插走 Core 列投影避免
-    加载完整 ORM 实例（与 tests/integration/test_api_key_service.py 同款）。
-    P4-4 review MAJOR-1：T4 前此处走 ORM device 域行，T4 后 devices 无注册行（FK 无匹配
-    → IntegrityError）且 create_task/executor 按 user_id 查 Key（device 域行不可见）。
+    测试直插走 Core 列投影避免加载完整 ORM 实例（与 tests/integration/test_api_key_service.py
+    同款）。P4-4 review MAJOR-1（V2.1 历史）：T4 前此处走 ORM device 域行，T4 后 devices
+    无注册行（FK 无匹配 → IntegrityError）且 create_task/executor 按 user_id 查 Key（device
+    域行不可见）。V2.3 起 devices 表与 api_keys.device_id 列已随不可逆迁移删除。
     """
     session.execute(
         insert(ApiKey).values(
             user_id=user_id,
-            device_id=None,
             encrypted_key=encrypt_key(api_key, encryption_key),
             status="AVAILABLE",
             masked_key=masked(api_key),
@@ -333,13 +332,11 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
         rate_limit_pdf_per_hour=1000,
     )
     session_factory = migrate_db(db_path)
-    device_id = args.device_id or str(uuid.uuid4())
-    headers: dict[str, str] = {}  # P4-4：X-Device-ID 已退出，仅 Bearer（下方注册后注入）
+    headers: dict[str, str] = {}  # Bearer only（P4-4；下方注册后注入）
 
     report: dict[str, Any] = {
         "driver": "r1-live-driver",
         "mode": "live" if live else "dry-run",
-        "device_id": device_id,
         "frame": {"path": str(args.frame), "seed": frame.get("seed"), "block_count": len(blocks)},
         "budgets": {"max_cost_yuan": args.max_cost_yuan, "max_total_yuan": args.max_total_yuan},
         "effective_date": datetime.now(UTC).date().isoformat(),
@@ -665,7 +662,6 @@ def main() -> None:
     parser.add_argument("--max-cost-yuan", type=float, default=5.0, help="单单元成本上限（元）")
     parser.add_argument("--max-total-yuan", type=float, default=10.0, help="总成本上限（元）")
     parser.add_argument("--limit", type=int, default=0, help="只执行前 N 个单元（0 = 全部）")
-    parser.add_argument("--device-id", type=str, default="", help="固定设备 ID（默认随机 UUID）")
     parser.add_argument(
         "--env-file", type=str, default=str(_DEFAULT_ENV_FILE), help=".env 路径（仅运行时读取）"
     )

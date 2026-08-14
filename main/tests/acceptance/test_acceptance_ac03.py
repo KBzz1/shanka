@@ -7,7 +7,7 @@
 - AC-03-d 不能编辑且不入牌组不统计 → 样卡不落库（cards/review_states 无行）：
   无持久化即无编辑入口（"不能编辑"由结构保证）；正式统计只读库内卡片，无卡片自然不统计。
 
-PDF 上下文（plan Task 5 决策）：种 DB 行（Device + PdfFile PARSED + Chapters），
+PDF 上下文（plan Task 5 决策）：种 DB 行（User + PdfFile PARSED + Chapters），
 不依赖样书——AC-03 聚焦样卡构成，PDF 全链路由 AC-01 覆盖。
 POST /samples 豁免 Idempotency-Key（契约 1.3 唯一豁免），请求不带幂等键。
 """
@@ -58,7 +58,7 @@ def _config() -> dict[str, object]:
     }
 
 
-def _seed_pdf_context(client: TestClient, device: dict[str, str]) -> tuple[str, list[str]]:
+def _seed_pdf_context(client: TestClient, user: dict[str, str]) -> tuple[str, list[str]]:
     """种 DB 行：User（FK 前置）+ PdfFile(PARSED) + 2 章节（plan Task 5 决策，避免样书依赖）。"""
     app = cast(FastAPI, client.app)
     factory = app.state.session_factory
@@ -94,8 +94,8 @@ def _seed_pdf_context(client: TestClient, device: dict[str, str]) -> tuple[str, 
 
 def test_acceptance_ac03_sample_cards(client: TestClient) -> None:
     """AC-03：3 张样卡（三档难度各 1；2 问答 + 1 判断）；不入牌组不统计。"""
-    device = _user(client)
-    file_id, chapter_ids = _seed_pdf_context(client, device)
+    user = _user(client)
+    file_id, chapter_ids = _seed_pdf_context(client, user)
     resp = client.post(
         "/samples",
         json={
@@ -103,7 +103,7 @@ def test_acceptance_ac03_sample_cards(client: TestClient) -> None:
             "chapter_ids": chapter_ids,
             "generation_config": _config(),
         },
-        headers=device,  # 无 Idempotency-Key：幂等豁免（契约 1.3）
+        headers=user,  # 无 Idempotency-Key：幂等豁免（契约 1.3）
     )
     assert resp.status_code == 200
     cards = resp.json()["sample_cards"]

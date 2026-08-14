@@ -42,7 +42,7 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
     from infra.db.models import ApiKey, Chapter, PdfFile
     from services.decks.service import create_deck
 
-    # FK 前置守卫：users/devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
+    # FK 前置守卫：users 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
     if session.get(User, user_id) is None:
         session.add(
             User(
@@ -73,7 +73,6 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
     session.execute(
         insert(ApiKey).values(
             user_id=user_id,
-            device_id=None,
             encrypted_key="enc",
             status="AVAILABLE",
             masked_key="sk-****",
@@ -235,10 +234,10 @@ def test_batches_failed_batch_skipped_after_retries(session_factory: Callable[[]
 
 
 def test_batches_legacy_task_no_user_fails_clean(session_factory: Callable[[], Session]) -> None:
-    """T3 Minor ①：legacy 任务（user_id NULL，device 域）→ process_next_batch 干净
+    """T3 Minor ①：legacy 任务（user_id NULL 的历史行）→ process_next_batch 干净
     GENERATION_FAILED（不 500 兜底、不产生无主账本行 LlmCallAttempt、不落卡）。"""
     from app.errors import AppError
-    from infra.db.models import Device, LlmCallAttempt
+    from infra.db.models import LlmCallAttempt
 
     user = _uuid()
     with session_factory() as session:
@@ -246,11 +245,9 @@ def test_batches_legacy_task_no_user_fails_clean(session_factory: Callable[[], S
     with session_factory() as session:
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
         plan_batches(session, task_id=task_id, generation_units=kps, now=_NOW)
-        session.add(Device(device_id="legacy-dev", created_at=_NOW))
         task = session.get(Task, task_id)
         assert task is not None
-        task.device_id = "legacy-dev"
-        task.user_id = None  # 模拟 P4-3 前 device 域旧任务（CHECK 双非空经 device_id 满足）
+        task.user_id = None  # 直插模拟 user_id 缺失的历史行（SQLAlchemy 允许，无需其他表）
         session.commit()
     client = _client_ok(session_factory)
     with session_factory() as session:

@@ -1,8 +1,7 @@
 """请求日志中间件（structure-contract 8.1）：INFO 请求进出；不记录请求体（1.5 红线）。
 
 记录字段：method/path/status/duration_ms + request_id/user_id 上下文（P4-6：身份字段
-切 user_id——principal 存在时记录 principal.user_id，匿名请求省略该字段；device_id
-已随 X-Device-ID 退出）。
+切 user_id——principal 存在时记录 principal.user_id，匿名请求省略该字段）。
 
 敏感路径（/auth/register /auth/login /api-key）：本中间件从不记录 headers（Authorization/
 密码/token 绝不入日志），BodyCapture 只提供幂等 body hash、不落 body 原文——敏感路径
@@ -20,7 +19,7 @@ logger = logging.getLogger("app.middleware.logging")
 
 
 def _identity_extra(request: Request, extra: dict[str, object]) -> dict[str, object]:
-    """身份字段（P4-6）：principal 存在时附 user_id；匿名请求省略（device_id 已退出）。"""
+    """身份字段（P4-6）：principal 存在时附 user_id；匿名请求省略。"""
     principal = getattr(request.state, "principal", None)
     if principal is not None:
         extra["user_id"] = principal.user_id

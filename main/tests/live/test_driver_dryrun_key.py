@@ -1,9 +1,9 @@
 """driver dry-run Key 直插判别测试（P4-4 review MAJOR-1 回归锁定）。
 
-回归背景：T4 前 dry-run Key 直插走 ORM device 域行；T4 后 headers 无 X-Device-ID、
-devices 无注册行（FK 无匹配 → IntegrityError 崩溃），且 create_task/executor 按 user_id
-查 Key（device 域行不可见 → 全单元 422 API_KEY_NOT_SET）。本测试锁定修复：直插行
-user_id 非空 + device_id NULL（FK 通过）+ user 域服务查询可见。
+回归背景（V2.1 历史）：T4 前 dry-run Key 直插走 ORM device 域行；T4 后 headers 无
+X-Device-ID、devices 无注册行（FK 无匹配 → IntegrityError 崩溃），且 create_task/executor
+按 user_id 查 Key（device 域行不可见 → 全单元 422 API_KEY_NOT_SET）。本测试锁定修复：
+直插行 user_id 非空（V2.3 起 api_keys 已无 device_id 列）+ user 域服务查询可见。
 """
 
 import secrets
@@ -20,7 +20,7 @@ from tests.live.driver import _DRY_RUN_KEY, _save_dry_run_key, migrate_db
 
 
 def test_dry_run_key_insert_user_domain(tmp_path: Path) -> None:
-    """直插行 user_id 非空 device_id NULL（FK 通过）+ get_status 按 user_id 可见。"""
+    """直插行 user_id 非空（api_keys 无 device_id 列）+ get_status 按 user_id 可见。"""
     db_path = tmp_path / "driver.db"
     session_factory = migrate_db(db_path)
     user_id = str(uuid.uuid4())
@@ -45,9 +45,11 @@ def test_dry_run_key_insert_user_domain(tmp_path: Path) -> None:
         session.commit()
 
     with session_factory() as session:
-        row = session.execute(select(ApiKey.user_id, ApiKey.device_id, ApiKey.status)).one()
+        # V2.3：api_keys 表无 device_id 列（随不可逆迁移删除）
+        cols = {row[1] for row in session.execute(text("PRAGMA table_info(api_keys)"))}
+        assert "device_id" not in cols
+        row = session.execute(select(ApiKey.user_id, ApiKey.status)).one()
         assert row.user_id == user_id
-        assert row.device_id is None  # 新写入不得生成 device_id（DESIGN §5.2）
         assert row.status == "AVAILABLE"
         status = get_status(session, user_id=user_id, encryption_key=enc_key)
         assert status["status"] == "AVAILABLE"

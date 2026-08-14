@@ -184,7 +184,7 @@ def test_operation_key_task_domain_and_ledger_idempotent(ctx: tuple[TestClient, 
     _task_id, _deck_id = _create_task_before_executor(client, user)
 
     _run_executor_until_done(db_path)
-    rows = _db_exec(db_path, "SELECT operation_key, user_id, device_id FROM llm_call_attempts")
+    rows = _db_exec(db_path, "SELECT operation_key, user_id FROM llm_call_attempts")
     assert rows, "账本应有调用行"
     # operation_key 纯任务域（planning:{chapter_id}:{gi} / generating:{batch_id} /
     # scoring:{group_key}），不含 user/session 维度（会话轮换不使账本恢复失效）
@@ -192,10 +192,9 @@ def test_operation_key_task_domain_and_ledger_idempotent(ctx: tuple[TestClient, 
     op_keys = [str(r[0] or "") for r in rows]
     assert all(key.startswith(stage_prefixes) for key in op_keys)
     assert all("user" not in key and "session" not in key for key in op_keys)
-    # 归属判别：账本行 user_id 非空（= task.user_id）、device_id NULL
+    # 归属判别：账本行 user_id 非空（= task.user_id）
     task_user = _db_exec(db_path, "SELECT user_id FROM tasks LIMIT 1")[0][0]
     assert all(r[1] == task_user for r in rows), "账本行 user_id 应等于 task.user_id"
-    assert all(r[2] is None for r in rows), "账本行不再写 device_id（DESIGN §5.2）"
 
     # 再次扫描：账本行数守恒（状态机/CAS 幂等，不依赖 session）
     count_before = len(rows)

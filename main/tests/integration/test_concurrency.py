@@ -61,7 +61,7 @@ def _seed_task(
     from services.pdf.text_chunks import persist_text_chunks
     from services.tasks.service import create_task
 
-    # FK 前置守卫：users/devices 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
+    # FK 前置守卫：users 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
     if session.get(User, user_id) is None:
         session.add(
             User(
@@ -98,7 +98,6 @@ def _seed_task(
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                device_id=None,
                 encrypted_key=_ENCRYPTED_TEST_KEY,
                 status="AVAILABLE",
                 masked_key="sk-****",
