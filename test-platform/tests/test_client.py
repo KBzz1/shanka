@@ -190,6 +190,20 @@ class ClientTest(unittest.TestCase):
         c.request("GET", "/ok", step="probe")
         self.assertEqual(REQ_HEADERS["/ok"]["Authorization"], "")
 
+    def test_register_login_strip_auth_header_after_set_token(self) -> None:
+        """brief 硬性语义:register/login 恒不带头——即使先 set_token 也不发送 Authorization。"""
+        c = self._client()
+        c.set_token("tok-held")
+        r = c.register("tester", "pw-secret-123")
+        self.assertEqual(r.status, 201)
+        self.assertEqual(REQ_HEADERS["/auth/register"]["Authorization"], "")
+        r = c.login("tester", "pw-secret-123")
+        self.assertEqual(r.status, 200)
+        self.assertEqual(REQ_HEADERS["/auth/login"]["Authorization"], "")
+        # 对照:普通请求仍携带已持有的 token(剥离仅作用于凭据路径)
+        c.request("GET", "/ok", step="probe")
+        self.assertEqual(REQ_HEADERS["/ok"]["Authorization"], "Bearer tok-held")
+
     def test_register_login_single_attempt_on_429(self) -> None:
         """DESIGN 4.4:register/login 不自动重试,防网络重放静默创建多条会话。"""
         global FAIL_AUTH

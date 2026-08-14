@@ -65,11 +65,15 @@ class ShankaClient:
         self._token = token
 
     def register(self, username: str, password: str) -> Response:
-        """POST /auth/register:不带头/不重试/不落事件(凭据与响应 token 脱敏)。"""
+        """POST /auth/register:恒不带头/不重试/不落事件(凭据与响应 token 脱敏)。
+
+        Authorization 显式剥离(即使先 set_token 也不发送)——brief 硬性语义,
+        不依赖后端对 /auth/register 的鉴权豁免。
+        """
         return self._credential_request("/auth/register", username, password)
 
     def login(self, username: str, password: str) -> Response:
-        """POST /auth/login:不带头/不重试/不落事件。token 由调用方按需 set_token 持有。"""
+        """POST /auth/login:恒不带头/不重试/不落事件。token 由调用方按需 set_token 持有。"""
         return self._credential_request("/auth/login", username, password)
 
     def _credential_request(self, path: str, username: str, password: str) -> Response:
@@ -78,6 +82,7 @@ class ShankaClient:
             path,
             body={"username": username, "password": password},
             retry=False,
+            auth=False,
         )
 
     def logout(self) -> Response:
@@ -97,10 +102,11 @@ class ShankaClient:
         idempotent: bool = False,
         retry: bool = True,
         step: str = "",
+        auth: bool = True,
     ) -> Response:
         started = time.monotonic()
         headers = {"Content-Type": "application/json"}
-        if self._token:
+        if auth and self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         if idempotent:
             headers["Idempotency-Key"] = str(uuid.uuid4())
