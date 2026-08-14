@@ -15,6 +15,9 @@
 
 实现：内存固定窗口（单实例 MVP；多实例演进时换共享存储，业务逻辑不变——见契约 4.4 定式）。
 超限：429 RATE_LIMITED + Retry-After 响应头（秒）。
+
+时钟：构造可注入 clock（RateLimiter 透传）——测试侧固定时钟消除 60s 窗口边界
+flakiness；生产装配不传（默认 time.monotonic，与 ip_limit 一致）。
 """
 
 import logging
@@ -85,21 +88,30 @@ class RateLimiter:
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp, settings: Settings) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        settings: Settings,
+        *,
+        clock: Callable[[], float] | ClockLike | None = None,
+    ) -> None:
         super().__init__(app)
         self.settings = settings
+        effective_clock = clock if clock is not None else time.monotonic
         self._write_limiter = RateLimiter(
-            limit=settings.rate_limit_write_per_minute, window_seconds=60
+            limit=settings.rate_limit_write_per_minute, window_seconds=60, clock=effective_clock
         )
         self._api_key_limiter = RateLimiter(
-            limit=settings.rate_limit_api_key_per_hour, window_seconds=3600
+            limit=settings.rate_limit_api_key_per_hour, window_seconds=3600, clock=effective_clock
         )
         self._samples_limiter = RateLimiter(
-            limit=settings.rate_limit_samples_per_hour, window_seconds=3600
+            limit=settings.rate_limit_samples_per_hour, window_seconds=3600, clock=effective_clock
         )
-        self._pdf_limiter = RateLimiter(limit=settings.rate_limit_pdf_per_hour, window_seconds=3600)
+        self._pdf_limiter = RateLimiter(
+            limit=settings.rate_limit_pdf_per_hour, window_seconds=3600, clock=effective_clock
+        )
         self._auth_limiter = RateLimiter(
-            limit=settings.rate_limit_auth_per_hour, window_seconds=3600
+            limit=settings.rate_limit_auth_per_hour, window_seconds=3600, clock=effective_clock
         )
 
     async def dispatch(

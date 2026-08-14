@@ -10,11 +10,12 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from app.middleware.ip_limit import IpRateLimitMiddleware
+from app.middleware.rate_limit import RateLimitMiddleware
 from tests.conftest import auth_headers
 
 
 class _ManualClock:
-    """手动推进时钟（IpRateLimitMiddleware clock 注入）：窗口边界可控，不跨真实秒。"""
+    """手动推进时钟（限流中间件 clock 注入）：窗口边界可控，不跨真实秒。"""
 
     def __init__(self, t: float = 1000.0) -> None:
         self.t = t
@@ -66,6 +67,30 @@ def test_rate_limit_write_dimension_429_with_retry_after(tmp_path: Path) -> None
     assert "Retry-After" in resp.headers
     assert int(resp.headers["Retry-After"]) > 0
     assert resp.json()["error"]["code"] == "RATE_LIMITED"
+
+
+def test_write_bucket_window_advance_with_manual_clock(tmp_path: Path) -> None:
+    """write 桶 60s 窗口：固定时钟推进跨窗口后复位（不依赖真实时间）。"""
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'rl_write_clock.db'}",
+        storage_path=tmp_path / "storage",
+        rate_limit_write_per_minute=3,
+    )
+    clock = _ManualClock(0.0)
+    app = FastAPI()
+    app.add_middleware(RateLimitMiddleware, settings=settings, clock=clock)
+
+    @app.post("/w")
+    def w() -> JSONResponse:
+        return JSONResponse(status_code=200, content={})
+
+    with TestClient(app) as client:
+        # 同窗口写满 rate_limit_write_per_minute 次 → 下一次 429
+        codes = [client.post("/w", json={}).status_code for _ in range(4)]
+        assert codes == [200, 200, 200, 429]
+        clock.t += 61.0  # 固定时钟推进跨 60s 窗口（不跨真实秒边界）
+        # 新窗口第一次写成功（200）
+        assert client.post("/w", json={}).status_code == 200
 
 
 def test_rate_limit_pdf_dimension_hits_429(tmp_path: Path) -> None:
