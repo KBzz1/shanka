@@ -48,6 +48,23 @@ _DEVICE_INDEXES = {
 
 
 def upgrade() -> None:
+    # 0. 4 张生成链中间表（无 user_id 列）的孤儿子行清理——先于父行删除（子表先行：
+    #    父行尚存时子查询能命中；否则父行删除后子行成为 FK 悬挂，T8 实测 205 行缺陷）
+    op.execute(
+        "DELETE FROM chapters WHERE file_id IN"
+        " (SELECT file_id FROM pdf_files WHERE user_id IS NULL)"
+    )
+    op.execute(
+        "DELETE FROM knowledge_points WHERE task_id IN"
+        " (SELECT task_id FROM tasks WHERE user_id IS NULL)"
+    )
+    op.execute(
+        "DELETE FROM batches WHERE task_id IN (SELECT task_id FROM tasks WHERE user_id IS NULL)"
+    )
+    op.execute(
+        "DELETE FROM review_states WHERE card_id IN"
+        " (SELECT card_id FROM cards WHERE user_id IS NULL)"
+    )
     # 1. 旧 device 域行物理删除（user_id IS NULL 即旧 device 域行）
     for table in _DELETE_ORDER:
         op.execute(f"DELETE FROM {table} WHERE user_id IS NULL")

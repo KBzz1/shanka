@@ -319,6 +319,28 @@ _LEGACY_INSERT_SQLS: tuple[str, ...] = (
         " 'p1', 'v1', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'SUCCESS', NULL,"
         " NULL, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
     ),
+    # 生成链 4 中间表（无 user_id 列）的孤儿子行：父行即上述 device 域行（f1/t1/c1）。
+    # V2.3 迁移须在删父行前先行清理，否则升级后成为 FK 悬挂（T8 实测 205 行缺陷）。
+    (
+        "INSERT INTO chapters (chapter_id, file_id, name, start_page, end_page)"
+        " VALUES ('ch1', 'f1', 'Ch 1', 1, 10)"
+    ),
+    (
+        "INSERT INTO batches (batch_id, task_id, batch_index, status, generated_item_ids,"
+        " retry_count)"
+        " VALUES ('b1', 't1', 0, 'COMPLETED', '[]', 0)"
+    ),
+    (
+        "INSERT INTO knowledge_points (knowledge_point_id, task_id, source_chunk_id, topic,"
+        " priority, status)"
+        " VALUES ('kp1', 't1', 'sc1', 'Topic', 1, 'DONE')"
+    ),
+    (
+        "INSERT INTO review_states (review_state_id, card_id, state, stability, difficulty,"
+        " due, reps, lapses, updated_at)"
+        " VALUES ('rs1', 'c1', 'NEW', 0.0, 3.0, '2026-01-02T00:00:00.000Z', 0, 0,"
+        " '2026-01-01T00:00:00.000Z')"
+    ),
 )
 
 # 直接归属 8 表（P3-T2 后均含 user_id；旧行 user_id 为 NULL）
@@ -364,6 +386,9 @@ def test_legacy_device_rows_removed_on_v2_3(alembic_env: tuple[Config, Path]) ->
             r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
         }
         assert "devices" not in tables
+        # 4 中间表孤儿子行随 V2.3 先行清理：升级后 FK 悬挂为零（T8 实测 205 行缺陷回归）
+        fk_check = conn.execute(text("PRAGMA foreign_key_check")).fetchall()
+        assert fk_check == [], f"升级后存在 FK 悬挂行：{fk_check}"
 
 
 def test_v2_3_downgrade_rejected(alembic_env: tuple[Config, Path]) -> None:
