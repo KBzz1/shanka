@@ -33,9 +33,10 @@ class EnvironmentsTest(unittest.TestCase):
 class CredentialsTest(unittest.TestCase):
     def test_credentials_from_env(self) -> None:
         with mock.patch.dict(
-            os.environ, {"SHANKA_TEST_USERNAME": "u1", "SHANKA_TEST_PASSWORD": "p1"}
+            os.environ, {"SHANKA_TEST_USERNAME": "u1", "SHANKA_TEST_EMAIL": "u1@local.test",
+                         "SHANKA_TEST_PASSWORD": "p1"}
         ):
-            self.assertEqual(credentials(), ("u1", "p1"))
+            self.assertEqual(credentials(), ("u1", "u1@local.test", "p1"))
 
     def test_credentials_missing_raises(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -43,6 +44,7 @@ class CredentialsTest(unittest.TestCase):
                 credentials()
         msg = str(ctx.exception)
         self.assertIn("SHANKA_TEST_USERNAME", msg)
+        self.assertIn("SHANKA_TEST_EMAIL", msg)
         self.assertIn("SHANKA_TEST_PASSWORD", msg)
         self.assertIn("不自动注册", msg)
 
@@ -52,6 +54,7 @@ class CredentialsTest(unittest.TestCase):
                 credentials()
         msg = str(ctx.exception)
         self.assertIn("SHANKA_TEST_PASSWORD", msg)
+        self.assertIn("SHANKA_TEST_EMAIL", msg)
         self.assertNotIn("SHANKA_TEST_USERNAME", msg)
 
 

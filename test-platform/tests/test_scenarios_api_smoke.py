@@ -11,6 +11,8 @@ from shanka.client import Response
 from scenarios.baseline import api_smoke
 from tests import stub
 
+EMAIL = "tester@local.test"  # 占位凭据(真实凭据只走环境变量)
+
 
 def _handler():
     decks_get = {"n": 0}
@@ -103,7 +105,7 @@ class ApiSmokeScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = api_smoke.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 same_key_post=same_key_post, burst=burst,
             )
         self.assertEqual(failed, 0)
@@ -136,12 +138,12 @@ class ApiSmokeScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = api_smoke.run(
-                c, environment="prod", username="tester", password="pw-123456",
+                c, environment="prod", username="tester", email=EMAIL, password="pw-123456",
                 same_key_post=same_key_post, burst=burst,
             )
         self.assertEqual(failed, 0)
         self.assertNotIn(("register", "tester", None), c.calls)  # prod 禁自动注册
-        self.assertIn(("login", "tester", None), c.calls)
+        self.assertIn(("login", EMAIL, None), c.calls)
         self.assertNotIn("报告字段", buf.getvalue())
 
     def test_run_no_session_early_return(self) -> None:
@@ -152,7 +154,8 @@ class ApiSmokeScenarioTest(unittest.TestCase):
             ("/auth/register", Response(0, None)),
         ))
         with redirect_stdout(io.StringIO()):
-            failed = api_smoke.run(c, environment="local", username="tester", password="pw-123456")
+            failed = api_smoke.run(c, environment="local", username="tester", email=EMAIL,
+                                   password="pw-123456")
         self.assertGreater(failed, 0)
         self.assertNotIn(("POST", "/decks", None), c.calls)  # 会话失败不进入业务链路
         self.assertNotIn(("logout", "", None), c.calls)
@@ -171,7 +174,7 @@ class ApiSmokeScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             exit_code = api_smoke.run(
-                c, environment="local", username="u", password="p",
+                c, environment="local", username="u", email="u@local.test", password="p",
                 same_key_post=lambda *a, **k: stub_response(json_body=None),
                 burst=lambda *a, **k: ([], []),  # 空二元组:run 解包不崩,限流断言软 FAIL
             )

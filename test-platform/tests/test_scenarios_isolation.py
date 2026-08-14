@@ -11,6 +11,8 @@ from shanka.client import Response
 from scenarios.isolation import isolation
 from tests import stub
 
+EMAIL = "tester@local.test"  # 占位凭据(真实凭据只走环境变量)
+
 
 def _local_handler(evidence: dict | None = None):
     """auth 感知的本地后端替身:按 token 分派,模拟按用户隔离与幂等重放。
@@ -27,8 +29,8 @@ def _local_handler(evidence: dict | None = None):
             username = body["username"]
             return Response(201, stub.session_body(f"u-{username}", username))
         if path == "/auth/login":
-            username = body["username"]
-            return Response(200, stub.session_body(f"u-{username}", username))
+            email = body["email"]
+            return Response(200, stub.session_body(f"u-{email}", email))
         if path == "/decks" and method == "POST":
             if idempotency_key:
                 slot = (auth, idempotency_key)
@@ -94,7 +96,7 @@ class IsolationScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = isolation.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 run_id="3f2a9c81d4e54b679c1d2e3f4a5b6c7d",
             )
         self.assertEqual(failed, 0)
@@ -120,7 +122,7 @@ class IsolationScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = isolation.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 run_id="3f2a9c81d4e54b679c1d2e3f4a5b6c7d",
             )
         self.assertEqual(failed, 0)
@@ -150,7 +152,8 @@ class IsolationScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = isolation.run(
-                c, environment="prod", username="tester", password="pw-123456", run_id="run-1",
+                c, environment="prod", username="tester", email=EMAIL, password="pw-123456",
+                run_id="run-1",
             )
         self.assertEqual(failed, 0)
         self.assertNotIn(("register", "tester", None), c.calls)  # prod 禁自动注册
@@ -178,7 +181,7 @@ class IsolationScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = isolation.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 run_id="3f2a9c81d4e54b679c1d2e3f4a5b6c7d",
             )
         self.assertGreater(failed, 0)
@@ -210,7 +213,7 @@ class IsolationScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = isolation.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 run_id="3f2a9c81d4e54b679c1d2e3f4a5b6c7d",
             )
         self.assertGreater(failed, 0)
@@ -227,10 +230,11 @@ class IsolationScenarioTest(unittest.TestCase):
         ))
         with redirect_stdout(io.StringIO()):
             failed = isolation.run(
-                c, environment="prod", username="tester", password="pw-123456", run_id="run-1",
+                c, environment="prod", username="tester", email=EMAIL, password="pw-123456",
+                run_id="run-1",
             )
         self.assertGreater(failed, 0)
-        self.assertEqual(c.calls, [("login", "tester", None)])
+        self.assertEqual(c.calls, [("login", EMAIL, None)])
 
 
 if __name__ == "__main__":

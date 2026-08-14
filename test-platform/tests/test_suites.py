@@ -53,7 +53,8 @@ class SuitesTest(unittest.TestCase):
 
     def test_runner_injects_environment_and_run_id(self) -> None:
         """runner 向每个场景注入 --base-url/--environment/--run-id(场景不自行生成 run_id)。"""
-        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_PASSWORD": "p"}
+        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_EMAIL": "u@local.test",
+               "SHANKA_TEST_PASSWORD": "p"}
         with mock.patch.dict(os.environ, env):
             with mock.patch.object(suites.auth, "main", return_value=0) as m_auth, \
                  mock.patch.object(suites.api_smoke, "main", return_value=0) as m_smoke:
@@ -69,11 +70,13 @@ class SuitesTest(unittest.TestCase):
 
     def test_live_suite_requires_confirm_cost(self) -> None:
         """live 最坏预算超阈值:无 --confirm-cost 拒绝执行(exit 1),有则放行(进入场景调度)。"""
-        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_PASSWORD": "p"}
+        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_EMAIL": "u@local.test",
+               "SHANKA_TEST_PASSWORD": "p"}
         with mock.patch.dict(os.environ, env):
             code = suites.main(["--environment", "local", "--suite", "live"])
         self.assertEqual(code, 1)
-        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_PASSWORD": "p"}
+        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_EMAIL": "u@local.test",
+               "SHANKA_TEST_PASSWORD": "p"}
         with mock.patch.dict(os.environ, env):
             with mock.patch.object(suites.auth, "main", return_value=0) as m_auth, \
                  mock.patch.object(suites.isolation, "main", return_value=0) as m_iso, \

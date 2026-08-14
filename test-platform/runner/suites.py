@@ -4,8 +4,8 @@
   quick — auth + api_smoke,0 次 LLM 调用,纯无 Key 冒烟;
   full  — 非生成场景(auth/isolation/api_smoke,0 次 LLM;域场景实装后扩展);
   live  — full + live_flow,含真实生成(最坏调用预算由 fixture 推导,超阈值必须 --confirm-cost)。
-凭据只从环境变量读取(SHANKA_TEST_USERNAME/SHANKA_TEST_PASSWORD),缺失拒绝执行;
-run_id 由 runner 生成并注入场景,日志身份字段为 user_id(会话建立前为空)。
+凭据只从环境变量读取(SHANKA_TEST_USERNAME/SHANKA_TEST_EMAIL/SHANKA_TEST_PASSWORD),
+缺失拒绝执行;run_id 由 runner 生成并注入场景,日志身份字段为 user_id(会话建立前为空)。
 """
 
 from __future__ import annotations

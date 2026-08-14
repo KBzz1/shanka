@@ -12,6 +12,7 @@ from scenarios.auth import auth
 from tests import stub
 
 ME_BODY = {"user": {"user_id": "u-1", "username": "tester", "created_at": "2026-08-14T00:00:00Z"}}
+EMAIL = "tester@local.test"  # 占位凭据(真实凭据只走环境变量)
 
 
 def _local_flow_handler():
@@ -66,11 +67,12 @@ class AuthScenarioTest(unittest.TestCase):
         c = stub.StubClient(_local_flow_handler())
         buf = io.StringIO()
         with redirect_stdout(buf):
-            failed = auth.run(c, environment="local", username="tester", password="pw-123456")
+            failed = auth.run(c, environment="local", username="tester", email=EMAIL,
+                              password="pw-123456")
         self.assertEqual(failed, 0)
         self.assertEqual(c.calls, [
             ("GET", "/decks", None),
-            ("login", "tester", None),      # 错误密码 401
+            ("login", EMAIL, None),         # 错误密码 401(login 以 email 为键)
             ("register", "tester", None),   # local 先 register
             ("set_token", "tok-u-1", None),
             ("GET", "/auth/me", None),
@@ -83,10 +85,11 @@ class AuthScenarioTest(unittest.TestCase):
         c = stub.StubClient(_prod_flow_handler())
         buf = io.StringIO()
         with redirect_stdout(buf):
-            failed = auth.run(c, environment="prod", username="tester", password="pw-123456")
+            failed = auth.run(c, environment="prod", username="tester", email=EMAIL,
+                              password="pw-123456")
         self.assertEqual(failed, 0)
         self.assertNotIn(("register", "tester", None), c.calls)  # prod 禁自动注册
-        self.assertEqual(c.calls.count(("login", "tester", None)), 2)  # 错误密码 + 正式登录
+        self.assertEqual(c.calls.count(("login", EMAIL, None)), 2)  # 错误密码 + 正式登录
         self.assertNotIn("报告字段", buf.getvalue())  # prod 不产生本地 user 行
 
     def test_run_no_session_early_return(self) -> None:
@@ -97,13 +100,14 @@ class AuthScenarioTest(unittest.TestCase):
         ))
         buf = io.StringIO()
         with redirect_stdout(buf):
-            failed = auth.run(c, environment="local", username="tester", password="pw-123456")
+            failed = auth.run(c, environment="local", username="tester", email=EMAIL,
+                              password="pw-123456")
         self.assertGreater(failed, 0)
         self.assertNotIn(("GET", "/auth/me", None), c.calls)  # 会话失败即止
         self.assertNotIn(("logout", "", None), c.calls)
 
     def test_run_local_existing_user_login_fallback(self) -> None:
-        """账号已存在(409)回落 login,不计数新建 user 行。"""
+        """账号已存在(409 EMAIL_TAKEN)回落 login,不计数新建 user 行。"""
         login_count = {"n": 0}
         me_count = {"n": 0}
 
@@ -111,7 +115,7 @@ class AuthScenarioTest(unittest.TestCase):
             if path == "/decks":
                 return Response(401, {"error": {"code": "AUTH_REQUIRED"}})
             if path == "/auth/register":
-                return Response(409, {"error": {"code": "USERNAME_TAKEN"}})
+                return Response(409, {"error": {"code": "EMAIL_TAKEN"}})
             if path == "/auth/login":
                 login_count["n"] += 1
                 if login_count["n"] == 1:
@@ -129,10 +133,11 @@ class AuthScenarioTest(unittest.TestCase):
         c = stub.StubClient(handler)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            failed = auth.run(c, environment="local", username="tester", password="pw-123456")
+            failed = auth.run(c, environment="local", username="tester", email=EMAIL,
+                              password="pw-123456")
         self.assertEqual(failed, 0)
         self.assertIn(("register", "tester", None), c.calls)
-        self.assertIn(("login", "tester", None), c.calls)
+        self.assertIn(("login", EMAIL, None), c.calls)
         self.assertNotIn("报告字段", buf.getvalue())  # 回落 login 不新建 user 行
 
 

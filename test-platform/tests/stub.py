@@ -43,16 +43,17 @@ class StubClient:
         self._token = token
         self.calls.append(("set_token", token, None))
 
-    def register(self, username: str, password: str) -> Response:
+    def register(self, username: str, email: str, password: str) -> Response:
         self.calls.append(("register", username, None))
         return self._dispatch(
-            "register", "/auth/register", {"username": username, "password": password}, None
+            "register", "/auth/register",
+            {"username": username, "email": email, "password": password}, None
         )
 
-    def login(self, username: str, password: str) -> Response:
-        self.calls.append(("login", username, None))
+    def login(self, email: str, password: str) -> Response:
+        self.calls.append(("login", email, None))
         return self._dispatch(
-            "login", "/auth/login", {"username": username, "password": password}, None
+            "login", "/auth/login", {"email": email, "password": password}, None
         )
 
     def logout(self) -> Response:

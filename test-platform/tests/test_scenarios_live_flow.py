@@ -11,6 +11,8 @@ from shanka.client import Response
 from scenarios.flow import live_flow
 from tests import stub
 
+EMAIL = "tester@local.test"  # 占位凭据(真实凭据只走环境变量)
+
 
 def _handler(*, generate=True, prod=False, batches=None):
     state = {"polls": 0, "obs": False}
@@ -20,7 +22,7 @@ def _handler(*, generate=True, prod=False, batches=None):
             state["obs"] = body["username"].startswith("t-")  # 临时观测账号
             return Response(201, stub.session_body(f"u-{body['username']}", body["username"]))
         if path == "/auth/login":
-            return Response(200, stub.session_body(f"u-{body['username']}", body["username"]))
+            return Response(200, stub.session_body(f"u-{body['email']}", body["email"]))
         if path == "/api-key":
             return Response(200, {"status": "ok"})
         if path == "/api-key/status":
@@ -80,7 +82,7 @@ class LiveFlowScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = live_flow.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 api_key="sk-test-secret", run_id="3f2a9c81d4e54b679c1d2e3f4a5b6c7d",
                 skip_generate=False, keep=False,
             )
@@ -96,11 +98,11 @@ class LiveFlowScenarioTest(unittest.TestCase):
             self.assertIn(path, paths)
         # 轮询至 COMPLETED(非终态轮询 2 次 + 终态 1 次)
         self.assertEqual(calls.count(("GET", "/tasks/task-1", None)), 3)
-        # 成本对账:batches 观测 + 预算/实际报告字段(最坏预算 53,实际 2 次尝试/2620 token)
+        # 成本对账:batches 观测 + 预算/实际报告字段(最坏预算 59 = 3 规划组,实际 2 次尝试/2620 token)
         self.assertIn(("GET", "/tasks/task-1/batches", None), calls)
         out = buf.getvalue()
         self.assertIn("对账: 生成尝试/批数在预算内", out)
-        self.assertIn("llm_budget_calls=53", out)
+        self.assertIn("llm_budget_calls=59", out)
         self.assertIn("llm_attempts_actual=2", out)
         self.assertIn("llm_tokens_actual=2620", out)
         self.assertIn("llm_cost_actual=0.0102", out)
@@ -124,7 +126,7 @@ class LiveFlowScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = live_flow.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 api_key="sk-test-secret", run_id="run-x", skip_generate=False, keep=False,
             )
         self.assertGreater(failed, 0)
@@ -135,7 +137,7 @@ class LiveFlowScenarioTest(unittest.TestCase):
         c = stub.StubClient(_handler())
         with redirect_stdout(io.StringIO()):
             failed = live_flow.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 api_key="sk-test-secret", run_id="run-x", skip_generate=True, keep=False,
             )
         self.assertEqual(failed, 0)
@@ -150,7 +152,7 @@ class LiveFlowScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = live_flow.run(
-                c, environment="prod", username="tester", password="pw-123456",
+                c, environment="prod", username="tester", email=EMAIL, password="pw-123456",
                 api_key="sk-test-secret", run_id="run-x", skip_generate=True, keep=False,
             )
         self.assertEqual(failed, 0)
@@ -172,7 +174,7 @@ class LiveFlowScenarioTest(unittest.TestCase):
         buf = io.StringIO()
         with redirect_stdout(buf):
             failed = live_flow.run(
-                c, environment="local", username="tester", password="pw-123456",
+                c, environment="local", username="tester", email=EMAIL, password="pw-123456",
                 api_key="sk-test-secret", run_id="run-x", skip_generate=False, keep=False,
             )
         out = buf.getvalue()
@@ -193,7 +195,7 @@ class LiveFlowScenarioTest(unittest.TestCase):
         ))
         with redirect_stdout(io.StringIO()):
             failed = live_flow.run(
-                c, environment="prod", username="tester", password="pw-123456",
+                c, environment="prod", username="tester", email=EMAIL, password="pw-123456",
                 api_key="sk-test-secret", run_id="run-x", skip_generate=True, keep=False,
             )
         self.assertGreater(failed, 0)

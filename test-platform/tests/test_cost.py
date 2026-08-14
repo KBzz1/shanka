@@ -20,18 +20,27 @@ class FakeBudgetScenario:  # live 场景:fixture 推导 LLM_CALLS(与 live_flow 
 class DeriveBudgetTest(unittest.TestCase):
     def test_live_fixture_worst_case(self) -> None:
         """2 章 × 每章基础 3 单元 × BALANCED 密度 2 = 12 单元;
-        规划 1 次任务级调用 × (1+2 重试) = 3;生成 批=单元 12 × (1+2) = 36;
+        规划 3 规划组(fixture 声明)× (1+2 重试) = 9;生成 批=单元 12 × (1+2) = 36;
         评分 每单元 1 卡、APPLICATION 逐单元最坏 = 12;固定 api-key 校验 + samples = 2。"""
-        b = cost.derive_budget(chapters=2, quantity_tendency="BALANCED", generate=True)
+        b = cost.derive_budget(chapters=2, quantity_tendency="BALANCED", generate=True,
+                               planning_groups=3)
         self.assertEqual(b.units, 12)
-        self.assertEqual(b.planning_calls, 3)
+        self.assertEqual(b.planning_groups, 3)
+        self.assertEqual(b.planning_calls, 9)
         self.assertEqual(b.generation_calls, 36)
         self.assertEqual(b.scoring_calls, 12)
         self.assertEqual(b.fixed_calls, 2)
+        self.assertEqual(b.total_calls(), 59)
+        self.assertEqual(b.worst_output_tokens(), 9 * 2048 + 36 * 768 + 12 * 4096)
+        self.assertEqual(b.worst_input_tokens(), 9 * 20_000 + 36 * 10_000 + 12 * 15_000)
+        self.assertAlmostEqual(b.worst_cost_yuan(), 2.201856, places=6)
+
+    def test_default_planning_groups_is_one(self) -> None:
+        """未声明 planning_groups 时默认 1 组(兼容未锚定组数的 fixture)。"""
+        b = cost.derive_budget(chapters=2, quantity_tendency="BALANCED", generate=True)
+        self.assertEqual(b.planning_groups, 1)
+        self.assertEqual(b.planning_calls, 3)
         self.assertEqual(b.total_calls(), 53)
-        self.assertEqual(b.worst_output_tokens(), 3 * 2048 + 36 * 768 + 12 * 4096)
-        self.assertEqual(b.worst_input_tokens(), 3 * 20_000 + 36 * 10_000 + 12 * 15_000)
-        self.assertAlmostEqual(b.worst_cost_yuan(), 1.863552, places=6)
 
     def test_density_factors(self) -> None:
         compact = cost.derive_budget(chapters=2, quantity_tendency="COMPACT", generate=True)
@@ -108,9 +117,10 @@ class GateTest(unittest.TestCase):
         self.assertTrue(cost.requires_confirm(4))  # 超过需确认
 
     def test_describe_contains_breakdown(self) -> None:
-        b = cost.derive_budget(chapters=2, quantity_tendency="BALANCED", generate=True)
+        b = cost.derive_budget(chapters=2, quantity_tendency="BALANCED", generate=True,
+                               planning_groups=3)
         text = cost.describe(b)
-        for part in ("PLANNING 3", "GENERATING 36", "SCORING 12", "固定 2", "53", "1.86"):
+        for part in ("PLANNING 9", "×3组", "GENERATING 36", "SCORING 12", "固定 2", "59", "2.20"):
             self.assertIn(part, text)
 
 

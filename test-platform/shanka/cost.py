@@ -41,7 +41,8 @@ class Budget:
     """一次 live 生成任务的最坏调用预算(含重试上限,最坏 = 每调用都打满重试)。"""
 
     units: int  # 最坏规划单元数(章节 × 每章基础预算 × 密度系数)
-    planning_calls: int  # 规划:1 规划组 × (1+重试上限)——前提:前 2 章页文本 ≤ 20k,超出则拆组、实际调用高于此推导值
+    planning_groups: int  # 规划组数(fixture 声明;受后端 max_planner_groups_per_task=30 上限)
+    planning_calls: int  # 规划:planning_groups 规划组 × (1+重试上限);组数由 fixture 声明
     generation_calls: int  # 生成:批=单元,每批 (1+重试上限)
     scoring_calls: int  # 评分:每单元 1 卡,APPLICATION 逐单元最坏 = 单元数(封顶 60)
     fixed_calls: int  # 固定真实调用:api-key 校验 + samples
@@ -77,20 +78,23 @@ class Budget:
         )
 
 
-def derive_budget(*, chapters: int, quantity_tendency: str, generate: bool) -> Budget:
+def derive_budget(
+    *, chapters: int, quantity_tendency: str, generate: bool, planning_groups: int = 1
+) -> Budget:
     """按受控 fixture 推导最坏调用预算;generate=False(skip-generate)时管线三阶段为 0。"""
     density = _DENSITY_FACTOR.get(quantity_tendency)
     if density is None:
         raise ValueError(f"未知 quantity_tendency: {quantity_tendency}")
     units = chapters * _UNITS_PER_CHAPTER * density if generate else 0
-    # 1 规划组前提(欠报方向声明):前 2 章累计页文本 ≤ planner_max_input_chars 20k
-    # (config.py);超过时后端按 20k 拆组(max_planner_groups_per_task=30),实际 PLANNING
-    # 调用与成本高于此推导值(最坏 = 组数 × (1+重试上限));fixture 未锚定页文本量,调整需同步声明
-    planning = 1 + _PLANNING_RETRY_LIMIT if generate else 0
+    # PLANNING 组数前提(V2.4 fixture 锚定):样书前 2 章 42.6k 字符 ÷ planner_max_input_chars
+    # 20k(config.py)= 3 组向上取整;组数由 fixture 显式声明(planning_groups),
+    # 实际组数受后端 max_planner_groups_per_task=30 上限;调整样书或阈值需同步声明
+    planning = planning_groups * (1 + _PLANNING_RETRY_LIMIT) if generate else 0
     generation = units * (1 + _GENERATION_RETRY_LIMIT)
     scoring = min(units * _CARDS_PER_UNIT, _MAX_SCORING_CALLS_PER_TASK)
     return Budget(
         units=units,
+        planning_groups=planning_groups if generate else 0,
         planning_calls=planning,
         generation_calls=generation,
         scoring_calls=scoring,
@@ -112,7 +116,8 @@ def budget_for(mod: Any) -> Budget | None:
 def describe(budget: Budget) -> str:
     """预算明细单行(闸门拒绝消息用)。"""
     return (
-        f"PLANNING {budget.planning_calls} + GENERATING {budget.generation_calls} "
+        f"PLANNING {budget.planning_calls}(×{budget.planning_groups}组) "
+        f"+ GENERATING {budget.generation_calls} "
         f"+ SCORING {budget.scoring_calls} + 固定 {budget.fixed_calls} = "
         f"{budget.total_calls()} 次调用;最坏输出 token {budget.worst_output_tokens()}, "
         f"最坏输入 token {budget.worst_input_tokens()};最坏成本 ≈ ¥{budget.worst_cost_yuan():.2f}"

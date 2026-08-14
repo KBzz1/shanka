@@ -164,7 +164,7 @@ class ClientTest(unittest.TestCase):
     def test_register_no_auth_no_log(self) -> None:
         c = self._client()
         n_before = len(self._log().splitlines())
-        r = c.register("tester", "pw-secret-123")
+        r = c.register("tester", "tester@local.test", "pw-secret-123")
         self.assertEqual(r.status, 201)
         self.assertEqual(r.json["access_token"], "tok-secret-abc")
         self.assertEqual(REQ_HEADERS["/auth/register"]["Authorization"], "")  # 不带头
@@ -177,7 +177,7 @@ class ClientTest(unittest.TestCase):
     def test_login_no_auth_header_no_log(self) -> None:
         c = self._client()
         n_before = len(self._log().splitlines())
-        r = c.login("tester", "pw-secret-123")
+        r = c.login("tester@local.test", "pw-secret-123")
         self.assertEqual(r.status, 200)
         self.assertEqual(r.json["access_token"], "tok-secret-abc")
         self.assertEqual(REQ_HEADERS["/auth/login"]["Authorization"], "")
@@ -189,7 +189,7 @@ class ClientTest(unittest.TestCase):
     def test_login_does_not_hold_token(self) -> None:
         """token 由 set_token 持有;login 成功不自动生效。"""
         c = self._client()
-        c.login("tester", "pw-secret-123")
+        c.login("tester@local.test", "pw-secret-123")
         c.request("GET", "/ok", step="probe")
         self.assertEqual(REQ_HEADERS["/ok"]["Authorization"], "")
 
@@ -197,10 +197,10 @@ class ClientTest(unittest.TestCase):
         """brief 硬性语义:register/login 恒不带头——即使先 set_token 也不发送 Authorization。"""
         c = self._client()
         c.set_token("tok-held")
-        r = c.register("tester", "pw-secret-123")
+        r = c.register("tester", "tester@local.test", "pw-secret-123")
         self.assertEqual(r.status, 201)
         self.assertEqual(REQ_HEADERS["/auth/register"]["Authorization"], "")
-        r = c.login("tester", "pw-secret-123")
+        r = c.login("tester@local.test", "pw-secret-123")
         self.assertEqual(r.status, 200)
         self.assertEqual(REQ_HEADERS["/auth/login"]["Authorization"], "")
         # 对照:普通请求仍携带已持有的 token(剥离仅作用于凭据路径)
@@ -212,11 +212,11 @@ class ClientTest(unittest.TestCase):
         global FAIL_AUTH
         FAIL_AUTH = True
         c = self._client()
-        r = c.register("tester", "pw-secret-123")
+        r = c.register("tester", "tester@local.test", "pw-secret-123")
         self.assertEqual(r.status, 429)
         self.assertEqual(HITS["/auth/register"], 1)
         HITS.clear()
-        r = c.login("tester", "pw-secret-123")
+        r = c.login("tester@local.test", "pw-secret-123")
         self.assertEqual(r.status, 429)
         self.assertEqual(HITS["/auth/login"], 1)
         # 对照:普通请求仍按 _MAX_RETRY 重试 429

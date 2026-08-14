@@ -65,26 +65,22 @@ class ShankaClient:
         """持有 Bearer token;此后普通请求自动携带 Authorization 头(未设置不带头)。"""
         self._token = token
 
-    def register(self, username: str, password: str) -> Response:
+    def register(self, username: str, email: str, password: str) -> Response:
         """POST /auth/register:恒不带头/不重试/不落事件(凭据与响应 token 脱敏)。
 
         Authorization 显式剥离(即使先 set_token 也不发送)——brief 硬性语义,
         不依赖后端对 /auth/register 的鉴权豁免。
         """
-        return self._credential_request("/auth/register", username, password)
-
-    def login(self, username: str, password: str) -> Response:
-        """POST /auth/login:恒不带头/不重试/不落事件。token 由调用方按需 set_token 持有。"""
-        return self._credential_request("/auth/login", username, password)
-
-    def _credential_request(self, path: str, username: str, password: str) -> Response:
-        return self.request(
-            "POST",
-            path,
-            body={"username": username, "password": password},
-            retry=False,
-            auth=False,
+        return self._credential_request(
+            "/auth/register", {"username": username, "email": email, "password": password}
         )
+
+    def login(self, email: str, password: str) -> Response:
+        """POST /auth/login:恒不带头/不重试/不落事件。token 由调用方按需 set_token 持有。"""
+        return self._credential_request("/auth/login", {"email": email, "password": password})
+
+    def _credential_request(self, path: str, body: dict) -> Response:
+        return self.request("POST", path, body=body, retry=False, auth=False)
 
     def logout(self) -> Response:
         """POST /auth/logout:Bearer 认证 + 幂等键;无论结果清空本地 token。"""

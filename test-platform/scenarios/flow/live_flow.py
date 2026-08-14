@@ -47,10 +47,11 @@ _GEN_CONFIG = {
 
 # 受控 fixture:固定取前 2 章、BALANCED 密度;最坏调用预算由 cost.derive_budget 推导
 # (废弃「live 固定 3 次调用」假设——LLM_CALLS 为推导值,非手写常量)。
-# 前提声明:PLANNING 按 1 规划组计(前 2 章累计页文本 ≤ planner_max_input_chars 20k);
-# 页文本量超过 20k 时后端拆组(上限 30 组),实际 PLANNING 调用与成本高于推导值(欠报方向)
+# PLANNING 组数前提(V2.4 fixture 锚定):样书前 2 章 42.6k 字符 ÷ planner_max_input_chars
+# 20k(config.py)= 3 组向上取整;组数由 fixture 显式声明(planning_groups),
+# 实际组数受后端 max_planner_groups_per_task=30 上限;调整样书或阈值需同步声明
 BUDGET_FIXTURE = {"chapters": 2, "quantity_tendency": _GEN_CONFIG["quantity_tendency"],
-                  "generate": True}
+                  "generate": True, "planning_groups": 3}
 LIVE_BUDGET = cost.derive_budget(**BUDGET_FIXTURE)
 LLM_CALLS = LIVE_BUDGET.total_calls()
 
@@ -89,6 +90,7 @@ def run(
     *,
     environment: str,
     username: str,
+    email: str,
     password: str,
     api_key: str,
     run_id: str,
@@ -98,7 +100,8 @@ def run(
     shlogging.set_context(suite=SUITE, scenario=NAME, user_id="")
 
     # 0. 会话建立(local register/已存在回落 login;prod 只 login)
-    session = account.bootstrap(c, environment=environment, username=username, password=password)
+    session = account.bootstrap(c, environment=environment, username=username,
+                                email=email, password=password)
     check("建立会话(register/login)", session is not None)
     if session is None:
         return summary()
@@ -205,11 +208,13 @@ def run(
         record("llm_tokens_actual", rec.tokens)
         record("llm_cost_actual", rec.cost_yuan)
         record("llm_budget_premise",
-               "PLANNING 1 规划组前提:前 2 章累计页文本 ≤ 20k(planner_max_input_chars),超出则拆组实际调用高于推导值")
+               "PLANNING 按 fixture 声明 3 规划组计(样书前 2 章 42.6k 字符 ÷ 20k 向上取整),"
+               "实际组数受后端 max_planner_groups_per_task=30 上限")
         print(f"    [对账] 预算: {cost.describe(LIVE_BUDGET)}")
         print(f"    [对账] 实际(GENERATING 阶段,批=单元投影): {rec.usage_line}")
         print("    [对账] 边界: PLANNING/SCORING 尝试数无 HTTP 观测入口,仅 GENERATING 可对账")
-        print("    [对账] 前提: PLANNING 按 1 规划组计(前 2 章累计页文本 ≤ 20k),超出则拆组、实际调用高于推导值")
+        print("    [对账] 前提: PLANNING 按 fixture 声明 3 规划组计(前 2 章 42.6k 字符 ÷ 20k 向上取整),"
+              "实际组数受后端 max_planner_groups_per_task=30 上限")
 
     # 5. 牌组卡片 + 复习评级(任意状态可评级,C-06)
     r = c.request("GET", f"/decks/{deck_id}/cards", step="deck-cards")
@@ -253,6 +258,7 @@ def run(
     if not environments.is_prod(environment):
         obs_name = account.temp_username(run_id, "obs")
         obs = account.bootstrap(c, environment=environment, username=obs_name,
+                                email=account.temp_email(run_id, "obs"),
                                 password=account.temp_password())
         check("观测临时账号建立", obs is not None, f"user={obs_name}")
         if obs is None:
@@ -295,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        username, password = environments.credentials()
+        username, email, password = environments.credentials()
     except environments.MissingCredentialsError as exc:
         print(f"拒绝执行: {exc}", file=sys.stderr)
         return 1
@@ -304,8 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     api_key = _load_env_key()
     # 任务生成期后端事件循环阻塞,轮询请求需长超时(默认 30s 不足)
     c = ShankaClient(args.base_url, timeout=60)
-    return run(c, environment=args.environment, username=username, password=password,
-               api_key=api_key, run_id=args.run_id or str(uuid.uuid4()),
+    return run(c, environment=args.environment, username=username, email=email,
+               password=password, api_key=api_key, run_id=args.run_id or str(uuid.uuid4()),
                skip_generate=args.skip_generate, keep=args.keep)
 
 

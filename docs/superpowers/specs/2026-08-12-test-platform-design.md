@@ -69,7 +69,7 @@ test-platform/                     # 顶层独立目录(git 跟踪)
 2. **一场景一文件 = 一个用户故事**：场景脚本只写业务步骤，复用 `shanka/` 核心库，不重复 HTTP 细节。
 3. **调度与场景分离**：runner 负责环境/套件/场景选择与成本闸门，不掺业务逻辑。
 4. **零依赖**：全平台纯 Python stdlib，任何 python3 可跑，不引入 pyproject/venv，天然与 main 环境解耦。
-5. **成本闸门**：每个场景模块声明 `LLM_CALLS: int`（预期真实 DeepSeek 调用数：PUT /api-key 校验、POST /samples、POST /tasks 均计数）。runner 聚合套件总数，**超过阈值（默认 3，即 `> 3`）必须 `--confirm-cost`**，否则拒绝执行。批量场景声明数大，天然触发闸门。
+5. **成本闸门**：每个场景模块声明 `LLM_CALLS: int`（预期真实 DeepSeek 调用数：PUT /api-key 校验、POST /samples、POST /tasks 均计数）。runner 聚合套件总数，**超过阈值（默认 3，即 `> 3`）必须 `--confirm-cost`**，否则拒绝执行。批量场景声明数大，天然触发闸门。——2026-08-14 勘误：LLM_CALLS 已改为由 `BUDGET_FIXTURE` 经 `cost.derive_budget` 推导（生成类场景不再手写固定数）；PLANNING 组数由 fixture 显式声明（V2.4 fixture 锚定 3 组：样书前 2 章 42.6k 字符 ÷ planner_max_input_chars 20k 向上取整），不再按「1 规划组」计——见 test-platform/AGENTS.md「成本与环境闸门」。
 6. **环境安全闸门**：目标环境为 prod（shanka.kbzz1.top）时**默认拒绝执行**，必须显式 `--confirm-prod`（防止误操作向生产 DB 写数据）；local 环境默认放行。
 7. **数据策略**：默认随机设备 ID + 场景结束自动清理（cleanup.py）；`--device-id` 固定可保留观察。
 8. **请求纪律**：继承 smoke_api 的 0.3s 节奏（IP 限流 5 req/s），429 按 Retry-After 重试。

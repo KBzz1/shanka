@@ -71,11 +71,13 @@ def _readonly_prod(c: ShankaClient) -> int:
     return summary()
 
 
-def run(c: ShankaClient, *, environment: str, username: str, password: str, run_id: str) -> int:
+def run(c: ShankaClient, *, environment: str, username: str, email: str,
+        password: str, run_id: str) -> int:
     shlogging.set_context(suite=SUITE, scenario=NAME, user_id="")
 
     # 主账号会话(local register/已存在回落 login;prod 只 login)
-    session = account.bootstrap(c, environment=environment, username=username, password=password)
+    session = account.bootstrap(c, environment=environment, username=username,
+                                email=email, password=password)
     check("主账号会话建立(register/login)", session is not None)
     if session is None:
         return summary()
@@ -102,6 +104,7 @@ def run(c: ShankaClient, *, environment: str, username: str, password: str, run_
     # 临时账号(run_id 命名,本地注册;user 行残留按 run_id 计数报告)
     second_name = account.temp_username(run_id, "iso")
     second = account.bootstrap(c, environment=environment, username=second_name,
+                               email=account.temp_email(run_id, "iso"),
                                password=account.temp_password())
     check("临时账号注册", second is not None, f"user={second_name}")
     if second is None:
@@ -190,13 +193,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pace", type=float, default=0.3, help="请求间隔秒(契约 IP 5 req/s)")
     args = ap.parse_args(argv)
     try:
-        username, password = environments.credentials()
+        username, email, password = environments.credentials()
     except environments.MissingCredentialsError as exc:
         print(f"拒绝执行: {exc}", file=sys.stderr)
         return 1
     c = ShankaClient(args.base_url, pace=args.pace)
-    return run(c, environment=args.environment, username=username, password=password,
-               run_id=args.run_id or str(uuid.uuid4()))
+    return run(c, environment=args.environment, username=username, email=email,
+               password=password, run_id=args.run_id or str(uuid.uuid4()))
 
 
 if __name__ == "__main__":

@@ -77,6 +77,7 @@ def run(
     *,
     environment: str,
     username: str,
+    email: str,
     password: str,
     openapi_local: str | None = None,
     same_key_post=_same_key_post,
@@ -100,7 +101,8 @@ def run(
           isinstance(err, dict) and err.get("code") == "AUTH_REQUIRED", str(err)[:80])
 
     # 3. 会话建立:local register(已存在回落 login),prod 只 login
-    session = account.bootstrap(c, environment=environment, username=username, password=password)
+    session = account.bootstrap(c, environment=environment, username=username,
+                                email=email, password=password)
     check("建立会话(register/login)", session is not None)
     if session is None:
         return summary()
@@ -194,13 +196,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--openapi-local", default=None, help="本地 openapi 文件路径(默认运行时 /openapi.json)")
     args = ap.parse_args(argv)
     try:
-        username, password = environments.credentials()
+        username, email, password = environments.credentials()
     except environments.MissingCredentialsError as exc:
         print(f"拒绝执行: {exc}", file=sys.stderr)
         return 1
     c = ShankaClient(args.base_url, pace=args.pace)
-    return run(c, environment=args.environment, username=username, password=password,
-               openapi_local=args.openapi_local)
+    return run(c, environment=args.environment, username=username, email=email,
+               password=password, openapi_local=args.openapi_local)
 
 
 if __name__ == "__main__":
