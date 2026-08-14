@@ -24,47 +24,17 @@ class Base(DeclarativeBase):
     pass
 
 
-class Device(Base):
-    """2.1 devices：匿名设备 ID 数据主体。"""
-
-    __tablename__ = "devices"
-
-    device_id: Mapped[str] = mapped_column(String, primary_key=True)
-    first_seen_ip: Mapped[str | None] = mapped_column(String, nullable=True)
-    user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_active_at: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-
-
 class ApiKey(Base):
     """2.2 api_keys：一用户一 Key（V2.2），加密存储（V3B 使用）。
 
     V2.2：user_id 为数据主体隔离键与主键（mapper 身份键同 user_id 元数据主键）；
-    device_id 为旧数据遗留列（新写入不再生成），补回 UNIQUE (device_id)（遗留设备域
-    防重；用户域行 device_id NULL 多行不冲突——SQLite UNIQUE 对 NULL 视为互异）。
-
-    SQLite rowid 表非 INTEGER 主键允许 NULL——user_id 主键 nullable=True 合法，旧行
-    （user_id 为 NULL）可保留，多 NULL 不冲突。SQLAlchemy ORM 限制（实测，见 P3-T2
-    报告）：旧 device 域行（user_id 为 NULL）经 ORM 查询不组装实例（NULL 身份键行以
-    None 占位、不可寻址）、ORM 写入/更新抛 FlushError——与 D-06「旧 device 域数据无
-    访问路径」语义一致，属预期行为；用户域行（user_id 非空）ORM 读/写/更新全可用。
-    P4-5 前 mapper 身份键曾过渡改写为 device_id（P3-T2 遗留，用户域行对 ORM 不可见、
-    写侧走 Core 直写），P4-5 已移除。
+    V2.3：设备架构彻底清除——device_id 遗留列/约束随不可逆迁移删除。
     """
 
     __tablename__ = "api_keys"
-    __table_args__ = (
-        PrimaryKeyConstraint("user_id", name="pk_api_keys"),
-        CheckConstraint(
-            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_api_keys_owner_domain"
-        ),
-        UniqueConstraint("device_id", name="uq_api_keys_device_id"),
-    )
+    __table_args__ = (PrimaryKeyConstraint("user_id", name="pk_api_keys"),)
 
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
-    device_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("devices.device_id", ondelete="CASCADE"), nullable=True
-    )
     encrypted_key: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(
         String, nullable=False
@@ -76,23 +46,13 @@ class ApiKey(Base):
 class PdfFile(Base):
     """2.3 pdf_files：PDF 元数据，storage_key 为随机 UUID 存储路径。
 
-    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
     """
 
     __tablename__ = "pdf_files"
-    __table_args__ = (
-        CheckConstraint(
-            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_pdf_files_owner_domain"
-        ),
-        Index("ix_pdf_files_device_created", "device_id", "created_at"),
-        Index("ix_pdf_files_user_created", "user_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_pdf_files_user_created", "user_id", "created_at"),)
 
     file_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # DB 已可空（遗留列）；v2.1 写入仍保证非空，用户侧写入落地后新行只写 user_id
-    device_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("devices.device_id"), nullable=True
-    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     filename: Mapped[str] = mapped_column(String, nullable=False)
     storage_key: Mapped[str] = mapped_column(String, nullable=False)
@@ -120,25 +80,13 @@ class Chapter(Base):
 class Task(Base):
     """2.5 tasks：生成任务（file_id/deck_id 删除后 SET NULL 保留任务）。
 
-    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
     """
 
     __tablename__ = "tasks"
-    __table_args__ = (
-        CheckConstraint(
-            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_tasks_owner_domain"
-        ),
-        Index("ix_tasks_device_created", "device_id", "created_at"),
-        Index("ix_tasks_task_device", "task_id", "device_id"),
-        Index("ix_tasks_user_created", "user_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_tasks_user_created", "user_id", "created_at"),)
 
     task_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # DB 可空（遗留列）；P4-3 起新写入只写 user_id——注解收敛为可空，
-    # 账本/卡归属调用链按 user_id 传递（create_attempt 等）
-    device_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("devices.device_id"), nullable=True
-    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     file_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("pdf_files.file_id", ondelete="SET NULL"), nullable=True
@@ -241,23 +189,13 @@ class Deck(Base):
     字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明。
     F1 建表用 TEXT 无 DB CHECK，不受影响；V4 创建 GENERATED 牌组时若需确认落点再更新 database-design。
 
-    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
     """
 
     __tablename__ = "decks"
-    __table_args__ = (
-        CheckConstraint(
-            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_decks_owner_domain"
-        ),
-        Index("ix_decks_device_updated", "device_id", "updated_at"),
-        Index("ix_decks_user_updated", "user_id", "updated_at"),
-    )
+    __table_args__ = (Index("ix_decks_user_updated", "user_id", "updated_at"),)
 
     deck_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # DB 已可空（遗留列）；v2.1 写入仍保证非空，用户侧写入落地后新行只写 user_id
-    device_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("devices.device_id"), nullable=True
-    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False)  # MANUAL/IMPORTED
@@ -269,16 +207,12 @@ class Deck(Base):
 class Card(Base):
     """2.9 cards：卡片（部分唯一索引 generation_item_id；UNIQUE(deck_id, position)）。
 
-    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
     """
 
     __tablename__ = "cards"
     __table_args__ = (
-        CheckConstraint(
-            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_cards_owner_domain"
-        ),
         UniqueConstraint("deck_id", "position", name="uq_cards_deck_position"),
-        Index("ix_cards_device_deck", "device_id", "deck_id"),
         Index("ix_cards_user_deck", "user_id", "deck_id"),
         Index(
             "ix_cards_gen_item_partial",
@@ -292,8 +226,6 @@ class Card(Base):
     deck_id: Mapped[str] = mapped_column(
         String, ForeignKey("decks.deck_id", ondelete="CASCADE"), nullable=False
     )
-    # DB 已可空（遗留列，与 deck 冗余一致）；v2.1 写入仍保证非空
-    device_id: Mapped[str | None] = mapped_column(String, nullable=True)
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     source: Mapped[str] = mapped_column(String, nullable=False)  # GENERATED/MANUAL/IMPORTED
     position: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -345,27 +277,20 @@ class ReviewState(Base):
 
 
 class ReviewEvent(Base):
-    """2.11 review_events：不可变复习事件（UNIQUE(device_id, client_event_id) + UNIQUE(user_id, client_event_id)）。
+    """2.11 review_events：不可变复习事件（UNIQUE(user_id, client_event_id)）。
 
-    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列/约束随不可逆迁移删除
+    （device_timezone 为负载字段，保留）。
     """
 
     __tablename__ = "review_events"
     __table_args__ = (
-        CheckConstraint(
-            "device_id IS NOT NULL OR user_id IS NOT NULL", name="ck_review_events_owner_domain"
-        ),
-        UniqueConstraint("device_id", "client_event_id", name="uq_review_events_device_client"),
         UniqueConstraint("user_id", "client_event_id", name="uq_review_events_user_client"),
-        Index("ix_review_events_device_reviewed", "device_id", "reviewed_at"),
         Index("ix_review_events_user_reviewed", "user_id", "reviewed_at"),
         Index("ix_review_events_card_id", "card_id"),
     )
 
     review_event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    device_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("devices.device_id"), nullable=True
-    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     card_id: Mapped[str] = mapped_column(
         String, ForeignKey("cards.card_id", ondelete="CASCADE"), nullable=False
@@ -378,40 +303,19 @@ class ReviewEvent(Base):
 
 
 class IdempotencyKey(Base):
-    """2.12 idempotency_keys：幂等（V2.2 主键 user_id+path+key；遗留唯一 device_id+path+key）。
+    """2.12 idempotency_keys：幂等（V2.2 主键 user_id+path+key）。
 
-    V2.2：主键重建为 (user_id, path, idempotency_key)，user_id 为数据主体隔离键；
-    device_id 为旧数据遗留列（新写入不再生成）；遗留 UNIQUE (device_id, path,
-    idempotency_key) 保留（旧设备域幂等缓存不跨身份空间重放，SQLite 多 NULL 不冲突）。
-    SQLite rowid 表非 INTEGER 主键允许 NULL——user_id 主键 nullable=True 合法，旧行
-    （user_id 为 NULL）可保留。跨设备旧行 (path, idempotency_key) 相同也不会冲突：
-    SQLite 对 PK/UNIQUE 中的 NULL 视为互异，多行 (NULL, path, idempotency_key)
-    并存（实测探针证伪「冲突即失败」旧表述）；同设备重放去重由保留的
-    UNIQUE (device_id, path, idempotency_key) 继续兜底（跨设备同键本就允许并存）。
-
-    SQLAlchemy ORM 限制（实测，见 P3-T2 报告）：复合主键含 NULL 时需
-    allow_partial_pks=True，否则旧行（user_id 为 NULL）经 ORM 查询被静默跳过、
-    写入抛 FlushError。v2.1 路径只做查询与插入（无更新/删除），allow_partial_pks
-    下全部可用；更新/删除路径（若有）对 user_id 为 NULL 的行仍会抛 FlushError。
+    V2.3：设备架构彻底清除——device_id 遗留列与 UNIQUE (device_id, path,
+    idempotency_key) 随不可逆迁移删除。
     """
 
     __tablename__ = "idempotency_keys"
     __table_args__ = (
         PrimaryKeyConstraint("user_id", "path", "idempotency_key", name="pk_idempotency_keys"),
-        UniqueConstraint(
-            "device_id", "path", "idempotency_key", name="uq_idempotency_keys_device_path"
-        ),
-        CheckConstraint(
-            "device_id IS NOT NULL OR user_id IS NOT NULL",
-            name="ck_idempotency_keys_owner_domain",
-        ),
     )
-    # SQLAlchemy 声明式协议读取类属性，仅初始化一次、不可变使用（RUF012 豁免）
-    __mapper_args__ = {"allow_partial_pks": True}  # noqa: RUF012
 
     # 复合主键列序对齐 database-design 2.12 `PRIMARY KEY (user_id, path, idempotency_key)`。
     user_id: Mapped[str | None] = mapped_column(String, primary_key=True, nullable=True)
-    device_id: Mapped[str | None] = mapped_column(String, nullable=True)
     path: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
     response_status: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -445,15 +349,11 @@ class TextChunk(Base):
 class LlmCallAttempt(Base):
     """llm_call_attempts：LLM 调用账本（spec §9；调用前 STARTED 占位，重试/上限/成本权威）。
 
-    V2.2：user_id 为数据主体隔离键；device_id 为旧数据遗留列（新写入不再生成）。
+    V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
     """
 
     __tablename__ = "llm_call_attempts"
     __table_args__ = (
-        CheckConstraint(
-            "device_id IS NOT NULL OR user_id IS NOT NULL",
-            name="ck_llm_call_attempts_owner_domain",
-        ),
         UniqueConstraint(
             "scope_type",
             "scope_id",
@@ -462,16 +362,11 @@ class LlmCallAttempt(Base):
             "attempt_no",
             name="uq_llm_call_attempts_scope_attempt_no",
         ),
-        Index("ix_llm_call_attempts_device_created", "device_id", "created_at"),
         Index("ix_llm_call_attempts_user_created", "user_id", "created_at"),
         Index("ix_llm_call_attempts_task_stage_operation", "task_id", "stage", "operation_key"),
     )
 
     call_id: Mapped[str] = mapped_column(String, primary_key=True)
-    # DB 已可空（遗留列）；v2.1 写入仍保证非空，用户侧写入落地后新行只写 user_id
-    device_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("devices.device_id"), nullable=True
-    )
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
     scope_type: Mapped[str] = mapped_column(String, nullable=False)  # TASK/CARD
     scope_id: Mapped[str] = mapped_column(String, nullable=False)

@@ -1,4 +1,8 @@
-"""Alembic 迁移集成测试：空库 upgrade → 12 表 + 约束；downgrade → 空库；再 upgrade 恢复。"""
+"""Alembic 迁移集成测试：空库 upgrade → 全表 + 约束；downgrade → 空库；再 upgrade 恢复。
+
+V2.3 起 downgrade 显式拒绝（设备数据已物理删除，不可逆）——往返/清空测试的下界为
+e85c78b2a345（V2.3 前终态），不再降过 V2.3。
+"""
 
 from pathlib import Path
 
@@ -6,7 +10,6 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, text
-from sqlalchemy.exc import IntegrityError
 
 from infra.db.session import create_db_engine
 
@@ -36,7 +39,6 @@ def test_alembic_upgrade_creates_all_tables(alembic_env: tuple[Config, Path]) ->
     command.upgrade(config, "head")
     tables = _table_names(db_path)
     expected = {
-        "devices",
         "api_keys",
         "pdf_files",
         "chapters",
@@ -58,20 +60,23 @@ def test_alembic_upgrade_creates_all_tables(alembic_env: tuple[Config, Path]) ->
 
 
 def test_alembic_downgrade_empties_db(alembic_env: tuple[Config, Path]) -> None:
+    """downgrade → 空库（起点 e85c78b2a345：V2.3 downgrade 显式拒绝，不再降过）。"""
     config, db_path = alembic_env
-    command.upgrade(config, "head")
+    command.upgrade(config, "e85c78b2a345")
     command.downgrade(config, "base")
     # Alembic 不删除自身版本表：downgrade 到 base 后仅剩 alembic_version
     assert _table_names(db_path) == {"alembic_version"}
 
 
 def test_alembic_upgrade_downgrade_upgrade_roundtrip(alembic_env: tuple[Config, Path]) -> None:
+    """往返（下界 e85c78b2a345）：V2.3 起 downgrade 显式拒绝，不再降过 V2.3。"""
     config, db_path = alembic_env
-    command.upgrade(config, "head")
+    command.upgrade(config, "e85c78b2a345")
     command.downgrade(config, "base")
     command.upgrade(config, "head")
     tables = _table_names(db_path)
     assert "cards" in tables and "review_states" in tables
+    assert "devices" not in tables  # V2.3 删除 devices 表
 
 
 def test_alembic_0002_adds_request_body_hash(alembic_env: tuple[Config, Path]) -> None:
@@ -125,7 +130,7 @@ def test_alembic_users_auth_sessions_columns(alembic_env: tuple[Config, Path]) -
 
 
 def test_alembic_owner_tables_have_user_id(alembic_env: tuple[Config, Path]) -> None:
-    """P3-T1：直接归属 6 表 user_id 列、device_id 降级可空、双非空 CHECK 存在。"""
+    """P3-T1：直接归属 6 表 user_id 列 + FK；V2.3 后 device_id 列与双非空 CHECK 已删除。"""
     config, db_path = alembic_env
     command.upgrade(config, "head")
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -138,9 +143,11 @@ def test_alembic_owner_tables_have_user_id(alembic_env: tuple[Config, Path]) -> 
             ).scalar_one()
             fks = conn.execute(text(f"PRAGMA foreign_key_list('{table}')")).fetchall()
             assert "user_id" in cols, f"{table} 缺 user_id 列"
-            assert cols["device_id"][3] == 0, f"{table}.device_id 应为可空（遗留列）"
-            assert cols["user_id"][3] == 0, f"{table}.user_id 应为可空（双非空由 CHECK 保证）"
-            assert f"ck_{table}_owner_domain" in sql_text, f"{table} 缺双非空 CHECK"
+            assert "device_id" not in cols, f"{table}.device_id 应在 V2.3 删除"
+            assert cols["user_id"][3] == 0, f"{table}.user_id 应为可空（非空由应用层保证）"
+            assert f"ck_{table}_owner_domain" not in sql_text, (
+                f"{table} 双非空 CHECK 应随 V2.3 删除"
+            )
             assert any(r[3] == "user_id" and r[2] == "users" for r in fks), (
                 f"{table}.user_id 缺 FK → users"
             )
@@ -183,7 +190,7 @@ def _pk_column_order(conn: Connection, table: str) -> list[str]:
 
 
 def test_alembic_api_keys_pk_rebuilt_to_user_id(alembic_env: tuple[Config, Path]) -> None:
-    """P3-T2：api_keys 主键重建为 user_id（NULL PK），device_id 为普通 NULL 遗留列。"""
+    """P3-T2：api_keys 主键为 user_id（NULL PK）；V2.3 后 device_id 列/FK/CHECK 已删除。"""
     config, db_path = alembic_env
     command.upgrade(config, "head")
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -195,19 +202,17 @@ def test_alembic_api_keys_pk_rebuilt_to_user_id(alembic_env: tuple[Config, Path]
         fks = {(r[2], r[3]) for r in conn.execute(text("PRAGMA foreign_key_list('api_keys')"))}
     assert "user_id" in cols
     assert cols["user_id"][5] == 1, "api_keys.user_id 应为主键"
-    assert cols["user_id"][3] == 0, (
-        "api_keys.user_id 主键可空（旧行保留，SQLite 非 INTEGER 主键允许 NULL）"
-    )
-    assert cols["device_id"][5] == 0 and cols["device_id"][3] == 0, "device_id 应为普通 NULL 遗留列"
-    assert "ck_api_keys_owner_domain" in sql_text
+    assert cols["user_id"][3] == 0, "api_keys.user_id 主键可空（SQLite 非 INTEGER 主键允许 NULL）"
+    assert "device_id" not in cols, "device_id 应在 V2.3 删除"
+    assert "ck_api_keys_owner_domain" not in sql_text, "双非空 CHECK 应随 V2.3 删除"
     assert ("users", "user_id") in fks, "user_id 缺 FK → users"
-    assert ("devices", "device_id") in fks, "遗留 device_id FK → devices 应保留"
+    assert ("devices", "device_id") not in fks, "device_id FK → devices 应随 V2.3 删除"
 
 
 def test_alembic_idempotency_pk_rebuilt_and_legacy_unique_kept(
     alembic_env: tuple[Config, Path],
 ) -> None:
-    """P3-T2：idempotency_keys 主键 (user_id, path, idempotency_key)，遗留 UNIQUE 保留。"""
+    """P3-T2：idempotency_keys 主键 (user_id, path, idempotency_key)；V2.3 后遗留 device UNIQUE/列/CHECK 已删。"""
     config, db_path = alembic_env
     command.upgrade(config, "head")
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -219,77 +224,38 @@ def test_alembic_idempotency_pk_rebuilt_and_legacy_unique_kept(
             text("SELECT sql FROM sqlite_master WHERE type='table' AND name='idempotency_keys'")
         ).scalar_one()
     assert pk_order == ["user_id", "path", "idempotency_key"]
-    assert cols["user_id"][3] == 0, "user_id 主键可空（旧行保留）"
-    assert cols["device_id"][3] == 0, "device_id 应为 NULL 遗留列"
-    assert {"device_id", "path", "idempotency_key"} in unique_colsets, "遗留唯一约束应保留"
-    assert "ck_idempotency_keys_owner_domain" in sql_text
+    assert cols["user_id"][3] == 0, "user_id 主键可空（SQLite 非 INTEGER 主键允许 NULL）"
+    assert "device_id" not in cols, "device_id 应在 V2.3 删除"
+    assert {"device_id", "path", "idempotency_key"} not in unique_colsets, (
+        "遗留唯一约束应随 V2.3 删除"
+    )
+    assert "ck_idempotency_keys_owner_domain" not in sql_text, "双非空 CHECK 应随 V2.3 删除"
 
 
 def test_review_events_user_client_unique_added_legacy_kept(
     alembic_env: tuple[Config, Path],
 ) -> None:
-    """P3-T2：review_events 另加 UNIQUE (user_id, client_event_id)，原 UNIQUE 保留。"""
+    """P3-T2：review_events UNIQUE (user_id, client_event_id)；V2.3 后原 device 版 UNIQUE 已删。"""
     config, db_path = alembic_env
     command.upgrade(config, "head")
     engine = create_db_engine(f"sqlite:///{db_path}")
     with engine.connect() as conn:
         unique_colsets = _unique_constraint_column_sets(conn, "review_events")
-    assert {"device_id", "client_event_id"} in unique_colsets, "原 UNIQUE 应保留"
+    assert {"device_id", "client_event_id"} not in unique_colsets, "原 UNIQUE 应随 V2.3 删除"
     assert {"user_id", "client_event_id"} in unique_colsets, "另加 UNIQUE 应存在"
 
 
-def test_alembic_api_keys_device_unique_added(alembic_env: tuple[Config, Path]) -> None:
-    """P4-5（P4 跟进 a）：api_keys 补回 UNIQUE (device_id)（origin='u' 列集 {device_id}）。
-
-    SQLite UNIQUE 对 NULL 视为互异——用户域行 device_id NULL 多行不冲突；遗留设备域
-    同 device_id 第二行违反唯一约束（防重兜底）。
-    """
+def test_alembic_api_keys_device_unique_removed_on_v2_3(
+    alembic_env: tuple[Config, Path],
+) -> None:
+    """P4-5 跟进（V2.3 清除）：api_keys 的 UNIQUE (device_id) 与 device_id 列一并删除。"""
     config, db_path = alembic_env
     command.upgrade(config, "head")
     engine = create_db_engine(f"sqlite:///{db_path}")
-    with engine.begin() as conn:
-        assert {"device_id"} in _unique_constraint_column_sets(conn, "api_keys")
-        # 用户域行 device_id NULL：两行并存（多 NULL 不冲突）
-        for uid in ("u1", "u2"):
-            conn.execute(
-                text(
-                    "INSERT INTO users (user_id, username, password_hash, created_at, updated_at)"
-                    " VALUES (:u, :n, 'hash', '2026-01-01T00:00:00.000Z',"
-                    " '2026-01-01T00:00:00.000Z')"
-                ),
-                {"u": uid, "n": uid},
-            )
-            conn.execute(
-                text(
-                    "INSERT INTO api_keys (user_id, encrypted_key, status, masked_key, updated_at)"
-                    " VALUES (:u, 'enc', 'AVAILABLE', 'sk-****', '2026-01-01T00:00:00.000Z')"
-                ),
-                {"u": uid},
-            )
-        # 遗留设备域防重：同 device_id 第二行违反 UNIQUE
-        conn.execute(
-            text(
-                "INSERT INTO devices (device_id, first_seen_ip, user_agent, last_active_at,"
-                " created_at)"
-                " VALUES ('dev1', NULL, NULL, NULL, '2026-01-01T00:00:00.000Z')"
-            )
-        )
-        conn.execute(
-            text(
-                "INSERT INTO api_keys (device_id, encrypted_key, status, masked_key, updated_at)"
-                " VALUES ('dev1', 'enc-1', 'AVAILABLE', 'sk-****abcd',"
-                " '2026-01-01T00:00:00.000Z')"
-            )
-        )
-    with pytest.raises(IntegrityError), engine.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO api_keys (device_id, encrypted_key, status, masked_key,"
-                " updated_at)"
-                " VALUES ('dev1', 'enc-2', 'AVAILABLE', 'sk-****efgh',"
-                " '2026-01-01T00:00:00.000Z')"
-            )
-        )
+    with engine.connect() as conn:
+        cols = {r[1] for r in conn.execute(text("PRAGMA table_info('api_keys')"))}
+        assert "device_id" not in cols
+        assert {"device_id"} not in _unique_constraint_column_sets(conn, "api_keys")
 
 
 # 旧库（2a391e994f93，v2.1 终态）device 域数据行：每表 1 行，SQL 直插（不经验 ORM）。
@@ -378,24 +344,44 @@ def _upgrade_legacy_db_with_rows(config: Config, db_path: Path) -> None:
     command.upgrade(config, "head")
 
 
-def test_alembic_legacy_rows_preserved_after_upgrade(alembic_env: tuple[Config, Path]) -> None:
-    """P3-T2：旧库副本 upgrade 后旧行 device_id 原值保留、user_id 为 NULL、行数守恒。"""
+def test_legacy_device_rows_removed_on_v2_3(alembic_env: tuple[Config, Path]) -> None:
+    """旧 device 域行随 V2.3 物理删除：user_id IS NULL 行清零、device_id 列不存在。"""
     config, db_path = alembic_env
-    _upgrade_legacy_db_with_rows(config, db_path)
+    _upgrade_legacy_db_with_rows(config, db_path)  # 2a391e994f93 → 直插旧行 → upgrade head
     engine = create_db_engine(f"sqlite:///{db_path}")
-    with engine.connect() as conn:
-        assert conn.execute(text("SELECT COUNT(*) FROM devices")).scalar() == 1
+    # 表名检查在同一连接内完成（不再新开引擎）：多引擎连串（迁移/直插/断言）交错时
+    # 新引擎 BEGIN IMMEDIATE 可能撞上前一连接的 WAL checkpoint/滞留写锁
+    # （database is locked，实测），单连接串行断言不受影响。
+    with engine.begin() as conn:
         for table in _OWNER_TABLES:
-            count = conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
-            assert count == 1, f"{table} 行数应守恒（1），实际 {count}"
-            row = conn.execute(text(f"SELECT device_id, user_id FROM {table}")).one()
-            assert row == ("dev1", None), f"{table} 旧行 device_id 应原值保留、user_id 为 NULL"
+            count = conn.execute(
+                text(f"SELECT COUNT(*) FROM {table} WHERE user_id IS NULL")
+            ).scalar()
+            assert count == 0, f"{table} 旧 device 域行未删除"
+            cols = [r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))]
+            assert "device_id" not in cols
+        tables = {
+            r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+        }
+        assert "devices" not in tables
+
+
+def test_v2_3_downgrade_rejected(alembic_env: tuple[Config, Path]) -> None:
+    """V2.3 起 downgrade 显式拒绝：设备数据已物理删除，不可逆。"""
+    config, _ = alembic_env
+    command.upgrade(config, "head")
+    with pytest.raises(RuntimeError, match="迁移不可逆"):
+        command.downgrade(config, "e85c78b2a345")
 
 
 def test_alembic_downgrade_fail_closed_with_user_data(alembic_env: tuple[Config, Path]) -> None:
-    """P3-T2：存在用户域数据时 downgrade 在任何 DDL/DML 前拒绝（fail closed），表结构未变。"""
+    """P3-T2：存在用户域数据时 downgrade 在任何 DDL/DML 前拒绝（fail closed），表结构未变。
+
+    V2.3 起 downgrade 显式拒绝（不可逆），fail-closed 守卫仅在 V2.3 之前的层可达：
+    从 e85c78b2a345（V2.3 前终态）降 base 触发。
+    """
     config, db_path = alembic_env
-    command.upgrade(config, "head")
+    command.upgrade(config, "e85c78b2a345")
     engine = create_db_engine(f"sqlite:///{db_path}")
     with engine.begin() as conn:
         conn.execute(
@@ -420,31 +406,12 @@ def test_alembic_downgrade_fail_closed_with_user_data(alembic_env: tuple[Config,
 
 
 def test_alembic_empty_and_legacy_only_downgrade_ok(alembic_env: tuple[Config, Path]) -> None:
-    """P3-T2：空库往返与纯旧 device 域数据副本 upgrade→downgrade 成功（旧行保留）；
-    P4 跟进 b 起含 ddc6 层 downgrade 带旧行 CI 守卫（T1 手工验证固化）。"""
-    config, db_path = alembic_env
-    # 空库 upgrade → downgrade → upgrade 往返
-    command.upgrade(config, "head")
+    """P3-T2：空库往返下界 e85c78b2a345（V2.3 downgrade 显式拒绝、不再降过 V2.3）。"""
+    config, _ = alembic_env
+    # 空库 upgrade → downgrade → upgrade 往返（下界 e85c78b2a345）
+    command.upgrade(config, "e85c78b2a345")
     command.downgrade(config, "base")
     command.upgrade(config, "head")
-    # 纯旧 device 域数据副本：回到旧库基线 → 插旧行 → upgrade → 只降本 revision（旧行保留）
-    command.downgrade(config, "2a391e994f93")
-    engine = create_db_engine(f"sqlite:///{db_path}")
-    with engine.begin() as conn:
-        for sql in _LEGACY_INSERT_SQLS:
-            conn.execute(text(sql))
-    command.upgrade(config, "head")
-    command.downgrade(config, "ddc6f34e30b8")
-    with engine.connect() as conn:
-        assert conn.execute(text("SELECT COUNT(*) FROM api_keys")).scalar() == 1
-        assert conn.execute(text("SELECT device_id FROM api_keys")).one() == ("dev1",)
-        assert conn.execute(text("SELECT COUNT(*) FROM idempotency_keys")).scalar() == 1
-        assert conn.execute(text("SELECT device_id FROM idempotency_keys")).one() == ("dev1",)
-    # P4 跟进 b：ddc6 层 downgrade 带旧行 CI 守卫（T1 手工验证固化）——
-    # 继续降回 v2.1 基线（ddc6f34e30b8 → 2a391e994f93），旧行 device_id 原值保留、行数守恒
-    command.downgrade(config, "2a391e994f93")
-    with engine.connect() as conn:
-        assert conn.execute(text("SELECT COUNT(*) FROM api_keys")).scalar() == 1
-        assert conn.execute(text("SELECT device_id FROM api_keys")).one() == ("dev1",)
-        assert conn.execute(text("SELECT COUNT(*) FROM idempotency_keys")).scalar() == 1
-        assert conn.execute(text("SELECT device_id FROM idempotency_keys")).one() == ("dev1",)
+    # 从 head 降过 V2.3 显式拒绝（downgrade 目标 e85c78b2a345）
+    with pytest.raises(RuntimeError, match="迁移不可逆"):
+        command.downgrade(config, "e85c78b2a345")
