@@ -45,7 +45,8 @@
    `rubric_version`。
 4. PRD V2.1 同步：5.4.2 难度定义表、5.6 单元产出描述、231 行旧措辞、验收标准。默认
    **原地修订 `prd_v2_1.md`**（对既有定义的修正，不升版本号；用户可在 spec 审阅时改主意）。
-5. 测试与真实 canary 验收（见 §6）。
+5. 测试与真实 canary 验收（见 §7）；
+6. 评分统计落盘：SCORING 阶段结束后按任务向版本目录追加一行聚合统计（见 §6）。
 
 **不做**（登记，另行工作包）：
 
@@ -173,7 +174,34 @@
 - `docs/Progress.md`：进度注记。
 - `openapi.yaml`、`database-design.md`：零变更（资源模型与表结构未动，红线 1/2 自动满足）。
 
-## 6. 测试与验收
+## 6. 评分统计落盘（observations）
+
+用户要求（2026-08-14 spec 审阅新增）：rubric 评分之后把**统计型**评分数据简单记录到对应
+rubric 版本目录的子文件下，用于版本间效果对比（如 rubric v2 vs v3）。不要每卡细节。
+
+**落盘规则**：
+
+- 文件位置：`agent_evolution/rubrics/<rubric_version>/observations/scores.jsonl`，按运行时
+  实际使用的 rubric 版本解析路径；追加写入，每行一条 JSON。
+- 记录粒度：**每任务一行**——SCORING 阶段对该任务全部完成后追加（不是每卡、不是每次
+  调用）。
+- 每行字段（无卡片 ID、无卡片文本）：
+
+  ```
+  {ts, task_id, rubric_version, scoring_prompt_version, model, thinking,
+   n, evidence: {mean, d0, d1, d2, d3}, correctness: {...}, difficulty: {...},
+   learning_value: {...}, total_mean}
+  ```
+
+  `n` = 本任务有评分的卡片数；各维度 `d0..d3` = 分数 0/1/2/3 的计数（直方图），`mean` =
+  均值；`thinking` = 该任务评分调用是否启用 thinking（路由口径见 §4）。
+- 容错：统计落盘是**尽力而为**的观测行为——文件写入失败（OSError）只记 WARNING 日志，
+  不得让 SCORING 阶段失败或回滚。
+- 版本目录纯净性：`agent_evolution/rubrics/*/observations/` 加入 `.gitignore`（运行时数据
+  不提交，资产目录冻结规则不受影响——observations 不是资产）。
+- 不落库：无 DB 变更、无契约变更，纯运行时文件观测。
+
+## 7. 测试与验收
 
 单元测试（`main/tests/`，命名 `test_<模块>_<行为>`）：
 
@@ -181,7 +209,10 @@
   settings）；
 - 路由：APPLICATION 单元生成调用 → body 携带 `{"type": "enabled"}`；非 APPLICATION →
   回落；APPLICATION 卡评分调用 → enabled；
-- 资产加载：manifest 新版本路径可加载。
+- 资产加载：manifest 新版本路径可加载；
+- 统计落盘：fake 评分管线跑完一个任务 → observations 文件追加一行且字段正确（n、四维
+  mean/直方图、total_mean、版本号、thinking 口径）；写入失败（OSError 注入）→ 仅 WARNING、
+  评分阶段正常完成；连续两个任务 → 两行追加不覆盖。
 
 回归：
 
@@ -200,7 +231,7 @@
 - 用 `res/` 样书跑一次正式生成，人工检查 APPLICATION 卡的提问方式与深度是否达到 §1 三例
   水平；检查成本增量（llm_metrics）与弃权率。
 
-## 7. 风险
+## 8. 风险
 
 - 深题质量依赖推理模型能力，深度可能不稳 → rubric v3 的难度匹配/学习价值维度观测 +
   canary 人工验收兜底；
