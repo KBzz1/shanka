@@ -37,7 +37,7 @@
 - Consumes: 迁移链 head `b92357b079ca`（7 revisions 线性）；models.py User 现状（uq_users_username）
 - Produces: `User.email: Mapped[str]`（NOT NULL）、`uq_users_email` 唯一约束；迁移后 users/auth_sessions 及下游 12 表为空
 
-- [ ] **Step 1: 改写迁移测试断言（先红）**
+- [x] **Step 1: 改写迁移测试断言（先红）**
 
 `test_alembic_migration.py` 的 `test_alembic_users_auth_sessions_columns`（92-113 行）改为：
 
@@ -73,12 +73,12 @@ def test_v2_4_account_data_wiped_and_downgrade_rejected(alembic_env: tuple[Confi
     # 再验证 downgrade：alembic downgrade -1 → 抛 RuntimeError（迁移文件 downgrade 第一行 raise）
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd main && conda run -n shanka-backend python -m pytest tests/integration/test_alembic_migration.py -q`
 Expected: FAIL（users 无 email 列 / uq_users_username 仍存在 / 新测试缺失迁移行为）
 
-- [ ] **Step 3: 写迁移文件**
+- [x] **Step 3: 写迁移文件**
 
 `cd main && conda run -n shanka-backend alembic revision -m "v2_4_email_login"`，文件内容：
 
@@ -129,7 +129,7 @@ def downgrade() -> None:
 
 （revision id 用 alembic 生成值替换两处占位。）
 
-- [ ] **Step 4: 改 models.py User**
+- [x] **Step 4: 改 models.py User**
 
 ```python
 class User(Base):
@@ -151,11 +151,11 @@ class User(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 ```
 
-- [ ] **Step 5: 同步 database-design.md（红线 2，本提交内绿）**
+- [x] **Step 5: 同步 database-design.md（红线 2，本提交内绿）**
 
 2.15 users 节：表头加 `email` 行（`string | ✓ | 登录键；服务端转小写规范化；UNIQUE（uq_users_email）`）；`username` 行说明改为「展示名：1~24 位，中文/字母/数字/._-，可重名（无 UNIQUE）」；约束行改为 uq_users_email。2.16 auth_sessions 节末尾追加一句：「V2.4 起 expires_at 支持滑动续期（活跃续期至 now+30 天，见 structure-contract 6.11）。」§7.1 追加 V2.4 落地记录行（revision id、email 列、清空数据、downgrade 拒绝）。
 
-- [ ] **Step 6: 跑迁移测试 + 守卫 + 漂移检查**
+- [x] **Step 6: 跑迁移测试 + 守卫 + 漂移检查**
 
 Run:
 ```bash
@@ -165,12 +165,12 @@ conda run -n shanka-backend alembic check
 ```
 Expected: 全 PASS + "No new upgrade operations detected"
 
-- [ ] **Step 7: 开发库实迁（本机验收路径）**
+- [x] **Step 7: 开发库实迁（本机验收路径）**
 
 Run: `cd main && conda run -n shanka-backend alembic upgrade head`
 验证：`conda run -n shanka-backend python -c "import sqlite3; c=sqlite3.connect('data/shanka.db'); print(c.execute(\"SELECT count(*) FROM users\").fetchone(), c.execute(\"PRAGMA table_info('users')\").fetchall())"` → users count=0 且含 email 列。**不删除 data/shanka.db**；0 字节干扰文件 main/shanka.db 不碰。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add main/infra/db/models.py main/migrations/versions/ docs/Architecture/database-design.md main/tests/integration/test_alembic_migration.py
@@ -195,7 +195,7 @@ git commit -m "feat(auth): users 加 email 登录键 + username 降为展示名 
 - Consumes: Task 1 的 `User.email` 列；`RateLimiter.check(key)`（rate_limit.py:65）；app.state 装配（main.py）
 - Produces: `register_user(session, *, username, email, password, now, ttl_days)` / `login_user(session, *, email, password, now, ttl_days, email_limiter)`；错误码 `EMAIL_TAKEN`（409）；state 属性 `login_email_limiter`
 
-- [ ] **Step 1: errors.py 错误码切换**
+- [x] **Step 1: errors.py 错误码切换**
 
 ```python
     # 账号（V2.2，决策 D-05；401 一律携带 WWW-Authenticate: Bearer）
@@ -207,7 +207,7 @@ git commit -m "feat(auth): users 加 email 登录键 + username 降为展示名 
 
 删除 `USERNAME_TAKEN = "USERNAME_TAKEN"` 行；`ERROR_HTTP_STATUS` 同步：删 `ErrorCode.USERNAME_TAKEN: 409`，加 `ErrorCode.EMAIL_TAKEN: 409`。全仓 grep `USERNAME_TAKEN` 清零（含 `main/migrations/versions/ddc6f34e30b8_account_auth_data_foundation.py:57` 注释——历史迁移文件注释不动，属历史记录；运行时引用必须清零）。
 
-- [ ] **Step 2: schemas/auth.py**
+- [x] **Step 2: schemas/auth.py**
 
 ```python
 class AuthRegisterRequest(BaseModel):
@@ -221,7 +221,7 @@ class AuthLoginRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 ```
 
-- [ ] **Step 3: service.py 校验与规范化**
+- [x] **Step 3: service.py 校验与规范化**
 
 替换 36-55 行区域：
 
@@ -339,13 +339,13 @@ def login_user(
 
 文件顶部 docstring 同步（「用户名冲突 → 409 USERNAME_TAKEN」→「email 冲突 → 409 EMAIL_TAKEN」等）。
 
-- [ ] **Step 4: api/auth.py + main.py + config.py 接线**
+- [x] **Step 4: api/auth.py + main.py + config.py 接线**
 
 api/auth.py register_endpoint：`register_user(session, username=payload.username, email=payload.email, ...)`；login_endpoint：`login_user(session, email=payload.email, ...)`、limiter 取 `request.app.state.login_email_limiter`。文件 docstring「login 用户名桶」→「login email 桶」。
 
 main.py：`app.state.login_username_limiter = RateLimiter(...)` → `app.state.login_email_limiter = RateLimiter(limit=settings.rate_limit_login_email_per_hour, window_seconds=3600)`；注释同步。config.py：`rate_limit_login_username_per_hour: int = 10` → `rate_limit_login_email_per_hour: int = 10`。grep `login_username` / `rate_limit_login_username` 全仓（main/）运行时引用清零。
 
-- [ ] **Step 5: openapi.yaml 同步（红线 1，本提交内绿）**
+- [x] **Step 5: openapi.yaml 同步（红线 1，本提交内绿）**
 
 ```yaml
     AuthRegisterRequest:
@@ -382,7 +382,7 @@ main.py：`app.state.login_username_limiter = RateLimiter(...)` → `app.state.l
 
 AuthUser 的 username 描述同步为展示名语义（3.14 对齐）。当前 openapi 为 2.2.0，版本号按文件头部惯例 bump（如 2.4.0）并保持与 structure-contract 引用一致。
 
-- [ ] **Step 6: 改写 test_auth.py（先写测试再实现已互为 TDD——本步改完跑全绿）**
+- [x] **Step 6: 改写 test_auth.py（先写测试再实现已互为 TDD——本步改完跑全绿）**
 
 `_auth_headers` 改为：
 
@@ -420,7 +420,7 @@ def _auth_headers(
 
 test_rate_limit_user.py：grep 其中 login 桶测试，username 桶键断言改 email（测试名与键同步改）。
 
-- [ ] **Step 7: 全量后端测试 + lint**
+- [x] **Step 7: 全量后端测试 + lint**
 
 Run:
 ```bash
@@ -429,7 +429,7 @@ conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backen
 ```
 Expected: 全 PASS（pytest 数量随改写微调，FAIL=0）。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add main/app/errors.py main/app/schemas/auth.py main/services/auth/service.py main/app/api/auth.py main/app/main.py main/app/config.py main/tests/ docs/Architecture/openapi.yaml
@@ -449,7 +449,7 @@ git commit -m "feat(auth): 注册三字段 + email 登录键 + EMAIL_TAKEN（契
 - Consumes: Task 2 的 login/register；`resolve_principal(session, *, token_hash, now) -> AuthPrincipal | None`；`request.app.state.settings.auth_session_ttl_days`（30）
 - Produces: `renew_session_if_due(session, *, session_id, now, ttl_days) -> None`（每会话每天至多一次 UPDATE）
 
-- [ ] **Step 1: service.py 新增续期函数（`_create_session` 之后）**
+- [x] **Step 1: service.py 新增续期函数（`_create_session` 之后）**
 
 ```python
 def renew_session_if_due(
@@ -469,7 +469,7 @@ def renew_session_if_due(
     )
 ```
 
-- [ ] **Step 2: middleware/auth.py 接线**
+- [x] **Step 2: middleware/auth.py 接线**
 
 ```python
         token_hash = hash_session_token(token)
@@ -490,7 +490,7 @@ def renew_session_if_due(
 
 模块 docstring 追加一行：「- V2.4 滑动续期：resolve 成功后 renew_session_if_due 按天节流延长 expires_at（活跃永不过期）。」
 
-- [ ] **Step 3: 测试（test_auth.py 追加）**
+- [x] **Step 3: 测试（test_auth.py 追加）**
 
 ```python
 def test_sliding_renewal_extends_near_expiry_session(client: TestClient, tmp_path: Path) -> None:
@@ -539,12 +539,12 @@ def test_revoked_session_never_renewed(client: TestClient, tmp_path: Path) -> No
 
 （时间断言若与 SQLite datetime 精度打架，改用 `SELECT expires_at > datetime('now', '+29 days')` 布尔断言。）
 
-- [ ] **Step 4: 跑测试**
+- [x] **Step 4: 跑测试**
 
 Run: `cd main && conda run -n shanka-backend python -m pytest tests/integration/test_auth.py -q && conda run -n shanka-backend python -m pytest tests/integration/test_auth_middleware.py -q`
 Expected: 全 PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add main/services/auth/service.py main/app/middleware/auth.py main/tests/integration/test_auth.py
@@ -566,7 +566,7 @@ git commit -m "feat(auth): 会话滑动续期——活跃用户永不过期（�
 - Consumes: 后端新契约（Task 2）：register `{username,email,password}`、login `{email,password}`、错误码 EMAIL_TAKEN
 - Produces: `AuthRepository.register(username, email, password)` / `login(email, password)`；`AuthViewModel.submitRegister(username, email, password)` / `submitLogin(email, password)`；`AuthViewModel.passwordsMatch(password, confirmation)` 纯函数；`AppViewModel.register(username, email, password, confirmation, onResult)`
 
-- [ ] **Step 1: BackendClient + AuthRepository 签名切换**
+- [x] **Step 1: BackendClient + AuthRepository 签名切换**
 
 RemoteFlashcards.kt 166-182 区域：
 
@@ -612,7 +612,7 @@ override suspend fun login(email: String, password: String): ApiResult<Session> 
     sessionResult(client.login(email, password))
 ```
 
-- [ ] **Step 2: AuthViewModel 三参数 + passwordsMatch**
+- [x] **Step 2: AuthViewModel 三参数 + passwordsMatch**
 
 ```kotlin
     fun login(email: String, password: String) {
@@ -642,7 +642,7 @@ override suspend fun login(email: String, password: String): ApiResult<Session> 
     }
 ```
 
-- [ ] **Step 3: AppViewModel.register 四参数 + 确认密码守卫**
+- [x] **Step 3: AppViewModel.register 四参数 + 确认密码守卫**
 
 ```kotlin
     fun register(username: String, email: String, password: String, confirmation: String, onResult: (String?) -> Unit) = viewModelScope.launch {
@@ -658,7 +658,7 @@ override suspend fun login(email: String, password: String): ApiResult<Session> 
 
 （注释「上游 UI 字段名为 email，其值作为后端 username 使用」删除——语义已对齐。）
 
-- [ ] **Step 4: AuthScreen 表单**
+- [x] **Step 4: AuthScreen 表单**
 
 LoginScreen 139-146 区域：`message = "请使用注册邮箱联系支持以重置密码。"` → `message = "请手动联系开发者直接修改密码。"`。
 
@@ -698,7 +698,7 @@ internal fun RegisterScreen(viewModel: AppViewModel, nav: ScreenNavigator) {
 
 （Task 5 会把两处 `AuthMessage(text, scale)` 换成倒计时签名——本步先保持编译一致：若 Task 5 未到，维持现签名。）
 
-- [ ] **Step 5: 更新 JVM 测试**
+- [x] **Step 5: 更新 JVM 测试**
 
 AuthViewModelTest：所有 `submitRegister(username, password)` / `submitLogin(username, password)` 调用改为三参数/email；新增：
 
@@ -715,12 +715,12 @@ AuthViewModelTest：所有 `submitRegister(username, password)` / `submitLogin(u
 
 AuthClientContractTest：register/login 请求体断言更新（register body 含 username/email/password 三键；login body 含 email/password 两键、无 username）；fake 会话响应形状不变。
 
-- [ ] **Step 6: 跑 JVM 测试 + assemble**
+- [x] **Step 6: 跑 JVM 测试 + assemble**
 
 Run: `cd frontend-app/Front && ./gradlew test && ./gradlew assembleDebug`
 Expected: BUILD SUCCESSFUL（53+ 全绿）
 
-- [ ] **Step 7: Commit（frontend-app）**
+- [x] **Step 7: Commit（frontend-app）**
 
 ```bash
 git -C /home/kbzz1/shanka_backend/frontend-app add -A && git -C /home/kbzz1/shanka_backend/frontend-app commit -m "feat(auth): 注册三字段 + email 登录接线 + 确认密码校验 + 忘记密码文案"
@@ -740,7 +740,7 @@ git -C /home/kbzz1/shanka_backend/frontend-app add -A && git -C /home/kbzz1/shan
 - Consumes: Task 4 的 AuthViewModel 形状；`ApiResult.Failure(status: Int, code: String?, ...)`（RemoteFlashcards.kt:84）；网络失败 code="NETWORK_UNAVAILABLE"（RemoteFlashcards.kt:267-273 unavailableResult）
 - Produces: `ErrorMessages.forCode(code: String?): String`；`AuthMessage(text, scale, onDismiss)` 三参数签名（3 秒倒计时，右侧纯数字【3】【2】【1】，归零整体消失）
 
-- [ ] **Step 1: ErrorMessages.kt（全量映射表）**
+- [x] **Step 1: ErrorMessages.kt（全量映射表）**
 
 ```kotlin
 package com.qiuzhao.flashcards.ui.auth
@@ -790,7 +790,7 @@ object ErrorMessages {
 
 （文案须与 structure-contract §7 错误码表语义一致；若实现时发现后端某码 message 语义更新，以 spec 语义为准同步本表。）
 
-- [ ] **Step 2: AuthViewModel 映射接线**
+- [x] **Step 2: AuthViewModel 映射接线**
 
 替换 29-36 行区域：
 
@@ -806,7 +806,7 @@ private fun ApiResult.Failure.authErrorMessage(): String =
     if (code == "NETWORK_UNAVAILABLE") NETWORK_ERROR_MESSAGE else ErrorMessages.forCode(code)
 ```
 
-- [ ] **Step 3: AuthMessage 倒计时组件**
+- [x] **Step 3: AuthMessage 倒计时组件**
 
 替换 AuthScreen.kt 680-687 行：
 
@@ -840,7 +840,7 @@ private fun AuthMessage(text: String, scale: Float, onDismiss: () -> Unit) {
 
 两处调用点更新：LoginScreen `message?.let { AuthMessage(it, scale) }` → `message?.let { AuthMessage(it, scale) { message = null } }`；RegisterScreen 同。语义：3 秒倒计时（【3】→【2】→【1】）归零后**整个提示框消失**（onDismiss 置 message=null）；`remember(text)` 保证新错误重置倒计时。所需 import（`kotlinx.coroutines.delay` 已有；`Row`/`Alignment`/`Spacer` 已在文件 import 中，核对即可）。
 
-- [ ] **Step 4: 测试**
+- [x] **Step 4: 测试**
 
 ErrorMessagesTest.kt（新）：
 
@@ -873,12 +873,12 @@ class ErrorMessagesTest {
 
 AuthViewModelTest 更新：失败映射断言——`Failure(status=400, code="VALIDATION_ERROR", ...)` → 「请求参数有误，请检查输入」（不再是网络错误）；`code="NETWORK_UNAVAILABLE"` → 「网络错误，请稍后重试」；未知码 → 「操作失败，请稍后重试」。
 
-- [ ] **Step 5: 跑 JVM 测试**
+- [x] **Step 5: 跑 JVM 测试**
 
 Run: `cd frontend-app/Front && ./gradlew test`
 Expected: BUILD SUCCESSFUL
 
-- [ ] **Step 6: Commit（frontend-app）**
+- [x] **Step 6: Commit（frontend-app）**
 
 ```bash
 git -C /home/kbzz1/shanka_backend/frontend-app add -A && git -C /home/kbzz1/shanka_backend/frontend-app commit -m "feat(auth): 全量错误码映射表 + 3 秒倒计时错误提示（【3】【2】【1】归零消失）"
@@ -901,7 +901,7 @@ git -C /home/kbzz1/shanka_backend/frontend-app add -A && git -C /home/kbzz1/shan
 - Consumes: 后端新契约（Task 2）；`Response(headers=小写键)`（client.py:41-46）；`environments.credentials()` 现返回 tuple[str, str]
 - Produces: `client.register(username, email, password)` / `client.login(email, password)`；`account.bootstrap(c, *, environment, username, email, password)`；`account.temp_email(run_id, tag)`；`credentials() -> tuple[str, str, str]`（新增环境变量 `SHANKA_TEST_EMAIL`）；`derive_budget(*, chapters, quantity_tendency, generate, planning_groups=1)`
 
-- [ ] **Step 1: client.py 签名切换**
+- [x] **Step 1: client.py 签名切换**
 
 ```python
     def register(self, username: str, email: str, password: str) -> Response:
@@ -922,7 +922,7 @@ git -C /home/kbzz1/shanka_backend/frontend-app add -A && git -C /home/kbzz1/shan
         return self.request("POST", path, body=body, retry=False, auth=False)
 ```
 
-- [ ] **Step 2: account.py bootstrap 429 重试 + temp_email**
+- [x] **Step 2: account.py bootstrap 429 重试 + temp_email**
 
 ```python
 from collections.abc import Callable
@@ -996,7 +996,7 @@ def temp_email(run_id: str, tag: str) -> str:
 
 模块 docstring「local 先 register(409 USERNAME_TAKEN 回落 login)」→「local 先 register(409 EMAIL_TAKEN 回落 login)」。
 
-- [ ] **Step 3: environments.credentials() 加 email**
+- [x] **Step 3: environments.credentials() 加 email**
 
 ```python
 EMAIL_ENV = "SHANKA_TEST_EMAIL"
@@ -1017,7 +1017,7 @@ def credentials() -> tuple[str, str, str]:
     return username, email, password
 ```
 
-- [ ] **Step 4: 调用点适配**
+- [x] **Step 4: 调用点适配**
 
 - `scenarios/auth/auth.py`：`run(c, *, environment, username, email, password)`；`c.login(account.wrong_password(password))` → `c.login(email, account.wrong_password(password))`；`account.bootstrap(c, environment=environment, username=username, email=email, password=password)`；main() 解包三值 `username, email, password = environments.credentials()`。
 - `scenarios/isolation/isolation.py`：两处 bootstrap 加 email（第二账号用 `account.temp_email(run_id, tag2)`）；credentials 解包。
@@ -1025,7 +1025,7 @@ def credentials() -> tuple[str, str, str]:
 - `runner/suites.py:57`：credentials() 解包改三值（email 透传给场景 run）。
 - 全部 `environments.credentials()` 解包点 grep 核对（5 处）；场景 main() 的 argparse 不需加 --email（凭据只走 env）。
 
-- [ ] **Step 5: cost.py PLANNING 组数**
+- [x] **Step 5: cost.py PLANNING 组数**
 
 ```python
 def derive_budget(
@@ -1039,7 +1039,7 @@ def derive_budget(
 
 Budget dataclass 的 `planning_calls` 注释同步（「1 规划组 × (1+重试上限)」→「planning_groups 规划组 × (1+重试上限)」）；`BUDGET_FIXTURE`（live_flow.py 或 cost.py 中定义处）加 `"planning_groups": 3`；budget 打印行（cost.py:115 附近）加 `PLANNING×{planning_groups}组`；test-platform/CLAUDE.md「成本与环境闸门」节前提声明句同步（「PLANNING 按 1 规划组计——前提：前 2 章累计页文本 ≤ 20k…」改为「PLANNING 按 fixture 声明 3 规划组计（前 2 章 42.6k 字符 ÷ 20k 向上取整）」）；`docs/superpowers/specs/2026-08-12-test-platform-design.md` 相应句末尾追加勘误注（不改写历史正文）。
 
-- [ ] **Step 6: 平台单测**
+- [x] **Step 6: 平台单测**
 
 test_account.py（新，stdlib unittest 风格；用假 Response + 假 client 不触网）：
 
@@ -1057,12 +1057,12 @@ class Bootstrap429RetryTest(unittest.TestCase):
 
 test_cost.py 更新：`derive_budget(chapters=2, quantity_tendency="...", generate=True, planning_groups=3)` → `budget.planning_calls == 9`；默认 `planning_groups=1` → 3。
 
-- [ ] **Step 7: 跑平台测试**
+- [x] **Step 7: 跑平台测试**
 
 Run: `cd test-platform && conda run -n shanka-backend python -m pytest tests/ -q`
 Expected: 全 PASS（82+ 新增）
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add test-platform/ docs/superpowers/specs/2026-08-12-test-platform-design.md
@@ -1082,7 +1082,7 @@ git commit -m "feat(test-platform): email 契约适配 + bootstrap 429 重试 + 
 **Interfaces:**
 - Consumes: Task 1/2/3 的最终实现形态（迁移 revision id、错误码、文案、滑动续期语义）
 
-- [ ] **Step 1: PRD V2.4**
+- [x] **Step 1: PRD V2.4**
 
 新建 `docs/PRD/V2.4/prd_v2_4.md`（继承 V2.3，结构参照 prd_v2_3.md 的「继承 + 变更清单」模式），变更清单：
 
@@ -1097,7 +1097,7 @@ git commit -m "feat(test-platform): email 契约适配 + bootstrap 429 重试 + 
 
 排除项：登录屏「直接进入」按钮维持现状（用户裁决不动）。
 
-- [ ] **Step 2: structure-contract.md 四处**
+- [x] **Step 2: structure-contract.md 四处**
 
 - 3.14 AuthUser：username 行改为「`username` | string | ✓ | 1~24 位展示名，中文/字母/数字/._-，可重名」；规则句删「全库唯一/转小写」表述。
 - 3.15 AuthSessionResponse：expires_at 说明追加「；V2.4 起活跃滑动续期（每次有效请求后剩余不足 1 天则续至 +30 天，按天节流）」。
@@ -1105,23 +1105,23 @@ git commit -m "feat(test-platform): email 契约适配 + bootstrap 429 重试 + 
 - 7 错误码表：`USERNAME_TAKEN` 行换为「`EMAIL_TAKEN` | 409 | 注册邮箱已被占用」；`INVALID_CREDENTIALS` 说明「用户名不存在与密码错误」→「邮箱不存在与密码错误」。
 - 1.6 限流策略表：「登录(用户名分桶) | 按规范化用户名」→「登录(邮箱分桶) | 按规范化邮箱」。
 
-- [ ] **Step 3: Progress.md + 文档清单**
+- [x] **Step 3: Progress.md + 文档清单**
 
 Progress.md 按惯例追加本工作包一行（日期 + 状态图例，参照 T3 先例格式）；docs/AGENTS.md 需求权威句若写死 V2.2/V2.3 → 更新为 V2.4。docs/PRD/ 下 AGENTS.md 若有版本清单 → 登记 V2.4。
 
-- [ ] **Step 4: 全契约 grep 校验**
+- [x] **Step 4: 全契约 grep 校验**
 
 ```bash
 grep -rn "USERNAME_TAKEN" docs/Architecture/ docs/PRD/V2.4/ main/app/ main/services/ main/tests/ 2>/dev/null
 ```
 Expected: 仅历史迁移文件注释（ddc6f34e30b8）与 PRD V2.2/V2.3 历史文档命中；运行时/契约层零命中。`grep -rn "login_username" main/` → 零命中。
 
-- [ ] **Step 5: 守卫与后端全测**
+- [x] **Step 5: 守卫与后端全测**
 
 Run: `cd main && conda run -n shanka-backend python -m pytest tests/integration/test_orm_database_guard.py tests/contract -q 2>/dev/null || conda run -n shanka-backend python -m pytest -q`
 Expected: 全 PASS（契约守卫含 openapi↔schemas 一致性测试若有则必须绿）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add docs/PRD/ docs/Architecture/structure-contract.md docs/Progress.md docs/AGENTS.md
@@ -1141,7 +1141,7 @@ git commit -m "docs: PRD V2.4 + structure-contract 契约同步（email 登录/�
 **Interfaces:**
 - Consumes: Task 4/5 的 AuthViewModel/AuthRepository 新签名；真机通道：Windows adb server（C:\Users\kbzz1\.cache\platform-tools）+ `ADB_SERVER_SOCKET=tcp:127.0.0.1:5037`
 
-- [ ] **Step 1: AuthFlowInstrumentedTest 改 email 语义**
+- [x] **Step 1: AuthFlowInstrumentedTest 改 email 语义**
 
 ```kotlin
     @Test fun fullAuthFlowRegisterLoginLogoutRelogin() = runBlocking {
@@ -1161,7 +1161,7 @@ git commit -m "docs: PRD V2.4 + structure-contract 契约同步（email 登录/�
 
 （原名/断言结构保留，仅字段与中文展示名按 V2.4 语义更新；instrumentation argument 注入 baseUrl 的既有机制不变。）
 
-- [ ] **Step 2: 三面全量回归（非真机部分）**
+- [x] **Step 2: 三面全量回归（非真机部分）**
 
 ```bash
 cd main && conda run -n shanka-backend python -m pytest -q && conda run -n shanka-backend python -m ruff check . && conda run -n shanka-backend python -m ruff format --check . && conda run -n shanka-backend python -m mypy .
@@ -1170,7 +1170,7 @@ cd ../frontend-app/Front && ./gradlew test --rerun-tasks && ./gradlew assembleDe
 ```
 Expected: 后端 565+ 全绿（数量随改写变化）/ ruff/format/mypy 全绿；平台 82+ 全绿；gradle 53+ 全绿 + 双 assemble。
 
-- [ ] **Step 3: 真机 connectedDebugAndroidTest**
+- [x] **Step 3: 真机 connectedDebugAndroidTest**
 
 - 通道复用：确认 Windows adb server 在位（`powershell.exe -NoProfile -Command "C:\Users\kbzz1\.cache\platform-tools\adb.exe devices"` 见设备）；WSL 内 `ADB_SERVER_SOCKET=tcp:127.0.0.1:5037 /home/kbzz1/android-sdk/platform-tools/adb devices`。
 - 测试前保持唤醒（T14 毛刺教训）：`adb shell svc power stayon true`；跑完恢复 `adb shell svc power stayon false`。
@@ -1178,7 +1178,7 @@ Expected: 后端 565+ 全绿（数量随改写变化）/ ruff/format/mypy 全绿
 - Expected: 18/18（BackendClientInstrumentedTest 13 + AuthFlowInstrumentedTest 3 + FlashcardsAppTest 1 + StoredSessionEntersMainScreenTest 1），XML failures=0。
 - fullAuthFlow 触网线上 shanka.kbzz1.top（本机 uvicorn 127.0.0.1:8000 在跑是源站，不要停；429 等 1-2 分钟重试）。
 
-- [ ] **Step 4: spec §8 验收勾选 + 计划勾选 + 提交**
+- [x] **Step 4: spec §8 验收勾选 + 计划勾选 + 提交**
 
 spec `2026-08-14-email-login-and-error-ux-design.md` §8 十条 AC 按证据勾选 `- [x]`（AC-01~AC-10 逐条对应 Task 1/2/3/4/5/6/7 证据 + 本任务回归证据）；本计划文件任务复选框勾选；两仓库提交：
 
@@ -1188,7 +1188,7 @@ git commit -m "docs: 验收总览勾选——email 登录 + 错误提示 UX + �
 git -C /home/kbzz1/shanka_backend/frontend-app add -A && git -C /home/kbzz1/shanka_backend/frontend-app commit -m "test(androidTest): 登录链路 email 语义更新（V2.4）"
 ```
 
-- [ ] **Step 5: 报告**
+- [x] **Step 5: 报告**
 
 SDD workspace `.superpowers/sdd/2026-08-14-email-login-and-error-ux/` 下 task-8-report.md 汇总三面回归证据、真机 18/18 XML 路径、AC 勾选依据、concerns。
 

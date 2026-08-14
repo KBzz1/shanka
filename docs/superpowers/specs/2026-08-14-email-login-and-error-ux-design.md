@@ -160,17 +160,17 @@
 
 ## 8. 验收标准
 
-- AC-01 注册收 username+email+password；email lowercase 规范化 + 唯一；重复 email → 409 EMAIL_TAKEN。
-- AC-02 登录只用 email+password；错误密码/不存在邮箱 → 401「邮箱或密码错误」；限流桶按 email。
-- AC-03 主界面展示注册时的 username（「用户名，快来学习」）。
-- AC-04 滑动续期：活跃使用不会过期；连续 30 天不活跃过期；登出立即失效。
-- AC-05 错误提示显示 3 秒后整个框消失，右侧倒计时纯数字【3】【2】【1】每秒递减，新错误重置。
-- AC-06 前端错误映射覆盖后端全部错误码，未知码兜底「操作失败，请稍后重试」，
+- [x] AC-01 注册收 username+email+password；email lowercase 规范化 + 唯一；重复 email → 409 EMAIL_TAKEN。
+- [x] AC-02 登录只用 email+password；错误密码/不存在邮箱 → 401「邮箱或密码错误」；限流桶按 email。
+- [x] AC-03 主界面展示注册时的 username（「用户名，快来学习」）。
+- [x] AC-04 滑动续期：活跃使用不会过期；连续 30 天不活跃过期；登出立即失效。
+- [x] AC-05 错误提示显示 3 秒后整个框消失，右侧倒计时纯数字【3】【2】【1】每秒递减，新错误重置。
+- [x] AC-06 前端错误映射覆盖后端全部错误码，未知码兜底「操作失败，请稍后重试」，
   传输层失败才显示「网络错误，请稍后重试」。
-- AC-07 忘记密码提示文案为「请手动联系开发者直接修改密码。」。
-- AC-08 注册确认密码两次一致才提交；密码提示「至少 8 位」。
-- AC-09 平台 bootstrap 429 按 Retry-After 重试 ≤3 次并明确报错；PLANNING 预算按 3 组推导。
-- AC-10 PRD V2.4 / database-design / structure-contract / openapi 四处一致 + 三面回归全绿。
+- [x] AC-07 忘记密码提示文案为「请手动联系开发者直接修改密码。」。
+- [x] AC-08 注册确认密码两次一致才提交；密码提示「至少 8 位」。
+- [x] AC-09 平台 bootstrap 429 按 Retry-After 重试 ≤3 次并明确报错；PLANNING 预算按 3 组推导。
+- [x] AC-10 PRD V2.4 / database-design / structure-contract / openapi 四处一致 + 三面回归全绿。
 
 ## 9. 执行纪律（继承全局约束）
 
