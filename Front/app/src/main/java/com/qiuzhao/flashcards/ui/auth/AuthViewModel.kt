@@ -84,11 +84,17 @@ class AuthViewModel(
         submit { repository.register(username.trim(), password) }
     }
 
-    /** Logs out locally regardless of the server result; a dead token never blocks signing out. */
-    fun logout() = scope.launch {
-        repository.logout()
-        runCatching { sessionStore.clear() }
-        _state.value = AuthState.LoggedOut()
+    /**
+     * Local-first logout: the session is cleared and the state flips to [AuthState.LoggedOut]
+     * immediately (the login screen never waits on the network), then the server token is
+     * revoked fire-and-forget. The token is captured before the clear — the repository reads
+     * nothing back from the store — so the revocation request still goes out with the right
+     * token after the store is emptied; the result is discarded either way.
+     */
+    fun logout() {
+        val session = sessionStore.loadQuietly()
+        scope.launch { sessionStore.clear(); _state.value = AuthState.LoggedOut() }
+        scope.launch { session?.let { runCatching { repository.logout(it.token) } } }
     }
 
     /**

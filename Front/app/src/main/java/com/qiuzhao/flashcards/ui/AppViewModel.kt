@@ -9,7 +9,10 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.CardDraft
 import com.qiuzhao.flashcards.data.remote.ApiKeyStatus
@@ -30,6 +33,7 @@ import com.qiuzhao.flashcards.data.remote.RemoteFlashcardRepository
 import com.qiuzhao.flashcards.data.remote.projectsForDisplay
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
+import com.qiuzhao.flashcards.data.session.SessionStore
 import com.qiuzhao.flashcards.ui.auth.AuthState
 import com.qiuzhao.flashcards.ui.auth.AuthViewModel
 import kotlinx.coroutines.delay
@@ -167,9 +171,24 @@ private object FrontendTestFixtures {
  * Business data is server-authoritative. DataStore keeps only user preferences and the network
  * layer owns the encrypted device id and debug evidence; Room is deliberately not instantiated.
  */
-class AppViewModel(application: Application) : AndroidViewModel(application) {
-    private val sessionStore = KeystoreSessionStore(application)
-    private val repository = RemoteFlashcardRepository(application, sessionStore = sessionStore)
+class AppViewModel(
+    application: Application,
+    private val sessionStore: SessionStore,
+    private val repository: RemoteFlashcardRepository,
+) : AndroidViewModel(application) {
+    companion object {
+        /**
+         * 注入缝的默认生产路径：AndroidViewModelFactory 只反射单参数 (Application) 构造，
+         * 带注入参数的构造改走此显式工厂；默认行为等价于原先硬编码的 Keystore 存储 + 远端仓库。
+         */
+        val Factory: ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY]!!
+                val store = KeystoreSessionStore(app)
+                AppViewModel(app, store, RemoteFlashcardRepository(app, sessionStore = store))
+            }
+        }
+    }
 
     /** Auth 会话状态机：登录/登出/401 清会话的全部语义集中于此，独立可测。 */
     val auth = AuthViewModel(repository, sessionStore, viewModelScope)

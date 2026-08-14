@@ -33,11 +33,16 @@ class AuthViewModelTest {
         var registerResult: ApiResult<Session> = ApiResult.Success(Session("token-2", SessionUser("user-2", "bob", "2026-08-14T00:00:00Z")))
         var logoutResult: ApiResult<Unit> = ApiResult.Success(Unit)
         var loginHook: (suspend () -> ApiResult<Session>)? = null
+        var logoutHook: (suspend (String) -> ApiResult<Unit>)? = null
+        var revokedToken: String? = null
 
         override suspend fun register(username: String, password: String): ApiResult<Session> = registerResult
         override suspend fun login(username: String, password: String): ApiResult<Session> = loginHook?.invoke() ?: loginResult
         override suspend fun refreshMe(): ApiResult<SessionUser> = meResult
-        override suspend fun logout(): ApiResult<Unit> = logoutResult
+        override suspend fun logout(token: String): ApiResult<Unit> {
+            revokedToken = token
+            return logoutHook?.invoke(token) ?: logoutResult
+        }
     }
 
     private fun failure(status: Int, code: String) = ApiResult.Failure(status, code, null, null)
@@ -198,6 +203,22 @@ class AuthViewModelTest {
 
         assertEquals(AuthState.LoggedOut(), viewModel.state.value)
         assertNull(store.load())
+    }
+
+    @Test fun `logout clears local session before network revocation`() = runTest {
+        // fake repository：logout 挂起不返回（模拟断网）；本地登出必须不等网络返回。
+        val gate = CompletableDeferred<Unit>()
+        val store = InMemorySessionStore().apply { save(session.token, session.user) }
+        val repository = FakeAuthRepository().apply { logoutHook = { gate.await(); ApiResult.Success(Unit) } }
+        val viewModel = AuthViewModel(repository, store, backgroundScope)
+
+        viewModel.logout()
+        runCurrent()
+
+        assertEquals(AuthState.LoggedOut(), viewModel.state.value)
+        assertNull(store.load())
+        // 网络撤销以清空前捕获的 token 发起（store 已空，不复读）。
+        assertEquals("token-1", repository.revokedToken)
     }
 
     @Test fun `submitting is true while a request is in flight`() = runTest {

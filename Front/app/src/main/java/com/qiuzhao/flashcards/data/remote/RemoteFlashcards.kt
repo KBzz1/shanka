@@ -148,7 +148,7 @@ sealed interface ApiResult<out T> {
     data class Failure(val status: Int, val code: String?, val localizationKey: String?, val message: String?) : ApiResult<Nothing>
 }
 
-internal data class HttpResult(val status: Int, val body: String, val headers: Map<String, List<String>>)
+data class HttpResult(val status: Int, val body: String, val headers: Map<String, List<String>>)
 
 /** Authorization header derived from a bearer token; empty when there is no session. */
 internal fun buildAuthHeaders(token: String?): Map<String, String> =
@@ -161,7 +161,7 @@ internal fun buildAuthHeaders(token: String?): Map<String, String> =
 internal fun requestAuthToken(authenticate: Boolean, tokenOverride: String?, session: Session?): String? =
     tokenOverride ?: if (authenticate) session?.token else null
 
-internal class BackendClient(
+class BackendClient(
     context: Context,
     private val baseUrl: String = defaultBaseUrl(),
     private val sessionStore: SessionStore = KeystoreSessionStore(context)
@@ -370,10 +370,19 @@ interface AuthRepository {
     suspend fun register(username: String, password: String): ApiResult<Session>
     suspend fun login(username: String, password: String): ApiResult<Session>
     suspend fun refreshMe(): ApiResult<SessionUser>
-    suspend fun logout(): ApiResult<Unit>
+    /**
+     * Revokes the given token on the server. The token is explicit because the local store is
+     * cleared *before* revocation fires (logout is local-first); reading it back from the store
+     * here would silently skip the server call.
+     */
+    suspend fun logout(token: String): ApiResult<Unit>
 }
 
-internal class RemoteFlashcardRepository(
+/**
+ * Open so instrumented tests can subclass it as an injection seam: the fake overrides only the
+ * endpoints the startup path touches and issues no network traffic at all.
+ */
+open class RemoteFlashcardRepository(
     context: Context,
     private val sessionStore: SessionStore = KeystoreSessionStore(context),
     private val client: BackendClient = BackendClient(context, sessionStore = sessionStore)
@@ -388,7 +397,7 @@ internal class RemoteFlashcardRepository(
             ?: DeckProgress(0, 0, 0, 0)
     }
 
-    suspend fun refreshDecks(): ApiResult<List<DeckSummary>> = client.request("list_decks", "GET", "/decks").decode { value ->
+    open suspend fun refreshDecks(): ApiResult<List<DeckSummary>> = client.request("list_decks", "GET", "/decks").decode { value ->
         values(value, "decks").mapNotNull(::deck).also { _decks.value = it }
     }
 
@@ -405,10 +414,9 @@ internal class RemoteFlashcardRepository(
         return parsed
     }
 
-    /** Logs out with the stored token; already-signed-out is a no-op. Auth 401s still clear the store. */
-    override suspend fun logout(): ApiResult<Unit> {
-        val session = sessionStore.loadQuietly() ?: return ApiResult.Success(Unit)
-        val result = client.logout(session.token).decode { Unit }
+    /** Revokes the explicit token; an auth 401 still means the token is dead and clears the store. */
+    override suspend fun logout(token: String): ApiResult<Unit> {
+        val result = client.logout(token).decode { Unit }
         if (result is ApiResult.Success || (result as? ApiResult.Failure)?.isAuthFailure() == true) runCatching { sessionStore.clear() }
         return result
     }
@@ -514,7 +522,7 @@ internal class RemoteFlashcardRepository(
         // is the sole source of truth for whether this device now has a usable key.
         return if (saved is ApiResult.Success) apiKeyStatus() else saved
     }
-    suspend fun dashboard(weeklyGoal: Int? = null): ApiResult<Dashboard> {
+    open suspend fun dashboard(weeklyGoal: Int? = null): ApiResult<Dashboard> {
         val timezone = java.net.URLEncoder.encode(java.util.TimeZone.getDefault().id, "UTF-8")
         val path = buildString {
             append("/stats/dashboard?timezone=").append(timezone)
