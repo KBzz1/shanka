@@ -65,7 +65,7 @@ test-platform/
 
 ## 成本与环境闸门
 
-- 成本闸门（DESIGN 8.3，废弃「live 固定 3 次调用」假设）：运行前 `shanka/cost.derive_budget` 按受控 fixture（章节数/quantity_tendency/generate）与契约默认上限（镜像 main/app/config.py 与 structure-contract，后端运维调整需同步）推导最坏调用预算（PLANNING/GENERATING/SCORING 调用数与 token 上限，含重试上限）；runner 聚合套件最坏调用数，**超过阈值（默认 3，即 > 3）必须 `--confirm-cost`**，拒绝消息含逐阶段预算明细。
+- 成本闸门（DESIGN 8.3，废弃「live 固定 3 次调用」假设）：运行前 `shanka/cost.derive_budget` 按受控 fixture（章节数/quantity_tendency/generate）与契约默认上限（镜像 main/app/config.py 与 structure-contract，后端运维调整需同步）推导最坏调用预算（PLANNING/GENERATING/SCORING 调用数与 token 上限，含重试上限；**PLANNING 按 1 规划组计——前提：前 2 章累计页文本 ≤ planner_max_input_chars 20k，超过时后端拆组（上限 30 组）、实际 PLANNING 调用与成本高于推导值（欠报方向）；fixture 页文本量或后端拆组阈值调整时，需手工同步此前提声明**）；runner 聚合套件最坏调用数，**超过阈值（默认 3，即 > 3）必须 `--confirm-cost`**，拒绝消息含逐阶段预算明细。
 - 运行后对账：live 任务完成后经 `GET /tasks/{id}/batches` 对账实际批数/生成尝试/token/成本（批=单元账本投影，成本以服务端 8.4 常量 `cost_estimate` 为准）写入报告字段（`llm_budget_calls`/`llm_attempts_actual`/`llm_tokens_actual`/`llm_cost_actual`）；**边界：后端无 llm_call_attempts GET 端点，PLANNING/SCORING 尝试数无 HTTP 观测入口，对账只覆盖 GENERATING 阶段，报告须如实声明**。
 - 环境安全闸门：目标环境为 prod（shanka.kbzz1.top）时**默认拒绝执行**，必须显式 `--confirm-prod`（防误操作向生产 DB 写数据）；prod 禁止自动注册，只允许已有测试账号登录。
 - 请求纪律：继承 0.3s 节奏（IP 限流 5 req/s），429 按 Retry-After 重试；数据策略：业务资源场景结束自动清理（`shanka/cleanup.py`，含异常路径前缀兜底清理），session 一律 logout 撤销；local 临时测试账号以 run_id 命名注册，无法安全删除的 user 行按 run_id 计数写入报告字段（`local_test_users_created`，不新增生产账号删除接口）。

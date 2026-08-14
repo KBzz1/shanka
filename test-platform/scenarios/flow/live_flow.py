@@ -44,7 +44,9 @@ _GEN_CONFIG = {
 }
 
 # 受控 fixture:固定取前 2 章、BALANCED 密度;最坏调用预算由 cost.derive_budget 推导
-# (废弃「live 固定 3 次调用」假设——LLM_CALLS 为推导值,非手写常量)
+# (废弃「live 固定 3 次调用」假设——LLM_CALLS 为推导值,非手写常量)。
+# 前提声明:PLANNING 按 1 规划组计(前 2 章累计页文本 ≤ planner_max_input_chars 20k);
+# 页文本量超过 20k 时后端拆组(上限 30 组),实际 PLANNING 调用与成本高于推导值(欠报方向)
 BUDGET_FIXTURE = {"chapters": 2, "quantity_tendency": _GEN_CONFIG["quantity_tendency"],
                   "generate": True}
 LIVE_BUDGET = cost.derive_budget(**BUDGET_FIXTURE)
@@ -200,9 +202,12 @@ def run(
         record("llm_attempts_actual", rec.generation_attempts)
         record("llm_tokens_actual", rec.tokens)
         record("llm_cost_actual", rec.cost_yuan)
+        record("llm_budget_premise",
+               "PLANNING 1 规划组前提:前 2 章累计页文本 ≤ 20k(planner_max_input_chars),超出则拆组实际调用高于推导值")
         print(f"    [对账] 预算: {cost.describe(LIVE_BUDGET)}")
         print(f"    [对账] 实际(GENERATING 阶段,批=单元投影): {rec.usage_line}")
         print("    [对账] 边界: PLANNING/SCORING 尝试数无 HTTP 观测入口,仅 GENERATING 可对账")
+        print("    [对账] 前提: PLANNING 按 1 规划组计(前 2 章累计页文本 ≤ 20k),超出则拆组、实际调用高于推导值")
 
     # 5. 牌组卡片 + 复习评级(任意状态可评级,C-06)
     r = c.request("GET", f"/decks/{deck_id}/cards", step="deck-cards")

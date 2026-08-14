@@ -41,7 +41,7 @@ class Budget:
     """一次 live 生成任务的最坏调用预算(含重试上限,最坏 = 每调用都打满重试)。"""
 
     units: int  # 最坏规划单元数(章节 × 每章基础预算 × 密度系数)
-    planning_calls: int  # 规划:1 次任务级调用 × (1+重试上限)
+    planning_calls: int  # 规划:1 规划组 × (1+重试上限)——前提:前 2 章页文本 ≤ 20k,超出则拆组、实际调用高于此推导值
     generation_calls: int  # 生成:批=单元,每批 (1+重试上限)
     scoring_calls: int  # 评分:每单元 1 卡,APPLICATION 逐单元最坏 = 单元数(封顶 60)
     fixed_calls: int  # 固定真实调用:api-key 校验 + samples
@@ -83,6 +83,9 @@ def derive_budget(*, chapters: int, quantity_tendency: str, generate: bool) -> B
     if density is None:
         raise ValueError(f"未知 quantity_tendency: {quantity_tendency}")
     units = chapters * _UNITS_PER_CHAPTER * density if generate else 0
+    # 1 规划组前提(欠报方向声明):前 2 章累计页文本 ≤ planner_max_input_chars 20k
+    # (config.py);超过时后端按 20k 拆组(max_planner_groups_per_task=30),实际 PLANNING
+    # 调用与成本高于此推导值(最坏 = 组数 × (1+重试上限));fixture 未锚定页文本量,调整需同步声明
     planning = 1 + _PLANNING_RETRY_LIMIT if generate else 0
     generation = units * (1 + _GENERATION_RETRY_LIMIT)
     scoring = min(units * _CARDS_PER_UNIT, _MAX_SCORING_CALLS_PER_TASK)
