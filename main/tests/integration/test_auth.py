@@ -282,3 +282,50 @@ def test_logout_idempotent_single_side_effect(client: TestClient, tmp_path: Path
     with engine.connect() as conn:
         count = conn.execute(text("SELECT count(*) FROM idempotency_keys")).scalar()
     assert count == 1
+
+
+def test_sliding_renewal_extends_near_expiry_session(client: TestClient, tmp_path: Path) -> None:
+    """滑动续期：剩余 <1 天的会话经任一受保护请求后延长至 ~now+30 天。"""
+    headers = _auth_headers(client, email="rene@example.com")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'auth.db'}")
+    # 把会话拨到「剩余 12 小时」：expires_at = now + 0.5d
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE auth_sessions SET expires_at = datetime('now', '+12 hours')"))
+    assert client.get("/auth/me", headers=headers).status_code == 200
+    # format_utc 输出为 ISO Z 后缀；比较用 SQL：剩余应 > 29 天（已续到 ~30 天）
+    with engine.connect() as conn:
+        remaining_days = conn.execute(
+            text("SELECT (julianday(expires_at) - julianday('now')) FROM auth_sessions")
+        ).scalar()
+    assert remaining_days > 29.0
+
+
+def test_fresh_session_not_renewed(client: TestClient, tmp_path: Path) -> None:
+    """节流：剩余 >1 天的会话不触发续期写库（expires_at 原值不动）。"""
+    headers = _auth_headers(client, email="fresh@example.com")
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'auth.db'}")
+    assert client.get("/auth/me", headers=headers).status_code == 200
+    with engine.connect() as conn:
+        expires_before = conn.execute(text("SELECT expires_at FROM auth_sessions")).scalar()
+    assert client.get("/auth/me", headers=headers).status_code == 200
+    with engine.connect() as conn:
+        expires_after = conn.execute(text("SELECT expires_at FROM auth_sessions")).scalar()
+    assert expires_before == expires_after
+
+
+def test_revoked_session_never_renewed(client: TestClient, tmp_path: Path) -> None:
+    """已撤销会话经 resolve 挡回 401，不触发续期。"""
+    headers = _auth_headers(client, email="revoked@example.com")
+    # logout 为写接口须携带 Idempotency-Key（contract 6.11，同 test_logout_missing_idempotency_key_400）
+    assert (
+        client.post(
+            "/auth/logout",
+            headers={**headers, "Idempotency-Key": "66666666-6666-4666-8666-666666666666"},
+        ).status_code
+        == 204
+    )
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'auth.db'}")
+    with engine.connect() as conn:
+        revoked_at = conn.execute(text("SELECT revoked_at FROM auth_sessions")).scalar()
+    assert revoked_at is not None
+    assert client.get("/auth/me", headers=headers).status_code == 401

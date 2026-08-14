@@ -6,6 +6,7 @@
   或 token 未知/撤销/过期 → 401 AUTH_INVALID；两者均携带 `WWW-Authenticate: Bearer`。
 - 通过后 request.state.principal = AuthPrincipal(user_id, session_id) 供后续中间件与
   handler 使用。
+- V2.4 滑动续期：resolve 成功后 renew_session_if_due 按天节流延长 expires_at（活跃永不过期）。
 """
 
 from collections.abc import Awaitable, Callable
@@ -17,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.errors import AppError, ErrorCode, http_status
 from infra.clock import SystemClock
 from infra.db.session import format_utc
-from services.auth.service import resolve_principal
+from services.auth.service import renew_session_if_due, resolve_principal
 from services.auth.tokens import hash_session_token
 
 _AUTH_EXEMPT_PATHS = {
@@ -45,11 +46,19 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if not token:
             return self._error(ErrorCode.AUTH_REQUIRED, "缺少 Bearer 凭证")
         token_hash = hash_session_token(token)
-        now = format_utc(SystemClock().now_utc())
+        now_utc = SystemClock().now_utc()
+        now = format_utc(now_utc)
         with request.app.state.session_factory() as session:
             principal = resolve_principal(session, token_hash=token_hash, now=now)
-        if principal is None:
-            return self._error(ErrorCode.AUTH_INVALID, "会话无效、已撤销或已过期")
+            if principal is None:
+                return self._error(ErrorCode.AUTH_INVALID, "会话无效、已撤销或已过期")
+            renew_session_if_due(
+                session,
+                session_id=principal.session_id,
+                now=now_utc,
+                ttl_days=request.app.state.settings.auth_session_ttl_days,
+            )
+            session.commit()
         request.state.principal = principal
         return await call_next(request)
 
