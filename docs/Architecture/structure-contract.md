@@ -1,6 +1,6 @@
-# 结构契约 v2.3
+# 结构契约 v2.4
 
-前后端接口合同。需求依据:[PRD v2.3](../PRD/V2.3/prd_v2_3.md)(继承 [v2.2](../PRD/V2.2/prd_v2_2.md)、[v2.1](../PRD/V2.1/prd_v2_1.md));机器可读接口定义:[openapi.yaml](openapi.yaml);持久化映射:[database-design.md](database-design.md)。
+前后端接口合同。需求依据:[PRD v2.4](../PRD/V2.4/prd_v2_4.md)(继承 [v2.3](../PRD/V2.3/prd_v2_3.md)、[v2.2](../PRD/V2.2/prd_v2_2.md)、[v2.1](../PRD/V2.1/prd_v2_1.md));机器可读接口定义:[openapi.yaml](openapi.yaml);持久化映射:[database-design.md](database-design.md)。
 
 **字段权威声明**:本章第 3 节资源模型是字段定义的唯一来源;`openapi.yaml` schema 与 `database-design.md` 表结构均从本章派生。
 
@@ -8,13 +8,13 @@
 
 ### 1.1 数据主体与鉴权(决策 D-05)
 
-- 用户经用户名/密码**注册或登录**获得 opaque Bearer session token;受保护请求携带 `Authorization: Bearer <token>`(FR-19)。
+- 用户经邮箱+密码**注册或登录**获得 opaque Bearer session token(注册另附 username 展示名);受保护请求携带 `Authorization: Bearer <token>`(FR-19)。
 - 注册/登录接口(6.11)无鉴权;探针与匿名系统端点(8.2/8.3)豁免 Bearer;其余业务接口全部需要 Bearer。
 - 所有资源按 `user_id` 隔离;服务端校验资源归属,禁止仅凭资源 ID 访问他人数据;跨用户访问统一 404,不暴露存在性。
 - 缺失/非法/撤销/过期 token → `401 AUTH_REQUIRED` / `AUTH_INVALID`,一律携带 `WWW-Authenticate: Bearer` 响应头。
-- **凭据规则**:用户名 3~32 位、仅 `[a-z0-9._-]`、服务端统一转小写;密码 8~128 字符、不截断、不做 normalization;密码 Argon2id(≥ memory_cost=19456 KiB / time_cost=2 / parallelism=1);登录失败统一 `401 INVALID_CREDENTIALS`(用户名不存在时做固定 dummy 校验),用户名冲突 `409 USERNAME_TAKEN`。
-- **会话规则**:256-bit 随机 opaque token,数据库只存 SHA-256 摘要;默认 30 天绝对有效期、无滑动续期、无 refresh;logout 只撤销当前会话;同一用户允许多会话。
-- **风险声明**:session token 等同于密码,泄漏后在被撤销或过期前可被冒用;缓解:注册/登录按 IP 与用户名限流(1.6)、token 只存摘要、敏感信息不落日志(1.5/8.1)。
+- **凭据规则**:登录凭据为邮箱+密码——邮箱 3~254 位(含 `@`、无空白)、服务端统一转小写、全库唯一;username 为展示名 1~24 位、中文/字母/数字/`._-`、可重名、不强制小写;密码 8~128 字符、不截断、不做 normalization;密码 Argon2id(≥ memory_cost=19456 KiB / time_cost=2 / parallelism=1);登录失败统一 `401 INVALID_CREDENTIALS`(邮箱不存在时做固定 dummy 校验),邮箱冲突 `409 EMAIL_TAKEN`。
+- **会话规则**:256-bit 随机 opaque token,数据库只存 SHA-256 摘要;默认 30 天有效期,V2.4 起活跃滑动续期——每次有效请求后剩余不足 29 天即续至 now+30 天(按天节流),连续 30 天不活跃过期;logout 只撤销当前会话;同一用户允许多会话。
+- **风险声明**:session token 等同于密码,泄漏后在被撤销或过期前可被冒用;缓解:注册/登录按 IP 与邮箱限流(1.6)、token 只存摘要、敏感信息不落日志(1.5/8.1)。
 - **归属声明**:所有资源隐含归属当前登录 `user_id`,持久化列为 `user_id`;无 `user_id` 列的表(chapters、knowledge_points 等)经外键关联路径归属校验。V2.3 起设备架构已彻底清除——`devices` 表、`device_id` 列与设备域数据物理删除,owner 恒为 `user_id`(V2.1 历史:曾以 `device_id` 为隔离键;V2.2 曾按决策 D-06 保留旧数据,已撤销)。
 
 ### 1.2 时间与时区
@@ -73,7 +73,7 @@
 | 写操作 | 60 req/min/user | 全部写接口 |
 | IP | 5 req/s/IP | 全部接口 |
 | 注册/登录 | 按来源 IP(默认阈值运维可调) | `POST /auth/register`、`POST /auth/login` |
-| 登录(用户名分桶) | 按规范化用户名(默认阈值运维可调) | `POST /auth/login`(防单账号分布式猜测) |
+| 登录(邮箱分桶) | 按规范化邮箱(默认阈值运维可调) | `POST /auth/login`(防单账号分布式猜测) |
 | `PUT /api-key` | 10 次/时/user | Key 校验(校验 oracle) |
 | `POST /samples` | 20 次/时/user | 样卡生成(消耗模型配额) |
 | PDF 上传 | 10 次/时/user | `POST /pdfs` |
@@ -337,10 +337,10 @@ updated_at）——样卡不入库、不参与统计与 Rubric（PRD 5.5 数据�
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `user_id` | uuid | ✓ | 数据主体标识;全部业务资源的归属键(1.1) |
-| `username` | string | ✓ | 3~32 位,`[a-z0-9._-]`,服务端统一转小写,全库唯一 |
+| `username` | string | ✓ | 1~24 位展示名,中文/字母/数字/._-,可重名 |
 | `created_at` | datetime | ✓ | |
 
-规则:不返回密码/hash;username 唯一性以转小写后的规范化值为准(决策 D-05)。
+规则:不返回密码/hash;username 为展示名,可重名、不参与登录;登录键为 email(唯一性以转小写后的规范化值为准,1.1)。
 
 ### 3.15 AuthSessionResponse(会话,V2.2 新增)
 
@@ -349,7 +349,7 @@ updated_at）——样卡不入库、不参与统计与 Rubric（PRD 5.5 数据�
 | `user` | AuthUser | ✓ | 最小用户资料 |
 | `access_token` | string | ✓ | 256-bit 随机 opaque token;仅本响应与客户端安全存储出现,服务端只存 SHA-256 摘要 |
 | `token_type` | string | ✓ | 恒为 `Bearer` |
-| `expires_at` | datetime | ✓ | 会话绝对过期时间(默认签发 + 30 天) |
+| `expires_at` | datetime | ✓ | 会话绝对过期时间(默认签发 + 30 天);V2.4 起活跃滑动续期(每次有效请求后剩余不足 29 天则续至 +30 天,按天节流) |
 
 规则:register(201)与 login(200)共用本形状;logout 撤销当前会话返回 204;`GET /auth/me` 只返回 `user`。
 客户端不得自动重试 register/login(防网络重放静默创建多条会话,FR-19)。
@@ -572,15 +572,15 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |
-| POST | `/v1/auth/register` | 创建用户并建立会话;`{ username, password }`;201 返回 AuthSessionResponse(3.15);用户名冲突 → `409 USERNAME_TAKEN` | - |
-| POST | `/v1/auth/login` | 校验凭据并建立新会话;200 返回 AuthSessionResponse;失败统一 `401 INVALID_CREDENTIALS` | - |
+| POST | `/v1/auth/register` | 创建用户并建立会话;`{ username, email, password }`;201 返回 AuthSessionResponse(3.15);email 冲突 → `409 EMAIL_TAKEN` | - |
+| POST | `/v1/auth/login` | 校验凭据并建立新会话;`{ email, password }`;200 返回 AuthSessionResponse;失败统一 `401 INVALID_CREDENTIALS`(邮箱或密码错误) | - |
 | POST | `/v1/auth/logout` | 撤销当前会话(仅当前);204 | 幂等键(并发双发单副作用) |
 | GET | `/v1/auth/me` | 返回当前用户最小资料 AuthUser(3.14) | - |
 
 规则:register/login 豁免 Bearer 鉴权与 Idempotency-Key;logout/me 需要 Bearer。客户端不得自动重试
 register/login(防网络重放静默创建多条会话)。受保护接口 401(`AUTH_REQUIRED` / `AUTH_INVALID`)携带
 `WWW-Authenticate: Bearer`(1.4)。logout 的顺序重放(撤销后同键重试)因撤销 token 统一 401 在认证
-闸门先行不可达,幂等键保证并发双发单副作用(条件更新天然幂等);login 的非法格式用户名按输入
+闸门先行不可达,幂等键保证并发双发单副作用(条件更新天然幂等);login 的非法格式邮箱按输入
 校验惯例返回 400 VALIDATION_ERROR(非 401),不泄露账号存在性。
 认证语义(凭据/会话/限流)见 1.1 / 1.6;数据归属与隔离见 1.1 归属声明与 1.3 幂等约定。
 
@@ -594,7 +594,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `INTERNAL_ERROR` | 500 | 未预期错误(内部细节仅进日志) |
 | 账号 | `AUTH_REQUIRED` | 401 | 缺失 Authorization Bearer 凭据;401 带 `WWW-Authenticate: Bearer` |
 | | `AUTH_INVALID` | 401 | token 非法/未知/撤销/过期;401 带 `WWW-Authenticate: Bearer` |
-| | `INVALID_CREDENTIALS` | 401 | 登录失败(用户名不存在与密码错误统一返回,不暴露账号存在性) |
+| | `INVALID_CREDENTIALS` | 401 | 登录失败(邮箱不存在与密码错误统一返回,不暴露账号存在性) |
 | | `EMAIL_TAKEN` | 409 | 注册邮箱已被占用 |
 | PDF | `PDF_UPLOAD_INVALID` | 400 | 非 PDF / 损坏 / 超限(100MB / 1000 页) |
 | | `PDF_PARSE_FAILED` | 422 | 文本层解析失败 |
@@ -688,3 +688,4 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | 3.5/3.6 生成单元与锚定 / 3.7 批=单元 / 4.1 任务状态机 / 6.10 分组键 | 5.4.1 / 5.6 / 5.7 | 一致(LLM 链路升级工作包契约同步) |
 | 3.14/3.15 账号与会话 / 6.11 账号接口 / 1.6 限流 / 7 账号错误码 | V2.2 FR-19 / AC-12、D-05 | 新增(账号登录工作包契约同步) |
 | 1.1 归属声明(设备架构清除) / database-design 表结构 | V2.3(决策翻转 D-06→V2.3) | 一致(清理收尾与补做验证工作包契约同步) |
+| 3.14/3.15 账号与会话 / 6.11 账号接口 / 1.6 限流 / 7 账号错误码 | V2.4(email 登录键 / username 展示名 / 滑动续期) | 一致(email 登录与长期登录工作包契约同步) |

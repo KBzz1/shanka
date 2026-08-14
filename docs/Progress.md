@@ -373,6 +373,8 @@
 - **未运行项（如实声明）**：local quick/full/live 对真实后端联调未运行（本机后端未启动）——仅受控最小路径验证 CLI 形状与闸门；真实 LLM 调用未运行（live 需成本/Key 单独确认，未获确认）。
 - **SDD 过程**：3 任务 × implementer + 任务级 reviewer；T2 Medium 1 项 fix round 闭环；T3 继承 T2 3 项 minor + 1 项环境性 flaky 全部闭环。
 
+- 2026-08-14 V2.4 工作包（email 登录键 / username 展示名 / 滑动续期 / 错误提示 UX / 平台 429+预算）`DONE`（契约侧）：代码任务 T1~T6 已提交（main 分支 dcce1fc..43d608d，契约守卫 44/44 全绿）；PRD V2.4 新建 + structure-contract 契约同步随本行完成（T7）。
+
 ## 5. 依赖关系与下一步
 
 ```text
