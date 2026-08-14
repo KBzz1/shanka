@@ -174,13 +174,13 @@
 
 ## 7. 验收总览
 
-- [ ] V2.3 迁移：空库 7 revisions 全链 + check 零漂移 + 开发库迁移成功 + 全仓 device_id
+- [x] V2.3 迁移：空库 7 revisions 全链 + check 零漂移 + 开发库迁移成功 + 全仓 device_id
       运行时引用清零
-- [ ] 契约三处一致（PRD V2.3/database-design/structure-contract）+ 守卫全绿
-- [ ] 毛刺 9 条闭环（各自带测试或证据）
-- [ ] 联调：quick/full 对真实后端跑通（FAIL=0）
-- [ ] live：真实 LLM 全链 + 成本 ≤ ¥3 + 对账记录
-- [ ] 前端整合：上游视觉 + 本仓库逻辑，重复视觉清零（文件清单）+ 视觉人工目检与上游
+- [x] 契约三处一致（PRD V2.3/database-design/structure-contract）+ 守卫全绿
+- [x] 毛刺 9 条闭环（各自带测试或证据）
+- [x] 联调：quick/full 对真实后端跑通（FAIL=0）
+- [x] live：真实 LLM 全链 + 成本 ≤ ¥3 + 对账记录
+- [x] 前端整合：上游视觉 + 本仓库逻辑，重复视觉清零（文件清单）+ 视觉人工目检与上游
       一致，双方测试全集 + assembleDebug
-- [ ] 真机：connectedDebugAndroidTest 通过（整合后版本）
-- [ ] 全量回归：main/ 四工具 + test-platform + Android 三面全绿
+- [x] 真机：connectedDebugAndroidTest 通过（整合后版本）
+- [x] 全量回归：main/ 四工具 + test-platform + Android 三面全绿
