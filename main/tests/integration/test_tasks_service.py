@@ -43,6 +43,7 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         User(
             user_id=user_id,
             username=f"u-{user_id[:8]}",
+            email=f"u-{user_id[:8]}@example.com",
             password_hash="x",
             created_at="2026-08-11T00:00:00.000Z",
             updated_at="2026-08-11T00:00:00.000Z",
@@ -196,6 +197,7 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
             User(
                 user_id=other_owner,
                 username=f"u-{other_owner[:8]}",
+                email=f"u-{other_owner[:8]}@example.com",
                 password_hash="x",
                 created_at="2026-08-11T00:00:00.000Z",
                 updated_at="2026-08-11T00:00:00.000Z",

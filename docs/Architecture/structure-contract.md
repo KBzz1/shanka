@@ -595,7 +595,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | 账号 | `AUTH_REQUIRED` | 401 | 缺失 Authorization Bearer 凭据;401 带 `WWW-Authenticate: Bearer` |
 | | `AUTH_INVALID` | 401 | token 非法/未知/撤销/过期;401 带 `WWW-Authenticate: Bearer` |
 | | `INVALID_CREDENTIALS` | 401 | 登录失败(用户名不存在与密码错误统一返回,不暴露账号存在性) |
-| | `USERNAME_TAKEN` | 409 | 注册用户名已被占用 |
+| | `EMAIL_TAKEN` | 409 | 注册邮箱已被占用 |
 | PDF | `PDF_UPLOAD_INVALID` | 400 | 非 PDF / 损坏 / 超限(100MB / 1000 页) |
 | | `PDF_PARSE_FAILED` | 422 | 文本层解析失败 |
 | | `PDF_TOC_MISSING` | 422 | 无可用目录结构(终止流程) |

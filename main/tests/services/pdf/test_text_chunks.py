@@ -56,6 +56,7 @@ def _seed_pdf(session: Session, file_id: str = "pdf-1") -> None:
         User(
             user_id="user-1",
             username="u-1",
+            email="u-1@example.com",
             password_hash="x",
             created_at="2026-08-11T00:00:00.000Z",
             updated_at="2026-08-11T00:00:00.000Z",

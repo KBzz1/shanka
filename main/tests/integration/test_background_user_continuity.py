@@ -130,7 +130,9 @@ def test_task_continues_after_logout_and_new_session_reads(ctx: tuple[TestClient
     _run_executor_until_done(db_path)
 
     # 重新登录（新 session）可读任务与卡片
-    login = client.post("/auth/login", json={"username": "alice", "password": "secret-pass-1"})
+    login = client.post(
+        "/auth/login", json={"email": "alice@example.com", "password": "secret-pass-1"}
+    )
     assert login.status_code == 200
     new_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
     task = client.get(f"/tasks/{task_id}", headers=new_headers)
@@ -154,7 +156,9 @@ def test_task_continues_after_session_expiry(ctx: tuple[TestClient, Path]) -> No
 
     _run_executor_until_done(db_path)
 
-    login = client.post("/auth/login", json={"username": "alice", "password": "secret-pass-1"})
+    login = client.post(
+        "/auth/login", json={"email": "alice@example.com", "password": "secret-pass-1"}
+    )
     assert login.status_code == 200
     new_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
     assert client.get(f"/tasks/{task_id}", headers=new_headers).json()["status"] == "COMPLETED"

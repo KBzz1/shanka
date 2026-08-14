@@ -1,11 +1,11 @@
-"""限流用户域切换（P4-3）：业务维度键 user_id、auth IP 桶、login 用户名桶。
+"""限流用户域切换（P4-3）：业务维度键 user_id、auth IP 桶、login email 桶。
 
 - 业务桶（write/api_key/samples/pdf）键 = principal.user_id：user1 写超限 429
   不影响 user2。
 - auth 维度（structure-contract 1.6/8.3）：POST /auth/register|/auth/login 按 IP
   限流，429 + Retry-After。
-- login 用户名桶（service 层限流）：同用户名多次登录（含失败）超限 → 429 +
-  Retry-After，其他用户名不受影响。
+- login email 桶（service 层限流，V2.4 桶键改 email）：同邮箱多次登录（含失败）
+  超限 → 429 + Retry-After，其他邮箱不受影响。
 """
 
 from pathlib import Path
@@ -56,65 +56,87 @@ def test_auth_ip_bucket_429_with_retry_after(tmp_path: Path) -> None:
         for i in range(4):
             resp = client.post(
                 "/auth/register",
-                json={"username": f"user{i}", "password": f"pass-{i}111"},
+                json={
+                    "username": f"user{i}",
+                    "email": f"user{i}@example.com",
+                    "password": f"pass-{i}111",
+                },
             )
             codes.append(resp.status_code)
-        blocked = client.post("/auth/register", json={"username": "user5", "password": "pass-5111"})
+        blocked = client.post(
+            "/auth/register",
+            json={"username": "user5", "email": "user5@example.com", "password": "pass-5111"},
+        )
     assert codes == [201, 201, 201, 429]
     assert blocked.status_code == 429
     assert blocked.json()["error"]["code"] == "RATE_LIMITED"
     assert int(blocked.headers["Retry-After"]) > 0
 
 
-def test_login_username_bucket_429_with_retry_after(tmp_path: Path) -> None:
-    """login 用户名桶（service 层）：同用户名多次登录超限 → 429 + Retry-After；
-    其他用户名不受影响。"""
-    with _make_client(tmp_path, "rl_login", rate_limit_login_username_per_hour=3) as client:
+def test_login_email_bucket_429_with_retry_after(tmp_path: Path) -> None:
+    """login email 桶（service 层，V2.4 桶键改 email）：同邮箱多次登录超限 → 429 +
+    Retry-After；其他邮箱不受影响。"""
+    with _make_client(tmp_path, "rl_login", rate_limit_login_email_per_hour=3) as client:
         # 注册 2 个用户（auth IP 桶默认 20/h 不干扰）
         assert (
             client.post(
-                "/auth/register", json={"username": "bob", "password": "bob-pass-1"}
+                "/auth/register",
+                json={"username": "bob", "email": "bob@example.com", "password": "bob-pass-1"},
             ).status_code
             == 201
         )
         assert (
             client.post(
-                "/auth/register", json={"username": "eve", "password": "eve-pass-1"}
+                "/auth/register",
+                json={"username": "eve", "email": "eve@example.com", "password": "eve-pass-1"},
             ).status_code
             == 201
         )
         codes = []
         for _ in range(3):
-            resp = client.post("/auth/login", json={"username": "bob", "password": "wrong-pass"})
+            resp = client.post(
+                "/auth/login", json={"email": "bob@example.com", "password": "wrong-pass"}
+            )
             codes.append(resp.status_code)
-        blocked = client.post("/auth/login", json={"username": "bob", "password": "wrong-pass"})
-        other = client.post("/auth/login", json={"username": "eve", "password": "wrong-pass"})
+        blocked = client.post(
+            "/auth/login", json={"email": "bob@example.com", "password": "wrong-pass"}
+        )
+        other = client.post(
+            "/auth/login", json={"email": "eve@example.com", "password": "wrong-pass"}
+        )
     assert codes == [401, 401, 401]  # 密码错误（不暴露存在性）
     assert blocked.status_code == 429
     assert blocked.json()["error"]["code"] == "RATE_LIMITED"
     assert int(blocked.headers["Retry-After"]) > 0
-    assert other.status_code == 401  # 其他用户名不受 bob 桶影响
+    assert other.status_code == 401  # 其他邮箱不受 bob 桶影响
 
 
-def test_login_username_bucket_success_also_counts(tmp_path: Path) -> None:
-    """成功登录同样计入用户名桶：成功 2 次 + 失败 1 次后超限 → 429。"""
-    with _make_client(tmp_path, "rl_login2", rate_limit_login_username_per_hour=3) as client:
+def test_login_email_bucket_success_also_counts(tmp_path: Path) -> None:
+    """成功登录同样计入 email 桶：成功 2 次 + 失败 1 次后超限 → 429。"""
+    with _make_client(tmp_path, "rl_login2", rate_limit_login_email_per_hour=3) as client:
         assert (
             client.post(
-                "/auth/register", json={"username": "bob", "password": "bob-pass-1"}
+                "/auth/register",
+                json={"username": "bob", "email": "bob@example.com", "password": "bob-pass-1"},
             ).status_code
             == 201
         )
-        ok1 = client.post("/auth/login", json={"username": "bob", "password": "bob-pass-1"})
+        ok1 = client.post(
+            "/auth/login", json={"email": "bob@example.com", "password": "bob-pass-1"}
+        )
         assert ok1.status_code == 200
         assert (
             client.post(
-                "/auth/login", json={"username": "bob", "password": "wrong-pass"}
+                "/auth/login", json={"email": "bob@example.com", "password": "wrong-pass"}
             ).status_code
             == 401
         )
-        ok2 = client.post("/auth/login", json={"username": "bob", "password": "bob-pass-1"})
+        ok2 = client.post(
+            "/auth/login", json={"email": "bob@example.com", "password": "bob-pass-1"}
+        )
         assert ok2.status_code == 200
-        blocked = client.post("/auth/login", json={"username": "bob", "password": "bob-pass-1"})
+        blocked = client.post(
+            "/auth/login", json={"email": "bob@example.com", "password": "bob-pass-1"}
+        )
     assert blocked.status_code == 429
     assert blocked.json()["error"]["code"] == "RATE_LIMITED"

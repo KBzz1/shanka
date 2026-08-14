@@ -50,7 +50,14 @@ def _uuid() -> str:
 def _seed_card(session: Session, *, encrypted_key: str = _ENCRYPTED_TEST_KEY) -> Card:
     """user 域 GENERATED 卡 + 非初始 ReviewState + AVAILABLE Key（重写前状态）。"""
     session.add(
-        User(user_id=_USER, username="u-1", password_hash="x", created_at=_NOW, updated_at=_NOW)
+        User(
+            user_id=_USER,
+            username="u-1",
+            email="u-1@example.com",
+            password_hash="x",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
     session.execute(

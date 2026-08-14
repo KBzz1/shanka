@@ -2,6 +2,8 @@
 
 API 测试在迁移后 schema 上跑：client fixture 内 alembic upgrade head 建真实表结构
 （与 test_decks_api.py 同款；/auth/register 需 users/auth_sessions 表）。
+V2.4：登录键为 email（服务端转小写）；username 降为展示名（1-24 位中文/字母/数字/._-，
+可重名，不再强制小写）。
 """
 
 import uuid
@@ -40,9 +42,14 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
 
 def _auth_headers(
-    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+    client: TestClient,
+    username: str = "alice",
+    email: str = "alice@example.com",
+    password: str = "secret-pass-1",
 ) -> dict[str, str]:
-    r = client.post("/auth/register", json={"username": username, "password": password})
+    r = client.post(
+        "/auth/register", json={"username": username, "email": email, "password": password}
+    )
     assert r.status_code == 201
     body = r.json()
     assert body["token_type"] == "Bearer"
@@ -73,46 +80,82 @@ def test_register_login_logout_me_flow(client: TestClient) -> None:
     )
     assert client.get("/auth/me", headers=headers).status_code == 401
     # 重新登录生成新 session
-    r2 = client.post("/auth/login", json={"username": "alice", "password": "secret-pass-1"})
+    r2 = client.post(
+        "/auth/login", json={"email": "alice@example.com", "password": "secret-pass-1"}
+    )
     assert r2.status_code == 200
     h2 = {"Authorization": f"Bearer {r2.json()['access_token']}"}
     assert client.get("/auth/me", headers=h2).status_code == 200
 
 
-def test_register_username_conflict_409(client: TestClient) -> None:
-    _auth_headers(client, username="bob", password="pass-1234")
+def test_register_email_conflict_409(client: TestClient) -> None:
+    _auth_headers(client, username="bob", email="bob@example.com", password="pass-1234")
     r = client.post(
-        "/auth/register", json={"username": "BOB", "password": "pass-1234"}
-    )  # 转小写后冲突
+        "/auth/register",
+        json={"username": "bob2", "email": "BOB@EXAMPLE.COM", "password": "pass-1234"},
+    )  # 转小写后 email 冲突
     assert r.status_code == 409
-    assert r.json()["error"]["code"] == "USERNAME_TAKEN"
+    assert r.json()["error"]["code"] == "EMAIL_TAKEN"
+    # 同 username 不同 email 允许（展示名可重名）
+    r2 = client.post(
+        "/auth/register",
+        json={"username": "bob", "email": "other@example.com", "password": "pass-1234"},
+    )
+    assert r2.status_code == 201
 
 
 def test_login_failure_unified_401_invalid_credentials(client: TestClient) -> None:
-    _auth_headers(client, username="carol", password="pass-1234")
-    r = client.post("/auth/login", json={"username": "carol", "password": "wrong-password"})
+    _auth_headers(client, username="carol", email="carol@example.com", password="pass-1234")
+    r = client.post(
+        "/auth/login", json={"email": "carol@example.com", "password": "wrong-password"}
+    )
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "INVALID_CREDENTIALS"
+    assert r.json()["error"]["message"] == "邮箱或密码错误"
     assert "WWW-Authenticate" not in r.headers  # INVALID_CREDENTIALS 不带该头（DESIGN §4.3）
-    # 用户名不存在同样 401 同码（不暴露存在性）
-    r2 = client.post("/auth/login", json={"username": "nobody", "password": "whatever-1"})
+    # 邮箱不存在同样 401 同码（不暴露存在性）
+    r2 = client.post("/auth/login", json={"email": "nobody@example.com", "password": "whatever-1"})
     assert r2.status_code == 401
     assert r2.json()["error"]["code"] == "INVALID_CREDENTIALS"
 
 
-def test_username_validation_and_normalization(client: TestClient) -> None:
-    for bad in ("ab", "a" * 33, "has space", "UPPER@X", "中文名"):
-        r = client.post("/auth/register", json={"username": bad, "password": "pass-1234"})
+def test_username_email_validation(client: TestClient) -> None:
+    # 用户名非法例（V2.4：1-24 位中文/字母/数字/._-）
+    for bad in ("", "a" * 25, "has space", "😀"):
+        r = client.post(
+            "/auth/register",
+            json={"username": bad, "email": "bad@example.com", "password": "pass-1234"},
+        )
         assert r.status_code == 400, bad
+    # 合法例（新语义）：中文展示名、大写不再强制小写——注册成功且 me 返回原样
+    for good, email in (("中文名", "zhongwen@example.com"), ("Tom", "tom@example.com")):
+        r = client.post(
+            "/auth/register", json={"username": good, "email": email, "password": "pass-1234"}
+        )
+        assert r.status_code == 201, good
+        headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
+        me = client.get("/auth/me", headers=headers)
+        assert me.status_code == 200
+        assert me.json()["user"]["username"] == good
+    # email 非法例
+    for bad_email in ("no-at", "a@b c", "x" * 255):
+        r = client.post(
+            "/auth/register",
+            json={"username": "validname", "email": bad_email, "password": "pass-1234"},
+        )
+        assert r.status_code == 400, bad_email
     for bad_pw in ("short7!", "x" * 129):
-        r = client.post("/auth/register", json={"username": "validname", "password": bad_pw})
+        r = client.post(
+            "/auth/register",
+            json={"username": "validname", "email": "valid@example.com", "password": bad_pw},
+        )
         assert r.status_code == 400
 
 
 def test_login_success_200_shape(client: TestClient) -> None:
     """login 成功 200 与 register 201 共用 AuthSessionResponse 形状（3.15）。"""
     _auth_headers(client)
-    r = client.post("/auth/login", json={"username": "alice", "password": "secret-pass-1"})
+    r = client.post("/auth/login", json={"email": "alice@example.com", "password": "secret-pass-1"})
     assert r.status_code == 200
     body = r.json()
     assert body["token_type"] == "Bearer"
@@ -124,7 +167,9 @@ def test_login_success_200_shape(client: TestClient) -> None:
 def test_multiple_sessions_coexist_logout_only_current(client: TestClient) -> None:
     """多会话并存；logout 只撤销当前 session（DESIGN §4.3）。"""
     headers1 = _auth_headers(client)
-    r2 = client.post("/auth/login", json={"username": "alice", "password": "secret-pass-1"})
+    r2 = client.post(
+        "/auth/login", json={"email": "alice@example.com", "password": "secret-pass-1"}
+    )
     assert r2.status_code == 200
     headers2 = {"Authorization": f"Bearer {r2.json()['access_token']}"}
     assert client.get("/auth/me", headers=headers1).status_code == 200
@@ -143,7 +188,9 @@ def test_expired_session_401_auth_invalid(client: TestClient, tmp_path: Path) ->
     _auth_headers(client)
     engine = create_db_engine(f"sqlite:///{tmp_path / 'auth.db'}")
     with engine.connect() as conn:
-        user_id = conn.execute(text("SELECT user_id FROM users WHERE username = 'alice'")).scalar()
+        user_id = conn.execute(
+            text("SELECT user_id FROM users WHERE email = 'alice@example.com'")
+        ).scalar()
     token = "expired-session-token-value"
     with engine.begin() as conn:
         conn.execute(
@@ -167,11 +214,14 @@ def test_expired_session_401_auth_invalid(client: TestClient, tmp_path: Path) ->
 
 def test_register_login_exempt_from_idempotency_key(client: TestClient, tmp_path: Path) -> None:
     """register/login 豁免 Idempotency-Key（contract 6.11 幂等列「-」），不落幂等记录。"""
-    r = client.post("/auth/register", json={"username": "dave", "password": "pass-1234"})
+    r = client.post(
+        "/auth/register",
+        json={"username": "dave", "email": "dave@example.com", "password": "pass-1234"},
+    )
     assert r.status_code == 201
     r = client.post(
         "/auth/login",
-        json={"username": "dave", "password": "pass-1234"},
+        json={"email": "dave@example.com", "password": "pass-1234"},
         headers={"Idempotency-Key": str(uuid.uuid4())},
     )
     assert r.status_code == 200

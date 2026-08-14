@@ -135,6 +135,7 @@ def _seed_scoring_task(
             User(
                 user_id=user_id,
                 username=f"u-{user_id[:8]}",
+                email=f"u-{user_id[:8]}@example.com",
                 password_hash="x",
                 created_at=_NOW,
                 updated_at=_NOW,

@@ -1,15 +1,16 @@
-"""账号 schema 锚点（openapi 2.2.0 AuthRegisterRequest/AuthLoginRequest/AuthUser/AuthSessionResponse）。"""
+"""账号 schema 锚点（openapi 2.4.0 AuthRegisterRequest/AuthLoginRequest/AuthUser/AuthSessionResponse）。"""
 
 from pydantic import BaseModel, Field
 
 
 class AuthRegisterRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=32)
+    username: str = Field(min_length=1, max_length=24)
+    email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=8, max_length=128)
 
 
 class AuthLoginRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=32)
+    email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=8, max_length=128)
 
 

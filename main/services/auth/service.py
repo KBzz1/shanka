@@ -1,11 +1,11 @@
 """账号用例（DESIGN §4.2/§4.3）：注册/登录/登出/当前用户/principal 解析。
 
 - register/login：校验 → 规范化 → dummy 或 verify → User/AuthSession INSERT → token 生成；
-  用户名冲突（含并发唯一约束兜底）→ 409 USERNAME_TAKEN；登录失败统一 401 INVALID_CREDENTIALS
-  （用户名不存在先执行固定 dummy 校验抹平时序差；损坏 PHC 哈希 catch InvalidHashError 绝不 500）。
+  email 冲突（含并发唯一约束兜底）→ 409 EMAIL_TAKEN；登录失败统一 401 INVALID_CREDENTIALS
+  （邮箱不存在先执行固定 dummy 校验抹平时序差；损坏 PHC 哈希 catch InvalidHashError 绝不 500）。
 - logout：条件更新 revoked_at（已撤销/重放不再执行副作用），幂等。
 - resolve_principal：只查 auth_sessions（行含 user_id 无需 JOIN），撤销/过期 → None，供中间件。
-- login 用户名桶限流（P4-3）：RateLimiter 共享实例由 handler 从 app.state 注入
+- login email 桶限流（P4-3→V2.4 桶键改 email）：RateLimiter 共享实例由 handler 从 app.state 注入
   （body 于 BodyCapture 内层，middleware 不可读——裁决）；检查在规范化+校验后，
   超限 → RATE_LIMITED（handler 捕获后 429 + Retry-After）。
 """
@@ -33,16 +33,26 @@ from infra.db.session import format_utc
 from services.auth.password import hash_password, verify_dummy, verify_password
 from services.auth.tokens import generate_session_token, hash_session_token
 
-_USERNAME_RE = re.compile(r"^[a-z0-9._-]{3,32}$")
+_USERNAME_RE = re.compile(r"^[\w.\-]{1,24}$")  # Unicode 字母数字（含中文）/._-，1-24 位
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")  # 宽松：含 @、无空白；长度上限由 schema 254 保证
 
 
 def _normalize_username(username: str) -> str:
-    return username.lower()
+    return username.strip()  # 展示名：只 trim，不再强制小写
+
+
+def _normalize_email(email: str) -> str:
+    return email.strip().lower()
 
 
 def _validate_username(username: str) -> None:
     if not _USERNAME_RE.fullmatch(username):
-        raise AppError(ErrorCode.VALIDATION_ERROR, "用户名须为 3-32 位小写字母/数字/._-")
+        raise AppError(ErrorCode.VALIDATION_ERROR, "用户名须为 1-24 位中文/字母/数字/._-")
+
+
+def _validate_email(email: str) -> None:
+    if not _EMAIL_RE.fullmatch(email):
+        raise AppError(ErrorCode.VALIDATION_ERROR, "邮箱格式不正确")
 
 
 def _validate_password(password: str) -> None:
@@ -51,7 +61,7 @@ def _validate_password(password: str) -> None:
 
 
 def _invalid_credentials() -> AppError:
-    return AppError(ErrorCode.INVALID_CREDENTIALS, "用户名或密码错误")
+    return AppError(ErrorCode.INVALID_CREDENTIALS, "邮箱或密码错误")
 
 
 def _verify_or_false(password: str, password_hash: str) -> bool:
@@ -85,23 +95,27 @@ def register_user(
     session: Session,
     *,
     username: str,
+    email: str,
     password: str,
     now: datetime,
     ttl_days: int,
 ) -> tuple[dict[str, str], str, str]:
     """注册：创建用户 + 首个会话；返回 (user_dict, access_token, expires_at)。"""
-    normalized = _normalize_username(username)
-    _validate_username(normalized)
+    normalized_username = _normalize_username(username)
+    normalized_email = _normalize_email(email)
+    _validate_username(normalized_username)
+    _validate_email(normalized_email)
     _validate_password(password)
-    existing = session.scalar(select(User).where(User.username == normalized))
+    existing = session.scalar(select(User).where(User.email == normalized_email))
     if existing is not None:
-        raise AppError(ErrorCode.USERNAME_TAKEN, "用户名已被占用")
+        raise AppError(ErrorCode.EMAIL_TAKEN, "邮箱已被占用")
     user_id = str(uuid.uuid4())
     created_at = format_utc(now)
     session.add(
         User(
             user_id=user_id,
-            username=normalized,
+            username=normalized_username,
+            email=normalized_email,
             password_hash=hash_password(password),
             created_at=created_at,
             updated_at=created_at,
@@ -110,33 +124,33 @@ def register_user(
     try:
         session.flush()
     except IntegrityError as exc:
-        # 并发注册同用户名：UNIQUE 约束兜底 → 409（DESIGN §4.2 冲突语义统一）
-        raise AppError(ErrorCode.USERNAME_TAKEN, "用户名已被占用") from exc
+        # 并发注册同 email：UNIQUE 约束兜底 → 409
+        raise AppError(ErrorCode.EMAIL_TAKEN, "邮箱已被占用") from exc
     token, expires_at = _create_session(session, user_id=user_id, now=now, ttl_days=ttl_days)
-    user_dict = {"user_id": user_id, "username": normalized, "created_at": created_at}
+    user_dict = {"user_id": user_id, "username": normalized_username, "created_at": created_at}
     return user_dict, token, expires_at
 
 
 def login_user(
     session: Session,
     *,
-    username: str,
+    email: str,
     password: str,
     now: datetime,
     ttl_days: int,
-    username_limiter: RateLimiter,
+    email_limiter: RateLimiter,
 ) -> tuple[dict[str, str], str, str]:
     """登录：校验凭据 + 新建会话；失败统一 INVALID_CREDENTIALS（不暴露用户存在性）。
 
-    username_limiter：login 用户名桶（P4-3）——规范化后先 check，超限抛 RATE_LIMITED
-    （handler 捕获后 429 + Retry-After）；成功与失败登录均计入桶。
+    email_limiter：login email 桶（P4-3→V2.4 桶键改 email）——规范化后先 check，
+    超限抛 RATE_LIMITED；成功与失败登录均计入桶。
     """
-    normalized = _normalize_username(username)
-    _validate_username(normalized)
-    allowed, _retry_after = username_limiter.check(normalized)
+    normalized_email = _normalize_email(email)
+    _validate_email(normalized_email)
+    allowed, _retry_after = email_limiter.check(normalized_email)
     if not allowed:
         raise AppError(ErrorCode.RATE_LIMITED, "请求过于频繁，请稍后重试")
-    user = session.scalar(select(User).where(User.username == normalized))
+    user = session.scalar(select(User).where(User.email == normalized_email))
     if user is None:
         verify_dummy(password)  # 固定 dummy 校验抹平账号存在性时序差（DESIGN §4.2）
         raise _invalid_credentials()

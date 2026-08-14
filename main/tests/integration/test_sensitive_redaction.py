@@ -93,10 +93,15 @@ def test_login_failure_does_not_log_password(
     """login 失败不记密码：唯一 sentinel 密码（仅测试代码字面量）注册后登录失败，
     日志全文不含 sentinel。"""
     sentinel = f"s3nt1n3l-{uuid.uuid4().hex[:8]}"
-    r = client.post("/auth/register", json={"username": "sentineluser", "password": sentinel})
+    r = client.post(
+        "/auth/register",
+        json={"username": "sentineluser", "email": "sentinel@example.com", "password": sentinel},
+    )
     assert r.status_code == 201
     with caplog.at_level(logging.INFO):
-        r = client.post("/auth/login", json={"username": "nosuchuser", "password": sentinel})
+        r = client.post(
+            "/auth/login", json={"email": "nosuchuser@example.com", "password": sentinel}
+        )
     assert r.status_code == 401
     assert sentinel not in caplog.text
 

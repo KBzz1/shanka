@@ -4,8 +4,8 @@
   execute_idempotent（客户端不得自动重试，防网络重放静默创建多条会话，FR-19）。
 - POST /logout：撤销当前会话（principal.session_id），走 execute_idempotent
   （path="/auth/logout"；P4-3 起幂等域按 user_id）。
-- POST /login 用户名桶（P4-3）：service 抛 RATE_LIMITED → 捕获后 429 + Retry-After
-  （limiter.retry_after_estimate()）+ rate_limit_hit_total(scope="auth")。
+- POST /login email 桶（P4-3→V2.4 桶键改 email）：service 抛 RATE_LIMITED → 捕获后
+  429 + Retry-After（limiter.retry_after_estimate()）+ rate_limit_hit_total(scope="auth")。
 - GET /me：返回当前用户最小资料 {"user": AuthUser}；session 撤销/过期 → 401 AUTH_INVALID。
 - 明文 token 只出现在 register/login 成功响应（DESIGN §4.3），不进日志。
 """
@@ -66,6 +66,7 @@ def register_endpoint(
     user_dict, token, expires_at = register_user(
         session,
         username=payload.username,
+        email=payload.email,
         password=payload.password,
         now=now,
         ttl_days=request.app.state.settings.auth_session_ttl_days,
@@ -81,22 +82,22 @@ def login_endpoint(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
     now: datetime = SystemClock().now_utc()
-    username_limiter: RateLimiter = request.app.state.login_username_limiter
+    email_limiter: RateLimiter = request.app.state.login_email_limiter
     try:
         user_dict, token, expires_at = login_user(
             session,
-            username=payload.username,
+            email=payload.email,
             password=payload.password,
             now=now,
             ttl_days=request.app.state.settings.auth_session_ttl_days,
-            username_limiter=username_limiter,
+            email_limiter=email_limiter,
         )
     except AppError as exc:
         if exc.code is ErrorCode.RATE_LIMITED:
-            # 用户名桶命中（P4-3）：429 + Retry-After；scope="auth"（structure-contract 8.3）
+            # email 桶命中（P4-3→V2.4）：429 + Retry-After；scope="auth"（structure-contract 8.3）
             RATE_LIMIT_HIT_TOTAL.labels(scope="auth").inc()
             response = JSONResponse(status_code=429, content=exc.to_response())
-            response.headers["Retry-After"] = str(username_limiter.retry_after_estimate())
+            response.headers["Retry-After"] = str(email_limiter.retry_after_estimate())
             return response
         raise
     session.commit()

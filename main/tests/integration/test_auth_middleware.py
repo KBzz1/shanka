@@ -60,10 +60,15 @@ def test_exempt_paths_do_not_require_bearer(client: TestClient) -> None:
     assert client.get("/healthz").status_code == 200
     assert client.get("/metrics").status_code == 200
     assert (
-        client.post("/auth/register", json={"username": "eve", "password": "pass-1234"}).status_code
+        client.post(
+            "/auth/register",
+            json={"username": "eve", "email": "eve@example.com", "password": "pass-1234"},
+        ).status_code
         == 201
     )
     assert (
-        client.post("/auth/login", json={"username": "eve", "password": "pass-1234"}).status_code
+        client.post(
+            "/auth/login", json={"email": "eve@example.com", "password": "pass-1234"}
+        ).status_code
         == 200
     )

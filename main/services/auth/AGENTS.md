@@ -7,4 +7,4 @@
 - `service.py`：登录失败统一 401 INVALID_CREDENTIALS（不暴露用户存在性）；用户不存在先执行固定 dummy 校验（verify_dummy，DUMMY_PASSWORD_HASH 硬编码）抹平时序差；损坏 PHC 哈希视为校验失败，绝不 500。
 - logout 幂等：条件更新 revoked_at（已撤销/重放不重复副作用，多会话并存只撤销当前 session）。
 - resolve_principal 只查 auth_sessions（行内即含 user_id，无需 JOIN users），撤销/过期 → None 供中间件 401。
-- 分层：本包不依赖 app（RateLimiter 仅 TYPE_CHECKING 鸭子类型调用 check）；错误码抛 AppError（VALIDATION_ERROR/USERNAME_TAKEN/INVALID_CREDENTIALS/RATE_LIMITED）。
+- 分层：本包不依赖 app（RateLimiter 仅 TYPE_CHECKING 鸭子类型调用 check）；错误码抛 AppError（VALIDATION_ERROR/EMAIL_TAKEN/INVALID_CREDENTIALS/RATE_LIMITED）。

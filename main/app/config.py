@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # 账号认证（DESIGN §4.2/§4.3：可运维调整，客户端不得硬编码）
     auth_session_ttl_days: int = 30
     rate_limit_auth_per_hour: int = 20
-    rate_limit_login_username_per_hour: int = 10
+    rate_limit_login_email_per_hour: int = 10
     # PDF 上传限制（structure-contract 6.1；可运维调整）
     # 100MB 与 Cloudflare 免费版上传上限对齐（2026-08-11 决策：教材扫描件常超 50MB）
     pdf_max_size_bytes: int = 100 * 1024 * 1024

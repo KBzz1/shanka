@@ -49,7 +49,14 @@ def _seed(session: Session) -> None:
     Task 为 user 域种子（仅作 task_id 外键父行）；账本行归属 user（P4-3）。
     """
     session.add(
-        User(user_id="u1", username="u-1", password_hash="x", created_at=_NOW, updated_at=_NOW)
+        User(
+            user_id="u1",
+            username="u-1",
+            email="u-1@example.com",
+            password_hash="x",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
     session.add(

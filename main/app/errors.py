@@ -20,7 +20,7 @@ class ErrorCode(StrEnum):
     AUTH_REQUIRED = "AUTH_REQUIRED"
     AUTH_INVALID = "AUTH_INVALID"
     INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
-    USERNAME_TAKEN = "USERNAME_TAKEN"
+    EMAIL_TAKEN = "EMAIL_TAKEN"
     # PDF
     PDF_UPLOAD_INVALID = "PDF_UPLOAD_INVALID"
     PDF_PARSE_FAILED = "PDF_PARSE_FAILED"
@@ -55,7 +55,7 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.AUTH_REQUIRED: 401,
     ErrorCode.AUTH_INVALID: 401,
     ErrorCode.INVALID_CREDENTIALS: 401,
-    ErrorCode.USERNAME_TAKEN: 409,
+    ErrorCode.EMAIL_TAKEN: 409,
     ErrorCode.PDF_UPLOAD_INVALID: 400,
     ErrorCode.PDF_PARSE_FAILED: 422,
     ErrorCode.PDF_TOC_MISSING: 422,
@@ -87,7 +87,7 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.auth_required",
         "error.auth_invalid",
         "error.invalid_credentials",
-        "error.username_taken",
+        "error.email_taken",
         "error.pdf_upload_invalid",
         "error.pdf_parse_failed",
         "error.pdf_toc_missing",

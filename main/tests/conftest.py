@@ -72,21 +72,29 @@ _AUTH_TOKEN_CACHE: dict[tuple[int, str], tuple[weakref.ReferenceType[TestClient]
 
 
 def auth_headers(
-    client: TestClient, username: str = "alice", password: str = "secret-pass-1"
+    client: TestClient,
+    username: str = "alice",
+    password: str = "secret-pass-1",
+    email: str | None = None,
 ) -> dict[str, str]:
     """register 或 login 后返回 Bearer 头（P4-4 起 X-Device-ID 已退出，仅 Bearer）。
 
     缓存语义：同一 (client, username) 只做一次 register/login（token 会话为该测试
     client 的 DB 持有）；文件内 logout 撤销语义的测试请用文件内 helper（test_auth.py
-    `_auth_headers` 每次重建会话，不经本缓存）。
+    `_auth_headers` 每次重建会话，不经本缓存）。V2.4：登录键为 email，未显式传入时
+    默认按 username 派生（username@example.com）。
     """
+    email = email or f"{username}@example.com"
     cache_key = (id(client), username)
     entry = _AUTH_TOKEN_CACHE.get(cache_key)
     token = entry[1] if entry is not None and entry[0]() is client else None
     if token is None:
-        r = client.post("/auth/register", json={"username": username, "password": password})
-        if r.status_code == 409:  # 同库同用户名已注册（跨 client 重放/共享库场景）
-            r = client.post("/auth/login", json={"username": username, "password": password})
+        r = client.post(
+            "/auth/register",
+            json={"username": username, "email": email, "password": password},
+        )
+        if r.status_code == 409:  # 同库同 email 已注册（跨 client 重放/共享库场景）
+            r = client.post("/auth/login", json={"email": email, "password": password})
         assert r.status_code in (200, 201), r.text
         token = r.json()["access_token"]
         _AUTH_TOKEN_CACHE[cache_key] = (weakref.ref(client), token)

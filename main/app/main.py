@@ -157,10 +157,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
     app.state.storage = storage
-    # login 用户名桶（P4-3）：service 层限流共享实例（body 于 BodyCapture 内层，
-    # middleware 不可读——裁决：限流器在 auth handler 取用）
-    app.state.login_username_limiter = RateLimiter(
-        limit=settings.rate_limit_login_username_per_hour, window_seconds=3600
+    # login email 桶（P4-3→V2.4 桶键改 email）：service 层限流共享实例（body 于
+    # BodyCapture 内层，middleware 不可读——裁决：限流器在 auth handler 取用）
+    app.state.login_email_limiter = RateLimiter(
+        limit=settings.rate_limit_login_email_per_hour, window_seconds=3600
     )
     return app
 

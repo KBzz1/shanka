@@ -155,6 +155,7 @@ def _seed_context(db_path: Path, *, user_id: str, with_key: bool = True) -> dict
                 User(
                     user_id=user_id,
                     username=f"u-{user_id[:8]}",
+                    email=f"u-{user_id[:8]}@example.com",
                     password_hash="x",
                     created_at="2026-08-11T00:00:00.000Z",
                     updated_at="2026-08-11T00:00:00.000Z",
