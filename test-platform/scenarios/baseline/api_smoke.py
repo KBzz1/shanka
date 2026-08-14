@@ -49,7 +49,12 @@ def _same_key_post(
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode() or "{}")
+        body = None
+        try:
+            body = json.loads(e.read().decode() or "{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            body = None  # 网关 502/HTML 非 JSON 响应体:返回 None,由调用方守卫软 FAIL
+        return e.code, body
 
 
 def _burst(c: ShankaClient, path: str, n: int) -> tuple[list[int], list[str | None]]:
@@ -113,7 +118,8 @@ def run(
     check("POST /decks -> 201", r.status == 201, f"({r.status})")
     deck_id = r.json.get("deck_id") if isinstance(r.json, dict) else None
     check("创建返回 deck_id", isinstance(deck_id, str))
-    check("创建返回 name", r.json.get("name") == deck_name)
+    created_name = r.json.get("name") if isinstance(r.json, dict) else None
+    check("创建返回 name", created_name == deck_name, str(created_name)[:80])
 
     # 5. 幂等重放(C-04):同幂等键重放 -> 原结果不 409
     key = str(uuid.uuid4())
@@ -122,16 +128,20 @@ def run(
     time.sleep(c.pace)
     st2, body2 = same_key_post(c, "/decks", {"name": deck_name}, key, session["access_token"])
     check("幂等重放非 409", st2 in (200, 201), f"({st2})")
-    check("幂等重放同 deck_id", body2.get("deck_id") == body1.get("deck_id"))
+    replay1 = body1.get("deck_id") if isinstance(body1, dict) else None
+    replay2 = body2.get("deck_id") if isinstance(body2, dict) else None
+    check("幂等重放同 deck_id",
+          isinstance(replay1, str) and isinstance(replay2, str) and replay1 == replay2,
+          f"{replay1} vs {replay2}"[:80])
     # 创建与重放各自落库的 deck_id 全量登记(重放键与创建键不同,按 C-04 语义另建牌组)
-    created_ids = {i for i in (deck_id, body1.get("deck_id"), body2.get("deck_id"))
-                   if isinstance(i, str)}
+    created_ids = {i for i in (deck_id, replay1, replay2) if isinstance(i, str)}
 
     # 6. 详情核对
     if deck_id:
         r = c.request("GET", f"/decks/{deck_id}", step="deck-detail")
         check("GET /decks/{id} -> 200", r.status == 200, f"({r.status})")
-        check("详情 deck_id 一致", r.json.get("deck_id") == deck_id)
+        detail_deck_id = r.json.get("deck_id") if isinstance(r.json, dict) else None
+        check("详情 deck_id 一致", detail_deck_id == deck_id, str(detail_deck_id)[:80])
 
     # 7. 错误结构:非法 body -> 400 VALIDATION_ERROR
     r = c.request("POST", "/decks", body={}, idempotent=True, step="deck-invalid")

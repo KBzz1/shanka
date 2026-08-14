@@ -34,7 +34,9 @@ from shanka.report import check, record, summary
 NAME = "live_flow"
 SUITE = "flow"
 
-_ENV_FILE = Path("/home/kbzz1/shanka_backend/.env")  # 仓库根 .env(密钥仅内存使用)
+# __file__ 相对推导仓库根 .env(密钥仅内存使用,绝不输出):live_flow.py 位于
+# test-platform/scenarios/flow/,parents[0]=flow/ → [1]=scenarios/ → [2]=test-platform/ → [3]=仓库根
+_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 _POLL_INTERVAL_S = 5    # 任务轮询间隔
 _POLL_TIMEOUT_S = 600   # 任务轮询总上限
 _TERMINAL = ("COMPLETED", "FAILED", "CANCELLED")
@@ -253,7 +255,12 @@ def run(
         obs = account.bootstrap(c, environment=environment, username=obs_name,
                                 password=account.temp_password())
         check("观测临时账号建立", obs is not None, f"user={obs_name}")
-        if obs is not None:
+        if obs is None:
+            # 异常路径:bootstrap 失败时本地 token 状态不承诺——切回主账号确定性后续;
+            # 临时账号 session 若已建而 client 未持有 token 则无法撤销,仅 WARN 登记(对齐 isolation.py)
+            print(f"    [warn] 观测临时账号 {obs_name} 建立失败,其会话可能未撤销"
+                  f"(注册失败路径,无 token 可注销)")
+        else:
             created += 1
             r = c.request("GET", "/observability/quality-summary", step="obs-quality-summary")
             body = _body(r)

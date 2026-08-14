@@ -48,6 +48,11 @@ def _handler():
     return handler
 
 
+def stub_response(json_body=None):
+    """_same_key_post 注入替身:模拟网关 502/HTML 非 JSON 响应体修复后的解析结果。"""
+    return (502, json_body)
+
+
 def _prod_handler():
     decks_get = {"n": 0}
 
@@ -151,6 +156,27 @@ class ApiSmokeScenarioTest(unittest.TestCase):
         self.assertGreater(failed, 0)
         self.assertNotIn(("POST", "/decks", None), c.calls)  # 会话失败不进入业务链路
         self.assertNotIn(("logout", "", None), c.calls)
+
+    def test_api_smoke_handles_non_json_response_cleanly(self) -> None:
+        """网关 502/HTML 响应时步骤干净 FAIL 而非 AttributeError/JSONDecodeError。"""
+        c = stub.StubClient(stub.script(
+            ("/healthz", Response(200, {"status": "ok"})),
+            ("/readyz", Response(200, {"status": "ok"})),
+            ("/decks", Response(502, None)),  # 网关 502/HTML 非 JSON 响应体
+            ("/auth/register", Response(201, stub.session_body("u-1", "u"))),
+            ("/openapi.json", Response(200, {"paths": {"/decks": {}}})),
+            ("/metrics", Response(200, {"status": "ok"})),
+            ("/auth/logout", Response(204, None)),
+        ))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            exit_code = api_smoke.run(
+                c, environment="local", username="u", password="p",
+                same_key_post=lambda *a, **k: stub_response(json_body=None),
+                burst=lambda *a, **k: ([], []),  # 空二元组:run 解包不崩,限流断言软 FAIL
+            )
+        self.assertNotEqual(exit_code, 0)  # 干净 FAIL
+        self.assertNotIn("Traceback", buf.getvalue())
 
 
 if __name__ == "__main__":

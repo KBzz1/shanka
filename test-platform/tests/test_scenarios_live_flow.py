@@ -158,6 +158,35 @@ class LiveFlowScenarioTest(unittest.TestCase):
         self.assertFalse(any(u.startswith("t-") for op, u, _ in c.calls if op == "register"))
         self.assertNotIn("报告字段", buf.getvalue())
 
+    def test_live_flow_obs_bootstrap_failure_warns(self) -> None:
+        """观测账号 bootstrap 失败路径输出 WARN 且主 token 切回。"""
+        base = _handler()
+
+        def handler(method, path, body):
+            if path == "/auth/register" and isinstance(body, dict) \
+                    and str(body.get("username", "")).startswith("t-"):
+                return Response(502, None)  # 观测临时账号注册失败(网关 502)
+            return base(method, path, body)
+
+        c = stub.StubClient(handler)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            failed = live_flow.run(
+                c, environment="local", username="tester", password="pw-123456",
+                api_key="sk-test-secret", run_id="run-x", skip_generate=False, keep=False,
+            )
+        out = buf.getvalue()
+        self.assertGreater(failed, 0)  # 「观测临时账号建立」步骤软 FAIL
+        self.assertIn("[FAIL] 观测临时账号建立", out)
+        self.assertIn("[warn]", out)
+        self.assertIn("观测临时账号", out)
+        self.assertIn("会话可能未撤销", out)
+        # 切回主 token 后继续走主账号清理与注销(确定性收尾不变)
+        calls = c.calls
+        self.assertIn(("set_token", "tok-u-tester", None), calls)
+        self.assertIn(("DELETE", "/decks/deck-1", None), calls)
+        self.assertIn(("logout", "", None), calls)
+
     def test_run_no_session_early_return(self) -> None:
         c = stub.StubClient(stub.script(
             ("/auth/login", Response(401, {"error": {"code": "INVALID_CREDENTIALS"}})),
@@ -180,6 +209,13 @@ class LiveFlowHelpersTest(unittest.TestCase):
     def test_body_safe(self) -> None:
         self.assertEqual(live_flow._body(Response(200, None)), {})
         self.assertEqual(live_flow._body(Response(200, {"a": 1})), {"a": 1})
+
+    def test_env_path_is_file_relative(self) -> None:
+        """_ENV_FILE 由 __file__ 推导,不含硬编码绝对路径,且指向仓库根。"""
+        src = Path(live_flow.__file__).read_text()
+        self.assertNotIn("/home/kbzz1", src)
+        repo_root = Path(live_flow.__file__).resolve().parents[3]  # flow/ → scenarios/ → test-platform/ → 仓库根
+        self.assertEqual(live_flow._ENV_FILE, repo_root / ".env")
 
 
 if __name__ == "__main__":
