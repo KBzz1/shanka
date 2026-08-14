@@ -13,10 +13,11 @@
    devices 表、8 张 owner 表的 device_id 列、遗留约束/索引、代码与契约中的设备残留；
    删除不可逆（downgrade 显式拒绝）；本机开发库直接迁移（不备份）；PRD 升 V2.3 记录。
 2. **毛刺修复**：三类 9 条（见 §2）。
-3. **补做三件未运行验证**：真实后端联调（quick/full）、live 真实 LLM（成本上限 ¥3）、
-   Android 真机测试（设备 adc60f1a 已连接）。
+3. **补做未运行验证**：真实后端联调（quick/full）、live 真实 LLM（成本上限 ¥3）、
+   Android 真机测试（设备 adc60f1a 已连接——真机验收排在 §4 前端整合之后）。
 4. **前端整合**：上游 JIANGYOU3/Shanka（origin）新登录界面视觉 + 本仓库 P6 后端对接
-   架构合并；整合完成后 fork→push→PR（push 前再向用户确认）。
+   架构合并（整合在前、真机验收在后）；视觉单源继承上游、本仓库重复视觉全量剔除；
+   整合完成后 fork→push→PR（push 前再向用户确认）。
 
 ## 1. 设备架构彻底清除（PRD V2.3）
 
@@ -82,7 +83,7 @@
    （fire-and-forget），断网时退出不再阻塞。
 9. 文档口径：SDD 报告计数/复跑次数口径、过期注释（P4/P6 已登记清单）统一清理。
 
-## 3. 补做三件未运行验证
+## 3. 补做未运行验证（真实联调 + live 两件）
 
 ### 3.1 真实后端联调（test-platform quick/full）
 
@@ -98,14 +99,6 @@
 - 触发条件：成本闸门放行 + Key 可用；若实际成本接近 ¥3 即停（闸门即停逻辑）。
 - 未触发/未运行的任何部分如实声明。
 
-### 3.3 Android 真机
-
-- 设备：`adc60f1a`（adb 已确认在线）。
-- `adb reverse tcp:8000 tcp:8000` 端口反向（真机访问本机后端）。
-- `./gradlew connectedDebugAndroidTest`：BackendClientInstrumentedTest +
-  FlashcardsAppTest 真机运行；与 3.1 的后端联调配合（登录态测试需真实后端）。
-- 上游整合（§4）完成后对整合结果跑同一验收。
-
 ## 4. 前端整合（上游视觉 + 本仓库架构）
 
 ### 4.1 现状
@@ -119,6 +112,10 @@
 ### 4.2 整合规则
 
 - **视觉/UI 层 → 上游为准**：AuthScreen 及其设计系统（字体/主题/组件）一律采用上游版本。
+- **全量剔除重复视觉（视觉单源）**：整合后，本仓库内与上游视觉呈现重复的代码——
+  登录界面 UI、主题、样式、字体、图标资源等——**全部删除**，视觉只继承上游设计
+  系统，不留双份实现。保留例外仅限：上游未做、但本仓库功能必须呈现的 UI（任务
+  三阶段状态展示、错误/加载态提示等）——此类 UI 在上游设计系统下适配实现。
 - **后端对接层 → 本仓库 P6 实现为准**：SessionStore（Keystore 加密）、BackendClient
   （Bearer 四端点/401 语义/显式不带头）、AuthViewModel 状态机（checkSession 三分支/
   业务 401 清会话/网络失败不退出）、40 个 JVM 测试全部保留。
@@ -132,7 +129,9 @@
 ### 4.3 整合验收
 
 - 本仓库 40 个 JVM 测试全绿（适配上游组件签名后的必要调整）；上游自带测试（若有）同步
-  跑通；assembleDebug + 3.3 真机验收。
+  跑通；assembleDebug 构建绿。
+- 视觉单源检查：整合后本仓库与上游重复的视觉代码清零——只继承上游设计系统，
+  §4.2 例外清单之外不存在本仓库视觉实现（文件/组件比对证据）。
 - 敏感纪律不变：密码不持久化、Authorization 不进日志。
 
 ### 4.4 fork/push/PR 流程
@@ -141,7 +140,15 @@
   到 JIANGYOU3/Shanka。
 - **push 与 PR 属外发动作，执行前再次向用户确认**。
 
-## 5. 全局约束（沿用）
+## 5. Android 真机验收（整合后）
+
+- 前置：§4 前端整合完成且 §4.3 全绿；§3.1 的本地后端联调环境在位。
+- 设备：`adc60f1a`（adb 已确认在线）。
+- `adb reverse tcp:8000 tcp:8000` 端口反向（真机访问本机后端）。
+- `./gradlew connectedDebugAndroidTest`：BackendClientInstrumentedTest +
+  FlashcardsAppTest 对整合后版本真机运行（登录态测试依赖真实后端，与 §3.1 联调配合）。
+
+## 6. 全局约束（沿用）
 
 1. 解释器 `/home/kbzz1/miniconda3/bin/conda run -n shanka-backend ...`；后端工作目录
    `main/`；平台 `test-platform/`；Android `frontend-app/Front/`。
@@ -153,7 +160,7 @@
    docs/llm-account-long-run-v1/ 与 docs/account-auth-test-platform-long-run-v1/ 的
    历史记录（追加 V2.3 决策到 PRD/Progress 属允许范围）。
 
-## 6. 验收总览
+## 7. 验收总览
 
 - [ ] V2.3 迁移：空库 7 revisions 全链 + check 零漂移 + 开发库迁移成功 + 全仓 device_id
       运行时引用清零
@@ -161,6 +168,6 @@
 - [ ] 毛刺 9 条闭环（各自带测试或证据）
 - [ ] 联调：quick/full 对真实后端跑通（FAIL=0）
 - [ ] live：真实 LLM 全链 + 成本 ≤ ¥3 + 对账记录
+- [ ] 前端整合：上游视觉 + 本仓库逻辑，重复视觉清零，40/40 测试 + assembleDebug
 - [ ] 真机：connectedDebugAndroidTest 通过（整合后版本）
-- [ ] 前端整合：上游视觉 + 本仓库逻辑，40/40 测试 + assembleDebug
 - [ ] 全量回归：main/ 四工具 + test-platform + Android 三面全绿
