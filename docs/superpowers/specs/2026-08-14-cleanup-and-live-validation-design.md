@@ -118,7 +118,8 @@
   三阶段状态展示、错误/加载态提示等）——此类 UI 在上游设计系统下适配实现。
 - **后端对接层 → 本仓库 P6 实现为准**：SessionStore（Keystore 加密）、BackendClient
   （Bearer 四端点/401 语义/显式不带头）、AuthViewModel 状态机（checkSession 三分支/
-  业务 401 清会话/网络失败不退出）、40 个 JVM 测试全部保留。
+  业务 401 清会话/网络失败不退出）、本仓库逻辑测试资产全部保留（计数随合并变化，
+  口径见 §4.3）。
 - **接线**：上游 AuthScreen 的登录/注册/退出触发点接到本仓库 repository 调用；上游
   UI 状态（loading/错误展示）对接本仓库 ViewModel 状态；错误文案映射保持本仓库口径
   （INVALID_CREDENTIALS/USERNAME_TAKEN/RATE_LIMITED/网络错误）。
@@ -128,10 +129,18 @@
 
 ### 4.3 整合验收
 
-- 本仓库 40 个 JVM 测试全绿（适配上游组件签名后的必要调整）；上游自带测试（若有）同步
-  跑通；assembleDebug 构建绿。
-- 视觉单源检查：整合后本仓库与上游重复的视觉代码清零——只继承上游设计系统，
-  §4.2 例外清单之外不存在本仓库视觉实现（文件/组件比对证据）。
+- **测试口径（双方全集）**：整合后测试资产 = 本仓库逻辑测试（AuthViewModelTest /
+  AuthClientContractTest / SessionStoreContractTest / ImportParserTest 等）+ 上游新增
+  测试（TypographySystemTest / AppNavigatorTest / ReviewSchedulerTest）+ androidTest
+  冲突合并版（FlashcardsAppTest / BackendClientInstrumentedTest 双方同名——按 §4.2
+  合并：视觉断言取上游、登录链路断言取本仓库）；全集全绿，不以「40/40」为口径。
+- **登录全链 UI 接线验收**：在上游 AuthScreen 上完成 注册→登录→登出→重登 全链
+  instrumented 验证（真机 §5 运行）；四类错误文案（INVALID_CREDENTIALS /
+  USERNAME_TAKEN / RATE_LIMITED / 网络错误）在上游 UI 上呈现为本仓库口径。
+- **视觉一致性双证据**：正向——视觉文件（AuthScreen / 主题 / 字体 / 组件）与上游
+  ef2ed95 逐文件 diff，除接线点（点击回调、状态源、错误文案映射）外零差异；负向——
+  本仓库与上游重复的视觉代码清零，§4.2 例外清单之外不存在本仓库视觉实现。
+- assembleDebug 构建绿。
 - 敏感纪律不变：密码不持久化、Authorization 不进日志。
 
 ### 4.4 fork/push/PR 流程
@@ -146,7 +155,8 @@
 - 设备：`adc60f1a`（adb 已确认在线）。
 - `adb reverse tcp:8000 tcp:8000` 端口反向（真机访问本机后端）。
 - `./gradlew connectedDebugAndroidTest`：BackendClientInstrumentedTest +
-  FlashcardsAppTest 对整合后版本真机运行（登录态测试依赖真实后端，与 §3.1 联调配合）。
+  FlashcardsAppTest 对整合后版本真机运行，含 §4.3 登录全链 UI 接线验收场景
+  （登录态测试依赖真实后端，与 §3.1 联调配合）。
 
 ## 6. 全局约束（沿用）
 
@@ -168,6 +178,7 @@
 - [ ] 毛刺 9 条闭环（各自带测试或证据）
 - [ ] 联调：quick/full 对真实后端跑通（FAIL=0）
 - [ ] live：真实 LLM 全链 + 成本 ≤ ¥3 + 对账记录
-- [ ] 前端整合：上游视觉 + 本仓库逻辑，重复视觉清零，40/40 测试 + assembleDebug
+- [ ] 前端整合：上游视觉 + 本仓库逻辑，视觉正向零差异 + 重复视觉清零，双方测试全集 +
+      assembleDebug
 - [ ] 真机：connectedDebugAndroidTest 通过（整合后版本）
 - [ ] 全量回归：main/ 四工具 + test-platform + Android 三面全绿
