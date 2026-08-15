@@ -362,14 +362,18 @@ def test_acceptance_ac04_invalid_cards_not_inserted_skipped(
     ctx: tuple[TestClient, Path],
 ) -> None:
     """AC-04-b：mock 返回非法卡（缺 question/answer，generator-output schema v2 违约）
-    → 重试预算耗尽 → 批次 SKIPPED 不入库（批次级失败不中断任务）。"""
+    → 重试预算耗尽 → 批次 SKIPPED 不入库（4.2 批次级失败不中断任务）；但整任务
+    无任何有效卡 → 发布阶段整体失败 TASK_ZERO_CARDS（4.1 V25-D-23：0 张有效卡
+    整体失败，不显示"完成 0 张"）。"""
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=[{"type": "QUESTION"}])
     body = client.get(f"/tasks/{task_id}", headers=user).json()
-    assert body["status"] == "COMPLETED"  # 批次级失败不中断任务（4.2）
+    assert body["status"] == "FAILED"  # 0 张有效卡整体失败（4.1 V25-D-23）
+    assert body["error_code"] == "TASK_ZERO_CARDS"
+    assert body["failure_stage"] == "PUBLISHING"
     assert body["generated_card_count"] == 0
     with _db_factory(db_path)() as session:
         cards = session.scalars(

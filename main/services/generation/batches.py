@@ -386,8 +386,8 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     batch.status = "SUCCEEDED"
     batch.generated_item_ids = json.dumps([inserted.generation_item_id])
     batch.rubric_version = versions["rubric_version"]
-    if fresh:
-        task.generated_card_count += 1
+    # V2.5（4.1）：generated_card_count 只在发布时按已发布卡统计（3.4 只统计已发布卡、
+    # 失败任务为 0）——生成期不再累加；fresh 仅用于 dedup 观测
     unit.status = "PROCESSED"
     _record_rubric(batch, unit=unit, card=inserted, duplicated=0 if fresh else 1)
     _finish_batch(batch, task, now)
@@ -597,6 +597,8 @@ def _insert_card(
     seed 保持 `gen|task|batch_index|type|front|back` 稳定（spec：seed 不变）；同 seed
     已入库（恢复/重入边缘）→ 返回既有卡（防重复用，不重复入库），fresh=False。
     target_difficulty 服务端写规划锚定值（§3.2，不要求模型回传）。
+    V2.5（4.1）：正式生成写入的卡一律 `STAGED`（可见谓词 3.9 排除），发布时同短事务
+    全部置 PUBLISHED；source_task_id/chapter_id 记录生成来源（删除语义 4.1）。
     """
     gen_item = _stable_uuid(
         f"gen|{task.task_id}|{batch.batch_index}|{internal.get('type')}|{internal.get('front')}|{internal.get('back')}"
@@ -620,6 +622,9 @@ def _insert_card(
         answer_boolean=_bool_to_int(internal.get("answer_boolean")),
         explanation=internal.get("explanation"),
         generation_item_id=gen_item,
+        source_task_id=task.task_id,  # 生成来源任务（V2.5）
+        chapter_id=unit.chapter_id,  # 源章节（V2.5）
+        publication_state="STAGED",  # 4.1：正式生成卡先隔离，整批成功才发布
         target_difficulty=unit.target_difficulty,  # 规划锚定落库（§3.2）
         version="v1",
         created_at=now,

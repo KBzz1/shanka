@@ -22,10 +22,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from domain.card import VISIBLE_PREDICATE_SQL
 from infra.db.models import Card, ReviewEvent, ReviewState
 from infra.db.session import format_utc
 from services.cards.service import card_view
@@ -147,12 +148,19 @@ def review_state_view(rs: ReviewState) -> dict[str, object]:
 def review_queue(
     session: Session, *, user_id: str, deck_id: str, now: str
 ) -> list[dict[str, object]]:
-    """到期队列（5.15/6.6）：due <= now 按 due、position 稳定排序；返回 {**card_view, review_state}。"""
+    """到期队列（5.15/6.6）：due <= now 按 due、position 稳定排序；返回 {**card_view, review_state}。
+
+    只含可见卡（统一可见谓词 3.9）——STAGED/删除批次卡不进队列。
+    """
     _owned(session, user_id=user_id, deck_id=deck_id)
     rows = session.execute(
         select(Card, ReviewState)
         .join(ReviewState, ReviewState.card_id == Card.card_id)
-        .where(Card.deck_id == deck_id, ReviewState.due <= now)
+        .where(
+            Card.deck_id == deck_id,
+            ReviewState.due <= now,
+            text(VISIBLE_PREDICATE_SQL),
+        )
         .order_by(ReviewState.due, Card.position)
     ).all()
     return [{**card_view(card), "review_state": review_state_view(rs)} for card, rs in rows]
@@ -171,8 +179,14 @@ def _submit_review_inner(
     """执行评级（幂等原语 fn 内）：返回 (是否因 client_event_id 兜底重放, 响应视图)。"""
     if device_timezone is not None:
         _validate_timezone(device_timezone)  # M-3：非法 IANA → 400 VALIDATION_ERROR
-    card = session.get(Card, card_id)
-    if card is None or card.user_id != user_id:
+    card = session.scalar(
+        select(Card).where(
+            Card.card_id == card_id,
+            Card.user_id == user_id,
+            text(VISIBLE_PREDICATE_SQL),
+        )
+    )
+    if card is None:
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
     rating = rating_from_str(rating_value)  # 非法 → REVIEW_EVENT_INVALID（400）
     rs = _get_review_state(session, card_id=card_id, now=now)

@@ -357,7 +357,9 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     # 批 2 抢占 + STARTED 占位已随调用前事务提交（spec §9）→ PROCESSING
     body = client.get(f"/tasks/{task_id}", headers=user).json()
     assert body["status"] == "GENERATING"
-    assert body["generated_card_count"] == 1
+    # V2.5（3.4）：generated_card_count 只统计已发布卡——生成期卡 STAGED 隔离不计数，
+    # 崩溃中间态为 0；发布时按实际发布数落终值（AC-05-b 断言 5）
+    assert body["generated_card_count"] == 0
     assert body["completed_batch_count"] == 1 and body["total_batch_count"] == 6
     with _db_factory(db_path)() as session:
         task = session.get(Task, task_id)

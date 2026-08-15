@@ -13,8 +13,9 @@
   STALE_SCORING_INPUT，卡评分留 NULL）→ 回写 Card 5 字段（总分 = 代码计算四维和）+
   Batch 质量 + finish_success + 心跳 commit。任何失败（RetryableUpstreamError/
   AppError/输出非法/STALE）→ finish_failed、不重试、不阻塞，继续下一组。全部组后
-  条件更新 WHERE status='GENERATING' AND stage='SCORING' → COMPLETED（rowcount=0 →
-  不覆盖并发 cancel）。
+  条件更新 WHERE status='GENERATING' AND stage='SCORING' → stage=PUBLISHING
+  （rowcount=0 → 不覆盖并发转移）——任务终态（COMPLETED/FAILED）由 executor 的
+  原子发布步骤在同一短事务内决定（4.1：整批发布与任务终态原子）。
 - 账本纪律（§9）：STARTED 先 commit → 事务外 chat → 终态+领域写同事务；恢复时以
   账本为已尝试游标（同 operation_key 任何尝试状态 ≥1 → 跳过，失败不重试）；
   SCORING 不写 normalized_result（红线 4）；STARTED/FAILED/UNKNOWN 都占
@@ -705,8 +706,10 @@ def run_scoring_stage(
     session: Session, *, task: Task, settings: Settings, client: DeepSeekClient
 ) -> None:
     """SCORING 阶段执行（spec §8）：逐组（重读 Task 须 GENERATING+SCORING）→ 全部组后
-    条件更新 WHERE status='GENERATING' AND stage='SCORING' → COMPLETED（rowcount=0 →
-    不覆盖并发 cancel）。失败不重试不阻塞；账本为已尝试游标 + 调用上限权威。
+    条件更新 WHERE status='GENERATING' AND stage='SCORING' → stage=PUBLISHING
+    （rowcount=0 → 不覆盖并发转移）。任务终态由 executor 的原子发布决定（4.1：
+    GENERATING+PUBLISHING → 校验 ≥1 张 STAGED 卡 → 全部 PUBLISHED → COMPLETED；
+    0 张 → FAILED + TASK_ZERO_CARDS）。失败不重试不阻塞；账本为已尝试游标 + 调用上限权威。
     """
     versions = asset_versions()
     groups = plan_scoring_groups(session, task=task, settings=settings)
@@ -750,13 +753,16 @@ def run_scoring_stage(
                 Task.status == "GENERATING",
                 Task.stage == _SCORING_STAGE,
             )
-            .values(status="COMPLETED", ended_at=now, resumable=0, updated_at=now)
+            .values(stage="PUBLISHING", updated_at=now)
         ),
     )
     if result.rowcount == 0:
-        return  # 并发取消/转移 → 不覆盖
+        return  # 并发转移 → 不覆盖（终态由发布步骤/其他 worker 决定）
     session.refresh(task)
-    logger.info("task scoring completed", extra={"task_id": task.task_id})
+    logger.info(
+        "task scoring completed",
+        extra={"task_id": task.task_id, "internal_stage": "PUBLISHING"},
+    )
 
 
 def enter_scoring_stage(session: Session, *, task_id: str, settings: Settings) -> bool:

@@ -2,15 +2,20 @@
 
 卡片创建同事务插入初始 review_states（database-design §3：state=NEW、difficulty=1.0 满足
 ORM CHECK 1~10）；position = 牌组内 max+1（UNIQUE(deck_id, position) 并发兜底）。
+
+V2.5（3.9）：所有用户侧卡查询复用 domain/card.py 统一可见谓词
+（publication_state='PUBLISHED' AND delete_batch_id IS NULL）——STAGED 卡在任务
+整体成功前对任何用户侧查询不可见（4.1），禁止本模块自行拼等价条件。
 """
 
 import uuid
 from collections.abc import Iterable
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from domain.card import VISIBLE_PREDICATE_SQL
 from infra.db.models import Card, ReviewState
 from services.decks.service import _owned
 
@@ -25,8 +30,18 @@ def _next_position(session: Session, *, deck_id: str) -> int:
 
 
 def _owned_card(session: Session, *, user_id: str, card_id: str) -> Card:
-    """归属查卡（PATCH/DELETE 单卡用；跨用户统一 404，契约 1.1）。"""
-    card = session.scalar(select(Card).where(Card.card_id == card_id, Card.user_id == user_id))
+    """归属查卡（PATCH/DELETE 单卡用；跨用户统一 404，契约 1.1）。
+
+    统一可见谓词（3.9）：STAGED/删除批次卡对用户单卡操作同样不可见（4.1：
+    对任何用户侧查询不可见）→ 404 不暴露存在性。
+    """
+    card = session.scalar(
+        select(Card).where(
+            Card.card_id == card_id,
+            Card.user_id == user_id,
+            text(VISIBLE_PREDICATE_SQL),
+        )
+    )
     if card is None:
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
     return card
@@ -108,9 +123,14 @@ def create_card(
 
 
 def list_cards(session: Session, *, user_id: str, deck_id: str) -> list[Card]:
+    """牌组卡片列表（6.5）：只含可见卡（统一可见谓词 3.9）。"""
     _owned(session, user_id=user_id, deck_id=deck_id)
     return list(
-        session.scalars(select(Card).where(Card.deck_id == deck_id).order_by(Card.position)).all()
+        session.scalars(
+            select(Card)
+            .where(Card.deck_id == deck_id, text(VISIBLE_PREDICATE_SQL))
+            .order_by(Card.position)
+        ).all()
     )
 
 

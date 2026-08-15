@@ -11,10 +11,11 @@
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from domain.card import VISIBLE_PREDICATE_SQL
 from infra.db.models import Card, ReviewEvent, ReviewState, UserPreferences
 
 _WEEKDAYS = 7
@@ -113,7 +114,7 @@ def dashboard(
     # 连续学习天数（截至本地当天）
     streak = _streak_days(session, user_id=user_id, tz=tz, now=now)
 
-    # 已掌握（C-03）
+    # 已掌握（C-03；只含可见卡——统一可见谓词 3.9）
     mastered = (
         session.scalar(
             select(func.count(Card.card_id))
@@ -122,6 +123,7 @@ def dashboard(
                 Card.user_id == user_id,
                 ReviewState.state == "REVIEW",
                 ReviewState.stability >= 21,
+                text(VISIBLE_PREDICATE_SQL),
             )
         )
         or 0
@@ -158,12 +160,12 @@ def _is_non_first(session: Session, *, user_id: str, ev: ReviewEvent) -> bool:
 
 
 def _first_answer_accuracy(session: Session, *, user_id: str) -> float | None:
-    """每卡历史首个事件为 GOOD 的比例。"""
+    """每卡历史首个事件为 GOOD 的比例（只含可见卡——统一可见谓词 3.9）。"""
     cards_with_events = (
         session.execute(
             select(Card.card_id)
             .join(ReviewEvent, ReviewEvent.card_id == Card.card_id)
-            .where(Card.user_id == user_id)
+            .where(Card.user_id == user_id, text(VISIBLE_PREDICATE_SQL))
             .distinct()
         )
         .scalars()

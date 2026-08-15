@@ -15,8 +15,9 @@ AWAITING_SAMPLE_CONFIRMATION / GENERATING / COMPLETED / FAILED / ABANDONED。
 - abandon：仅 DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION → ABANDONED。
 - retry：仅 FAILED → 关联新任务（可沿用已确认样卡）；历史遗留任务（project/file
   缺失）只读不可重试。
-- delete：仅终态任务（COMPLETED/FAILED/ABANDONED）；delete_generated_cards 决定
-  已发布卡去留（卡片 source_task_id 级联 SET NULL）。
+- delete：仅终态任务（COMPLETED/FAILED/ABANDONED）；STAGED 残留卡随删除级联清理
+  （绝不转无来源可见卡），delete_generated_cards 决定已发布卡去留（保留 →
+  卡片 source_task_id SET NULL）。
 
 事务语义：本模块函数不 commit/rollback，由调用方（handler/service 用例）控制；
 状态转移用 DB 条件更新（并发转移不互相覆盖），非法前置统一 TASK_STATE_CONFLICT。
@@ -474,11 +475,28 @@ def delete_task(
     session: Session, *, user_id: str, task_id: str, delete_generated_cards: bool
 ) -> None:
     """删除任务历史（6.4）：仅终态任务；delete_generated_cards=true 连已发布卡删除
-    （复习数据级联），false 只删任务行（cards.source_task_id FK SET NULL 保留卡）。"""
+    （复习数据级联），false 只删任务行（cards.source_task_id FK SET NULL 保留卡）。
+
+    V2.5（4.1 删除规则）：失败任务遗留的 STAGED 卡随任务删除级联清理——绝不转为
+    无来源可见卡（STAGED 对用户不可见，删除任务后无主必清）；delete_generated_cards
+    只决定已发布卡去留（保留 → source_task_id 置空 / 删除 → 连卡删除）。
+    删除仅终态任务：与发布/worker 的并发由状态门卫串行化——worker 发布提交前任务
+    仍 GENERATING（删除被 409 拒绝），发布后任务终态才可删（不复活）。
+    """
     task = _owned_task(session, user_id=user_id, task_id=task_id)
     if task.status not in TERMINAL_TASK_STATUSES:
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "仅终态任务可删除")
+    for card in session.scalars(
+        select(Card).where(Card.source_task_id == task_id, Card.publication_state == "STAGED")
+    ).all():
+        session.delete(card)
+    published = session.scalars(
+        select(Card).where(Card.source_task_id == task_id, Card.publication_state == "PUBLISHED")
+    ).all()
     if delete_generated_cards:
-        for card in session.scalars(select(Card).where(Card.source_task_id == task_id)).all():
+        for card in published:
             session.delete(card)
+    else:
+        for card in published:
+            card.source_task_id = None
     session.delete(task)

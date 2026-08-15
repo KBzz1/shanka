@@ -485,9 +485,11 @@ def test_plan_groups_cap_reduction_by_layer_quota(
 
 
 def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Session]) -> None:
-    """评分成功：Card 5 字段非 NULL（总分 = 代码计算 9）、任务 COMPLETED（stage=SCORING）、
-    账本 stage=SCORING SUCCESS（scoring_output schema v2 / rubric v2；不写 normalized_result）。"""
+    """评分成功：Card 5 字段非 NULL（总分 = 代码计算 9）、任务经 PUBLISHING 原子发布
+    COMPLETED（4.1）、账本 stage=SCORING SUCCESS（scoring_output schema v2 /
+    rubric v2；不写 normalized_result）。"""
     from services.generation.scoring import run_scoring_stage
+    from services.tasks.executor import publish_generated_cards
 
     user = _uuid()
     with session_factory() as session:
@@ -501,6 +503,9 @@ def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Sessi
 
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
+        session.refresh(task)
+        assert task.status == "GENERATING" and task.stage == "PUBLISHING"  # 4.1 内部阶段
+        publish_generated_cards(session, task=task)  # 原子发布（同短事务）
         session.commit()
     with session_factory() as session:
         task, cards, units = _task_with_cards(session, task_id=task_id)
@@ -508,8 +513,10 @@ def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Sessi
         batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
     assert calls == 1
     assert task.status == "COMPLETED"
-    assert task.stage == "SCORING"
+    assert task.stage == "PUBLISHING"  # internal_stage 终值（4.1：…→SCORING→PUBLISHING）
     assert task.ended_at is not None
+    assert task.generated_card_count == 1  # 发布时按已发布卡统计（3.4）
+    assert cards[0].publication_state == "PUBLISHED"  # 整批发布（STAGED → PUBLISHED）
     assert cards[0].evidence_score == 2
     assert cards[0].correctness_score == 3
     assert cards[0].difficulty_score == 2
@@ -583,8 +590,9 @@ def test_scoring_preserves_dedup_duplicate_rate(
 def test_scoring_version_drift_rejected(session_factory: Callable[[], Session]) -> None:
     """评分调用后、回写前改 Card.version（模拟用户编辑）→ 整组 finish_failed
     （STALE_SCORING_INPUT 内部原因入日志、error_code 兜底 GENERATION_FAILED）、
-    卡评分保持 NULL、任务仍 COMPLETED（非阻塞）。"""
+    卡评分保持 NULL、任务仍经原子发布 COMPLETED（非阻塞）。"""
     from services.generation.scoring import run_scoring_stage
+    from services.tasks.executor import publish_generated_cards
 
     user = _uuid()
     with session_factory() as session:
@@ -606,21 +614,24 @@ def test_scoring_version_drift_rejected(session_factory: Callable[[], Session]) 
 
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
+        publish_generated_cards(session, task=task)  # 4.1：原子发布（组失败不阻塞）
         session.commit()
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         attempts = _scoring_attempts(session, task_id=task_id)
-    assert task.status == "COMPLETED"  # 组失败不阻塞任务完成
+    assert task.status == "COMPLETED"  # 组失败不阻塞任务完成（发布仍进行）
     assert [a.status for a in attempts] == ["FAILED"]
     assert attempts[0].error_code == "GENERATION_FAILED"  # 兜底错误码（内部原因日志区分）
     assert cards[0].evidence_score is None  # 旧分数不写回
     assert cards[0].rubric_total_score is None
+    assert cards[0].publication_state == "PUBLISHED"  # 评分失败不影响发布
 
 
 def test_scoring_failure_non_blocking(session_factory: Callable[[], Session]) -> None:
     """评分 chat 抛 RetryableUpstreamError → 不重试（attempt_count == 1）、卡保留
-    （card_count 不变）、任务仍 COMPLETED、账本记 FAILED。"""
+    （card_count 不变）、任务仍经原子发布 COMPLETED、账本记 FAILED。"""
     from services.generation.scoring import run_scoring_stage
+    from services.tasks.executor import publish_generated_cards
 
     user = _uuid()
     with session_factory() as session:
@@ -634,6 +645,7 @@ def test_scoring_failure_non_blocking(session_factory: Callable[[], Session]) ->
 
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
+        publish_generated_cards(session, task=task)  # 4.1：原子发布（失败不阻塞）
         session.commit()
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)
@@ -649,8 +661,9 @@ def test_scoring_failure_non_blocking(session_factory: Callable[[], Session]) ->
 
 
 def test_scoring_invalid_output_group_failed(session_factory: Callable[[], Session]) -> None:
-    """评分输出非法（非 JSON）→ 整组 FAILED（不落部分分数）、任务仍 COMPLETED。"""
+    """评分输出非法（非 JSON）→ 整组 FAILED（不落部分分数）、任务仍经原子发布 COMPLETED。"""
     from services.generation.scoring import run_scoring_stage
+    from services.tasks.executor import publish_generated_cards
 
     user = _uuid()
     with session_factory() as session:
@@ -659,6 +672,7 @@ def test_scoring_invalid_output_group_failed(session_factory: Callable[[], Sessi
         run_scoring_stage(
             session, task=task, settings=_SETTINGS, client=_client(lambda r: _ok("no"))
         )
+        publish_generated_cards(session, task=task)  # 4.1：原子发布（失败不阻塞）
         session.commit()
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)
@@ -699,9 +713,10 @@ def test_scoring_stage_failed_guarded(session_factory: Callable[[], Session]) ->
 
 def test_scoring_cap_reached_still_completes(session_factory: Callable[[], Session]) -> None:
     """账本 SCORING 尝试数已达 max_scoring_calls_per_task（恢复/上限调整边缘）→ 剩余组
-    跳过不发调用，任务仍走最终条件更新 COMPLETED（不悬挂 RUNNING+SCORING）。"""
+    跳过不发调用，任务仍走最终条件更新 PUBLISHING + 原子发布 COMPLETED（不悬挂）。"""
     from services.generation.ledger import create_attempt
     from services.generation.scoring import run_scoring_stage
+    from services.tasks.executor import publish_generated_cards
 
     user = _uuid()
     settings = Settings(
@@ -741,12 +756,14 @@ def test_scoring_cap_reached_still_completes(session_factory: Callable[[], Sessi
         task = session.get(Task, task_id)
         assert task is not None
         run_scoring_stage(session, task=task, settings=settings, client=_client(handler))
+        publish_generated_cards(session, task=task)  # 4.1：原子发布（不悬挂）
         session.commit()
     with session_factory() as session:
         task = session.get(Task, task_id)
         attempts = _scoring_attempts(session, task_id=task_id)
     assert calls == 0  # 上限已占 → 不再付费调用
     assert task is not None and task.status == "COMPLETED"  # 不悬挂
+    assert task.stage == "PUBLISHING"
     assert len(attempts) == 2  # 未新增尝试
 
 
@@ -771,8 +788,9 @@ def test_enter_scoring_stage_transitions(session_factory: Callable[[], Session])
 
 
 def test_executor_runs_scoring_after_generation(session_factory: Callable[[], Session]) -> None:
-    """executor 接线：批循环结束 → enter_scoring_stage → 评分回写 → COMPLETED。
-    同一 client 先服务生成调用（GENERATOR_INPUT）再服务评分调用（SCORING_INPUT）。"""
+    """executor 接线：批循环结束 → enter_scoring_stage → 评分回写 → 原子发布 COMPLETED
+    （4.1：PUBLISHING 终态）；同一 client 先服务生成调用（GENERATOR_INPUT）再服务
+    评分调用（SCORING_INPUT）。"""
     user = _uuid()
     with session_factory() as session:
         task_id = _seed_scoring_task(session, user_id=user, stage="GENERATING", generate=False)
@@ -792,9 +810,10 @@ def test_executor_runs_scoring_after_generation(session_factory: Callable[[], Se
         task, cards, _ = _task_with_cards(session, task_id=task_id)
     assert n == 1
     assert task.status == "COMPLETED"
-    assert task.stage == "SCORING"
+    assert task.stage == "PUBLISHING"  # internal_stage 终值（4.1）
     assert len(cards) == 1
     assert cards[0].rubric_total_score == 9  # 生成 + 评分全链路
+    assert cards[0].publication_state == "PUBLISHED"  # 原子发布
 
 
 def test_scan_takes_over_scoring_orphan(session_factory: Callable[[], Session]) -> None:

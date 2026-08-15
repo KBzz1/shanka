@@ -6,10 +6,11 @@
 
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from domain.card import VISIBLE_PREDICATE_SQL
 from domain.task import ACTIVE_TASK_STATUSES
 from infra.db.models import Card, Deck, ReviewEvent, ReviewState, Task
 
@@ -51,16 +52,26 @@ def _owned(session: Session, *, user_id: str, deck_id: str) -> Deck:
 def deck_progress(
     session: Session, *, user_id: str, deck_id: str, now: str
 ) -> dict[str, int | float]:
-    """派生进度（structure-contract 3.8/5.3）：card_count/due_count/mastered/review_count/mastery_ratio。"""
+    """派生进度（structure-contract 3.8/5.3）：card_count/due_count/mastered/review_count/
+    mastery_ratio——全部只含可见卡（统一可见谓词 3.9：card_count 派生进度只含可见卡）。"""
     _owned(session, user_id=user_id, deck_id=deck_id)
     card_count = (
-        session.scalar(select(func.count(Card.card_id)).where(Card.deck_id == deck_id)) or 0
+        session.scalar(
+            select(func.count(Card.card_id)).where(
+                Card.deck_id == deck_id, text(VISIBLE_PREDICATE_SQL)
+            )
+        )
+        or 0
     )
     due_count = (
         session.scalar(
             select(func.count(Card.card_id))
             .join(ReviewState, ReviewState.card_id == Card.card_id)
-            .where(Card.deck_id == deck_id, ReviewState.due <= now)
+            .where(
+                Card.deck_id == deck_id,
+                ReviewState.due <= now,
+                text(VISIBLE_PREDICATE_SQL),
+            )
         )
         or 0
     )
@@ -72,6 +83,7 @@ def deck_progress(
                 Card.deck_id == deck_id,
                 ReviewState.state == "REVIEW",
                 ReviewState.stability >= 21,
+                text(VISIBLE_PREDICATE_SQL),
             )
         )
         or 0
@@ -80,7 +92,7 @@ def deck_progress(
         session.scalar(
             select(func.count(ReviewEvent.review_event_id))
             .join(Card, Card.card_id == ReviewEvent.card_id)
-            .where(Card.deck_id == deck_id)
+            .where(Card.deck_id == deck_id, text(VISIBLE_PREDICATE_SQL))
         )
         or 0
     )

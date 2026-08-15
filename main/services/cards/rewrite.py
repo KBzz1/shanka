@@ -25,11 +25,12 @@ import re
 import uuid
 from collections.abc import Callable
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
+from domain.card import VISIBLE_PREDICATE_SQL
 from infra.db.models import ApiKey, Card, LlmCallAttempt, ReviewState
 from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
@@ -177,7 +178,14 @@ def rewrite_card(
     idempotency_key：handler 传入 Idempotency-Key（operation_key 区分多次用户请求）；
     测试可传 None → hash("")。
     """
-    card = session.scalar(select(Card).where(Card.card_id == card_id, Card.user_id == user_id))
+    # 统一可见谓词（3.9）：STAGED/删除批次卡对用户单卡操作同样不可见（4.1）
+    card = session.scalar(
+        select(Card).where(
+            Card.card_id == card_id,
+            Card.user_id == user_id,
+            text(VISIBLE_PREDICATE_SQL),
+        )
+    )
     if card is None:
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
     review_state = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))

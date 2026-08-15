@@ -300,7 +300,12 @@ def test_process_batch_anchored_card(session_factory: Callable[[], Session]) -> 
     assert batch.model == "deepseek-v4-flash" and batch.http_status == 200
     assert batch.prompt_version == "v3" and batch.schema_version == "v2"
     assert unit.status == "PROCESSED"
-    assert task.generated_card_count == 1
+    # V2.5（3.4/4.1）：生成期不累加——generated_card_count 只在发布时按已发布卡统计
+    # （失败任务为 0）；单卡先 STAGED 隔离（可见谓词 3.9 排除），任务成功才发布
+    assert task.generated_card_count == 0
+    assert card.publication_state == "STAGED"
+    assert card.source_task_id == task_id
+    assert card.chapter_id is not None
     assert task.completed_batch_count == 1
     # 账本同事务 SUCCESS（usage/资产版本按调用记录）
     assert len(attempts) == 1

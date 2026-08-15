@@ -17,11 +17,18 @@
   心跳同事务落库，长任务中间状态可观测，崩溃后已完成批次保留、未完成批次可恢复）→
   批循环结束 → enter_scoring_stage（条件更新 stage=GENERATING → SCORING）→
   run_scoring_stage（评分回写，内部条件更新 GENERATING+SCORING → COMPLETED）。
-- 评分 worker：扫描 `status='GENERATING' AND stage='SCORING'` 任务——心跳超时的孤儿
-  （在途 worker 崩溃）经 CAS 条件更新接管 + mark_stale_unknown + 重跑 run_scoring_stage
-  （账本为已尝试游标）；心跳新鲜（在途 worker 存活）不干预。
+- 评分 worker：扫描 `status='GENERATING' AND stage IN ('SCORING','PUBLISHING')` 任务——
+  心跳超时的孤儿（在途 worker 崩溃）经 CAS 条件更新接管：SCORING 孤儿
+  mark_stale_unknown + 重跑 run_scoring_stage（账本为已尝试游标）；PUBLISHING 孤儿
+  （崩溃于 SCORING→PUBLISHING 提交与发布之间）直接执行原子发布（无 LLM）。心跳新鲜
+  （在途 worker 存活）不干预。
+- 原子发布（4.1）：任务进入 PUBLISHING 后，同一短事务内 CAS 门卫（WHERE
+  GENERATING+PUBLISHING）→ 校验 ≥1 张 STAGED 卡 → 全部置 PUBLISHED → 任务
+  COMPLETED + generated_card_count（只统计已发布卡，3.4）；0 张有效卡 → 任务
+  FAILED + TASK_ZERO_CARDS（V25-D-23）。任何阶段失败 → FAILED，STAGED 卡继续
+  隔离，用户侧零部分可见。
 系统级错误（adapter 抛 API_KEY_UNAVAILABLE/GENERATION_FAILED）→ 任务 FAILED（4.1），
-failure_stage 按 task.stage 归因（PLANNING/GENERATING/SCORING）；
+failure_stage 按 task.stage 归因（PLANNING/GENERATING/SCORING/PUBLISHING）；
 批次级失败（Schema 重试达上限）→ 批次 SKIPPED，任务继续（4.2）。V4 fake 不再用于任务执行
 （样卡仍用 fake）。V2.5：无 PAUSED/resume/cancel——内部恢复经租约/心跳，不暴露用户状态。
 """
@@ -32,7 +39,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -40,7 +47,7 @@ from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import GenerationConfig
 from infra.clock import SystemClock
-from infra.db.models import ApiKey, Batch, KnowledgePoint, Task
+from infra.db.models import ApiKey, Batch, Card, KnowledgePoint, Task
 from infra.db.session import format_utc
 from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -127,6 +134,92 @@ def _format_cutoff(now: str, minutes: int) -> str:
     except ValueError:
         return now
     return format_utc(dt - timedelta(minutes=minutes))
+
+
+def _publish_guard_update(session: Session, *, task: Task, values: dict[str, Any]) -> bool:
+    """发布阶段条件更新（4.1 幂等转移）：WHERE GENERATING+PUBLISHING；rowcount=0 →
+    并发 worker 已转移（发布/失败）→ 不覆盖。不 commit——由调用方提交。"""
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(Task)
+            .where(
+                Task.task_id == task.task_id,
+                Task.status == "GENERATING",
+                Task.stage == "PUBLISHING",
+            )
+            .values(**values)
+        ),
+    )
+    return result.rowcount == 1
+
+
+def publish_generated_cards(session: Session, *, task: Task) -> None:
+    """整批原子发布（4.1）：同一短事务内——CAS 门卫（GENERATING+PUBLISHING）→ 校验
+    ≥1 张 STAGED 卡 → 全部置 PUBLISHED → 任务 COMPLETED + generated_card_count
+    （只统计已发布卡）；0 张有效卡 → 任务 FAILED + TASK_ZERO_CARDS（V25-D-23，
+    不显示"完成 0 张"）。调用方 commit；并发 worker 已发布 → rowcount=0 不覆盖不复活。
+
+    发布无 LLM 调用——纯短事务（R-17 不持锁义务天然满足）；失败路径同样条件更新，
+    不信任 identity map（并发转移不覆盖）。
+    """
+    now = format_utc(SystemClock().now_utc())
+    if not _publish_guard_update(session, task=task, values={"updated_at": now}):
+        return  # 已转移（并发 worker 完成/失败）→ 不覆盖
+    staged = (
+        session.scalar(
+            select(func.count(Card.card_id)).where(
+                Card.source_task_id == task.task_id,
+                Card.publication_state == "STAGED",
+            )
+        )
+        or 0
+    )
+    if staged == 0:
+        # 0 张有效卡整体失败（4.1 V25-D-23）：任务 FAILED + TASK_ZERO_CARDS，
+        # STAGED 卡继续隔离（本分支无卡）
+        if _publish_guard_update(
+            session,
+            task=task,
+            values={
+                "status": "FAILED",
+                "failure_stage": "PUBLISHING",
+                "error_code": ErrorCode.TASK_ZERO_CARDS.value,
+                "ended_at": now,
+                "resumable": 0,
+                "updated_at": now,
+            },
+        ):
+            session.refresh(task)
+            logger.warning(
+                "task publish failed, zero valid cards",
+                extra={"task_id": task.task_id, "error_code": ErrorCode.TASK_ZERO_CARDS.value},
+            )
+        return
+    session.execute(
+        update(Card)
+        .where(
+            Card.source_task_id == task.task_id,
+            Card.publication_state == "STAGED",
+        )
+        .values(publication_state="PUBLISHED")
+    )
+    if _publish_guard_update(
+        session,
+        task=task,
+        values={
+            "status": "COMPLETED",
+            "generated_card_count": staged,
+            "ended_at": now,
+            "resumable": 0,
+            "updated_at": now,
+        },
+    ):
+        session.refresh(task)
+        logger.info(
+            "task published",
+            extra={"task_id": task.task_id, "published_cards": staged},
+        )
 
 
 def _recover_generating_orphans(session: Session, *, task: Task, settings: Settings) -> None:
@@ -324,11 +417,12 @@ def process_active_tasks(
         except Exception:  # noqa: BLE001
             _fail_task(task, error_code=ErrorCode.GENERATION_FAILED.value)
             logger.warning("task execution unexpected failure", extra={"task_id": task.task_id})
-    # 评分 worker 扫描：GENERATING + stage=SCORING（spec §8：心跳超时孤儿可 CAS 接管；
-    # 心跳新鲜 = 在途 worker 存活，跳过）
+    # 评分 worker 扫描：GENERATING + stage IN (SCORING, PUBLISHING)（spec §8 + 4.1：
+    # 心跳超时孤儿可 CAS 接管——SCORING 重跑评分、PUBLISHING 直接发布；心跳新鲜 =
+    # 在途 worker 存活，跳过）
     scoring_tasks = session.scalars(
         select(Task)
-        .where(Task.status == "GENERATING", Task.stage == "SCORING")
+        .where(Task.status == "GENERATING", Task.stage.in_(["SCORING", "PUBLISHING"]))
         .order_by(Task.created_at)
     ).all()
     acted = 0
@@ -409,6 +503,12 @@ def _execute_task(
             session.refresh(task)
             run_scoring_stage(session, task=task, settings=settings, client=client)
             session.refresh(task)
+            # 原子发布（4.1）：run_scoring_stage 终态条件更新 SCORING → PUBLISHING 成功后，
+            # 同一短事务校验 STAGED 卡 → 全部 PUBLISHED → COMPLETED（或 TASK_ZERO_CARDS FAILED）；
+            # stage 未到 PUBLISHING（并发转移）→ 不发布，终态由其他 worker 决定
+            if task.status == "GENERATING" and task.stage == "PUBLISHING":
+                publish_generated_cards(session, task=task)
+                session.refresh(task)
             if task.status == "COMPLETED":
                 _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
     finally:
@@ -422,15 +522,42 @@ def _execute_scoring_task(
     settings: Settings,
     client_factory: ClientFactory | None,
 ) -> int:
-    """SCORING 孤儿接管（spec §8 + CAS2 同款心跳判据）：仅心跳超时的 GENERATING+SCORING
-    任务可被接管（新鲜心跳 = 在途 worker 存活，跳过不干预）；CAS 条件更新接管后
-    mark_stale_unknown（遗留 STARTED → UNKNOWN，仍计上限）+ 重跑 run_scoring_stage
-    （账本为已尝试游标：已尝试组跳过、未尝试组续跑）。返回实际行动数（1 = 接管，0 = 跳过）。"""
+    """SCORING/PUBLISHING 孤儿接管（spec §8 + 4.1 + CAS2 同款心跳判据）：仅心跳超时的
+    GENERATING+SCORING/PUBLISHING 任务可被接管（新鲜心跳 = 在途 worker 存活，跳过不干预）。
+
+    - SCORING：CAS 条件更新接管 → mark_stale_unknown（遗留 STARTED → UNKNOWN，仍计上限）
+      → 重跑 run_scoring_stage（账本为已尝试游标：已尝试组跳过、未尝试组续跑）→ 原子发布。
+    - PUBLISHING（崩溃于 SCORING→PUBLISHING 提交与发布之间）：CAS 条件更新接管 →
+      直接执行原子发布（无 LLM 调用）。
+    返回实际行动数（1 = 接管，0 = 跳过）。"""
     _require_str(task.updated_at, "任务数据不完整（缺少时间戳）")
     now = format_utc(SystemClock().now_utc())
     if not _heartbeat_stale(task.updated_at, now, settings.orphan_timeout_minutes):
         return 0  # 心跳新鲜 → 在途 worker 存活，不干预
     cutoff = _format_cutoff(now, settings.orphan_timeout_minutes)
+    if task.stage == "PUBLISHING":
+        result = cast(
+            CursorResult[Any],
+            session.execute(
+                update(Task)
+                .where(
+                    Task.task_id == task.task_id,
+                    Task.status == "GENERATING",
+                    Task.stage == "PUBLISHING",
+                    Task.updated_at < cutoff,
+                )
+                .values(updated_at=now)
+            ),
+        )
+        if result.rowcount == 0:
+            return 0  # 已被其他 worker 接管或状态已转移
+        session.refresh(task)
+        session.commit()  # 接管心跳提交（发布无 LLM，不持写事务义务）
+        publish_generated_cards(session, task=task)
+        session.refresh(task)
+        if task.status == "COMPLETED":
+            _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
+        return 1
     result = cast(
         CursorResult[Any],
         session.execute(
@@ -463,6 +590,11 @@ def _execute_scoring_task(
     try:
         run_scoring_stage(session, task=task, settings=settings, client=client)
         session.refresh(task)
+        # 原子发布（4.1）：run_scoring_stage 终态条件更新 SCORING → PUBLISHING 成功后
+        # 同短事务发布；stage 未到 PUBLISHING（并发转移）→ 不发布
+        if task.status == "GENERATING" and task.stage == "PUBLISHING":
+            publish_generated_cards(session, task=task)
+            session.refresh(task)
         if task.status == "COMPLETED":
             _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
     finally:
