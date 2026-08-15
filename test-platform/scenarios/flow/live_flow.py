@@ -1,5 +1,8 @@
-"""完整制卡流程场景(API Key → PDF → 样卡 → 任务 → 复习 → 看板 → quality-summary)端到端联调,账号 Bearer 流程。
+"""完整制卡流程场景(API Key → 项目 → 任务(样卡/生成) → 复习 → 看板 → quality-summary)端到端联调,账号 Bearer 流程。
 
+V2.5 化(终审 I-1):POST /samples 与 POST /tasks 已随 V2.5 下线——样卡持久化在
+tasks 域下(POST /tasks/{id}/samples),任务创建入口为 POST /projects/{project_id}/tasks;
+牌组经 POST /decks 带 project_id 归属项目(C-1 生产写路径)。
 成本闸门(DESIGN 8.3):废弃「live 固定 3 次调用」假设——LLM_CALLS 由 BUDGET_FIXTURE
 按契约默认上限推导最坏调用预算(PLANNING/GENERATING/SCORING + 固定 api-key 校验与
 samples);任务完成后经 GET /tasks/{id}/batches 对账实际尝试/token/成本(GENERATING
@@ -7,7 +10,7 @@ samples);任务完成后经 GET /tasks/{id}/batches 对账实际尝试/token/成
 .env 读取,仅内存使用,绝不输出。
 运行方式(由 runner 调度或直接):
     python3 scenarios/flow/live_flow.py --base-url http://localhost:8000 [--environment local|prod] [--run-id UUID]
-    python3 scenarios/flow/live_flow.py --skip-generate   # 到样卡为止,不创建任务(无对账)
+    python3 scenarios/flow/live_flow.py --skip-generate   # 到项目/章节选择为止,不创建任务(无对账)
 退出码 = 失败步骤数(0 = 全部通过)。
 """
 
@@ -26,7 +29,7 @@ _ROOT = str(Path(__file__).resolve().parents[2])
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from shanka import account, cost, environments, logging as shlogging
+from shanka import account, client, cost, environments, logging as shlogging
 from shanka.cleanup import DataScope
 from shanka.client import Response, ShankaClient
 from shanka.report import check, record, summary
@@ -38,11 +41,12 @@ SUITE = "flow"
 # test-platform/scenarios/flow/,parents[0]=flow/ → [1]=scenarios/ → [2]=test-platform/ → [3]=仓库根
 _ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 _POLL_INTERVAL_S = 5    # 任务轮询间隔
-_POLL_TIMEOUT_S = 600   # 任务轮询总上限
-_TERMINAL = ("COMPLETED", "FAILED", "CANCELLED")
+_SAMPLES_TIMEOUT_S = 300  # 样卡生成(1~3 张)后台完成上限
+_POLL_TIMEOUT_S = 600   # 生成轮询总上限
+_HARD_TERMINAL = ("FAILED", "ABANDONED")
 _GEN_CONFIG = {
-    "quantity_tendency": "BALANCED",
-    "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+    "coverage_mode": "BALANCED",
+    "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
 }
 
 # 受控 fixture:固定取前 2 章、BALANCED 密度;最坏调用预算由 cost.derive_budget 推导
@@ -50,7 +54,7 @@ _GEN_CONFIG = {
 # PLANNING 组数前提(V2.4 fixture 锚定):样书前 2 章 42.6k 字符 ÷ planner_max_input_chars
 # 20k(config.py)= 3 组向上取整;组数由 fixture 显式声明(planning_groups),
 # 实际组数受后端 max_planner_groups_per_task=30 上限;调整样书或阈值需同步声明
-BUDGET_FIXTURE = {"chapters": 2, "quantity_tendency": _GEN_CONFIG["quantity_tendency"],
+BUDGET_FIXTURE = {"chapters": 2, "quantity_tendency": "BALANCED",
                   "generate": True, "planning_groups": 3}
 LIVE_BUDGET = cost.derive_budget(**BUDGET_FIXTURE)
 LLM_CALLS = LIVE_BUDGET.total_calls()
@@ -61,13 +65,30 @@ def _body(r: Response) -> dict:
     return r.json if isinstance(r.json, dict) else {}
 
 
-def _sample_cards(body: dict) -> list[dict]:
-    """样卡数组兼容多字段名(samples/sample_cards/cards/items/data)。"""
-    for key in ("samples", "sample_cards", "cards", "items", "data"):
-        value = body.get(key)
-        if isinstance(value, list):
-            return value
-    return []
+def _poll_task(c: ShankaClient, task_id: str, *, target: str, timeout_s: int,
+               step: str = "task-poll") -> dict:
+    """轮询 GET /tasks/{id} 至 target;FAILED/ABANDONED 或超时抛 SystemExit(非零退出)。
+
+    样卡阶段 target=AWAITING_SAMPLE_CONFIRMATION,生成阶段 target=COMPLETED
+    (V2.5 样卡持久化于任务;与 v25_core_flow 同款轮询)。
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        r = c.request("GET", f"/tasks/{task_id}", step=step)
+        if r.status != 200:
+            raise SystemExit(f"轮询任务 {task_id[:8]} 失败: HTTP {r.status}")
+        body = _body(r)
+        status = str(body.get("status") or "")
+        if status == target:
+            return body
+        if status in _HARD_TERMINAL:
+            raise SystemExit(
+                f"任务未达 {target}: status={status} "
+                f"failure_stage={body.get('failure_stage')} error_code={body.get('error_code')}"
+            )
+        if time.monotonic() >= deadline:
+            raise SystemExit(f"任务 {task_id[:8]} 轮询超时(>{timeout_s}s),最后状态 {status!r}")
+        time.sleep(_POLL_INTERVAL_S)
 
 
 def _load_env_key() -> str:
@@ -117,39 +138,26 @@ def run(
     check("GET /api-key/status -> AVAILABLE", body.get("status") == "AVAILABLE",
           f"status={body.get('status')}")
 
-    # 2. 复用当前用户已解析 PDF:列表选第一个 PARSED,取章节断言非空
-    r = c.request("GET", "/pdfs", step="pdf-list")
-    check("GET /pdfs -> 200", r.status == 200, f"({r.status})")
-    pdfs = [p for p in _body(r).get("items", []) if p.get("status") == "PARSED"]
-    check("存在已解析 PDF", bool(pdfs), f"parsed={len(pdfs)}")
-    if not pdfs:
-        raise SystemExit(
-            f"当前用户无已解析 PDF(parsed=0):请先上传解析 PDF 或预置测试账号数据后重跑"
-        )
-    file_id = pdfs[0]["file_id"]
-    r = c.request("GET", f"/pdfs/{file_id}", step="pdf-detail")
-    check("GET /pdfs/{file_id} -> 200", r.status == 200, f"({r.status})")
-    chapters = [ch for ch in (_body(r).get("chapters") or [])]
-    check("PDF 章节非空", bool(chapters), f"chapters={len(chapters)}")
-    if not chapters:
-        raise SystemExit(f"PDF {file_id[:8]} 无章节,无法生成")
+    # 2. 项目前置(V2.5):复用测试账号已有 READY 项目(与 v25_core_flow 同约定;
+    #    POST /samples 与 POST /tasks 已随 V2.5 下线——样卡持久化在 tasks 域下)
+    r = c.request("GET", "/projects", step="project-list")
+    check("GET /projects -> 200", r.status == 200, f"({r.status})")
+    ready = [p for p in _body(r).get("items", []) if p.get("status") == "READY"]
+    check("存在 READY 项目(前置)", bool(ready), f"ready={len(ready)}")
+    if not ready:
+        raise SystemExit("当前用户无 READY 项目:请先上传解析并确认章节的 PDF(或预置测试账号数据)后重跑")
+    project_id = ready[0]["project_id"]
+    r = c.request("GET", f"/projects/{project_id}", step="project-detail")
+    check("GET /projects/{id} -> 200", r.status == 200, f"({r.status})")
+    chapters = [ch for ch in (_body(r).get("file") or {}).get("chapters") or [] if isinstance(ch, dict)]
+    check("项目章节 >= 2(前置)", len(chapters) >= 2, f"chapters={len(chapters)}")
+    if len(chapters) < 2:
+        raise SystemExit(f"项目 {project_id[:8]} 章节不足 2,无法覆盖生成链路(当前 {len(chapters)})")
     sel = chapters[:2]
 
-    # 3. 样卡预览(无副作用、豁免幂等键,故不幂等)
-    r = c.request("POST", "/samples",
-                  body={"file_id": file_id,
-                        "chapter_ids": [ch["chapter_id"] for ch in sel],
-                        "generation_config": _GEN_CONFIG},
-                  step="samples")
-    check("POST /samples -> 200", r.status == 200, f"({r.status})")
-    cards = _sample_cards(_body(r))
-    check("样卡数组非空", bool(cards), f"cards={len(cards)}")
-    if not cards:
-        raise SystemExit("样卡生成为空,无法继续")
-
-    # 4. 创建牌组 + 生成任务(--skip-generate 时到此结束,仍需注销会话)
+    # 3. 创建项目归属牌组 + DRAFT 任务(--skip-generate 时到此结束,仍需注销会话)
     if skip_generate:
-        print("    [skip-generate] 跳过 POST /tasks 与评级,流程到样卡为止")
+        print("    [skip-generate] 跳过任务创建与评级,流程到项目/章节选择为止")
         r = c.logout()
         check("logout -> 204", r.status == 204, f"({r.status})")
         if created:
@@ -157,42 +165,41 @@ def run(
         return summary()
 
     try:
-        deck_id = scope.create_deck("联调测试牌组")
+        deck_id = scope.create_deck("联调测试牌组", project_id=project_id)
     except RuntimeError as exc:
         raise SystemExit(f"创建牌组失败: {exc}") from None
-    check("POST /decks 创建联调测试牌组 -> 201", True, f"deck={deck_id[:8]}")
+    check("POST /decks 建项目归属牌组 -> 201", True, f"deck={deck_id[:8]}")
 
-    r = c.request("POST", "/tasks",
-                  body={"file_id": file_id, "deck_id": deck_id,
-                        "chapter_ids": [ch["chapter_id"] for ch in sel],
-                        "generation_config": _GEN_CONFIG},
-                  idempotent=True, step="task-create")
-    check("POST /tasks -> 201", r.status == 201, f"({r.status})")
-    task_id = _body(r).get("task_id")
+    r = client.create_task(c, project_id=project_id, deck_id=deck_id,
+                           chapter_ids=[ch["chapter_id"] for ch in sel],
+                           generation_config=_GEN_CONFIG)
+    body = _body(r)
+    check("POST /projects/{id}/tasks -> 201 DRAFT",
+          r.status == 201 and body.get("status") == "DRAFT",
+          f"({r.status}) {body.get('status')}")
+    task_id = body.get("task_id")
     check("任务返回 task_id", isinstance(task_id, str), f"task={str(task_id)[:8]}")
     if not isinstance(task_id, str):
-        raise SystemExit(f"任务创建响应缺 task_id: {_body(r)}")
+        raise SystemExit(f"任务创建响应缺 task_id: {body}")
 
-    # 轮询至终态:间隔 5s,单次请求 60s 超时(client timeout),总上限 600s
-    deadline = time.monotonic() + _POLL_TIMEOUT_S
-    status = ""
-    while status not in _TERMINAL:
-        r = c.request("GET", f"/tasks/{task_id}", step="task-poll")
-        body = _body(r)
-        status = str(body.get("status") or "")
-        check("轮询 GET /tasks/{id} -> 200", r.status == 200,
-              f"status={status} cards={body.get('generated_card_count')}")
-        if r.status != 200:
-            raise SystemExit(f"轮询任务 {task_id[:8]} 失败: HTTP {r.status}")
-        if status in _TERMINAL:
-            break
-        if time.monotonic() >= deadline:
-            raise SystemExit(f"任务 {task_id[:8]} 轮询超时(>{_POLL_TIMEOUT_S}s),最后状态 {status!r}")
-        time.sleep(_POLL_INTERVAL_S)
-    check("任务终态 COMPLETED", status == "COMPLETED", f"status={status}")
-    if status != "COMPLETED":
-        raise SystemExit(f"任务未完成: status={status} "
-                         f"stage={body.get('failure_stage')} error_code={body.get('error_code')}")
+    # 4. 持久化样卡(V2.5 任务域:POST /tasks/{id}/samples 后台完成)→ 确认后 start →
+    #    轮询 COMPLETED(间隔 5s,单次请求 60s 超时,样卡/生成各自上限)
+    r = client.request_samples(c, task_id)
+    check("POST /tasks/{id}/samples -> 200", r.status == 200, f"({r.status})")
+    body = _poll_task(c, task_id, target="AWAITING_SAMPLE_CONFIRMATION",
+                      timeout_s=_SAMPLES_TIMEOUT_S, step="task-poll")
+    sample_cards = body.get("sample_cards") if isinstance(body.get("sample_cards"), list) else []
+    check("样卡持久化到任务(非空)", bool(sample_cards), f"cards={len(sample_cards)}")
+
+    r = client.start_task(c, task_id)
+    body = _body(r)
+    check("POST /tasks/{id}/start -> 200 GENERATING",
+          r.status == 200 and body.get("status") == "GENERATING",
+          f"({r.status}) {body.get('status')}")
+    body = _poll_task(c, task_id, target="COMPLETED", timeout_s=_POLL_TIMEOUT_S,
+                      step="task-poll")
+    check("任务终态 COMPLETED", body.get("status") == "COMPLETED",
+          f"status={body.get('status')}")
     check("任务生成卡片数 > 0", bool(body.get("generated_card_count")),
           f"cards={body.get('generated_card_count')}")
 
@@ -216,7 +223,8 @@ def run(
         print("    [对账] 前提: PLANNING 按 fixture 声明 3 规划组计(前 2 章 42.6k 字符 ÷ 20k 向上取整),"
               "实际组数受后端 max_planner_groups_per_task=30 上限")
 
-    # 5. 牌组卡片 + 复习评级(任意状态可评级,C-06)
+    # 5. 牌组卡片 + 复习评级(任意状态可评级,C-06;V2.5 响应 review_state/study_date,
+    #    时区由账号学习时区决定,客户端不上报 device_timezone)
     r = c.request("GET", f"/decks/{deck_id}/cards", step="deck-cards")
     check("GET /decks/{id}/cards -> 200", r.status == 200, f"({r.status})")
     items = [it for it in _body(r).get("items", [])]
@@ -224,18 +232,17 @@ def run(
     if not items:
         raise SystemExit(f"牌组 {deck_id[:8]} 无卡片,无法评级")
     card_id = items[0]["card_id"]
-    r = c.request("POST", "/review-events",
-                  body={"card_id": card_id, "rating": "GOOD",
-                        "client_event_id": str(uuid.uuid4()),
-                        "device_timezone": "Asia/Shanghai"},
-                  idempotent=True, step="review-event")
+    r = client.submit_review(c, card_id=card_id, rating="GOOD",
+                             client_event_id=str(uuid.uuid4()))
     body = _body(r)
     check("POST /review-events -> 200", r.status == 200, f"({r.status})")
-    check("评级返回 state/due", isinstance(body.get("state"), str) and bool(body.get("due")),
-          f"state={body.get('state')} due={body.get('due')}")
+    rs = body.get("review_state") if isinstance(body.get("review_state"), dict) else {}
+    check("评级返回 review_state/study_date",
+          bool(rs.get("state")) and bool(body.get("study_date")),
+          f"state={rs.get('state')}")
 
-    # 6. 看板(时区对齐,观察本周统计)
-    r = c.request("GET", "/stats/dashboard?timezone=Asia/Shanghai", step="dashboard")
+    # 6. 看板(V2.5 服务端按账号学习时区分桶,无 timezone 查询参数)
+    r = c.request("GET", "/stats/dashboard", step="dashboard")
     body = _body(r)
     check("GET /stats/dashboard -> 200", r.status == 200, f"({r.status})")
     check("看板含周复习/掌握统计",
@@ -296,7 +303,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base-url", default="http://localhost:8000")
     ap.add_argument("--environment", default="local", choices=list(environments.ENVIRONMENTS))
     ap.add_argument("--run-id", default=None, help="runner 注入(临时观测账号命名);直跑时自动生成")
-    ap.add_argument("--skip-generate", action="store_true", help="跳过 POST /tasks 与评级,到样卡为止")
+    ap.add_argument("--skip-generate", action="store_true",
+                    help="跳过任务创建与评级,到项目/章节选择为止")
     ap.add_argument("--keep", action="store_true", help="不清理创建的牌组")
     args = ap.parse_args(argv)
 

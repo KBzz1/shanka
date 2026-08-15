@@ -15,7 +15,7 @@ EMAIL = "tester@local.test"  # 占位凭据(真实凭据只走环境变量)
 
 
 def _handler(*, generate=True, prod=False, batches=None):
-    state = {"polls": 0, "obs": False}
+    state = {"polls": 0, "obs": False, "started": False}
 
     def handler(method, path, body):
         if path == "/auth/register":
@@ -27,18 +27,26 @@ def _handler(*, generate=True, prod=False, batches=None):
             return Response(200, {"status": "ok"})
         if path == "/api-key/status":
             return Response(200, {"status": "AVAILABLE"})
-        if path == "/pdfs":
-            return Response(200, {"items": [{"file_id": "pdf-1", "status": "PARSED"}]})
-        if path == "/pdfs/pdf-1":
-            return Response(200, {"file_id": "pdf-1",
-                                  "chapters": [{"chapter_id": "ch-1"}, {"chapter_id": "ch-2"}]})
-        if path == "/samples":
-            return Response(200, {"samples": [{"card_id": "s-1"}]})
+        # V2.5 项目前置:READY 项目 + 详情章节(替代已下线的 /pdfs + POST /samples)
+        if path == "/projects":
+            return Response(200, {"items": [{"project_id": "proj-1", "status": "READY"}]})
+        if path == "/projects/proj-1":
+            return Response(200, {"file": {"file_id": "pdf-1",
+                                           "chapters": [{"chapter_id": "ch-1"},
+                                                        {"chapter_id": "ch-2"}]}})
         if path == "/decks" and method == "POST":
             return Response(201, {"deck_id": "deck-1"})
-        if path == "/tasks":
-            return Response(201, {"task_id": "task-1"})
-        if path == "/tasks/task-1":
+        if path == "/projects/proj-1/tasks":
+            return Response(201, {"task_id": "task-1", "status": "DRAFT"})
+        if path == "/tasks/task-1/samples" and method == "POST":
+            return Response(200, {"status": "SAMPLE_GENERATING"})
+        if path == "/tasks/task-1/start" and method == "POST":
+            state["started"] = True
+            return Response(200, {"status": "GENERATING"})
+        if path == "/tasks/task-1" and method == "GET":
+            if not state["started"]:  # 样卡轮询:首次即 AWAITING(样卡持久化)
+                return Response(200, {"status": "AWAITING_SAMPLE_CONFIRMATION",
+                                      "sample_cards": [{"card_id": "s-1"}]})
             state["polls"] += 1
             if state["polls"] < 3:
                 return Response(200, {"status": "GENERATING", "generated_card_count": 0})
@@ -57,8 +65,9 @@ def _handler(*, generate=True, prod=False, batches=None):
         if path == "/decks/deck-1/cards":
             return Response(200, {"items": [{"card_id": "card-1"}]})
         if path == "/review-events":
-            return Response(200, {"state": "LEARNING", "due": "2026-08-15T00:00:00Z"})
-        if path == "/stats/dashboard?timezone=Asia/Shanghai":
+            return Response(200, {"review_state": {"state": "LEARNING"},
+                                  "study_date": "2026-08-15"})
+        if path == "/stats/dashboard":
             return Response(200, {"weekly_total": 1, "mastered_card_count": 0})
         if path == "/observability/quality-summary":
             if state["obs"]:
@@ -91,13 +100,20 @@ class LiveFlowScenarioTest(unittest.TestCase):
         # 会话:Bearer 全流程,local register 主账号 + 观测临时账号
         self.assertIn(("register", "tester", None), calls)
         self.assertIn(("register", "t-3f2a9c81d4-obs", None), calls)
-        # 生成链路:api-key -> pdf -> samples -> task -> poll -> cards -> review -> dashboard
+        # 生成链路(V2.5):api-key -> project -> 项目牌组 -> 任务 -> 样卡 -> start ->
+        # poll -> cards -> review -> dashboard(已下线 POST /samples 与 POST /tasks)
         paths = {p for _, p, _ in calls}
-        for path in ("/api-key", "/pdfs", "/samples", "/tasks", "/decks/deck-1/cards",
-                     "/review-events", "/stats/dashboard?timezone=Asia/Shanghai"):
+        for path in ("/api-key", "/projects", "/projects/proj-1", "/decks",
+                     "/projects/proj-1/tasks", "/tasks/task-1/samples",
+                     "/tasks/task-1/start", "/decks/deck-1/cards", "/review-events",
+                     "/stats/dashboard"):
             self.assertIn(path, paths)
-        # 轮询至 COMPLETED(非终态轮询 2 次 + 终态 1 次)
-        self.assertEqual(calls.count(("GET", "/tasks/task-1", None)), 3)
+        self.assertNotIn("/samples", paths)
+        # 牌组归属项目(C-1 写路径):POST /decks body 含 project_id
+        deck_body = next(body for m, p, body in calls if p == "/decks" and m == "POST")
+        self.assertEqual(deck_body, {"name": "联调测试牌组", "project_id": "proj-1"})
+        # 轮询:样卡 1 次(首次即 AWAITING)+ 生成 3 次(非终态 2 次 + 终态 1 次)
+        self.assertEqual(calls.count(("GET", "/tasks/task-1", None)), 4)
         # 成本对账:batches 观测 + 预算/实际报告字段(最坏预算 59 = 3 规划组,实际 2 次尝试/2620 token)
         self.assertIn(("GET", "/tasks/task-1/batches", None), calls)
         out = buf.getvalue()
@@ -133,7 +149,7 @@ class LiveFlowScenarioTest(unittest.TestCase):
         self.assertIn("[FAIL] 对账: 生成尝试/批数在预算内", buf.getvalue())
         self.assertIn("生成尝试 39/36", buf.getvalue())
 
-    def test_run_skip_generate_ends_after_samples_with_logout(self) -> None:
+    def test_run_skip_generate_ends_after_project_selection_with_logout(self) -> None:
         c = stub.StubClient(_handler())
         with redirect_stdout(io.StringIO()):
             failed = live_flow.run(
@@ -143,8 +159,10 @@ class LiveFlowScenarioTest(unittest.TestCase):
         self.assertEqual(failed, 0)
         calls = c.calls
         paths = {p for _, p, _ in calls}
-        self.assertIn("/samples", paths)
-        self.assertNotIn("/tasks", paths)  # skip 不创建任务
+        self.assertIn("/projects", paths)  # 前置校验到项目/章节选择为止
+        self.assertNotIn("/samples", paths)  # 已下线端点绝不调用
+        self.assertNotIn("/decks", paths)  # skip 不创建牌组
+        self.assertNotIn("/projects/proj-1/tasks", paths)  # skip 不创建任务
         self.assertIn(("logout", "", None), calls)  # 会话仍注销
 
     def test_run_prod_no_temp_account(self) -> None:
@@ -203,11 +221,6 @@ class LiveFlowScenarioTest(unittest.TestCase):
 
 
 class LiveFlowHelpersTest(unittest.TestCase):
-    def test_sample_cards_multi_field_compat(self) -> None:
-        for payload in ({"samples": [1]}, {"cards": [1]}, {"items": [1]}, {"data": [1]}):
-            self.assertEqual(len(live_flow._sample_cards(payload)), 1)
-        self.assertEqual(live_flow._sample_cards({"other": "x"}), [])
-
     def test_body_safe(self) -> None:
         self.assertEqual(live_flow._body(Response(200, None)), {})
         self.assertEqual(live_flow._body(Response(200, {"a": 1})), {"a": 1})

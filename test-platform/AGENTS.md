@@ -20,7 +20,7 @@ test-platform/
 
 - 调度入口：`./test-platform/runner/run.sh --environment local|prod --suite quick|full|live|v25 [--scenario NAME] [--confirm-cost] [--confirm-prod]`
 - 凭据：测试账号只从环境变量读取——`SHANKA_TEST_USERNAME` / `SHANKA_TEST_EMAIL` / `SHANKA_TEST_PASSWORD`（缺失拒绝执行，不自动注册）；local 环境先 register（账号已存在回落 login），prod 只 login 且必须 `--confirm-prod`（禁止自动注册）。
-- 套件：`quick` = auth + api_smoke（0 次 LLM 调用纯冒烟）；`full` = 非生成场景（auth/isolation/api_smoke，0 次 LLM；域场景实装后扩展）；`live` = full + live_flow（真实生成，最坏调用预算由 fixture 推导，超阈值必须 `--confirm-cost`）。**live_flow 复用当前测试用户已解析的 PDF（账号域按 user 隔离数据），需先上传解析或预置测试账号数据**；`v25` = v25_core_flow + v25_recovery（V2.5 非可视化 Release 主链路黑盒套件：cost-confirmed 生成套件，合计 61 次调用超阈值必须 `--confirm-cost`；zero-LLM 恢复套件 0 次调用不触发闸门）。
+- 套件：`quick` = auth + api_smoke（0 次 LLM 调用纯冒烟）；`full` = 非生成场景（auth/isolation/api_smoke，0 次 LLM；域场景实装后扩展）；`live` = full + live_flow（真实生成，最坏调用预算由 fixture 推导，超阈值必须 `--confirm-cost`）。**live_flow 复用当前测试用户已有 READY 项目且章节 ≥ 2（与 v25_core_flow 同前置约定；V2.5 化后样卡/任务走 tasks 域），需先上传解析并确认章节或预置测试账号数据**；`v25` = v25_core_flow + v25_recovery（V2.5 非可视化 Release 主链路黑盒套件：cost-confirmed 生成套件，合计 61 次调用超阈值必须 `--confirm-cost`；zero-LLM 恢复套件 0 次调用不触发闸门）。
 - 单场景直跑：`cd test-platform && python3 scenarios/baseline/api_smoke.py [--base-url] [--environment local|prod] [--pace]`；凭据同上读 env，不经 CLI 参数；退出码 = 失败步骤数（0 = 全绿）。
 - 平台自测：`cd test-platform && python3 -m unittest discover -s tests`（stdlib 测试，不依赖 main 环境）。
 
@@ -47,7 +47,7 @@ test-platform/
 | review | ratings.py | 四档评级/排程状态 |
 | stats | dashboard.py | 看板/时区/空态 |
 
-已实装：`auth/auth.py`（NAME=`auth`，LLM_CALLS=0）、`isolation/isolation.py`（NAME=`isolation`，LLM_CALLS=0）、`baseline/api_smoke.py`（NAME=`api_smoke`，LLM_CALLS=0）、`flow/live_flow.py`（NAME=`live_flow`，LLM_CALLS=BUDGET_FIXTURE 推导最坏预算 59——废弃固定 3 假设）、`flow/v25_core_flow.py`（NAME=`v25_core_flow`，LLM_CALLS=推导 59 + 重写预览 2 = 61，超阈值必须 `--confirm-cost`；前置：账号已有 READY 项目且章节 ≥ 2）、`flow/v25_recovery.py`（NAME=`v25_recovery`，LLM_CALLS=0，零 LLM 不触发闸门；前置：账号已有 READY 项目与可重试 FAILED 任务——先预置一次失败制卡记录）。
+已实装：`auth/auth.py`（NAME=`auth`，LLM_CALLS=0）、`isolation/isolation.py`（NAME=`isolation`，LLM_CALLS=0）、`baseline/api_smoke.py`（NAME=`api_smoke`，LLM_CALLS=0）、`flow/live_flow.py`（NAME=`live_flow`，LLM_CALLS=BUDGET_FIXTURE 推导最坏预算 59——废弃固定 3 假设；前置：账号已有 READY 项目且章节 ≥ 2；V2.5 化后不再调用已下线的 POST /samples 与 POST /tasks）、`flow/v25_core_flow.py`（NAME=`v25_core_flow`，LLM_CALLS=推导 59 + 重写预览 2 = 61，超阈值必须 `--confirm-cost`；前置：账号已有 READY 项目且章节 ≥ 2）、`flow/v25_recovery.py`（NAME=`v25_recovery`，LLM_CALLS=0，零 LLM 不触发闸门；前置：账号已有 READY 项目与可重试 FAILED 任务——先预置一次失败制卡记录）。
 
 ## 新增场景指引
 

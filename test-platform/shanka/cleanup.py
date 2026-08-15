@@ -11,8 +11,12 @@ class DataScope:
         self._client = client
         self._decks: list[str] = []
 
-    def create_deck(self, name: str) -> str:
-        r = self._client.request("POST", "/decks", body={"name": name}, idempotent=True, step="deck-create")
+    def create_deck(self, name: str, project_id: str | None = None) -> str:
+        """创建牌组并登记清理;project_id 归属学习项目(V2.5,牌组须同项目才能挂任务)。"""
+        body: dict = {"name": name}
+        if project_id is not None:
+            body["project_id"] = project_id
+        r = self._client.request("POST", "/decks", body=body, idempotent=True, step="deck-create")
         if r.status not in (200, 201):
             raise RuntimeError(f"创建牌组失败: {r.status} {r.json}")
         deck_id = str(r.json["deck_id"])

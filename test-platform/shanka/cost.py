@@ -22,7 +22,7 @@ _PLANNING_RETRY_LIMIT = 2  # 规划每组预算 2 次重试(共 3 次尝试)
 _GENERATION_RETRY_LIMIT = 2  # 批次 Schema 校验失败重试上限(共 3 次尝试)
 _CARDS_PER_UNIT = 1  # 3.7:批=单元,每单元 1 卡
 _MAX_SCORING_CALLS_PER_TASK = 60  # 评分调用数全局上限
-_FIXED_CALLS = 2  # PUT /api-key 校验 1 + POST /samples 1(固定真实调用)
+_FIXED_CALLS = 2  # PUT /api-key 校验 1 + 样卡请求 1(POST /tasks/{id}/samples;V2.5 固定真实调用)
 # 单次输出 token 上限(config.py;可运维调整)
 _PLANNER_MAX_OUTPUT_TOKENS = 2048
 _GENERATOR_MAX_OUTPUT_TOKENS = 768
