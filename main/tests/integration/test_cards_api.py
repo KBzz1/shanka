@@ -195,7 +195,7 @@ def test_cards_api_update_cross_user_404(client: TestClient) -> None:
 
 
 def test_cards_api_delete_cascade(client: TestClient) -> None:
-    """删除单卡：204 → 列表不含 → review 队列不含（FK 级联 review_states/review_events）。"""
+    """删除单卡：200 撤销批次 → 列表不含 → review 队列不含（V2.5 可见性标记，10 秒窗口）。"""
     user = _user(client)
     deck_id = _deck(client, user)
     resp = client.post(
@@ -203,7 +203,9 @@ def test_cards_api_delete_cascade(client: TestClient) -> None:
     )
     card_id = resp.json()["card_id"]
     resp = client.delete(f"/cards/{card_id}", headers={**user, **_idem()})
-    assert resp.status_code == 204, resp.text
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["card_ids"] == [card_id]
+    assert resp.json()["status"] == "PENDING"
 
     resp = client.get(f"/decks/{deck_id}/cards", headers=user)
     assert all(i["card_id"] != card_id for i in resp.json()["items"])
@@ -212,7 +214,7 @@ def test_cards_api_delete_cascade(client: TestClient) -> None:
 
 
 def test_cards_api_delete_idempotent_replay(client: TestClient) -> None:
-    """删除幂等：同键重放返回 204（契约 1.3 重复提交安全返回）。"""
+    """删除幂等：同键重放返回 200 同批次响应（契约 1.3 重复提交安全返回）。"""
     user = _user(client)
     deck_id = _deck(client, user)
     resp = client.post(
@@ -221,8 +223,10 @@ def test_cards_api_delete_idempotent_replay(client: TestClient) -> None:
     card_id = resp.json()["card_id"]
     key = _idem()
     headers = {**user, **key}
-    assert client.delete(f"/cards/{card_id}", headers=headers).status_code == 204
-    assert client.delete(f"/cards/{card_id}", headers=headers).status_code == 204
+    r1 = client.delete(f"/cards/{card_id}", headers=headers)
+    r2 = client.delete(f"/cards/{card_id}", headers=headers)
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json() == r2.json()
 
 
 def test_cards_api_delete_cross_user_404(client: TestClient) -> None:

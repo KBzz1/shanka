@@ -6,6 +6,7 @@ ORM CHECK 1~10）；position = 牌组内 max+1（UNIQUE(deck_id, position) 并�
 V2.5（3.9）：所有用户侧卡查询复用 domain/card.py 统一可见谓词
 （publication_state='PUBLISHED' AND delete_batch_id IS NULL）——STAGED 卡在任务
 整体成功前对任何用户侧查询不可见（4.1），禁止本模块自行拼等价条件。
+单卡删除（10 秒撤销批次）在 deletion.py（V2.5 删除 = 可见性标记 + 批次状态）。
 """
 
 import uuid
@@ -72,13 +73,6 @@ def update_card(
         rs.last_rating = None
         rs.updated_at = now
     return card
-
-
-def delete_card(session: Session, *, user_id: str, card_id: str) -> None:
-    """删除单卡（structure-contract 6.5）；review_states/review_events 由 FK ON DELETE
-    CASCADE 级联清理（engine 级 PRAGMA foreign_keys=ON）。"""
-    card = _owned_card(session, user_id=user_id, card_id=card_id)
-    session.delete(card)
 
 
 def _insert_card(

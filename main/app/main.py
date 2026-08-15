@@ -147,6 +147,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(decks.router)
     app.include_router(cards.router)
     app.include_router(cards.router_rewrite)  # V6 单卡重写（openapi /cards/{card_id}/rewrite）
+    app.include_router(cards.router_batches)  # V2.5 删除批次（/card-deletion-batches/*）
     app.include_router(review.router)
     app.include_router(stats.router)
     app.include_router(pdfs.router)

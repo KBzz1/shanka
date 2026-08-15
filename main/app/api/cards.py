@@ -8,7 +8,7 @@ rewrite 请求体同为内联 object（custom_requirements 可空，非 str → 
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Request, Response
+from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -19,13 +19,18 @@ from app.middleware.idempotency import (
     request_body_hash,
 )
 from app.schemas.cards import Card, CardCreate, CardUpdateRequest, ImportResponse, ImportResult
+from app.schemas.deletion_batch import CardDeletionBatch
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
+from services.cards.deletion import (
+    list_pending_batches,
+    mark_card_deleted,
+    undo_deletion_batch,
+)
 from services.cards.rewrite import rewrite_card
 from services.cards.service import (
     card_view,
     create_card,
-    delete_card,
     import_cards,
     list_cards,
     update_card,
@@ -33,6 +38,7 @@ from services.cards.service import (
 
 router = APIRouter(prefix="/decks/{deck_id}/cards", tags=["decks"])
 router_rewrite = APIRouter(prefix="/cards", tags=["decks"])
+router_batches = APIRouter(prefix="/card-deletion-batches", tags=["decks"])
 
 
 def _now() -> str:
@@ -162,23 +168,32 @@ def update_card_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
-@router_rewrite.delete("/{card_id}", status_code=204)
+@router_rewrite.delete("/{card_id}", response_model=CardDeletionBatch)
 def delete_card_endpoint(
     request: Request,
     card_id: str,
     session: Annotated[Session, Depends(get_db_session)],
-) -> Response:
-    """删除单卡（structure-contract 6.5）；级联 review_states/review_events。"""
+    delete_batch_id: Annotated[str | None, Query()] = None,
+) -> JSONResponse:
+    """删除单卡（structure-contract 3.18/6.5；V25-DECK-FR-04）：进入 10 秒撤销批次，
+    不立即硬删。delete_batch_id 提供且对应批仍 PENDING → 合并追加并整批重计时
+    （D-24）；否则新建批。返回 CardDeletionBatch（含 undo_until）。"""
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = f"/cards/{card_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        delete_card(session, user_id=user_id, card_id=card_id)
-        return 204, {}
+        batch = mark_card_deleted(
+            session,
+            user_id=user_id,
+            card_id=card_id,
+            delete_batch_id=delete_batch_id,
+            now=_now(),
+        )
+        return 200, batch
 
-    _replayed, status, _body = execute_idempotent(
+    _replayed, status, body = execute_idempotent(
         session,
         user_id=user_id,
         path=path,
@@ -187,7 +202,48 @@ def delete_card_endpoint(
         fn=biz,
     )
     session.commit()
-    return Response(status_code=status)
+    return JSONResponse(status_code=status, content=body)
+
+
+@router_batches.get("/pending", response_model=dict[str, list[CardDeletionBatch]])
+def list_pending_deletion_batches_endpoint(
+    request: Request,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """App 重启恢复仍有效的撤销批次（6.5；D-19）：服务端持久化，先惰性清理过期批。"""
+    batches = list_pending_batches(session, user_id=request.state.principal.user_id, now=_now())
+    return JSONResponse(content={"items": batches})
+
+
+@router_batches.post("/{delete_batch_id}/undo", response_model=CardDeletionBatch)
+def undo_deletion_batch_endpoint(
+    request: Request,
+    delete_batch_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """撤销整批（6.5 POST undo）：窗口内恢复全部卡片；过期 → 409
+    CARD_DELETE_WINDOW_EXPIRED（幂等接线同其他写接口，重放返回首次响应）。"""
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/card-deletion-batches/{delete_batch_id}/undo"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        batch = undo_deletion_batch(
+            session, user_id=user_id, delete_batch_id=delete_batch_id, now=_now()
+        )
+        return 200, batch
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
 
 
 @router_rewrite.post("/{card_id}/rewrite", response_model=Card)
