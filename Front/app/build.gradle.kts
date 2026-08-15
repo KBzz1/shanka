@@ -25,7 +25,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0.0"
+        versionName = "2.5.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -41,7 +41,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Debug-only 显式本地环境覆盖（模拟器 loopback）；Release 编译期不可达。
+            buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:8000\"")
+        }
         release {
+            // Release 编译期固定正式 base URL；无服务器编辑、测试模式或演示数据开关。
+            buildConfigField("String", "API_BASE_URL", "\"https://shanka.kbzz1.top\"")
             signingConfig = signingConfigs.getByName("release")
         }
     }
