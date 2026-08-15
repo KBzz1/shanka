@@ -27,6 +27,7 @@ if TYPE_CHECKING:  # 仅类型（分层不允许 services 运行时依赖 app—
 
 from app.errors import AppError, ErrorCode
 from domain.auth import AuthPrincipal
+from domain.enums import AvatarKey
 from infra.clock import SystemClock
 from infra.db.models import AuthSession, User
 from infra.db.session import format_utc
@@ -218,6 +219,42 @@ def get_current_user(session: Session, *, session_id: str) -> dict[str, str]:
         "username": user.username,
         "email": user.email,  # V2.5 只读返回规范化后的当前登录邮箱
         "avatar_key": user.avatar_key,  # V2.5 预设头像
+        "created_at": user.created_at,
+    }
+
+
+def update_current_user(
+    session: Session,
+    *,
+    user_id: str,
+    username: str | None,
+    avatar_key: str | None,
+    now: datetime,
+) -> dict[str, str]:
+    """V2.5 PATCH /auth/me：更新昵称/预设头像；email 只读不可改；至少一个字段（schema 已保证）。
+
+    username 去首尾空白后按展示名规则校验（非法 → VALIDATION_ERROR，失败不改名）；
+    avatar_key 只接受 mood_01~mood_12 内置预设（非法 → VALIDATION_ERROR）。
+    """
+    user = session.get(User, user_id)
+    if user is None:
+        # principal 由 auth_sessions 解析（外键指向 users），正常不可达——数据完整性兜底
+        raise AppError(ErrorCode.INTERNAL_ERROR, "用户不存在")
+    if username is not None:
+        normalized = _normalize_username(username)
+        _validate_username(normalized)
+        user.username = normalized
+    if avatar_key is not None:
+        if avatar_key not in {key.value for key in AvatarKey}:
+            raise AppError(ErrorCode.VALIDATION_ERROR, "avatar_key 只接受 mood_01~mood_12 预设")
+        user.avatar_key = avatar_key
+    user.updated_at = format_utc(now)
+    session.flush()
+    return {
+        "user_id": user.user_id,
+        "username": user.username,
+        "email": user.email,  # 只读：本路径永不写入
+        "avatar_key": user.avatar_key,
         "created_at": user.created_at,
     }
 

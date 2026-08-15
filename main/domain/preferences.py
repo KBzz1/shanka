@@ -7,4 +7,5 @@
 DEFAULT_COVERAGE_MODE = "BALANCED"
 DEFAULT_DIFFICULTY_RATIO = {"basic": 40, "understanding": 40, "deep_question": 20}
 DEFAULT_DAILY_LEARNING_GOAL = 50
+DEFAULT_LEARNING_TIMEZONE = "Asia/Shanghai"  # 账号行首次创建时的服务端默认（PRD V25-SET-FR-04：首次设置由客户端建议设备时区后 PATCH 覆盖）
 DIFFICULTY_RATIO_TOTAL = 100

@@ -18,11 +18,24 @@ class UserPreferences(BaseModel):
     updated_at: str
 
 
+class DifficultyRatioInput(BaseModel):
+    """更新请求用松约束比例（openapi 仍为 $ref DifficultyRatio；字段结构一致）。
+
+    故意不带 DifficultyRatio 的模型校验器：非法比例须由服务层抛
+    INVALID_PREFERENCES（structure-contract 7），若在 pydantic 层拒绝会被
+    RequestValidationError 中间件泛化成 VALIDATION_ERROR（Task 2 审查遗留 I-2）。
+    """
+
+    basic: int
+    understanding: int
+    deep_question: int
+
+
 class UserPreferencesUpdateRequest(BaseModel):
     """部分更新偏好（openapi UserPreferencesUpdateRequest；last-success-wins）。"""
 
     default_coverage_mode: str | None = None
-    default_difficulty_ratio: DifficultyRatio | None = None
+    default_difficulty_ratio: DifficultyRatioInput | None = None
     daily_learning_goal: int | None = None
     learning_timezone: str | None = None
     current_project_id: str | None = None

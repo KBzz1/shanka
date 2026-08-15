@@ -4,7 +4,7 @@ V2.5：AuthUser 含 email（只读，不可 PATCH）与 avatar_key（mood_01~moo
 PATCH /auth/me 仅接受 { username?, avatar_key? }，至少一个字段。
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AuthRegisterRequest(BaseModel):
@@ -30,7 +30,13 @@ class AuthMeUpdateRequest(BaseModel):
     """更新昵称或预设头像（openapi AuthMeUpdateRequest；V2.5：至少一个字段，email 只读）。"""
 
     username: str | None = Field(default=None, min_length=1, max_length=24)
-    avatar_key: str | None = None  # mood_01~mood_12（域校验见后续任务 handler）
+    avatar_key: str | None = None  # mood_01~mood_12（服务层按 AvatarKey 枚举校验）
+
+    @model_validator(mode="after")
+    def _require_at_least_one_field(self) -> "AuthMeUpdateRequest":
+        if self.username is None and self.avatar_key is None:
+            raise ValueError("至少提供一个字段（username 或 avatar_key）")
+        return self
 
 
 class AuthSessionResponse(BaseModel):

@@ -27,6 +27,7 @@ from app.middleware.idempotency import (
 from app.middleware.rate_limit import RateLimiter
 from app.schemas.auth import (
     AuthLoginRequest,
+    AuthMeUpdateRequest,
     AuthRegisterRequest,
     AuthSessionResponse,
     AuthUser,
@@ -39,6 +40,7 @@ from services.auth.service import (
     login_user,
     logout_session,
     register_user,
+    update_current_user,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -139,3 +141,41 @@ def me_endpoint(
     principal: AuthPrincipal = request.state.principal
     user = get_current_user(session, session_id=principal.session_id)
     return JSONResponse(status_code=200, content={"user": AuthUser(**user).model_dump()})
+
+
+@router.patch("/me", status_code=200)
+def update_me_endpoint(
+    request: Request,
+    payload: AuthMeUpdateRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """V2.5 PATCH /auth/me：{ username?, avatar_key? } 至少一个字段；email 只读不可 patch。
+
+    走 execute_idempotent（6.1 幂等 ✓）；返回更新后的 AuthUser。
+    """
+    principal: AuthPrincipal = request.state.principal
+    key = get_idempotency_key(request)
+    path = "/auth/me"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+    now: datetime = SystemClock().now_utc()
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        user = update_current_user(
+            session,
+            user_id=principal.user_id,
+            username=payload.username,
+            avatar_key=payload.avatar_key,
+            now=now,
+        )
+        return 200, {"user": AuthUser(**user).model_dump()}
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=principal.user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
