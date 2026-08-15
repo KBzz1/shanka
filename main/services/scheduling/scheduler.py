@@ -28,6 +28,7 @@ __all__ = [
     "Card",
     "build_fsrs_card",
     "create_scheduler",
+    "forgetting_risk",
     "rating_from_str",
     "review_card",
     "state_upper",
@@ -174,3 +175,21 @@ def state_upper(state_name: str) -> str:
         return _STATE_UPPER[state_name]
     except KeyError as exc:
         raise ValueError(f"未知 fsrs state: {state_name}") from exc
+
+
+def forgetting_risk(stability: float, last_review: str | None, now: datetime) -> float:
+    """遗忘风险（3.20：统一 FSRS 适配器按服务端 now 计算；无法计算时风险置 0）。
+
+    风险 = 1 - 可检索性 R(now)（py-fsrs get_retrievability，FSRS-4/5 检索公式）；
+    无 last_review 或 stability<=0（NEW/未评级卡）→ 0。elapsed 取整日
+    （(now - last_review).days），同日复习的卡风险为 0——计划排序再按逾期时长与
+    card_id 消歧。风险越低代表记得越牢：风险 DESC = 可检索性 ASC。
+    """
+    if last_review is None or stability <= 0:
+        return 0.0
+    card = Card(
+        stability=stability,
+        due=_parse_utc(last_review),
+        last_review=_parse_utc(last_review),
+    )
+    return float(1.0 - card.get_retrievability(now))  # fsrs 无类型桩（mypy override 视为 Any）

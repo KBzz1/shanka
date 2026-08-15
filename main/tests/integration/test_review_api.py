@@ -81,9 +81,12 @@ def test_review_api_submit_returns_updated_state(client: TestClient) -> None:
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["card_id"] == card_id
-    assert body["reps"] == 1
-    assert body["last_rating"] == "GOOD"
+    # V2.5（6.6）：响应 = {review_state, study_date}（账号学习时区下的本次学习日期）
+    assert body["review_state"]["card_id"] == card_id
+    assert body["review_state"]["reps"] == 1
+    assert body["review_state"]["last_rating"] == "GOOD"
+    assert body["study_date"]  # 非空 ISO 日期（默认 Asia/Shanghai 账号时区）
+    assert body["study_date"][:4] == "2026"
 
 
 def test_review_api_idempotency_key_replays(client: TestClient) -> None:
@@ -101,7 +104,7 @@ def test_review_api_idempotency_key_replays(client: TestClient) -> None:
     resp2 = client.post("/review-events", json=payload, headers=headers)
     assert resp1.status_code == 200 and resp2.status_code == 200
     assert resp1.json() == resp2.json()  # 单事件（幂等键层重放首次完整快照）
-    assert resp2.json()["reps"] == 1  # 未重复执行
+    assert resp2.json()["review_state"]["reps"] == 1  # 未重复执行
 
 
 def test_review_api_client_event_id_dedup_key_differs(client: TestClient) -> None:
@@ -120,7 +123,7 @@ def test_review_api_client_event_id_dedup_key_differs(client: TestClient) -> Non
     r2 = client.post("/review-events", json=payload, headers={**user, **_idem()})
     assert r1.status_code == 200 and r2.status_code == 200
     assert r1.json() == r2.json()  # R-12 兜底重放完整口径：响应 = 当前 review_state 视图
-    assert r2.json()["reps"] == 1  # client_event_id 兜底重放当前视图，不重复计数
+    assert r2.json()["review_state"]["reps"] == 1  # client_event_id 兜底重放当前视图，不重复计数
 
 
 def test_review_api_client_event_conflict(client: TestClient) -> None:

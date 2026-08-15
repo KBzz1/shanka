@@ -79,12 +79,14 @@ def test_acceptance_ac10_review_workflow(client: TestClient) -> None:
     resp = client.post("/review-events", json=payload, headers={**device, **_idem()})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["state"] == "LEARNING"  # 落库统一大写（契约 3.10）
-    assert body["reps"] == 1
+    # V2.5（6.6）：响应 = {review_state, study_date}
+    assert body["review_state"]["state"] == "LEARNING"  # 落库统一大写（契约 3.10）
+    assert body["review_state"]["reps"] == 1
+    assert body["study_date"]
     # 离线重试同一 client_event_id（不同幂等键）→ 不重复计数
     resp = client.post("/review-events", json=payload, headers={**device, **_idem()})
     assert resp.status_code == 200
-    assert resp.json()["reps"] == 1
+    assert resp.json()["review_state"]["reps"] == 1
     # 牌组进度 review_count=1
     resp = client.get(f"/decks/{deck_id}", headers=device)
     assert resp.json()["review_count"] == 1

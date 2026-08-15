@@ -15,6 +15,7 @@ import json
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -63,6 +64,11 @@ def session_factory(tmp_path: Path) -> Callable[[], Session]:
 
 def _uuid() -> str:
     return str(uuid.uuid4())
+
+
+def _rs(result: dict[str, object]) -> dict[str, object]:
+    """评级响应 review_state 视图（V2.5：{review_state, study_date} 形状）。"""
+    return cast(dict[str, object], result["review_state"])
 
 
 def _seed_card(session: Session) -> Card:
@@ -284,8 +290,8 @@ def test_rewrite_concurrency_review_then_rewrite_resets_schedule(
             now=_T1,
         )
         session.commit()
-    assert reviewed["state"] == "REVIEW"  # REVIEW 态卡 GOOD → 保持 REVIEW
-    assert reviewed["reps"] == 6  # 5 → 6：复习已更新排程（应用之前）
+    assert _rs(reviewed)["state"] == "REVIEW"  # REVIEW 态卡 GOOD → 保持 REVIEW
+    assert _rs(reviewed)["reps"] == 6  # 5 → 6：复习已更新排程（应用之前）
     with session_factory() as session:
         preview = _create_preview(
             session, card_id=card_id, content=_rewrite_json("重写后问题", "重写后答案"), now=_T2
@@ -340,9 +346,9 @@ def test_rewrite_concurrency_rewrite_then_review_schedules_new_content(
             now=_T2,
         )
         session.commit()
-    assert reviewed["state"] == "LEARNING"  # NEW 初始卡首 GOOD → Learning（5.2 第 1 行）
-    assert reviewed["reps"] == 1  # 从 0 重新计数（重写重置后）
-    assert reviewed["due"] == "2026-08-11T02:10:00.000Z"  # now+10m 第一步
+    assert _rs(reviewed)["state"] == "LEARNING"  # NEW 初始卡首 GOOD → Learning（5.2 第 1 行）
+    assert _rs(reviewed)["reps"] == 1  # 从 0 重新计数（重写重置后）
+    assert _rs(reviewed)["due"] == "2026-08-11T02:10:00.000Z"  # now+10m 第一步
     with session_factory() as session:
         stored = session.get(Card, card_id)
         assert stored is not None

@@ -36,6 +36,15 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
+def _rs(result: dict[str, object]) -> dict[str, object]:
+    """评级响应 review_state 视图（V2.5：{review_state, study_date} 形状）。"""
+    return cast(dict[str, object], result["review_state"])
+
+
+def _sd(result: dict[str, object]) -> str:
+    return cast(str, result["study_date"])
+
+
 @pytest.fixture
 def user() -> str:
     return _uuid()
@@ -160,11 +169,11 @@ def test_submit_review_updates_state_and_creates_event(
             now="2026-08-11T01:00:00.000Z",
         )
         session.commit()
-    assert result["state"] == "LEARNING"
-    assert result["due"] == "2026-08-11T01:10:00.000Z"
-    assert result["reps"] == 1
-    assert result["lapses"] == 0
-    assert result["last_rating"] == "GOOD"
+    assert _rs(result)["state"] == "LEARNING"
+    assert _rs(result)["due"] == "2026-08-11T01:10:00.000Z"
+    assert _rs(result)["reps"] == 1
+    assert _rs(result)["lapses"] == 0
+    assert _rs(result)["last_rating"] == "GOOD"
     with session_factory() as session:
         events = session.scalars(select(ReviewEvent)).all()
         assert len(events) == 1
@@ -204,8 +213,8 @@ def test_submit_review_same_client_event_replays(
             now="2026-08-11T01:00:00.000Z",
         )
         session.commit()
-    assert second["reps"] == 1  # 不重复计数
-    assert second["due"] == first["due"]  # 重放 = 读当前 review_state 视图
+    assert _rs(second)["reps"] == 1  # 不重复计数
+    assert _rs(second)["due"] == _rs(first)["due"]  # 重放 = 读当前视图
     with session_factory() as session:
         assert len(session.scalars(select(ReviewEvent)).all()) == 1
 
@@ -296,8 +305,8 @@ def test_submit_review_learning_second_good_plus_1d(
             now="2026-08-11T01:00:00.000Z",
         )
         session.commit()
-    assert first["state"] == "LEARNING"
-    assert first["due"] == "2026-08-11T01:10:00.000Z"  # 首 GOOD → +10m（step 1，实证）
+    assert _rs(first)["state"] == "LEARNING"
+    assert _rs(first)["due"] == "2026-08-11T01:10:00.000Z"  # 首 GOOD → +10m
     with session_factory() as session:
         second = submit_review(
             session,
@@ -309,9 +318,9 @@ def test_submit_review_learning_second_good_plus_1d(
             now="2026-08-11T01:10:00.000Z",
         )
         session.commit()
-    assert second["state"] == "LEARNING"
-    assert second["due"] == "2026-08-12T01:10:00.000Z"  # 重建 step=1 → 二次 GOOD +1d
-    assert second["reps"] == 2
+    assert _rs(second)["state"] == "LEARNING"
+    assert _rs(second)["due"] == "2026-08-12T01:10:00.000Z"  # 重建 step=1 → 二次 GOOD +1d
+    assert _rs(second)["reps"] == 2
 
 
 def test_submit_review_learning_graduates_and_relearning_rebuild(
@@ -341,13 +350,13 @@ def test_submit_review_learning_graduates_and_relearning_rebuild(
             )
             results.append(result)
         session.commit()
-    assert results[0]["state"] == "LEARNING"  # +10m（首 GOOD）
-    assert results[1]["state"] == "LEARNING"  # +1d（二次 GOOD，step 推导）
-    assert results[2]["state"] == "REVIEW"  # 三次 GOOD 毕业（5.2 表第 3 行）
-    assert results[3]["state"] == "RELEARNING"  # REVIEW+AGAIN
-    assert results[3]["due"] == "2026-08-19T01:20:00.000Z"  # +10m（relearning_steps[0]）
-    assert results[4]["state"] == "REVIEW"  # RELEARNING 重建 GOOD → Review
-    assert str(results[4]["due"]) > "2026-08-19T01:20:00.000Z"
+    assert _rs(results[0])["state"] == "LEARNING"  # +10m（首 GOOD）
+    assert _rs(results[1])["state"] == "LEARNING"  # +1d（二次 GOOD，step 推导）
+    assert _rs(results[2])["state"] == "REVIEW"  # 三次 GOOD 毕业（5.2 表第 3 行）
+    assert _rs(results[3])["state"] == "RELEARNING"  # REVIEW+AGAIN
+    assert _rs(results[3])["due"] == "2026-08-19T01:20:00.000Z"  # +10m（relearning_steps[0]）
+    assert _rs(results[4])["state"] == "REVIEW"  # RELEARNING 重建 GOOD → Review
+    assert str(_rs(results[4])["due"]) > "2026-08-19T01:20:00.000Z"
 
 
 def test_submit_review_learning_againthen_good_plus_10m(
@@ -377,8 +386,8 @@ def test_submit_review_learning_againthen_good_plus_10m(
             now="2026-08-11T01:10:00.000Z",
         )
         session.commit()
-    assert again["state"] == "LEARNING"
-    assert again["due"] == "2026-08-11T01:20:00.000Z"  # AGAIN → step 0、+10m
+    assert _rs(again)["state"] == "LEARNING"
+    assert _rs(again)["due"] == "2026-08-11T01:20:00.000Z"  # AGAIN → step 0、+10m
     with session_factory() as session:
         third = submit_review(
             session,
@@ -390,9 +399,9 @@ def test_submit_review_learning_againthen_good_plus_10m(
             now="2026-08-11T01:20:00.000Z",
         )
         session.commit()
-    assert third["state"] == "LEARNING"
+    assert _rs(third)["state"] == "LEARNING"
     assert (
-        third["due"] == "2026-08-11T01:30:00.000Z"
+        _rs(third)["due"] == "2026-08-11T01:30:00.000Z"
     )  # last_rating=AGAIN → step 0 → GOOD +10m（非 +1d）
-    assert third["reps"] == 3
-    assert third["lapses"] == 1
+    assert _rs(third)["reps"] == 3
+    assert _rs(third)["lapses"] == 1

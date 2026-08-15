@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -83,6 +83,36 @@ def _check_project_owned(session: Session, *, user_id: str, project_id: str) -> 
     )
     if exists is None:
         raise AppError(ErrorCode.PROJECT_NOT_FOUND, "项目不存在或无权访问")
+
+
+# format_utc 输出格式（database-design §0：恒 3 位毫秒 Z）——学习日期分桶解析口径
+_UTC_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+
+def _parse_utc(value: str) -> datetime:
+    return datetime.strptime(value, _UTC_FORMAT).replace(tzinfo=UTC)
+
+
+def learning_date(now_utc: str, timezone: str) -> str:
+    """账号学习时区下的学习日期（契约 1.2/3.20；format_utc 输入 → ISO date）。
+
+    今日计划的学习日期与评级响应的 study_date 共用本口径：UTC reviewed_at 折算
+    到账号 IANA 时区，不改写已记录事件（时区改变后用新时区重新分桶）。
+    """
+    return _parse_utc(now_utc).astimezone(ZoneInfo(timezone)).date().isoformat()
+
+
+def day_bounds_utc(now_utc: str, timezone: str) -> tuple[str, str]:
+    """学习日期当日 [本地 00:00, 次日 00:00) 的 UTC 边界（format_utc 字符串，字典序=时间序）。
+
+    用于今日去重完成数的区间查询（review_events.reviewed_at 为 UTC 服务端时间）。
+    """
+    tz = ZoneInfo(timezone)
+    local = _parse_utc(now_utc).astimezone(tz)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return format_utc(start.astimezone(UTC)), format_utc(
+        (start + timedelta(days=1)).astimezone(UTC)
+    )
 
 
 def _to_response(row: UserPreferences) -> dict[str, Any]:

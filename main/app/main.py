@@ -21,6 +21,7 @@ from app.api import (
     projects,
     review,
     stats,
+    study,
     tasks,
 )
 from app.config import Settings
@@ -155,6 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(pdfs.router)
     app.include_router(projects.router)
     app.include_router(preferences.router)
+    app.include_router(study.router)  # V2.5 今日学习计划（/study/today）
     app.include_router(api_key.router)
     app.include_router(tasks.router)
     app.include_router(observability.router)

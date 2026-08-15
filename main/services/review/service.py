@@ -16,6 +16,9 @@ import fsrs，构造口径见 scheduler.py docstring）：
 
 now 入参格式契约（M-3）：必须为 `infra.db.session.format_utc` 输出
 （`%Y-%m-%dT%H:%M:%S.%fZ`，UTC、恒 3 位毫秒，database-design §0），`_parse_utc` 按此解析。
+
+V2.5（6.6）：评级响应 = {review_state, study_date}——study_date 为账号学习时区
+（preferences 权威，契约 1.2）下的本次学习日期；兜底重放取既有事件 reviewed_at 折算。
 """
 
 import uuid
@@ -31,6 +34,7 @@ from infra.db.models import Card, ReviewEvent, ReviewState
 from infra.db.session import format_utc
 from services.cards.service import card_view
 from services.decks.service import _owned
+from services.preferences.service import get_preferences, learning_date
 from services.scheduling.scheduler import (
     Card as FsrsCard,  # fsrs Card 类型经 scheduler 适配器导出（I-1：单一适配边界）
 )
@@ -175,8 +179,12 @@ def _submit_review_inner(
     client_event_id: str,
     device_timezone: str | None,
     now: str,
-) -> tuple[bool, dict[str, object]]:
-    """执行评级（幂等原语 fn 内）：返回 (是否因 client_event_id 兜底重放, 响应视图)。"""
+) -> tuple[bool, dict[str, object], str]:
+    """执行评级（幂等原语 fn 内）：返回 (是否因 client_event_id 兜底重放, 响应视图, study_date)。
+
+    study_date = 账号学习时区（1.2）下的本次学习日期：首评取事务时钟 now；
+    兜底重放取既有事件的 reviewed_at（同口径折算，不改写）。
+    """
     if device_timezone is not None:
         _validate_timezone(device_timezone)  # M-3：非法 IANA → 400 VALIDATION_ERROR
     card = session.scalar(
@@ -190,6 +198,8 @@ def _submit_review_inner(
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
     rating = rating_from_str(rating_value)  # 非法 → REVIEW_EVENT_INVALID（400）
     rs = _get_review_state(session, card_id=card_id, now=now)
+    # 归属校验之后才取账号时区（get-or-create 物化写：未知用户不得因 FK 变成 500）
+    timezone = get_preferences(session, user_id=user_id, now=_parse_utc(now))["learning_timezone"]
 
     # client_event_id 兜底（1.3）：先查已有事件（UNIQUE(user_id, client_event_id)）
     existing = session.scalar(
@@ -200,7 +210,8 @@ def _submit_review_inner(
     )
     if existing is not None:
         if existing.card_id == card_id and existing.rating == rating_value:
-            return True, review_state_view(rs)  # 重放：读当前 review_state 视图（R-12 口径）
+            # 重放：读当前 review_state 视图（R-12 口径）+ 事件发生日的学习日期
+            return True, review_state_view(rs), learning_date(existing.reviewed_at, timezone)
         raise AppError(ErrorCode.REVIEW_EVENT_CONFLICT, "client_event_id 已用于其他评级")
 
     # review_datetime 固定为事务时钟（C-02 确定性；fsrs 要求 aware UTC）
@@ -234,7 +245,7 @@ def _submit_review_inner(
             created_at=now,
         )
     )
-    return False, review_state_view(rs)
+    return False, review_state_view(rs), learning_date(now, timezone)
 
 
 def submit_review(
@@ -247,8 +258,11 @@ def submit_review(
     device_timezone: str | None,
     now: str,
 ) -> dict[str, object]:
-    """评级事务入口（handler 层再包 execute_idempotent，Task 3）。"""
-    _, view = _submit_review_inner(
+    """评级事务入口（handler 层再包 execute_idempotent，Task 3）。
+
+    V2.5（6.6）：返回 {review_state: 更新后视图, study_date: 账号学习时区下的本次学习日期}。
+    """
+    _, view, study_date = _submit_review_inner(
         session,
         user_id=user_id,
         card_id=card_id,
@@ -257,4 +271,4 @@ def submit_review(
         device_timezone=device_timezone,
         now=now,
     )
-    return view
+    return {"review_state": view, "study_date": study_date}

@@ -9,7 +9,7 @@ VALIDATION_ERROR）。V2.5 两阶段重写：创建预览不改原卡 → apply 
 cancel 可幂等（旧 V6 单步 /rewrite 随契约下线）。
 """
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -59,8 +59,21 @@ def list_cards_endpoint(
     request: Request,
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
+    order: Annotated[Literal["position", "random"], Query()] = "position",
+    content_difficulty: Annotated[
+        Literal["BASIC", "UNDERSTANDING", "DEEP_QUESTION", "UNLABELED"] | None, Query()
+    ] = None,
+    mastery: Annotated[Literal["all", "mastered", "unmastered"], Query()] = "all",
 ) -> JSONResponse:
-    cards = list_cards(session, user_id=request.state.principal.user_id, deck_id=deck_id)
+    """自由刷题（6.5）：位置序/会话稳定随机 + 内容难度 + 掌握筛选（枚举非法 → 422 → 400）。"""
+    cards = list_cards(
+        session,
+        user_id=request.state.principal.user_id,
+        deck_id=deck_id,
+        order=order,
+        content_difficulty=content_difficulty,
+        mastery=mastery,
+    )
     return JSONResponse(content={"items": [card_view(c) for c in cards]})
 
 

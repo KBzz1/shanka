@@ -9,6 +9,8 @@ V2.5（3.9）：所有用户侧卡查询复用 domain/card.py 统一可见谓词
 单卡删除（10 秒撤销批次）在 deletion.py（V2.5 删除 = 可见性标记 + 批次状态）。
 """
 
+import hashlib
+import random
 import uuid
 from collections.abc import Iterable
 
@@ -116,16 +118,47 @@ def create_card(
     return _insert_card(session, deck_id=deck_id, user_id=user_id, front=front, back=back, now=now)
 
 
-def list_cards(session: Session, *, user_id: str, deck_id: str) -> list[Card]:
-    """牌组卡片列表（6.5）：只含可见卡（统一可见谓词 3.9）。"""
+def list_cards(
+    session: Session,
+    *,
+    user_id: str,
+    deck_id: str,
+    order: str = "position",
+    content_difficulty: str | None = None,
+    mastery: str = "all",
+) -> list[Card]:
+    """自由刷题列表（6.5）：位置序或会话稳定随机 + 内容难度/掌握筛选；只含可见卡（3.9）。
+
+    - order=random：确定性伪随机排列，seed = (user_id, deck_id) 哈希——同一用户同一
+      牌组每次请求同序（openapi：随机顺序由客户端会话 seed 固定，服务端不得每翻一张
+      重新洗牌；无 seed 参数，服务端派生稳定排列，客户端会话内固定）。实现裁决见
+      test_free_browse.py 模块注释。
+    - content_difficulty：BASIC/UNDERSTANDING/DEEP_QUESTION 精确匹配 target_difficulty；
+      UNLABELED = 未标注（target_difficulty IS NULL，手动/导入卡）。
+    - mastery：mastered = state==REVIEW 且 stability>=21（契约 5.3）；unmastered 为其余。
+    """
     _owned(session, user_id=user_id, deck_id=deck_id)
-    return list(
-        session.scalars(
-            select(Card)
-            .where(Card.deck_id == deck_id, text(VISIBLE_PREDICATE_SQL))
-            .order_by(Card.position)
-        ).all()
+    stmt = (
+        select(Card)
+        .join(ReviewState, ReviewState.card_id == Card.card_id)
+        .where(Card.deck_id == deck_id, text(VISIBLE_PREDICATE_SQL))
     )
+    if content_difficulty is not None:
+        if content_difficulty == "UNLABELED":
+            stmt = stmt.where(Card.target_difficulty.is_(None))
+        else:
+            stmt = stmt.where(Card.target_difficulty == content_difficulty)
+    if mastery == "mastered":
+        stmt = stmt.where(ReviewState.state == "REVIEW", ReviewState.stability >= 21)
+    elif mastery == "unmastered":
+        stmt = stmt.where(~((ReviewState.state == "REVIEW") & (ReviewState.stability >= 21)))
+    if order == "position":
+        return list(session.scalars(stmt.order_by(Card.position)).all())
+    # order == "random"：确定性伪随机（同一输入同序，不逐次洗牌）
+    cards = list(session.scalars(stmt).all())
+    seed = hashlib.sha256(f"{user_id}:{deck_id}".encode()).digest()
+    random.Random(seed).shuffle(cards)
+    return cards
 
 
 def card_view(card: Card) -> dict[str, object]:

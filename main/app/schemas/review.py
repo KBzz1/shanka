@@ -50,3 +50,10 @@ class ReviewEventRequest(BaseModel):
 
 class ReviewQueueItem(Card):
     review_state: ReviewState
+
+
+class ReviewSubmitResponse(BaseModel):
+    """评级响应（openapi /review-events 200 内联对象：required [review_state, study_date]）。"""
+
+    review_state: ReviewState
+    study_date: str  # 账号学习时区下的本次学习日期（契约 1.2/6.6）
