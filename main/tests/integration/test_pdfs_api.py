@@ -2,8 +2,10 @@
 
 import uuid
 from pathlib import Path
+from typing import cast
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -161,12 +163,23 @@ def test_pdfs_api_get_detail_and_404(client: TestClient) -> None:
 
 
 def test_pdfs_api_delete_204_and_storage_cleaned(client: TestClient, tmp_path: Path) -> None:
+    """兼容删除委托项目删除（V2.5 语义，6.2）：解析中项目不可删（V25-GEN-FR-09 状态保护）；
+    解析失败（PARSE_FAILED）后可删 → 204 + 存储对象随元数据清理。"""
     user = _user(client)
     file_id = client.post(
         "/pdfs",
         files={"file": ("c.pdf", _pdf_bytes(), "application/pdf")},
         headers={**user, **_idem()},
     ).json()["file_id"]
+    # 上传即建项目（兼容委托），解析中（PENDING）→ 409 PROJECT_STATE_CONFLICT（不再直接删 PDF）
+    resp = client.delete(f"/pdfs/{file_id}", headers={**user, **_idem()})
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "PROJECT_STATE_CONFLICT"
+    # 触发解析（fake PDF 无文本层 → FAILED → 项目 PARSE_FAILED）→ 可删除
+    from services.pdf.scanner import scan_once
+
+    app = cast(FastAPI, client.app)
+    scan_once(app.state.session_factory, storage=app.state.storage)
     resp = client.delete(f"/pdfs/{file_id}", headers={**user, **_idem()})
     assert resp.status_code == 204
     resp = client.get(f"/pdfs/{file_id}", headers=user)

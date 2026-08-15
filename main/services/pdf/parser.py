@@ -13,6 +13,7 @@
   end_page = 下一条 start_page - 1，最后一条 = 总页数；越界 clamp（1 <= start <= end <= 总页数）。
 """
 
+from io import BytesIO
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -23,6 +24,17 @@ from app.errors import AppError, ErrorCode
 
 _TEXT_SAMPLE_PAGES = 5
 _TEXT_SAMPLE_LIMIT = 500
+
+
+def page_count_hint(data: bytes) -> int | None:
+    """上传页数 hint（carry-forward 决策）：pypdf 快速读页数；损坏文件 → None（扫描器 FAILED 兜底）。
+
+    供 POST /projects、POST /projects/{id}/replace-pdf 与兼容 POST /pdfs 共用（单一来源）。
+    """
+    try:
+        return len(PdfReader(BytesIO(data)).pages)
+    except Exception:  # noqa: BLE001  # 损坏/非 PDF 一律无 hint，上传校验与扫描器兜底
+        return None
 
 
 class ChapterInfo(TypedDict):

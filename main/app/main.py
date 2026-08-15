@@ -18,6 +18,7 @@ from app.api import (
     pdfs,
     preferences,
     probes,
+    projects,
     review,
     samples,
     stats,
@@ -150,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(review.router)
     app.include_router(stats.router)
     app.include_router(pdfs.router)
+    app.include_router(projects.router)
     app.include_router(preferences.router)
     app.include_router(api_key.router)
     app.include_router(samples.router)

@@ -1,4 +1,10 @@
-"""PDF 路由（structure-contract 6.1；openapi /pdfs）。handler 只做 HTTP 映射。
+"""PDF 路由（structure-contract 6.1；openapi /pdfs）——V2.5 过渡期兼容路径。
+
+委托语义（6.2 注）：POST /pdfs 委托项目创建（services.projects.create_project，
+上传同时建立学习项目——同一业务模型，无第二套项目/任务状态）；DELETE /pdfs/{file_id}
+经 services.pdf.service.delete_pdf 委托项目删除（retain_decks=true）；GET/章节路由
+读同一数据模型（视图构建单一来源 services.pdf.service）。V2.5 Release 客户端只使用
+项目接口。handler 只做 HTTP 映射。
 
 multipart 上传幂等顺序（Task 4 报告）：文件读取 + 三重校验 + 页数 hint +
 storage.save 在 handler 异步部分完成（execute_idempotent 之前）；biz 只做 DB
@@ -7,12 +13,10 @@ storage.save 在 handler 异步部分完成（execute_idempotent 之前）；biz
 """
 
 import logging
-from io import BytesIO
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
-from pypdf import PdfReader
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -26,53 +30,27 @@ from app.schemas.pdfs import Chapter as ChapterSchema
 from app.schemas.pdfs import ChapterUpdateRequest
 from app.schemas.pdfs import PdfFile as PdfFileSchema
 from infra.clock import SystemClock
-from infra.db.models import Chapter, PdfFile
+from infra.db.models import Chapter
 from infra.db.session import format_utc, get_db_session
 from infra.storage.local import LocalStorage
+from services.pdf.parser import page_count_hint
 from services.pdf.scanner import validate_upload
 from services.pdf.service import (
+    chapter_view,
     delete_chapter,
     delete_pdf,
     get_pdf,
     list_pdfs,
+    pdf_view,
     update_chapter,
-    upload_pdf,
 )
+from services.projects.service import create_project
 
 router = APIRouter(prefix="/pdfs", tags=["pdf"])
 
 
 def _now() -> str:
     return format_utc(SystemClock().now_utc())
-
-
-def _page_count_hint(data: bytes) -> int | None:
-    """页数 hint（carry-forward 决策）：pypdf 快速读页数；损坏文件 → None（扫描器 FAILED 兜底）。"""
-    try:
-        return len(PdfReader(BytesIO(data)).pages)
-    except Exception:  # noqa: BLE001  # 损坏/非 PDF 一律无 hint，上传校验与扫描器兜底
-        return None
-
-
-def _chapter_view(chapter: Chapter) -> dict[str, Any]:
-    return {
-        "chapter_id": chapter.chapter_id,
-        "name": chapter.name,
-        "start_page": chapter.start_page,
-        "end_page": chapter.end_page,
-    }
-
-
-def _pdf_view(pdf: PdfFile, chapters: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    return {
-        "file_id": pdf.file_id,
-        "filename": pdf.filename,
-        "size_bytes": pdf.size_bytes,
-        "status": pdf.status,
-        "error_code": pdf.error_code,
-        "chapters": chapters,
-        "created_at": pdf.created_at,
-    }
 
 
 @router.post("", status_code=201, response_model=PdfFileSchema)
@@ -104,14 +82,15 @@ async def upload_pdf_endpoint(
         content_type=file.content_type or "",
         magic=data[:5],
         size_bytes=len(data),
-        page_count_hint=_page_count_hint(data),
+        page_count_hint=page_count_hint(data),
         settings=settings,
     )
     storage: LocalStorage = request.app.state.storage
     storage_key = storage.save(data)
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        pdf = upload_pdf(
+        # 兼容路径委托项目创建（6.2）：上传同时建立学习项目；响应仍为 PdfFile（旧契约载荷）
+        project = create_project(
             session,
             user_id=user_id,
             filename=file.filename or "upload.pdf",
@@ -120,7 +99,7 @@ async def upload_pdf_endpoint(
             now=_now(),
         )
         session.flush()
-        return 201, _pdf_view(pdf)
+        return 201, project["file"]
 
     _replayed, status, body = execute_idempotent(
         session,
@@ -138,7 +117,7 @@ async def upload_pdf_endpoint(
 def list_pdfs_endpoint(
     request: Request, session: Annotated[Session, Depends(get_db_session)]
 ) -> JSONResponse:
-    items = [_pdf_view(pdf) for pdf in list_pdfs(session, user_id=request.state.principal.user_id)]
+    items = [pdf_view(pdf) for pdf in list_pdfs(session, user_id=request.state.principal.user_id)]
     return JSONResponse(content={"items": items})
 
 
@@ -155,8 +134,8 @@ def get_pdf_endpoint(
         rows = session.scalars(
             select(Chapter).where(Chapter.file_id == file_id).order_by(Chapter.start_page)
         ).all()
-        chapters = [_chapter_view(ch) for ch in rows]
-    return JSONResponse(content=_pdf_view(pdf, chapters))
+        chapters = [chapter_view(ch) for ch in rows]
+    return JSONResponse(content=pdf_view(pdf, chapters))
 
 
 @router.delete("/{file_id}", status_code=204)
@@ -240,7 +219,7 @@ def patch_chapter_endpoint(
             now=_now(),
         )
         session.flush()
-        return 200, _chapter_view(chapter)
+        return 200, chapter_view(chapter)
 
     _replayed, status, body = execute_idempotent(
         session,
