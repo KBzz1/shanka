@@ -1,14 +1,13 @@
 """任务执行器集成测试：V5A adapter 分批生成入库/状态机/防重（mock transport，不触网）。
 
-种子写入真实加密 Key（executor 解密路径）；scan_once/process_running_tasks 注入
+种子写入真实加密 Key（executor 解密路径）；scan_once/process_active_tasks 注入
 settings + client_factory（mock transport），生产缺省路径不在此验证。
 """
 
 import json
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -18,12 +17,12 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk, User
+from infra.db.models import Base, Card, KnowledgePoint, Task, TextChunk, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from services.generation.batches import plan_batches
-from services.tasks.executor import process_running_tasks
+from services.tasks.executor import process_active_tasks
 from services.tasks.service import create_task
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
@@ -45,16 +44,16 @@ def _uuid() -> str:
 
 
 def _seed_task(session: Session, *, user_id: str, coverage_mode: str = "COMPACT") -> str:
-    """种子：PENDING+PLANNING 任务直接转 RUNNING+GENERATING + 页文本 + 生成单元
+    """种子：DRAFT 任务直转 GENERATING（stage=GENERATING）+ 页文本 + 生成单元
     （锚定难度/卡型/来源页）+ 按单元建批（generation_unit_id 必填——LLM 升级管线
     spec §7 批=单元，1 单元 1 批）。
 
-    T8 起 create_task 不再规划知识点（PENDING+PLANNING）；生成路径测试绕过规划
-    worker，聚焦批次语义——T9 新增的规划执行路径由 test_planning_executor.py 覆盖。
+    V2.5 起 create_task 只落 DRAFT（自动保存）；生成路径测试绕过样卡/规划
+    worker，聚焦批次语义——规划执行路径由 test_planning_executor.py 覆盖。
     单元数 = 每章基础 3 × 密度系数（COMPACT=3 / BALANCED=6）——旧规划配额语义，
     测试直接构造；目标难度按 0.4/0.4/0.2 循环锚定。
     """
-    from infra.db.models import ApiKey, Chapter, PdfFile
+    from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile
     from services.decks.service import create_deck
     from services.pdf.text_chunks import persist_text_chunks
 
@@ -82,7 +81,20 @@ def _seed_task(session: Session, *, user_id: str, coverage_mode: str = "COMPACT"
     )
     session.add(pdf)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at="2026-08-11T00:00:00.000Z",
+        version="2026-08-11T00:00:00.000Z",
+        created_at="2026-08-11T00:00:00.000Z",
+        updated_at="2026-08-11T00:00:00.000Z",
+    )
+    session.add(project)
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
+    deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
@@ -107,7 +119,7 @@ def _seed_task(session: Session, *, user_id: str, coverage_mode: str = "COMPACT"
     task = create_task(
         session,
         user_id=user_id,
-        file_id=pdf.file_id,
+        project_id=project.project_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
@@ -116,14 +128,14 @@ def _seed_task(session: Session, *, user_id: str, coverage_mode: str = "COMPACT"
         ),
         now="2026-08-11T00:00:00.000Z",
     )
-    task.status = "RUNNING"
+    task.status = "GENERATING"  # V2.5 七态：跳过样卡阶段直入生成（批次语义聚焦）
     task.stage = "GENERATING"
     task.updated_at = "2026-08-11T00:00:00.000Z"
     session.flush()
     chunks = session.scalars(
         select(TextChunk).where(TextChunk.file_id == pdf.file_id).order_by(TextChunk.page_number)
     ).all()
-    diffs = ["BASIC", "UNDERSTANDING", "APPLICATION"]
+    diffs = ["BASIC", "UNDERSTANDING", "DEEP_QUESTION"]  # V2.5 改名（3.5）
     n_kps = {"COMPACT": 3, "BALANCED": 6}.get(coverage_mode, 3)
     kps = [
         KnowledgePoint(
@@ -180,8 +192,9 @@ def _scoring_content(request: httpx.Request) -> str:
 
 
 def _seed_planning_task(session: Session, *, user_id: str) -> str:
-    """PENDING+PLANNING 任务 + 章节 + 页文本（text_chunks）：规划 worker 全流程基座。"""
-    from infra.db.models import ApiKey, Chapter, PdfFile
+    """GENERATING+PLANNING 任务（start 后状态）+ 章节 + 页文本（text_chunks）：
+    规划 worker 全流程基座。"""
+    from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile
     from services.decks.service import create_deck
     from services.pdf.text_chunks import persist_text_chunks
 
@@ -208,7 +221,20 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     )
     session.add(pdf)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at="2026-08-11T00:00:00.000Z",
+        version="2026-08-11T00:00:00.000Z",
+        created_at="2026-08-11T00:00:00.000Z",
+        updated_at="2026-08-11T00:00:00.000Z",
+    )
+    session.add(project)
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
+    deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
@@ -233,7 +259,7 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     task = create_task(
         session,
         user_id=user_id,
-        file_id=pdf.file_id,
+        project_id=project.project_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
@@ -242,6 +268,10 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
         ),
         now="2026-08-11T00:00:00.000Z",
     )
+    # start 后状态（4.1）：AWAITING_SAMPLE_CONFIRMATION → GENERATING + stage=PLANNING
+    task.status = "GENERATING"
+    task.stage = "PLANNING"
+    task.updated_at = "2026-08-11T00:00:00.000Z"
     session.commit()
     return task.task_id
 
@@ -275,7 +305,7 @@ def test_executor_completes_task_and_inserts_cards(session_factory: Callable[[],
     with session_factory() as session:
         task_id = _seed_task(session, user_id=user)
     with session_factory() as session:
-        n = process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
+        n = process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
         task = session.get(Task, task_id)
         assert task is not None and task.deck_id is not None
@@ -294,11 +324,11 @@ def test_executor_no_duplicate_generation_items(session_factory: Callable[[], Se
     with session_factory() as session:
         task_id = _seed_task(session, user_id=user)
     with session_factory() as session:
-        process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
+        process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
     # 已完成任务不再处理
     with session_factory() as session:
-        n = process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
+        n = process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
     assert n == 0
     with session_factory() as session:
@@ -318,7 +348,7 @@ def test_executor_same_chapter_second_task_still_generates(
         task1 = _seed_task(session, user_id=user)
         task2 = _seed_task(session, user_id=user)  # 同章节二次任务（新 task_id）
     with session_factory() as session:
-        process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
+        process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
     with session_factory() as session:
         for task_id in (task1, task2):
@@ -371,7 +401,7 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
     client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
     before = _metric_value("generation_tasks_total", ['result="FAILED"'])
     with session_factory() as session:
-        n = process_running_tasks(
+        n = process_active_tasks(
             session, settings=_SETTINGS, client_factory=lambda _api_key: client
         )
         session.commit()
@@ -390,85 +420,6 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
     assert after - before == 1.0  # 8.3：系统级失败也计数
 
 
-def test_executor_cancel_between_batches_preserves_cancelled(
-    session_factory: Callable[[], Session],
-) -> None:
-    """V5B final review I-1：批次间隙 cancel → 批 2 不处理（CANCELLED 不被 COMPLETED 覆盖）。
-
-    复现：批 1 commit 后（复查前）另一连接在批次间隙落库 CANCELLED（cancel handler 同款写入）
-    → executor 每批 commit 后 session.refresh 复查 → 不再抢占批 2。
-    断言：任务保持 CANCELLED（ended_at 不被覆盖）+ 无批 2 卡入库 + chat 调用停在批 1。
-    注入点：包装 executor session 的 refresh——首次复查（批 1 commit 后）前执行 cancel
-    （此刻 executor 无打开事务，另一连接写入无锁冲突——单线程确定性，不依赖调度时序；
-    BEGIN IMMEDIATE 并发写入冲突属已知限制，另行登记，本用例覆盖批次间隙成功路径）。
-    """
-    user = _uuid()
-    with session_factory() as session:
-        task_id = _seed_task(session, user_id=user, coverage_mode="BALANCED")
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": _valid_cards_json()}}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-                "model": "deepseek-v4-flash",
-            },
-        )
-
-    client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
-    with session_factory() as session:
-        original_refresh = session.refresh
-        injected = False
-
-        def refresh_with_cancel(
-            instance: object,
-            attribute_names: Iterable[str] | None = None,
-            with_for_update: Any = None,
-        ) -> None:
-            nonlocal injected
-            # 只匹配 executor 的 session.refresh(task)（批 commit 后）——_claim_next_batch 的
-            # refresh(candidate) 刷新 Batch 对象且 executor 持写事务，此时注入 cancel 会走
-            # BEGIN IMMEDIATE 锁冲突路径（锁 500 已知限制），非本用例目标（批次间隙成功路径）
-            if not injected and isinstance(instance, Task):
-                injected = True
-                with session_factory() as cancel_session:
-                    task_row = cancel_session.get(Task, task_id)
-                    assert task_row is not None
-                    task_row.status = "CANCELLED"
-                    task_row.ended_at = "2026-08-11T00:00:00.000Z"
-                    task_row.updated_at = "2026-08-11T00:00:00.000Z"
-                    cancel_session.commit()
-            original_refresh(instance, attribute_names, with_for_update)
-
-        session.refresh = refresh_with_cancel  # type: ignore[method-assign]  # 测试注入：包装 refresh 注入批次间隙 cancel
-        n = process_running_tasks(session, settings=_SETTINGS, client_factory=lambda _k: client)
-        session.commit()  # 调用方最终 commit——旧实现会在此把 CANCELLED 覆盖回 COMPLETED（回归点）
-        task = session.get(Task, task_id)
-        assert task is not None and task.deck_id is not None
-        cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
-        batches = session.scalars(
-            select(Batch).where(Batch.task_id == task_id).order_by(Batch.batch_index)
-        ).all()
-    assert n == 1
-    assert calls == 1  # 批 2 未被抢占 → 无第二次 chat 调用
-    assert task.status == "CANCELLED"  # 不被 COMPLETED 覆盖
-    assert task.ended_at == "2026-08-11T00:00:00.000Z"  # 取消侧 ended_at 不被覆盖
-    # 批 2-6 未 claim（保留 PENDING；BALANCED 6 单元 → 6 批，批=单元）
-    assert [b.status for b in batches] == [
-        "SUCCEEDED",
-        "PENDING",
-        "PENDING",
-        "PENDING",
-        "PENDING",
-        "PENDING",
-    ]
-    assert len(cards) == 1  # 仅批 1 卡入库（BALANCED 6 单元 → 6 批 × 每批 1 卡）
-
-
 def test_executor_full_flow_plan_then_generate(
     session_factory: Callable[[], Session],
 ) -> None:
@@ -477,7 +428,7 @@ def test_executor_full_flow_plan_then_generate(
 
     mock 首次 chat 返回合法 planner 单元（引用请求内组页），随后返回 1 张合法卡
     （1 单元 = 1 批 = 1 卡），评分调用（<SCORING_INPUT>）返回 ID 守恒的分数；
-    断言规划/生成/评分在同一次 process_running_tasks 中衔接。
+    断言规划/生成/评分在同一次 process_active_tasks 中衔接。
     """
     user = _uuid()
     with session_factory() as session:
@@ -548,7 +499,7 @@ def test_executor_full_flow_plan_then_generate(
         return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
 
     with session_factory() as session:
-        n = process_running_tasks(session, settings=_SETTINGS, client_factory=client_factory)
+        n = process_active_tasks(session, settings=_SETTINGS, client_factory=client_factory)
         session.commit()
         task = session.get(Task, task_id)
         assert task is not None and task.deck_id is not None

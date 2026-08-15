@@ -31,6 +31,7 @@ from infra.db.models import (
     Card,
     Chapter,
     KnowledgePoint,
+    LearningProject,
     LlmCallAttempt,
     PdfFile,
     Task,
@@ -43,7 +44,7 @@ from infra.llm.deepseek import DeepSeekClient
 from services.generation.batches import plan_batches, process_next_batch
 from services.generation.scoring_validator import validate_scores
 from services.pdf.text_chunks import persist_text_chunks
-from services.tasks.executor import process_running_tasks
+from services.tasks.executor import process_active_tasks
 from services.tasks.service import create_task
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
@@ -126,7 +127,7 @@ def _seed_scoring_task(
     stage: str = "SCORING",
     generate: bool = True,
 ) -> str:
-    """RUNNING+{stage} 任务 + 页文本 + 生成单元（锚定难度/卡型循环）+ 每单元一批 +
+    """GENERATING+{stage} 任务 + 页文本 + 生成单元（锚定难度/卡型循环）+ 每单元一批 +
     （generate）真实生成路径落卡。返回 task_id。"""
     from services.decks.service import create_deck
 
@@ -153,7 +154,20 @@ def _seed_scoring_task(
     )
     session.add(pdf)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at=_NOW,
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
+    deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
@@ -178,7 +192,7 @@ def _seed_scoring_task(
     task = create_task(
         session,
         user_id=user_id,
-        file_id=pdf.file_id,
+        project_id=project.project_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
@@ -187,8 +201,8 @@ def _seed_scoring_task(
         ),
         now=_NOW,
     )
-    # P4-4：executor 密钥查找已切 user 域
-    task.status = "RUNNING"
+    # P4-4：executor 密钥查找已切 user 域；V2.5：GENERATING 覆盖生成/评分全程
+    task.status = "GENERATING"
     task.stage = "GENERATING"
     task.updated_at = _NOW
     session.flush()
@@ -655,9 +669,9 @@ def test_scoring_invalid_output_group_failed(session_factory: Callable[[], Sessi
     assert cards[0].rubric_total_score is None
 
 
-def test_scoring_stage_cancel_guarded(session_factory: Callable[[], Session]) -> None:
-    """组处理前任务已 CANCELLED → run_scoring_stage 不发请求（调用计数 0）、
-    不覆盖 CANCELLED。"""
+def test_scoring_stage_failed_guarded(session_factory: Callable[[], Session]) -> None:
+    """组处理前任务已 FAILED（并发终态）→ run_scoring_stage 不发请求（调用计数 0）、
+    不覆盖（V2.5 无 cancel，以 FAILED 等价验证守卫）。"""
     from services.generation.scoring import run_scoring_stage
 
     user = _uuid()
@@ -672,7 +686,7 @@ def test_scoring_stage_cancel_guarded(session_factory: Callable[[], Session]) ->
 
         task = session.get(Task, task_id)
         assert task is not None
-        task.status = "CANCELLED"
+        task.status = "FAILED"
         session.commit()
         run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
         session.commit()
@@ -680,7 +694,7 @@ def test_scoring_stage_cancel_guarded(session_factory: Callable[[], Session]) ->
         task = session.get(Task, task_id)
     assert calls == 0
     assert task is not None
-    assert task.status == "CANCELLED"  # 最终条件更新不覆盖 cancel
+    assert task.status == "FAILED"  # 最终条件更新不覆盖并发终态
 
 
 def test_scoring_cap_reached_still_completes(session_factory: Callable[[], Session]) -> None:
@@ -750,8 +764,8 @@ def test_enter_scoring_stage_transitions(session_factory: Callable[[], Session])
         assert enter_scoring_stage(session, task_id=task_id, settings=_SETTINGS) is False
         task = session.get(Task, task_id)
         assert task is not None
-        task.status = "CANCELLED"
-        task.stage = "GENERATING"  # 取消后回退 stage（模拟极端交错）
+        task.status = "FAILED"
+        task.stage = "GENERATING"  # 并发终态 + stage 回退（模拟极端交错）
         session.commit()
         assert enter_scoring_stage(session, task_id=task_id, settings=_SETTINGS) is False
 
@@ -771,7 +785,7 @@ def test_executor_runs_scoring_after_generation(session_factory: Callable[[], Se
                 return _ok(_scoring_response_from_request(request))
             return _ok(_card_response("QUESTION"))
 
-        n = process_running_tasks(
+        n = process_active_tasks(
             session, settings=_SETTINGS, client_factory=lambda _k: _client(handler)
         )
         session.commit()
@@ -820,7 +834,7 @@ def test_scan_takes_over_scoring_orphan(session_factory: Callable[[], Session]) 
         def handler(request: httpx.Request) -> httpx.Response:
             return _ok(_scoring_response_from_request(request))
 
-        n = process_running_tasks(
+        n = process_active_tasks(
             session, settings=_SETTINGS, client_factory=lambda _k: _client(handler)
         )
         session.commit()
@@ -905,9 +919,10 @@ def test_scoring_group_entries_vanished_fails_no_call(
     assert attempts[0].error_code == "GENERATION_FAILED"
 
 
-def test_scoring_cancel_during_call_no_writeback(session_factory: Callable[[], Session]) -> None:
-    """评分 chat 进行中（事务外）另一连接取消 → 回写守卫（status!=RUNNING）→ 卡评分
-    留 NULL、账本 STARTED 保留（恢复转 UNKNOWN）、最终条件更新不覆盖 CANCELLED。"""
+def test_scoring_failed_during_call_no_writeback(session_factory: Callable[[], Session]) -> None:
+    """评分 chat 进行中（事务外）另一连接置 FAILED（并发终态）→ 回写守卫
+    （status!=GENERATING）→ 卡评分留 NULL、账本 STARTED 保留（恢复转 UNKNOWN）、
+    最终条件更新不覆盖（V2.5 无 cancel，以 FAILED 等价验证）。"""
     from services.generation.scoring import run_scoring_stage
 
     user = _uuid()
@@ -915,11 +930,11 @@ def test_scoring_cancel_during_call_no_writeback(session_factory: Callable[[], S
         task_id = _seed_scoring_task(session, user_id=user, difficulties=["BASIC"])
 
         def handler(request: httpx.Request) -> httpx.Response:
-            # chat 进行中（事务外）注入取消（另一连接——cancel handler 同款写入）
+            # chat 进行中（事务外）注入并发终态（另一连接写入）
             with session_factory() as other:
                 task_row = other.get(Task, task_id)
                 assert task_row is not None
-                task_row.status = "CANCELLED"
+                task_row.status = "FAILED"
                 task_row.ended_at = _NOW
                 task_row.updated_at = _NOW
                 other.commit()
@@ -931,7 +946,7 @@ def test_scoring_cancel_during_call_no_writeback(session_factory: Callable[[], S
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         attempts = _scoring_attempts(session, task_id=task_id)
-    assert task.status == "CANCELLED"  # 不被最终条件更新覆盖
+    assert task.status == "FAILED"  # 不被最终条件更新覆盖
     assert cards[0].rubric_total_score is None  # 不写回（守卫）
     assert [a.status for a in attempts] == ["STARTED"]  # 留给恢复转 UNKNOWN（§9）
 

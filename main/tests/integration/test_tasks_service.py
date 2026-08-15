@@ -1,8 +1,9 @@
-"""任务 service 集成测试：创建/状态机/取消/resume/校验（真实 SQLite + fake 执行）。
+"""任务 service 集成测试（V2.5 Task 5）：项目域创建校验 + 归属守卫（真实 SQLite）。
 
 carry-forward（V1 教训）：engine 级 PRAGMA foreign_keys=ON（database-design 0），
-pdf/deck/task/api_keys 均 FK → users——fixture 先建 users 行
-（HTTP 流中由注册端点建立，本层显式补种）；tasks 校验 Key 需 ApiKey 种子。
+pdf/deck/task/api_keys 均 FK → users——fixture 先建 users 行；tasks 创建校验 Key
+需 ApiKey 种子。V2.5：create_task 以 project_id 为入口（POST /projects/{id}/tasks），
+七态状态机完整转移表见 test_v25_task_lifecycle.py（本文件聚焦创建校验）。
 """
 
 import json
@@ -17,10 +18,19 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import ApiKey, Base, Chapter, KnowledgePoint, PdfFile, Task, User
+from infra.db.models import (
+    ApiKey,
+    Base,
+    Chapter,
+    Deck,
+    KnowledgePoint,
+    LearningProject,
+    PdfFile,
+    Task,
+    User,
+)
 from infra.db.session import create_db_engine, create_session_factory
-from services.decks.service import create_deck
-from services.tasks.service import cancel_task, create_task, get_task, resume_task
+from services.tasks.service import create_task, get_task
 
 
 @pytest.fixture
@@ -34,22 +44,23 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> dict[str, Any]:
-    """users 前置 + PDF/章节/牌组 + ApiKey 种子（tasks 校验 Key）。
+_NOW = "2026-08-15T00:00:00.000Z"
 
-    PDF/牌组/ApiKey 均 user 域（P4-3/P4-4 切换）。
-    """
-    session.add(
-        User(
-            user_id=user_id,
-            username=f"u-{user_id[:8]}",
-            email=f"u-{user_id[:8]}@example.com",
-            password_hash="x",
-            created_at="2026-08-11T00:00:00.000Z",
-            updated_at="2026-08-11T00:00:00.000Z",
+
+def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> dict[str, Any]:
+    """users 前置 + 项目（PDF/2 章节/项目绑定牌组）+ ApiKey 种子（tasks 校验 Key）。"""
+    if session.get(User, user_id) is None:
+        session.add(
+            User(
+                user_id=user_id,
+                username=f"u-{user_id[:8]}",
+                email=f"u-{user_id[:8]}@example.com",
+                password_hash="x",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
         )
-    )
-    session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
+        session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -57,13 +68,35 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         storage_key=_uuid(),
         size_bytes=1,
         status="PARSED",
-        created_at="2026-08-11T00:00:00.000Z",
+        created_at=_NOW,
     )
     session.add(pdf)
     session.flush()
-    deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at=_NOW,
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
     session.flush()
-    chapter_ids = []
+    deck = Deck(
+        deck_id=_uuid(),
+        user_id=user_id,
+        name="D",
+        source="MANUAL",
+        project_id=project.project_id,
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(deck)
+    session.flush()
+    chapter_ids: list[str] = []
     chapters = []
     for i in range(2):
         ch = Chapter(
@@ -84,11 +117,12 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
                 encrypted_key="enc",
                 status="AVAILABLE",
                 masked_key="sk-****",
-                updated_at="2026-08-11T00:00:00.000Z",
+                updated_at=_NOW,
             )
         )
     session.flush()
     return {
+        "project_id": project.project_id,
         "file_id": pdf.file_id,
         "deck_id": deck.deck_id,
         "chapter_ids": chapter_ids,
@@ -111,107 +145,102 @@ def _config(tendency: str = "BALANCED") -> GenerationConfig:
     )
 
 
-def test_tasks_create_pending_snapshot_without_planning(
+def test_tasks_create_draft_snapshot_without_planning(
     session_factory: Callable[[], Session],
 ) -> None:
-    """T8 新语义：create_task 只落创建快照（PENDING + stage=PLANNING，不自动规划）。
-
-    原验收意图（创建快照持久化 + selected_chapters 契约 3.4 Chapter[] 可还原）保留；
-    知识点规划由规划 worker CAS 接管（spec §6.1），创建事务内不再产出 KnowledgePoint
-    （断言 0 行——规划断言载体换成 test_planning_executor.py 的 claim 流程）。
-    """
-    device = _uuid()
+    """V2.5：create_task 只落 DRAFT 创建快照（不规划）；selected_chapters 契约 3.4
+    Chapter[] 可还原；generation_config JSON 持久化。"""
+    user = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, user_id=device)
+        ctx = _seed_context(session, user_id=user)
         session.commit()
     with session_factory() as session:
         task = create_task(
             session,
-            user_id=device,
-            file_id=ctx["file_id"],
-            deck_id=ctx["deck_id"],
+            user_id=user,
+            project_id=str(ctx["project_id"]),
+            deck_id=str(ctx["deck_id"]),
             chapter_ids=ctx["chapter_ids"],
             config=_config(),
-            now="2026-08-11T00:00:00.000Z",
+            now=_NOW,
         )
         session.commit()
         task_id = task.task_id
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
         status = task.status
         stage = task.stage
-    assert status == "PENDING"
-    assert stage == "PLANNING"
-    assert len(kps) == 0  # 规划不再在创建同事务（spec §6.1）
+    assert status == "DRAFT"
+    assert stage is None  # internal_stage 正式生成前不暴露
+    assert len(kps) == 0  # 规划由 worker 在 start 后接管（spec §6.1）
     with session_factory() as session:
         row = session.get(Task, task_id)
         assert row is not None
         assert row.generation_config  # JSON 快照持久化
-        # selected_chapters 快照存完整 Chapter 对象（契约 3.4 Chapter[]；3.6 名称可还原）
-        snapshot = json.loads(row.selected_chapters)
-        assert snapshot == ctx["chapters"]
+        assert json.loads(row.selected_chapters) == ctx["chapters"]
 
 
 def test_tasks_create_without_key_422(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, user_id=device, with_key=False)
+        ctx = _seed_context(session, user_id=user, with_key=False)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         create_task(
             session,
-            user_id=device,
-            file_id=ctx["file_id"],
-            deck_id=ctx["deck_id"],
+            user_id=user,
+            project_id=str(ctx["project_id"]),
+            deck_id=str(ctx["deck_id"]),
             chapter_ids=ctx["chapter_ids"],
             config=_config(),
-            now="2026-08-11T00:00:00.000Z",
+            now=_NOW,
         )
     assert excinfo.value.code is ErrorCode.API_KEY_NOT_SET
 
 
-def test_tasks_create_cross_user_404(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+def test_tasks_create_cross_user_project_404(session_factory: Callable[[], Session]) -> None:
+    """跨用户项目 → 404 PROJECT_NOT_FOUND（6.2 统一 404，不暴露存在性）。"""
+    user = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, user_id=device)
+        ctx = _seed_context(session, user_id=user)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         create_task(
             session,
             user_id=_uuid(),
-            file_id=ctx["file_id"],
-            deck_id=ctx["deck_id"],
+            project_id=str(ctx["project_id"]),
+            deck_id=str(ctx["deck_id"]),
             chapter_ids=ctx["chapter_ids"],
             config=_config(),
-            now="2026-08-11T00:00:00.000Z",
+            now=_NOW,
         )
-    assert excinfo.value.code is ErrorCode.PDF_NOT_FOUND
+    assert excinfo.value.code is ErrorCode.PROJECT_NOT_FOUND
 
 
 def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]) -> None:
-    """章节归属校验：chapter_ids 含不属于该 PDF 的章节 → PDF_NOT_FOUND（与 samples 一致）。"""
-    device = _uuid()
+    """章节归属校验：chapter_ids 含不属于项目 PDF 的章节 → PDF_NOT_FOUND。"""
+    user = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, user_id=device)
-        other_owner = _uuid()
+        ctx = _seed_context(session, user_id=user)
+        foreign = _uuid()
         session.add(
             User(
-                user_id=other_owner,
-                username=f"u-{other_owner[:8]}",
-                email=f"u-{other_owner[:8]}@example.com",
+                user_id=foreign,
+                username=f"u-{foreign[:8]}",
+                email=f"u-{foreign[:8]}@example.com",
                 password_hash="x",
-                created_at="2026-08-11T00:00:00.000Z",
-                updated_at="2026-08-11T00:00:00.000Z",
+                created_at=_NOW,
+                updated_at=_NOW,
             )
         )
-        session.flush()  # FK 强制：users 行先落库
+        session.flush()
         other_pdf = PdfFile(
             file_id=_uuid(),
-            user_id=other_owner,  # 他人 PDF（原 device 域遗留种子——归属已切 user 域）
+            user_id=foreign,
             filename="c.pdf",
             storage_key=_uuid(),
             size_bytes=1,
             status="PARSED",
-            created_at="2026-08-11T00:00:00.000Z",
+            created_at=_NOW,
         )
         session.add(other_pdf)
         session.flush()
@@ -225,136 +254,44 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         create_task(
             session,
-            user_id=device,
-            file_id=ctx["file_id"],
-            deck_id=ctx["deck_id"],
+            user_id=user,
+            project_id=str(ctx["project_id"]),
+            deck_id=str(ctx["deck_id"]),
             chapter_ids=[ctx["chapter_ids"][0], foreign_id],
             config=_config(),
-            now="2026-08-11T00:00:00.000Z",
+            now=_NOW,
         )
     assert excinfo.value.code is ErrorCode.PDF_NOT_FOUND
 
 
 def test_tasks_get_missing_404(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+    user = _uuid()
     with session_factory() as session:
-        _seed_context(session, user_id=device)
+        _seed_context(session, user_id=user)
         session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        get_task(session, user_id=device, task_id=_uuid())
+        get_task(session, user_id=user, task_id=_uuid())
     assert excinfo.value.code is ErrorCode.TASK_NOT_FOUND
 
 
-def test_tasks_cancel_keeps_cards(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
+def test_tasks_get_cross_user_404(session_factory: Callable[[], Session]) -> None:
+    """任务归属守卫：他人任务 → 404（不暴露存在性）。"""
+    user = _uuid()
     with session_factory() as session:
-        ctx = _seed_context(session, user_id=device)
+        ctx = _seed_context(session, user_id=user)
         session.commit()
     with session_factory() as session:
         task = create_task(
             session,
-            user_id=device,
-            file_id=ctx["file_id"],
-            deck_id=ctx["deck_id"],
+            user_id=user,
+            project_id=str(ctx["project_id"]),
+            deck_id=str(ctx["deck_id"]),
             chapter_ids=ctx["chapter_ids"],
             config=_config(),
-            now="2026-08-11T00:00:00.000Z",
+            now=_NOW,
         )
-        session.commit()
-        task_id = task.task_id
-        # T8 起创建为 PENDING+PLANNING；"运行中取消" 前置由直写构造（RUNNING）
-        task.status = "RUNNING"
-        result = cancel_task(
-            session, user_id=device, task_id=task_id, now="2026-08-11T01:00:00.000Z"
-        )
-        session.commit()
-    assert result.status == "CANCELLED"
-
-
-def test_tasks_resume_paused(session_factory: Callable[[], Session]) -> None:
-    device = _uuid()
-    with session_factory() as session:
-        ctx = _seed_context(session, user_id=device)
-        session.commit()
-    with session_factory() as session:
-        task = create_task(
-            session,
-            user_id=device,
-            file_id=ctx["file_id"],
-            deck_id=ctx["deck_id"],
-            chapter_ids=ctx["chapter_ids"],
-            config=_config(),
-            now="2026-08-11T00:00:00.000Z",
-        )
-        session.flush()
-        task.status = "PAUSED"
-        task.resumable = 1
-        session.commit()
-        task_id = task.task_id
-    with session_factory() as session:
-        result = resume_task(
-            session, user_id=device, task_id=task_id, now="2026-08-11T02:00:00.000Z"
-        )
-        session.commit()
-    assert result.status == "RUNNING"
-    # 再 resume（RUNNING 非 PAUSED）→ 409
-    with session_factory() as session, pytest.raises(AppError) as excinfo:
-        resume_task(session, user_id=device, task_id=task_id, now="2026-08-11T02:00:00.000Z")
-    assert excinfo.value.code is ErrorCode.TASK_STATE_CONFLICT
-
-
-def test_tasks_resume_orphan_running_after_timeout(session_factory: Callable[[], Session]) -> None:
-    """孤儿 RUNNING（updated_at 超 30 分钟）→ resume 抢占恢复（4.1）。"""
-    device = _uuid()
-    with session_factory() as session:
-        ctx = _seed_context(session, user_id=device)
-        session.commit()
-    with session_factory() as session:
-        task = create_task(
-            session,
-            user_id=device,
-            file_id=ctx["file_id"],
-            deck_id=ctx["deck_id"],
-            chapter_ids=ctx["chapter_ids"],
-            config=_config(),
-            now="2026-08-11T00:00:00.000Z",
-        )
-        session.flush()
-        # 模拟孤儿：RUNNING + updated_at 3 小时前（T8 起创建为 PENDING+PLANNING，
-        # RUNNING 由规划 worker CAS 接管写入——本用例聚焦恢复状态机，直写 RUNNING）
-        task.status = "RUNNING"
-        task.updated_at = "2026-08-10T21:00:00.000Z"
-        session.commit()
-        task_id = task.task_id
-    with session_factory() as session:
-        result = resume_task(
-            session, user_id=device, task_id=task_id, now="2026-08-11T00:30:00.000Z"
-        )
-        session.commit()
-    assert result.status == "RUNNING"
-    assert result.resumable == 0
-
-
-def test_tasks_resume_running_fresh_conflicts(session_factory: Callable[[], Session]) -> None:
-    """新鲜 RUNNING（心跳内）→ resume 409 TASK_STATE_CONFLICT。"""
-    device = _uuid()
-    with session_factory() as session:
-        ctx = _seed_context(session, user_id=device)
-        session.commit()
-    with session_factory() as session:
-        task = create_task(
-            session,
-            user_id=device,
-            file_id=ctx["file_id"],
-            deck_id=ctx["deck_id"],
-            chapter_ids=ctx["chapter_ids"],
-            config=_config(),
-            now="2026-08-11T00:00:00.000Z",
-        )
-        # T8 起创建为 PENDING+PLANNING；"新鲜 RUNNING" 前置由直写构造（心跳内）
-        task.status = "RUNNING"
         session.commit()
         task_id = task.task_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        resume_task(session, user_id=device, task_id=task_id, now="2026-08-11T00:10:00.000Z")
-    assert excinfo.value.code is ErrorCode.TASK_STATE_CONFLICT
+        get_task(session, user_id=_uuid(), task_id=task_id)
+    assert excinfo.value.code is ErrorCode.TASK_NOT_FOUND

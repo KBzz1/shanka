@@ -1,10 +1,13 @@
-"""planning_executor.py：规划执行（spec §6.1/§6.2/§6.3/§6.4；Task 9）。
+"""planning_executor.py：规划执行（spec §6.1/§6.2/§6.3/§6.4；Task 9；V2.5 七态适配）。
 
-- `claim_planning_task`：CAS1 首次接管（PENDING+PLANNING → RUNNING）+ 提交前按 §4.2
-  重读章节最新 name/start/end_page 覆盖 selected_chapters（规划快照冻结，原子提交）；
-  章节失效 → 同事务 FAILED + failure_stage=PLANNING + 内部原因 CHAPTER_SNAPSHOT_STALE
-  （日志区分，error_code 用兜底 GENERATION_FAILED）；CAS2 孤儿恢复（心跳超时接管 +
-  遗留 STARTED 转 UNKNOWN）。不 commit——由调用方提交保证"接管与快照冻结原子性"。
+- `claim_planning_task`：CAS1 首次接管（GENERATING+PLANNING 且未接管 → 心跳/
+  started_at 落库）+ 提交前按 §4.2 重读章节最新 name/start/end_page 覆盖
+  selected_chapters（规划快照冻结，原子提交）；章节失效 → 同事务 FAILED +
+  failure_stage=PLANNING + 内部原因 CHAPTER_SNAPSHOT_STALE（日志区分，
+  error_code 用兜底 GENERATION_FAILED）；CAS2 孤儿恢复（心跳超时接管 +
+  遗留 STARTED 转 UNKNOWN）。V2.5：用户状态 GENERATING 覆盖规划/生成/评分全程，
+  接管只动 internal_stage/心跳，不再写 RUNNING。不 commit——由调用方提交保证
+  "接管与快照冻结原子性"。
 - `run_planning`：快照选页 → 按 planner_max_input_chars 连续页拆组（组数超上限 →
   FAILED）→ 三层配额（任务→章→组子配额）→ 每组：输入漂移守卫 / 账本恢复复用 /
   预算 / STARTED 心跳 commit → 事务外 chat → 校验截断 → 终态+心跳 commit → 合并去重
@@ -17,7 +20,7 @@
 - 时钟：`now` 显式参数定式（claim 由调用方注入）；run_planning 每次尝试/心跳/终态
   各自读取新时钟（SystemClock，ledger.py 同款 _now 兜底约定）——心跳必须真实推进，
   避免长运行任务被 CAS2 误判孤儿接管；CAS1 的 started_at 用 claim 注入时刻。
-- 终态一律条件更新（WHERE RUNNING+PLANNING）：并发取消/转移不覆盖；Key 错误、输入
+- 终态一律条件更新（WHERE GENERATING+PLANNING）：并发放弃/转移不覆盖；Key 错误、输入
   漂移与快照非法等即时失败同款 guard（review fix 2/5）。
 """
 
@@ -60,6 +63,7 @@ from services.pdf.text_chunks import load_pages
 logger = logging.getLogger(__name__)
 
 _PLANNING_STAGE = "PLANNING"
+_GENERATING_STATUS = "GENERATING"  # V2.5 用户七态：规划/生成/评分全程 GENERATING
 _UTC_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"  # database-design 0：UTC、恒 3 位毫秒
 
 
@@ -95,14 +99,23 @@ def group_fingerprint(
 
 
 def claim_planning_task(session: Session, *, orphan_timeout_minutes: int, now: str) -> Task | None:
-    """规划 worker 抢占（spec §6.1）：CAS1 首次接管 + 快照冻结；CAS2 孤儿恢复。
+    """规划 worker 抢占（spec §6.1；V2.5 七态）：CAS1 首次接管 + 快照冻结；CAS2 孤儿恢复。
 
-    不 commit——CAS1 的 RUNNING 转移与 selected_chapters 冻结（或章节失效 FAILED）
+    V2.5：任务经 start 进入 GENERATING（internal_stage=PLANNING）；CAS1 目标为
+    `GENERATING + stage=PLANNING + started_at IS NULL`（尚未被任何 worker 接管），
+    CAS2 目标为同状态但心跳超时（started_at 已落 = 曾被接管，在途 worker 崩溃）。
+    接管不转移用户状态（全程 GENERATING），只落 started_at/心跳与快照冻结。
+
+    不 commit——CAS1 的接管与 selected_chapters 冻结（或章节失效 FAILED）
     由调用方同事务提交，保证"已接管但页码未冻结"的中间状态不落库。
     """
     candidate = session.scalar(
         select(Task)
-        .where(Task.status == "PENDING", Task.stage == _PLANNING_STAGE)
+        .where(
+            Task.status == _GENERATING_STATUS,
+            Task.stage == _PLANNING_STAGE,
+            Task.started_at.is_(None),  # 尚未被接管（CAS1）
+        )
         .order_by(Task.created_at, Task.task_id)
         .limit(1)
     )
@@ -113,11 +126,11 @@ def claim_planning_task(session: Session, *, orphan_timeout_minutes: int, now: s
                 update(Task)
                 .where(
                     Task.task_id == candidate.task_id,
-                    Task.status == "PENDING",
+                    Task.status == _GENERATING_STATUS,
                     Task.stage == _PLANNING_STAGE,
+                    Task.started_at.is_(None),
                 )
                 .values(
-                    status="RUNNING",
                     started_at=func.coalesce(Task.started_at, now),
                     updated_at=now,
                 )
@@ -132,8 +145,9 @@ def claim_planning_task(session: Session, *, orphan_timeout_minutes: int, now: s
     orphan = session.scalar(
         select(Task)
         .where(
-            Task.status == "RUNNING",
+            Task.status == _GENERATING_STATUS,
             Task.stage == _PLANNING_STAGE,
+            Task.started_at.is_not(None),  # 曾被接管（CAS2：仅心跳超时）
             Task.updated_at < cutoff,
         )
         .order_by(Task.updated_at, Task.task_id)
@@ -146,8 +160,9 @@ def claim_planning_task(session: Session, *, orphan_timeout_minutes: int, now: s
                 update(Task)
                 .where(
                     Task.task_id == orphan.task_id,
-                    Task.status == "RUNNING",
+                    Task.status == _GENERATING_STATUS,
                     Task.stage == _PLANNING_STAGE,
+                    Task.started_at.is_not(None),
                     Task.updated_at < cutoff,
                 )
                 .values(updated_at=now)
@@ -298,7 +313,7 @@ def run_planning(
         sub_quotas = allocate_group_quota(chapter_quotas[ci], char_counts)
         for gi, group in enumerate(groups):
             session.refresh(task)
-            if task.status != "RUNNING" or task.stage != _PLANNING_STAGE:
+            if task.status != _GENERATING_STATUS or task.stage != _PLANNING_STAGE:
                 return  # 已取消/转移 → 停止（不再付费调用）
             operation_key = f"planning:{entry['chapter_id']}:{gi}"
             quota = sub_quotas[gi]
@@ -320,7 +335,7 @@ def run_planning(
                 skipped_groups += 1
             else:
                 merged.extend((u, entry["chapter_id"]) for u in units)
-    if task.status != "RUNNING":
+    if task.status != _GENERATING_STATUS:
         return  # Key 错误/输入漂移等内部失败已置 FAILED（或外部转移）→ 不再落最终事务
     # 4. 合并：跨组指纹去重 + 全局 priority（§6.2）
     final_units = _merge_units(merged)
@@ -432,7 +447,7 @@ def _run_group(
     )
     while True:
         session.refresh(task)
-        if task.status != "RUNNING" or task.stage != _PLANNING_STAGE:
+        if task.status != _GENERATING_STATUS or task.stage != _PLANNING_STAGE:
             return None  # 已取消/转移 → 立即停止，不得再付费调用
         attempt_now = _now_utc()  # 每次尝试取新时钟（review fix 1：心跳真实推进）
         attempt_no = (
@@ -636,7 +651,7 @@ def _fail_planning_inplace(
 
 
 def _planning_guard_update(session: Session, task: Task, *, values: dict[str, Any]) -> bool:
-    """最终短事务条件更新（§6.2 step 7）：WHERE RUNNING+PLANNING；rowcount=0 → 回滚。"""
+    """最终短事务条件更新（§6.2 step 7）：WHERE GENERATING+PLANNING；rowcount=0 → 回滚。"""
     session.refresh(task)
     result = cast(
         CursorResult[Any],
@@ -644,7 +659,7 @@ def _planning_guard_update(session: Session, task: Task, *, values: dict[str, An
             update(Task)
             .where(
                 Task.task_id == task.task_id,
-                Task.status == "RUNNING",
+                Task.status == _GENERATING_STATUS,
                 Task.stage == _PLANNING_STAGE,
             )
             .values(**values)

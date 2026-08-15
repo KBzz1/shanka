@@ -1,12 +1,11 @@
-"""任务创建改造测试（spec §6.1/§10；Task 8）：PENDING+PLANNING 创建快照 + 预算硬上限。
+"""任务创建改造测试（spec §6.1/§10；Task 5）：DRAFT 创建快照（V2.5 自动保存）+ 预算硬上限。
 
 - 基座同 test_tasks_service.py：真实 SQLite（PRAGMA foreign_keys=ON）全表建库，
-  users 前置 + PDF/章节/牌组 + ApiKey 种子；
+  users 前置 + 项目/PDF/章节/牌组 + ApiKey 种子；
 - brief 中 `settings_override` fixture 在仓库不存在（T7 先例同样 adaptation），按
   仓库约定显式构造 Settings：预算测试走 executor 定式 `session.info["settings"]`
   注入通道，边界测试走 create_task 显式参数通道（adaptation 见任务报告）；
-- 既有 test_tasks_service.py::test_tasks_create_runs_and_plans 的 RUNNING+同事务
-  规划断言属旧创建语义，T16 更新；本文件只测新语义。
+- 旧 PENDING+PLANNING 创建语义已被 V2.5 DRAFT 取代（4.1），本文件只测 V2.5 语义。
 """
 
 import json
@@ -22,7 +21,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import ApiKey, Base, Chapter, KnowledgePoint, PdfFile, Task, User
+from infra.db.models import (
+    ApiKey,
+    Base,
+    Chapter,
+    KnowledgePoint,
+    LearningProject,
+    PdfFile,
+    Task,
+    User,
+)
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from services.tasks.service import create_task, task_view
@@ -74,7 +82,20 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
     )
     session.add(pdf)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at=_NOW,
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
+    deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
     chapter_ids: list[str] = []
     chapters: list[dict[str, object]] = []
@@ -108,6 +129,7 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
     )
     session.flush()
     return {
+        "project_id": project.project_id,
         "file_id": pdf.file_id,
         "deck_id": deck.deck_id,
         "chapter_ids": chapter_ids,
@@ -130,21 +152,22 @@ def _budget_settings(tmp_path: Path, *, max_units: int) -> Settings:
     )
 
 
-def test_create_task_pending_planning(session: Session) -> None:
-    """创建即 PENDING+PLANNING：started_at/total_batch_count 为空、快照完整、不再同事务规划。"""
+def test_create_task_draft_snapshot(session: Session) -> None:
+    """创建即 DRAFT（V2.5 4.1 自动保存）：started_at/total_batch_count 为空、快照完整、
+    不同事务规划。"""
     user = _uuid()
     ctx = _seed(session, user_id=user)
     task = create_task(
         session,
         user_id=user,
-        file_id=ctx["file_id"],
+        project_id=ctx["project_id"],
         deck_id=ctx["deck_id"],
         chapter_ids=ctx["chapter_ids"],
         config=_config(),
         now=_NOW,
     )
-    assert task.status == "PENDING"
-    assert task.stage == "PLANNING"
+    assert task.status == "DRAFT"
+    assert task.stage is None  # start 后才有 internal_stage
     assert task.started_at is None
     assert task.total_batch_count is None
     # 创建快照语义（契约 3.4/3.6）：完整 Chapter 对象 JSON，与现状一致
@@ -169,7 +192,7 @@ def test_create_task_budget_exceeded_rejected(session: Session, tmp_path: Path) 
         create_task(
             session,
             user_id=user,
-            file_id=ctx["file_id"],
+            project_id=ctx["project_id"],
             deck_id=ctx["deck_id"],
             chapter_ids=ctx["chapter_ids"],
             config=_config("COMPACT"),
@@ -181,18 +204,18 @@ def test_create_task_budget_exceeded_rejected(session: Session, tmp_path: Path) 
 
 
 def test_create_task_budget_boundary_accepted(session: Session, tmp_path: Path) -> None:
-    """预算等于上限（5 章 COMPACT=15 = 15）→ 正常创建 PENDING（显式 settings 参数通道）。"""
+    """预算等于上限（5 章 COMPACT=15 = 15）→ 正常创建 DRAFT（显式 settings 参数通道）。"""
     user = _uuid()
     ctx = _seed(session, user_id=user, chapter_count=5)
     task = create_task(
         session,
         user_id=user,
-        file_id=ctx["file_id"],
+        project_id=ctx["project_id"],
         deck_id=ctx["deck_id"],
         chapter_ids=ctx["chapter_ids"],
         config=_config("COMPACT"),
         now=_NOW,
         settings=_budget_settings(tmp_path, max_units=15),
     )
-    assert task.status == "PENDING"
-    assert task.stage == "PLANNING"
+    assert task.status == "DRAFT"
+    assert task.stage is None

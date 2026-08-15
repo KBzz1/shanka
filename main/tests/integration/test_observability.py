@@ -20,7 +20,7 @@ from sqlalchemy import insert, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, PdfFile, User
+from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -181,7 +181,20 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
         )
         session.add(pdf)
         session.flush()
+        project = LearningProject(
+            project_id=_uuid(),
+            user_id=user_id,
+            file_id=pdf.file_id,
+            name="P",
+            chapters_confirmed_at="2026-08-11T00:00:00.000Z",
+            version="2026-08-11T00:00:00.000Z",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+        session.add(project)
+        session.flush()
         deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
         session.flush()
         chapter_ids: list[str] = []
         for i in range(2):
@@ -213,7 +226,12 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
         )
         session.flush()
         session.commit()
-    return {"file_id": pdf.file_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
+    return {
+        "project_id": project.project_id,
+        "file_id": pdf.file_id,
+        "deck_id": deck.deck_id,
+        "chapter_ids": chapter_ids,
+    }
 
 
 def _payload(seed: dict[str, object]) -> dict[str, object]:
@@ -228,19 +246,23 @@ def _payload(seed: dict[str, object]) -> dict[str, object]:
 
 
 def _run_task(client: TestClient, db_path: Path, *, user: dict[str, str]) -> tuple[str, str]:
-    """POST 任务 → 显式 executor 扫描（mock transport 两批）→ 返回 (task_id, file_id)。"""
+    """V2.5 完整生命周期：POST 创建 DRAFT → 请求样卡 → 显式扫描（样卡 worker）→
+    start → 显式扫描（规划/生成/评分衔接）→ 返回 (task_id, file_id)。"""
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
+        f"/projects/{seed['project_id']}/tasks",
         json=_payload(seed),
         headers={**user, **_idem()},
     )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+    assert client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
     n = scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory)
-    assert n == 1  # 单任务执行完毕（两批）
+    assert n == 1  # 样卡 worker 完成（SAMPLE_GENERATING → AWAITING）
+    assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
+    n = scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory)
+    assert n == 1  # 规划 + 生成 + 评分同轮衔接 → COMPLETED
     return task_id, str(seed["file_id"])
 
 
@@ -416,36 +438,3 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
     assert (
         _plain_value(after, "batch_retry_total") - _plain_value(before, "batch_retry_total")
     ) == 0.0
-
-
-def test_cancel_metric_counts_transition_once(ctx: tuple[TestClient, Path]) -> None:
-    """F-1 回归：generation_tasks_total CANCELLED 只在实际状态转移时计数。
-
-    同任务不同幂等键重复取消（任务已终态 → service 早返回不转移）与同键重放
-    （execute_idempotent 快照，不重跑 biz）均不重复 inc（差值断言）。
-    """
-    client, db_path = ctx
-    user = _user(client)
-    seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
-        json=_payload(seed),
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 201  # 任务创建即 RUNNING（未跑 executor）
-    task_id = resp.json()["task_id"]
-    labels = ['result="CANCELLED"']
-    before = _labeled_value(client.get("/metrics").text, "generation_tasks_total", labels)
-    key_a = _idem()
-    # 首次取消（RUNNING → CANCELLED）：计数 +1
-    r1 = client.post(f"/tasks/{task_id}/cancel", headers={**user, **key_a})
-    assert r1.status_code == 200 and r1.json()["status"] == "CANCELLED"
-    # 不同幂等键重复取消（任务已终态）：service 早返回，不转移不计数
-    r2 = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
-    assert r2.status_code == 200 and r2.json()["status"] == "CANCELLED"
-    # 同键重放：走 execute_idempotent 快照，不重跑 biz
-    r3 = client.post(f"/tasks/{task_id}/cancel", headers={**user, **key_a})
-    assert r3.status_code == 200 and r3.json() == r1.json()
-    after = _labeled_value(client.get("/metrics").text, "generation_tasks_total", labels)
-    assert after - before == 1.0

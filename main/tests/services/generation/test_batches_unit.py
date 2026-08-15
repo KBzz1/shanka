@@ -29,6 +29,7 @@ from infra.db.models import (
     Card,
     Chapter,
     KnowledgePoint,
+    LearningProject,
     LlmCallAttempt,
     PdfFile,
     Task,
@@ -41,7 +42,7 @@ from infra.llm.deepseek import DeepSeekClient
 from infra.llm.prompts import load_asset
 from services.generation.batches import plan_batches, process_next_batch
 from services.pdf.text_chunks import persist_text_chunks
-from services.tasks.executor import process_running_tasks
+from services.tasks.executor import process_active_tasks
 from services.tasks.service import create_task
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
@@ -81,7 +82,8 @@ def _seed_unit_task(
     settings: Settings = _SETTINGS,
     no_source_chunks: bool = False,
 ) -> str:
-    """RUNNING+GENERATING 任务 + 页文本 + 生成单元 + （plan）按单元建批。返回 task_id。
+    """GENERATING 任务（stage=GENERATING）+ 页文本 + 生成单元 + （plan）按单元建批。
+    返回 task_id。
 
     no_source_chunks=True：单元 source_chunk_ids 写空（来源不足极端情形——生成前
     直接 SKIPPED 不发调用的分支）。
@@ -111,7 +113,20 @@ def _seed_unit_task(
     )
     session.add(pdf)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at=_NOW,
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
+    deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
@@ -136,7 +151,7 @@ def _seed_unit_task(
     task = create_task(
         session,
         user_id=user_id,
-        file_id=pdf.file_id,
+        project_id=project.project_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
@@ -146,7 +161,7 @@ def _seed_unit_task(
         ),
         now=_NOW,
     )
-    task.status = "RUNNING"
+    task.status = "GENERATING"  # V2.5 七态：跳过样卡阶段直入生成（批次语义聚焦）
     task.stage = "GENERATING"
     task.updated_at = _NOW
     session.flush()
@@ -661,7 +676,7 @@ def test_batch_ledger_same_transaction_crash_recovery(
     # 阶段 2：executor 扫描恢复（心跳超时 → 遗留 STARTED→UNKNOWN + PROCESSING→FAILED）
     # → 重试（尝试 2，预算含 UNKNOWN）→ SUCCEEDED + 卡入库 + 任务 COMPLETED
     with session_factory() as session:
-        n = process_running_tasks(
+        n = process_active_tasks(
             session,
             settings=_SETTINGS,
             client_factory=lambda _api_key: _client(lambda r: _ok(_valid_question_card())),

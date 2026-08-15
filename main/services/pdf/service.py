@@ -14,10 +14,9 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from domain.task import ACTIVE_TASK_STATUSES
 from infra.db.models import Chapter, KnowledgePoint, LearningProject, PdfFile, Task
 from infra.storage.local import LocalStorage
-
-_NON_TERMINAL = ["PENDING", "RUNNING", "PAUSED"]
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +108,7 @@ def delete_pdf(session: Session, *, user_id: str, file_id: str, storage: LocalSt
             select(func.count(Task.task_id)).where(
                 Task.file_id == file_id,
                 Task.user_id == user_id,  # 一致性守卫（DESIGN §5.1）：只计本用户任务
-                Task.status.in_(_NON_TERMINAL),
+                Task.status.in_(ACTIVE_TASK_STATUSES),
             )
         )
         or 0

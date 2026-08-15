@@ -3,10 +3,10 @@
 GenerationConfig 为 samples/tasks 共享请求模型（openapi 组件级定义），tasks.py 复用。
 V2.5：DifficultyRatio 三档为 0~100 的 10% 整数档、合计 100、允许任一档为 0；
 比例全 0 为非法配置（契约 3.5/4.1，INVALID_PREFERENCES 语义）。
-SampleRequest 为旧 /samples 兼容路径请求模型（V2.5 openapi 无命名 schema，不锚定守卫）。
+旧 /samples 兼容路径与 SampleRequest 已随 Task 5 移除（样卡持久化于任务）。
 """
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 
 from domain.enums import CoverageMode
 
@@ -48,14 +48,6 @@ class GenerationConfig(BaseModel):
         if self.coverage_mode not in {mode.value for mode in CoverageMode}:
             raise ValueError("非法 coverage_mode")
         return self
-
-
-class SampleRequest(BaseModel):
-    """旧 /samples 兼容路径请求（V2.5 起样卡持久化于任务，本模型仅过渡期使用）。"""
-
-    file_id: str
-    chapter_ids: list[str] = Field(min_length=1)
-    generation_config: GenerationConfig
 
 
 class SampleCard(BaseModel):

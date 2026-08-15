@@ -22,7 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from domain.enums import TaskStatus
+from domain.task import ACTIVE_TASK_STATUSES as _ACTIVE_TASK_STATUSES
 from infra.db.models import (
     Card,
     Chapter,
@@ -33,20 +33,6 @@ from infra.db.models import (
     Task,
 )
 from services.pdf.service import chapter_view, delete_chapter, pdf_view, update_chapter, upload_pdf
-
-# 活跃（非终态）任务：V2.5 七态非终态；Task 5 状态机接管前迁移期遗留旧态一并拦截
-# （防"活跃任务下删除项目"数据丢失——旧态任务等价于 V2.5 前四态）。
-_ACTIVE_TASK_STATUSES = frozenset(
-    {
-        TaskStatus.DRAFT.value,
-        TaskStatus.SAMPLE_GENERATING.value,
-        TaskStatus.AWAITING_SAMPLE_CONFIRMATION.value,
-        TaskStatus.GENERATING.value,
-        "PENDING",  # 迁移期遗留：V2.5 前运行时写入的旧态
-        "RUNNING",
-        "PAUSED",
-    }
-)
 
 
 def _uuid4() -> str:

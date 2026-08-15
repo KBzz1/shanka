@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from domain.task import ACTIVE_TASK_STATUSES
 from infra.db.models import Card, Deck, ReviewEvent, ReviewState, Task
 
 
@@ -135,7 +136,7 @@ def delete_deck(session: Session, *, user_id: str, deck_id: str) -> None:
             select(func.count(Task.task_id)).where(
                 Task.deck_id == deck_id,
                 Task.user_id == user_id,  # 一致性守卫（DESIGN §5.1）：只计本用户任务
-                Task.status.in_(["PENDING", "RUNNING", "PAUSED"]),
+                Task.status.in_(ACTIVE_TASK_STATUSES),
             )
         )
         or 0

@@ -122,7 +122,7 @@ def test_decks_api_delete_blocked_by_running_task(client: TestClient, tmp_path: 
                 "INSERT INTO tasks (task_id, user_id, status, selected_chapters,"
                 " generation_config, deck_id, generated_card_count, resumable,"
                 " created_at, updated_at)"
-                " VALUES (:task_id, :user_id, 'RUNNING', '[]', '{}', :deck_id,"
+                " VALUES (:task_id, :user_id, 'GENERATING', '[]', '{}', :deck_id,"
                 " 0, 0, :now, :now)"
             ),
             {

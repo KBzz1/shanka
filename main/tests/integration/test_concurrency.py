@@ -1,6 +1,6 @@
 """V5B 并发/心跳集成测试：批次抢占单执行者/心跳刷新（真实 SQLite + mock transport）。
 
-种子写入真实加密 Key（executor 解密路径）；process_running_tasks 注入
+种子写入真实加密 Key（executor 解密路径）；process_active_tasks 注入
 settings + client_factory（mock transport），生产缺省路径不在此验证。
 """
 
@@ -21,7 +21,7 @@ from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from services.generation.batches import plan_batches, process_next_batch
-from services.tasks.executor import process_running_tasks
+from services.tasks.executor import process_active_tasks
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
 _SETTINGS = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
@@ -48,7 +48,7 @@ def _seed_task(
     coverage_mode: str = "COMPACT",
     n_units: int | None = None,
 ) -> str:
-    """种子：RUNNING+GENERATING 任务 + 页文本 + 生成单元（锚定难度/卡型/来源页）+
+    """种子：GENERATING 任务（stage=GENERATING）+ 页文本 + 生成单元（锚定难度/卡型/来源页）+
     按单元建批（spec §7 批=单元，generation_unit_id 必填）。
 
     T8 起 create_task 不再规划知识点（PENDING+PLANNING）；V5B 并发/心跳测试聚焦
@@ -56,7 +56,7 @@ def _seed_task(
     覆盖）。test 1 直接调 process_next_batch，不经过 executor 的 plan 路径。
     n_units 覆盖单元数（test 1 单批次抢占场景用 1 单元 = 1 批）。
     """
-    from infra.db.models import ApiKey, Chapter, PdfFile
+    from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile
     from services.decks.service import create_deck
     from services.pdf.text_chunks import persist_text_chunks
     from services.tasks.service import create_task
@@ -85,7 +85,20 @@ def _seed_task(
     )
     session.add(pdf)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at="2026-08-10T00:00:00.000Z",
+        version="2026-08-10T00:00:00.000Z",
+        created_at="2026-08-10T00:00:00.000Z",
+        updated_at="2026-08-10T00:00:00.000Z",
+    )
+    session.add(project)
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now="2026-08-10T00:00:00.000Z")
+    deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
@@ -115,7 +128,7 @@ def _seed_task(
     task = create_task(
         session,
         user_id=user_id,
-        file_id=pdf.file_id,
+        project_id=project.project_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
@@ -124,14 +137,14 @@ def _seed_task(
         ),
         now="2026-08-10T00:00:00.000Z",
     )
-    task.status = "RUNNING"
+    task.status = "GENERATING"  # V2.5 七态：跳过样卡阶段直入生成（并发/心跳聚焦）
     task.stage = "GENERATING"
     task.updated_at = "2026-08-10T00:00:00.000Z"
     session.flush()
     chunks = session.scalars(
         select(TextChunk).where(TextChunk.file_id == pdf.file_id).order_by(TextChunk.page_number)
     ).all()
-    diffs = ["BASIC", "UNDERSTANDING", "APPLICATION"]
+    diffs = ["BASIC", "UNDERSTANDING", "DEEP_QUESTION"]  # V2.5 改名（3.5）
     n_kps = n_units if n_units is not None else {"COMPACT": 3, "BALANCED": 6}.get(coverage_mode, 3)
     kps = [
         KnowledgePoint(
@@ -235,7 +248,7 @@ def test_concurrency_heartbeat_updates_updated_at(session_factory: Callable[[], 
         assert seeded is not None
         created_at = seeded.created_at
     with session_factory() as session:
-        process_running_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
+        process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
     with session_factory() as session:
         task = session.get(Task, task_id)
@@ -282,7 +295,7 @@ def test_concurrency_batch_commit_survives_crash(
     crashed = False
     with session_factory() as session:
         try:
-            process_running_tasks(session, settings=_SETTINGS, client_factory=lambda _k: client)
+            process_active_tasks(session, settings=_SETTINGS, client_factory=lambda _k: client)
         except SystemExit:
             crashed = True
             session.rollback()  # 崩溃连接释放写锁（等价于进程死亡）
@@ -295,7 +308,7 @@ def test_concurrency_batch_commit_survives_crash(
         ).all()
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
     assert calls == 2  # 批 1 成功、批 2 崩溃
-    assert task.status == "RUNNING"  # 终态未落库（崩溃发生在 COMPLETED 之前）
+    assert task.status == "GENERATING"  # V2.5 七态：终态未落库（崩溃发生在 COMPLETED 之前）
     assert task.updated_at is not None and created_at is not None
     assert task.updated_at > created_at  # 批 1 心跳已随批提交
     # 批 1 已提交；批 2 抢占+STARTED 已提交（spec §9 调用前占位）→ PROCESSING 保留

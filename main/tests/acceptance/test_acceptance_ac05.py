@@ -1,20 +1,20 @@
 """验收测试：AC-05 任务恢复与幂等（PRD 9；迁移 schema + HTTP + mock transport + 崩溃模拟）。
 
-LLM 升级管线（规划 → 生成 → 评分）mock 全链路驱动；AC-05 恢复意图在新语义下的映射：
+LLM 升级管线（规划 → 生成 → 评分）mock 全链路驱动；AC-05 恢复意图在新语义下的映射
+（V2.5 4.3：无用户 resume/cancel——执行器内部经租约/心跳自动恢复，不暴露 PAUSED）：
 
 AC-05-a 中断后已入库卡保留 → 批 2 chat 前 SystemExit 崩溃（T1 模式）后：任务停留
-        RUNNING、批 1 SUCCEEDED + 1 卡落库（批次事务粒度——崩溃不丢已完成批次）；
+        GENERATING、批 1 SUCCEEDED + 1 卡落库（批次事务粒度——崩溃不丢已完成批次）；
         批 2 抢占 + STARTED 占位已随调用前事务提交（spec §9）→ PROCESSING 保留
-        （旧语义 claim 随崩溃回滚 → PENDING；新语义经心跳超时孤儿恢复复位）
-AC-05-b 继续任务从游标继续 → resume（孤儿 RUNNING 抢占）→ 恢复扫描只处理批 2..6
-        → COMPLETED；completed_batch_count 1 → 6（游标原子推进）
+        （恢复经心跳超时孤儿判据复位 FAILED 后重新抢占）
+AC-05-b 继续任务从游标继续 → 心跳超时孤儿 → 恢复扫描只处理批 2..6 → COMPLETED；
+        completed_batch_count 1 → 6（游标原子推进）
 AC-05-c 已完成批次不重复执行 → 恢复后批 1 仍 SUCCEEDED（retry_count=0），其生成
         调用恰好 1 次（学习目标序列断言 + 账本 attempt_count==1）
 AC-05-d generation_item_id 不重复入库 → 恢复/重入边缘：批 2 将生成的卡（seed 可复算）
         预先已在库（等价旧语义"批 2 响应含批内重复内容"——新 pipeline 每批恰好 1 卡，
         重复只能经同 seed 重入出现）→ 只入库 1 张（dedup 命中）+
         duplicate_rate 1.0 观测 + 全任务卡 generation_item_id 互异
-场景 2（取消保留）：任务运行中 cancel → CANCELLED + 已入库卡保留（1 卡不动），取消后不再处理
 
 后台循环间隔拉大（3600s）隔离：显式调 executor.scan_once（test_tasks_api 同款"显式
 scan_once"模式）；崩溃模拟 = mock transport 指定调用抛 SystemExit（BaseException——绕过
@@ -40,6 +40,7 @@ from infra.db.models import (
     Batch,
     Card,
     Chapter,
+    LearningProject,
     LlmCallAttempt,
     PdfFile,
     Task,
@@ -136,7 +137,20 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
         )
         session.add(pdf)
         session.flush()
+        project = LearningProject(
+            project_id=_uuid(),
+            user_id=user_id,
+            file_id=pdf.file_id,
+            name="P",
+            chapters_confirmed_at="2026-08-11T00:00:00.000Z",
+            version="2026-08-11T00:00:00.000Z",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+        session.add(project)
+        session.flush()
         deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
         session.flush()
         chapter_ids: list[str] = []
         for i in range(2):
@@ -168,7 +182,12 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
             now="2026-08-11T00:00:00.000Z",
         )
         session.commit()
-    return {"file_id": pdf.file_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
+    return {
+        "project_id": project.project_id,
+        "file_id": pdf.file_id,
+        "deck_id": deck.deck_id,
+        "chapter_ids": chapter_ids,
+    }
 
 
 def _payload(seed: dict[str, object]) -> dict[str, object]:
@@ -180,6 +199,26 @@ def _payload(seed: dict[str, object]) -> dict[str, object]:
             "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
         },
     }
+
+
+def _create_and_start(
+    client: TestClient, db_path: Path, *, user: dict[str, str], seed: dict[str, object]
+) -> str:
+    """V2.5 生命周期推进：创建 DRAFT → 请求样卡 → 显式扫描（样卡 worker，fake 不触网）
+    → start → 返回 task_id（进入 GENERATING+PLANNING，供崩溃模拟扫描使用）。"""
+    resp = client.post(
+        f"/projects/{seed['project_id']}/tasks",
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 201
+    task_id = str(resp.json()["task_id"])
+    assert client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
+    scan_tasks(_db_factory(db_path), settings=_SETTINGS)
+    resp = client.get(f"/tasks/{task_id}", headers=user)
+    assert resp.status_code == 200 and resp.json()["status"] == "AWAITING_SAMPLE_CONFIRMATION"
+    assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
+    return task_id
 
 
 def _db_factory(db_path: Path) -> sessionmaker[Session]:
@@ -294,19 +333,15 @@ def _batches(session: Session, task_id: str) -> list[Batch]:
 def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     ctx: tuple[TestClient, Path, Settings],
 ) -> None:
-    """AC-05 a-d：批 2 前崩溃 → 卡保留 + resume 孤儿从游标继续 + 批 1 不重跑 +
-    generation_item_id 防重。"""
+    """AC-05 a-d：批 2 前崩溃 → 卡保留 + 孤儿恢复从游标继续 + 批 1 不重跑 +
+    generation_item_id 防重。
+
+    V2.5（4.3）：无用户 resume 端点——执行器内部经租约/心跳自动恢复（不暴露 PAUSED）；
+    恢复路径 = 心跳超时孤儿判据 + 批次复位（PROCESSING→FAILED 可重新抢占）。"""
     client, db_path, settings = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
-        json=_payload(seed),
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
+    task_id = _create_and_start(client, db_path, user=user, seed=seed)
 
     # 崩溃模拟（T1 模式）：扫描 = 2 次规划（2 章）+ 批 1 一次生成成功，批 2 前
     # SystemExit（绕过 executor 的 except Exception）；崩溃点 = 第 4 次调用
@@ -318,10 +353,10 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     assert calls["n"] == 4  # 2 规划 + 批 1 + 批 2 崩溃
     assert gen_objectives == ["知识点0", "知识点1"]  # 崩溃前生成序（批 1、批 2）
 
-    # AC-05-a：崩溃后任务停留 RUNNING + 批 1 SUCCEEDED + 卡保留（批次事务粒度已落库）；
+    # AC-05-a：崩溃后任务停留 GENERATING + 批 1 SUCCEEDED + 卡保留（批次事务粒度已落库）；
     # 批 2 抢占 + STARTED 占位已随调用前事务提交（spec §9）→ PROCESSING
     body = client.get(f"/tasks/{task_id}", headers=user).json()
-    assert body["status"] == "RUNNING"
+    assert body["status"] == "GENERATING"
     assert body["generated_card_count"] == 1
     assert body["completed_batch_count"] == 1 and body["total_batch_count"] == 6
     with _db_factory(db_path)() as session:
@@ -349,11 +384,6 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     assert len(cards) == 1  # 已入库卡保留（AC-05-a）
     assert [a.status for a in batch1_attempts] == ["SUCCESS"]  # 批 1 账本一次成功（AC-05-c 前置）
 
-    # 新鲜 RUNNING（心跳内）resume → 409（孤儿判据生效，非 PAUSED 路径）
-    resp = client.post(f"/tasks/{task_id}/resume", headers={**user, **_idem()})
-    assert resp.status_code == 409
-    assert resp.json()["error"]["code"] == "TASK_STATE_CONFLICT"
-
     # 模拟 30 分钟孤儿窗口流逝（心跳超时）：updated_at 回拨到足够过去（孤儿判据 = 心跳超时）
     with _db_factory(db_path)() as session:
         task = session.get(Task, task_id)
@@ -361,12 +391,10 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
         task.updated_at = "2026-07-01T00:00:00.000Z"
         session.commit()
 
-    # 新 app（重启模拟）→ resume（孤儿）→ 200 RUNNING
+    # 新 app（重启模拟）→ 任务与已入库卡可见（无用户 resume API——恢复由执行器
+    # 扫描驱动，4.3：孤儿任务经同一状态的租约/心跳重新抢占）
     with TestClient(create_app(settings)) as restarted:
-        assert restarted.get(f"/tasks/{task_id}", headers=user).json()["status"] == "RUNNING"
-        resp = restarted.post(f"/tasks/{task_id}/resume", headers={**user, **_idem()})
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "RUNNING"
+        assert restarted.get(f"/tasks/{task_id}", headers=user).json()["status"] == "GENERATING"
 
     # AC-05-d 防重前置：模拟恢复/重入边缘——批 2 将生成的卡（seed = gen|task|2|QUESTION|q1|a1
     # 可复算）已在库（等价旧语义"批 2 响应含批内重复内容"：新 pipeline 每批恰好 1 卡，
@@ -397,8 +425,8 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
         )
         session.commit()
 
-    # resume 会刷新心跳（updated_at=now）；GENERATING 孤儿恢复按心跳超时判据——
-    # 恢复扫描前再次回拨，模拟恢复 worker 接管前的孤儿窗口流逝
+    # GENERATING 孤儿恢复按心跳超时判据——恢复扫描前确认孤儿窗口仍在流逝
+    # （防重种子直写未刷新心跳，回拨冗余但保持判据显式）
     with _db_factory(db_path)() as session:
         task = session.get(Task, task_id)
         assert task is not None
@@ -451,61 +479,3 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     assert items[1]["generated_item_ids"] == [dup_gen_item]
     assert items[1]["duplicate_rate"] == 1.0
     assert items[0]["duplicate_rate"] == 0.0
-
-
-def test_acceptance_ac05_cancel_keeps_inserted_cards(
-    ctx: tuple[TestClient, Path, Settings],
-) -> None:
-    """场景 2（取消保留）：任务运行中 cancel → CANCELLED + 已入库卡保留，取消后不再处理。"""
-    client, db_path, _ = ctx
-    user = _user(client)
-    seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
-        json=_payload(seed),
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
-
-    # 任务运行中：批 1 成功后崩溃暂停（T1 模式）→ 任务 RUNNING + 1 卡已入库
-    calls: dict[str, int] = {"n": 0}
-    gen_objectives: list[str] = []
-    factory = _scripted_factory(calls, gen_objectives, crash_call=4)
-    with pytest.raises(SystemExit):
-        scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory)
-    assert calls["n"] == 4
-
-    resp = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "CANCELLED"
-    assert body["ended_at"] is not None
-    assert body["generated_card_count"] == 1  # 视图仍报告已入库卡（保留）
-
-    # 已入库卡保留：批 1 SUCCEEDED + 1 卡不动（取消不回滚已完成批次）；
-    # 批 2 抢占 + STARTED 占位已提交（spec §9）→ PROCESSING
-    with _db_factory(db_path)() as session:
-        batches = _batches(session, task_id)
-        cards = session.scalars(
-            select(Card).where(Card.deck_id == cast(str, seed["deck_id"]))
-        ).all()
-    assert [b.status for b in batches] == [
-        "SUCCEEDED",
-        "PROCESSING",
-        "PENDING",
-        "PENDING",
-        "PENDING",
-        "PENDING",
-    ]
-    assert len(cards) == 1
-
-    # 取消后不再处理：CANCELLED 不进入扫描（无 RUNNING 任务），无新 chat 调用、卡数不变
-    assert scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory) == 0
-    assert calls["n"] == 4
-    with _db_factory(db_path)() as session:
-        cards = session.scalars(
-            select(Card).where(Card.deck_id == cast(str, seed["deck_id"]))
-        ).all()
-    assert len(cards) == 1

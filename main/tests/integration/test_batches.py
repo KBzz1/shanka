@@ -39,7 +39,7 @@ def _uuid() -> str:
 
 
 def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> str:
-    from infra.db.models import ApiKey, Chapter, PdfFile
+    from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile
     from services.decks.service import create_deck
 
     # FK 前置守卫：users 行必须先存在（engine 级 PRAGMA foreign_keys=ON）
@@ -66,7 +66,20 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
     )
     session.add(pdf)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at=_NOW,
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
+    deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
     ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
     session.add(ch)
@@ -84,7 +97,7 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
     task = create_task(
         session,
         user_id=user_id,
-        file_id=pdf.file_id,
+        project_id=project.project_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
@@ -93,7 +106,7 @@ def _seed_task_with_kps(session: Session, *, user_id: str, n_kps: int = 4) -> st
         ),
         now=_NOW,
     )
-    task.status = "RUNNING"
+    task.status = "GENERATING"  # V2.5 七态：跳过样卡阶段直入生成（批次语义聚焦）
     task.stage = "GENERATING"
     task.updated_at = _NOW
     persist_text_chunks(

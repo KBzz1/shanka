@@ -65,8 +65,10 @@ def _seed_chapter(db_path: Path, file_id: str) -> str:
     return chapter_id
 
 
-def _create_deck(client: TestClient, user: dict[str, str]) -> str:
-    resp = client.post("/decks", json={"name": "D"}, headers={**user, **_idem()})
+def _create_deck(client: TestClient, user: dict[str, str], *, project_id: str | None = None) -> str:
+    resp = client.post(
+        "/decks", json={"name": "D", "project_id": project_id}, headers={**user, **_idem()}
+    )
     assert resp.status_code == 201, resp.text
     return str(resp.json()["deck_id"])
 
@@ -117,24 +119,30 @@ def test_card_deck_user_consistency(client: TestClient) -> None:
     assert client.get(f"/decks/{deck_id}/cards", headers=h1).status_code == 200
 
 
-def test_task_pdf_deck_user_consistency(client: TestClient, tmp_path: Path) -> None:
-    """Task↔PDF/Deck 一致性守卫：user2 用 user1 的 file_id 建任务 → 404；
-    user2 用自己的 file_id 但挂 user1 的 deck_id → 404。"""
+def test_task_project_deck_user_consistency(client: TestClient, tmp_path: Path) -> None:
+    """Task↔Project/Deck 一致性守卫：user2 用 user1 的 project 建任务 → 404；
+    user2 用自己的 project 但挂 user1 的 deck_id → 404。"""
     h1 = _user(client, "user1", "pass-1111")
     h2 = _user(client, "user2", "pass-2222")
-    # 各自上传 PDF（201 PENDING；fake bytes 通过三重校验）
+    # 各自上传 PDF 建立学习项目（201；fake bytes 通过三重校验）
     pdf_bytes = b"%PDF-1.4 fake pdf content for upload validation"
     r1 = client.post(
-        "/pdfs", files={"file": ("a.pdf", pdf_bytes, "application/pdf")}, headers={**h1, **_idem()}
+        "/projects",
+        files={"file": ("a.pdf", pdf_bytes, "application/pdf")},
+        headers={**h1, **_idem()},
     )
     assert r1.status_code == 201, r1.text
     r2 = client.post(
-        "/pdfs", files={"file": ("b.pdf", pdf_bytes, "application/pdf")}, headers={**h2, **_idem()}
+        "/projects",
+        files={"file": ("b.pdf", pdf_bytes, "application/pdf")},
+        headers={**h2, **_idem()},
     )
     assert r2.status_code == 201, r2.text
-    deck1 = _create_deck(client, h1)
-    chapter1 = _seed_chapter(tmp_path / "iso.db", r1.json()["file_id"])
-    chapter2 = _seed_chapter(tmp_path / "iso.db", r2.json()["file_id"])
+    project1 = r1.json()["project_id"]
+    project2 = r2.json()["project_id"]
+    deck1 = _create_deck(client, h1, project_id=project1)
+    chapter1 = _seed_chapter(tmp_path / "iso.db", r1.json()["file"]["file_id"])
+    chapter2 = _seed_chapter(tmp_path / "iso.db", r2.json()["file"]["file_id"])
     payload = {
         "deck_id": deck1,
         "chapter_ids": [chapter1],
@@ -143,17 +151,13 @@ def test_task_pdf_deck_user_consistency(client: TestClient, tmp_path: Path) -> N
             "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
         },
     }
-    # V2.5 过渡：file_id 经 query 参数传入（请求体为 V2.5 形状）
-    resp = client.post(
-        "/tasks", params={"file_id": r1.json()["file_id"]}, json=payload, headers={**h2, **_idem()}
-    )
+    # V2.5 4.3：任务挂项目（POST /projects/{id}/tasks）——跨用户项目 → 404 不暴露存在性
+    resp = client.post(f"/projects/{project1}/tasks", json=payload, headers={**h2, **_idem()})
     assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "PDF_NOT_FOUND"
-    # user2 自己的 PDF + user1 的 deck → 404 DECK_NOT_FOUND
+    assert resp.json()["error"]["code"] == "PROJECT_NOT_FOUND"
+    # user2 自己的 project + user1 的 deck → 404 DECK_NOT_FOUND
     payload["chapter_ids"] = [chapter2]
-    resp = client.post(
-        "/tasks", params={"file_id": r2.json()["file_id"]}, json=payload, headers={**h2, **_idem()}
-    )
+    resp = client.post(f"/projects/{project2}/tasks", json=payload, headers={**h2, **_idem()})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
 

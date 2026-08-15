@@ -26,6 +26,7 @@ from infra.db.models import (
     Batch,
     Chapter,
     KnowledgePoint,
+    LearningProject,
     LlmCallAttempt,
     PdfFile,
     Task,
@@ -84,7 +85,8 @@ def _seed_planning_task(
     text_page_range: tuple[int, int] | None = None,
     coverage_mode: str = "COMPACT",
 ) -> tuple[str, str, str]:
-    """PENDING+PLANNING 任务 + 章节 + 页文本（text_chunks）；返回 (task_id, chapter_id, file_id)。
+    """GENERATING+PLANNING 任务（start 后状态）+ 章节 + 页文本（text_chunks）；
+    返回 (task_id, chapter_id, file_id)。
 
     text_page_range 覆盖页文本落库范围（缺省 = 章节页码范围）；可构造"章节无文本"场景。
     """
@@ -113,7 +115,20 @@ def _seed_planning_task(
     )
     session.add(pdf)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        file_id=pdf.file_id,
+        name="P",
+        chapters_confirmed_at=_NOW,
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
+    deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
     ch = Chapter(
         chapter_id=_uuid(),
@@ -148,7 +163,7 @@ def _seed_planning_task(
     task = create_task(
         session,
         user_id=user_id,
-        file_id=pdf.file_id,
+        project_id=project.project_id,
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
@@ -157,6 +172,10 @@ def _seed_planning_task(
         ),
         now=_NOW,
     )
+    # start 后状态（4.1）：AWAITING_SAMPLE_CONFIRMATION → GENERATING + stage=PLANNING
+    task.status = "GENERATING"
+    task.stage = "PLANNING"
+    task.updated_at = _NOW
     session.commit()
     return task.task_id, ch.chapter_id, pdf.file_id
 
@@ -227,7 +246,8 @@ def _claim_and_plan(
 def test_claim_cas1_snapshot_freeze(
     session_factory: Callable[[], Session],
 ) -> None:
-    """CAS1：PENDING+PLANNING → RUNNING；claim 前修改 Chapter.start_page → 快照含新值。"""
+    """CAS1：GENERATING+PLANNING（started_at 空）→ 接管落 started_at/心跳，用户状态
+    不转移（V2.5 全程 GENERATING）；claim 前修改 Chapter.start_page → 快照含新值。"""
     user = _uuid()
     with session_factory() as session:
         task_id, chapter_id, _ = _seed_planning_task(session, user_id=user)
@@ -238,26 +258,28 @@ def test_claim_cas1_snapshot_freeze(
         task = claim_planning_task(session, orphan_timeout_minutes=30, now=_CLAIM_NOW)
         assert task is not None
         assert task.task_id == task_id
-        assert task.status == "RUNNING"
+        assert task.status == "GENERATING"  # 接管不转移用户状态（4.1）
         assert task.started_at == _CLAIM_NOW
         snapshot = json.loads(task.selected_chapters)
         assert snapshot[0]["start_page"] == 99  # 重读章节最新页码覆盖快照（§4.2 冻结）
         session.commit()
-        # CAS2：RUNNING+PLANNING 但未超时（updated_at == now）→ 拒绝接管
+        # CAS2：GENERATING+PLANNING 但未超时（updated_at == now）→ 拒绝接管
         assert claim_planning_task(session, orphan_timeout_minutes=30, now=_CLAIM_NOW) is None
 
 
 def test_claim_cas2_orphan_takeover_marks_started_unknown(
     session_factory: Callable[[], Session],
 ) -> None:
-    """CAS2：RUNNING+PLANNING 心跳超时 → 接管 + 遗留 STARTED 转 UNKNOWN（恢复按账本）。"""
+    """CAS2：GENERATING+PLANNING 心跳超时（曾被接管）→ 接管 + 遗留 STARTED 转
+    UNKNOWN（恢复按账本）。"""
     user = _uuid()
     with session_factory() as session:
         task_id, chapter_id, _ = _seed_planning_task(session, user_id=user)
         task = session.get(Task, task_id)
         assert task is not None
-        task.status = "RUNNING"
+        task.status = "GENERATING"
         task.stage = "PLANNING"
+        task.started_at = "2026-08-12T00:00:00.000Z"  # 曾被接管（CAS2 前置）
         task.updated_at = "2026-08-12T00:00:00.000Z"  # 心跳超时（>30 分钟）
         session.commit()
         create_attempt(
@@ -341,7 +363,7 @@ def test_planning_success_units_and_batches(
         ).all()
     assert calls == 1
     assert task.stage == "GENERATING"
-    assert task.status == "RUNNING"
+    assert task.status == "GENERATING"  # V2.5 全程 GENERATING（规划完成不转移用户状态）
     assert task.skipped_planning_group_count == 0
     assert len(kps) == 2  # 每单元一个知识点（BASIC + UNDERSTANDING 各 1，配额内）
     assert [kp.target_difficulty for kp in kps] == ["BASIC", "UNDERSTANDING"]
@@ -546,10 +568,11 @@ def test_planning_all_failed_fails_task(
     assert [a.status for a in attempts] == ["FAILED", "FAILED", "FAILED"]
 
 
-def test_planning_cancelled_final_condition_update(
+def test_planning_failed_final_condition_update(
     session_factory: Callable[[], Session],
 ) -> None:
-    """全部组成功后在最终事务前取消 → 条件更新 rowcount=0 → 不写 KnowledgePoint/Batch。"""
+    """全部组成功后在最终事务前并发 FAILED（另一 worker 系统级失败）→ 条件更新
+    rowcount=0 → 不写 KnowledgePoint/Batch（V2.5 无 cancel，终态守卫以 FAILED 等价验证）。"""
     user = _uuid()
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
@@ -568,13 +591,13 @@ def test_planning_cancelled_final_condition_update(
             with_for_update: Any = None,
         ) -> None:
             nonlocal injected
-            # 最终短事务前的 Task 刷新（chat 已完成后）→ 注入 CANCELLED（另一连接）
+            # 最终短事务前的 Task 刷新（chat 已完成后）→ 注入并发 FAILED（另一连接）
             if not injected and isinstance(instance, Task) and calls >= 1:
                 injected = True
                 with session_factory() as cancel_session:
                     task_row = cancel_session.get(Task, task_id)
                     assert task_row is not None
-                    task_row.status = "CANCELLED"
+                    task_row.status = "FAILED"
                     task_row.ended_at = _NOW
                     task_row.updated_at = _NOW
                     cancel_session.commit()
@@ -594,7 +617,7 @@ def test_planning_cancelled_final_condition_update(
             select(func.count()).select_from(Batch).where(Batch.task_id == task_id)
         )
     assert calls == 1
-    assert task.status == "CANCELLED"  # 不被最终事务覆盖
+    assert task.status == "FAILED"  # 并发终态不被最终事务覆盖
     assert kp_count == 0  # 条件不成立 → 整事务回滚
     assert batch_count == 0
 
@@ -754,11 +777,11 @@ def test_planning_heartbeat_refreshes_per_attempt(
     assert task.updated_at > "2026-08-12T01:02:00.000Z"
 
 
-def test_planning_key_error_cancel_race_preserves_cancelled(
+def test_planning_key_error_fail_race_preserves_failed(
     session_factory: Callable[[], Session],
 ) -> None:
-    """review fix 2：401 Key 错误路径的条件更新——finish 提交后、guard 前注入取消
-    → rowcount=0 → FAILED 不覆盖 CANCELLED。"""
+    """review fix 2：401 Key 错误路径的条件更新——finish 提交后、guard 前并发 FAILED
+    → rowcount=0 → guard 的 FAILED 不覆盖并发终态（V2.5 无 cancel，以 FAILED 等价验证）。"""
     user = _uuid()
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
@@ -778,13 +801,13 @@ def test_planning_key_error_cancel_race_preserves_cancelled(
         ) -> None:
             nonlocal injected
             # 401 已发生后的下一次 Task 刷新 = _fail_planning_inplace 的 guard 刷新
-            # → 注入 CANCELLED（另一连接）
+            # → 注入并发 FAILED（另一连接）
             if not injected and isinstance(instance, Task) and chatted:
                 injected = True
                 with session_factory() as cancel_session:
                     task_row = cancel_session.get(Task, task_id)
                     assert task_row is not None
-                    task_row.status = "CANCELLED"
+                    task_row.status = "FAILED"
                     task_row.ended_at = _NOW
                     task_row.updated_at = _NOW
                     cancel_session.commit()
@@ -798,7 +821,7 @@ def test_planning_key_error_cancel_race_preserves_cancelled(
         attempts = session.scalars(
             select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
         ).all()
-    assert task.status == "CANCELLED"  # 不被 guard-less FAILED 覆盖
+    assert task.status == "FAILED"  # 并发终态不被 guard 的 FAILED 覆盖
     assert [a.status for a in attempts] == ["FAILED"]  # 账本 401 失败已记（预算消耗）
 
 

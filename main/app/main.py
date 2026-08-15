@@ -20,7 +20,6 @@ from app.api import (
     probes,
     projects,
     review,
-    samples,
     stats,
     tasks,
 )
@@ -154,7 +153,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(projects.router)
     app.include_router(preferences.router)
     app.include_router(api_key.router)
-    app.include_router(samples.router)
     app.include_router(tasks.router)
     app.include_router(observability.router)
     app.state.settings = settings

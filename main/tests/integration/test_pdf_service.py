@@ -168,7 +168,7 @@ def test_pdf_service_delete_blocked_by_non_terminal_task(
                 task_id=_uuid(),
                 user_id=user,
                 file_id=file_id,
-                status="RUNNING",
+                status="GENERATING",
                 selected_chapters="[]",
                 generation_config="{}",
                 generated_card_count=0,

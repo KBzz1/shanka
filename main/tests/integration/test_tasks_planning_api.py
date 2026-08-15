@@ -1,4 +1,4 @@
-"""任务创建改造 API 测试（spec §6.1/§10；Task 8）：PENDING+PLANNING 视图 + 预算上限 400。
+"""任务创建改造 API 测试（spec §6.1/§10；Task 5）：DRAFT 视图（V2.5 自动保存）+ 预算上限 400。
 
 - brief 指定 `tests/app/api/test_tasks_planning_api.py`，仓库无 tests/app/ 目录，
   按仓库约定放 tests/integration/（test_tasks_api.py 同款基座：迁移 schema +
@@ -17,7 +17,7 @@ from sqlalchemy import insert, select, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, PdfFile, Task, User
+from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from tests.conftest import auth_headers
@@ -115,7 +115,20 @@ def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dic
         )
         session.add(pdf)
         session.flush()
+        project = LearningProject(
+            project_id=_uuid(),
+            user_id=user_id,
+            file_id=pdf.file_id,
+            name="P",
+            chapters_confirmed_at=_NOW,
+            version=_NOW,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        session.add(project)
+        session.flush()
         deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
+        deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
         session.flush()
         chapter_ids: list[str] = []
         for i in range(chapter_count):
@@ -140,7 +153,12 @@ def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dic
         )
         session.flush()
         session.commit()
-    return {"file_id": pdf.file_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
+    return {
+        "project_id": project.project_id,
+        "file_id": pdf.file_id,
+        "deck_id": deck.deck_id,
+        "chapter_ids": chapter_ids,
+    }
 
 
 def _payload(seed: dict[str, object], *, tendency: str = "COMPACT") -> dict[str, object]:
@@ -154,21 +172,21 @@ def _payload(seed: dict[str, object], *, tendency: str = "COMPACT") -> dict[str,
     }
 
 
-def test_tasks_create_201_pending_planning_view(ctx: tuple[TestClient, Path]) -> None:
-    """POST /tasks → 201 PENDING+PLANNING：started_at/total_batch_count 为空、快照完整、新字段。"""
+def test_tasks_create_201_draft_view(ctx: tuple[TestClient, Path]) -> None:
+    """POST /projects/{id}/tasks → 201 DRAFT：started_at/total_batch_count 为空、
+    快照完整、新字段（V2.5 4.1 自动保存：创建即 DRAFT，不规划）。"""
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
+        f"/projects/{seed['project_id']}/tasks",
         json=_payload(seed),
         headers={**user, **_idem()},
     )
     assert resp.status_code == 201
     body = resp.json()
-    assert body["status"] == "PENDING"
-    assert body["internal_stage"] == "PLANNING"  # V2.5：stage 列 → internal_stage 语义
+    assert body["status"] == "DRAFT"
+    assert body["internal_stage"] is None  # start 后才有内部阶段
     assert body["started_at"] is None
     assert body["total_batch_count"] is None
     assert body["completion_reason"] is None
@@ -187,8 +205,7 @@ def test_tasks_create_budget_exceeded_400(ctx_strict: tuple[TestClient, Path]) -
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path), chapter_count=5)
     resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
+        f"/projects/{seed['project_id']}/tasks",
         json=_payload(seed),
         headers={**user, **_idem()},
     )

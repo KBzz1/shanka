@@ -183,7 +183,7 @@ def test_decks_delete_blocked_by_non_terminal_task(session_factory: Callable[[],
             Task(
                 task_id=_uuid(),
                 user_id=user,
-                status="RUNNING",
+                status="GENERATING",
                 selected_chapters="[]",
                 generation_config="{}",
                 deck_id=deck.deck_id,

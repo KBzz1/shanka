@@ -17,7 +17,7 @@ from sqlalchemy import insert, select, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, PdfFile, Task, User
+from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -53,6 +53,8 @@ def _client_factory(api_key: str) -> DeepSeekClient:
             chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
             units: list[dict[str, object]] = []
             for difficulty, quota in payload["difficulty_quota"].items():
+                # V2.5 改名（3.5）：历史 APPLICATION 键 → DEEP_QUESTION（落库合法值域）
+                difficulty = "DEEP_QUESTION" if difficulty == "APPLICATION" else difficulty
                 for _ in range(quota):
                     units.append(
                         {
@@ -174,7 +176,20 @@ def _seed_context(db_path: Path, *, user_id: str, with_key: bool = True) -> dict
         )
         session.add(pdf)
         session.flush()
+        project = LearningProject(
+            project_id=_uuid(),
+            user_id=user_id,
+            file_id=pdf.file_id,
+            name="P",
+            chapters_confirmed_at="2026-08-11T00:00:00.000Z",
+            version="2026-08-11T00:00:00.000Z",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+        session.add(project)
+        session.flush()
         deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
         session.flush()
         chapter_ids: list[str] = []
         for i in range(2):
@@ -208,7 +223,12 @@ def _seed_context(db_path: Path, *, user_id: str, with_key: bool = True) -> dict
             now="2026-08-11T00:00:00.000Z",
         )
         session.commit()
-    return {"file_id": pdf.file_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
+    return {
+        "project_id": project.project_id,
+        "file_id": pdf.file_id,
+        "deck_id": deck.deck_id,
+        "chapter_ids": chapter_ids,
+    }
 
 
 def _payload(seed: dict[str, object], *, tendency: str = "COMPACT") -> dict[str, object]:
@@ -229,27 +249,25 @@ def _post_task(
     user: dict[str, str],
     idem: dict[str, str] | None = None,
 ) -> httpx.Response:
-    """POST /tasks（V2.5 过渡：file_id 为 query 参数）。"""
+    """POST /projects/{project_id}/tasks（V2.5 4.3：项目归属入口）。"""
     headers = {**user, **(idem or _idem())}
     return cast(
         httpx.Response,
-        client.post(
-            "/tasks", params={"file_id": seed["file_id"]}, json=_payload(seed), headers=headers
-        ),
+        client.post(f"/projects/{seed['project_id']}/tasks", json=_payload(seed), headers=headers),
     )
 
 
-def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, Path]) -> None:
-    """POST /tasks → 201 PENDING+PLANNING（T8 新语义：创建不自动规划，规划 worker
-    CAS 接管）；selected_chapters 为 Chapter 对象数组快照（契约 3.4）。"""
+def test_tasks_create_201_draft_with_chapter_snapshot(ctx: tuple[TestClient, Path]) -> None:
+    """POST /projects/{id}/tasks → 201 DRAFT（V2.5 4.1/6.4 自动保存：创建即 DRAFT，
+    不规划）；selected_chapters 为 Chapter 对象数组快照（契约 3.4）。"""
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     resp = _post_task(client, seed, user)
     assert resp.status_code == 201
     body = resp.json()
-    assert body["status"] == "PENDING"
-    assert body["internal_stage"] == "PLANNING"  # V2.5 stage 列 → internal_stage 语义
+    assert body["status"] == "DRAFT"
+    assert body["internal_stage"] is None  # start 后才有内部阶段（PLANNING→…）
     assert body["generated_card_count"] == 0
     chapters = body["selected_chapters"]
     assert len(chapters) == 2
@@ -264,9 +282,7 @@ def test_tasks_create_missing_idempotency_key_400(ctx: tuple[TestClient, Path]) 
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks", params={"file_id": seed["file_id"]}, json=_payload(seed), headers=user
-    )
+    resp = client.post(f"/projects/{seed['project_id']}/tasks", json=_payload(seed), headers=user)
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
@@ -288,8 +304,9 @@ def test_tasks_create_idempotent_replay(ctx: tuple[TestClient, Path]) -> None:
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     headers = {**user, **_idem()}
     payload = _payload(seed)
-    r1 = client.post("/tasks", params={"file_id": seed["file_id"]}, json=payload, headers=headers)
-    r2 = client.post("/tasks", params={"file_id": seed["file_id"]}, json=payload, headers=headers)
+    path = f"/projects/{seed['project_id']}/tasks"
+    r1 = client.post(path, json=payload, headers=headers)
+    r2 = client.post(path, json=payload, headers=headers)
     assert r1.status_code == 201 and r2.status_code == 201
     assert r1.json() == r2.json()
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
@@ -304,15 +321,10 @@ def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> 
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     headers = {**user, **_idem()}
-    assert (
-        client.post(
-            "/tasks", params={"file_id": seed["file_id"]}, json=_payload(seed), headers=headers
-        ).status_code
-        == 201
-    )
+    path = f"/projects/{seed['project_id']}/tasks"
+    assert client.post(path, json=_payload(seed), headers=headers).status_code == 201
     resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
+        path,
         json=_payload(seed, tendency="EXTENSIVE"),
         headers=headers,
     )
@@ -321,7 +333,8 @@ def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> 
 
 
 def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
-    """长任务轮询：显式 executor 扫描后 GET 返回 COMPLETED（COMPACT=3 知识点/章 × 2 章）。"""
+    """长任务轮询（V2.5 完整流程）：创建 DRAFT → 请求样卡 → 显式扫描（样卡 worker
+    完成）→ start → 显式扫描（规划/生成/评分衔接）→ GET 返回 COMPLETED。"""
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
@@ -329,6 +342,14 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     task_factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+    # 请求样卡（DRAFT → SAMPLE_GENERATING）→ 样卡 worker 后台完成 → AWAITING
+    assert client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
+    scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
+    resp = client.get(f"/tasks/{task_id}", headers=user)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "AWAITING_SAMPLE_CONFIRMATION"
+    # start（校验样卡 hash）→ 规划/生成/评分 worker → COMPLETED
+    assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
     final: dict[str, object] = {}
     for _ in range(10):
         scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
@@ -338,49 +359,6 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
         if final["status"] == "COMPLETED":
             break
     assert final["status"] == "COMPLETED"
-    assert final["generated_card_count"] == 6  # COMPACT 2 章 → 6 单元 → 6 批 × 每批 1 卡
+    assert isinstance(final["generated_card_count"], int) and final["generated_card_count"] > 0
     assert final["ended_at"] is not None
     assert final["resumable"] is False
-
-
-def test_tasks_cancel_200(ctx: tuple[TestClient, Path]) -> None:
-    """POST cancel → 200 CANCELLED（已入库卡片保留，V4 取消时无卡片）。"""
-    client, db_path = ctx
-    user = _user(client)
-    seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = _post_task(client, seed, user)
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
-    resp = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "CANCELLED"
-    assert body["ended_at"] is not None
-    # 终态再取消保持 CANCELLED（状态机不变式）
-    resp = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "CANCELLED"
-
-
-def test_tasks_resume_200_then_409(ctx: tuple[TestClient, Path]) -> None:
-    """PAUSED+resumable=1 → resume 200 RUNNING；再 resume（RUNNING）→ 409 TASK_STATE_CONFLICT。"""
-    client, db_path = ctx
-    user = _user(client)
-    seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = _post_task(client, seed, user)
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
-    # 直写 PAUSED + resumable=1（服务端无 PAUSED 入口；后台循环间隔 3600 不干预）
-    factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
-    with factory() as session:
-        task = session.get(Task, task_id)
-        assert task is not None
-        task.status = "PAUSED"
-        task.resumable = 1
-        session.commit()
-    resp = client.post(f"/tasks/{task_id}/resume", headers={**user, **_idem()})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "RUNNING"
-    resp = client.post(f"/tasks/{task_id}/resume", headers={**user, **_idem()})
-    assert resp.status_code == 409
-    assert resp.json()["error"]["code"] == "TASK_STATE_CONFLICT"

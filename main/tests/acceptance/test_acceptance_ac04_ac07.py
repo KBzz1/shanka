@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Batch, Card, Chapter, PdfFile, User
+from infra.db.models import ApiKey, Batch, Card, Chapter, LearningProject, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -220,7 +220,20 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
         )
         session.add(pdf)
         session.flush()
+        project = LearningProject(
+            project_id=_uuid(),
+            user_id=user_id,
+            file_id=pdf.file_id,
+            name="P",
+            chapters_confirmed_at="2026-08-11T00:00:00.000Z",
+            version="2026-08-11T00:00:00.000Z",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+        session.add(project)
+        session.flush()
         deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
         session.flush()
         chapter_ids: list[str] = []
         for i in range(2):
@@ -252,7 +265,12 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
             now="2026-08-11T00:00:00.000Z",
         )
         session.commit()
-    return {"file_id": pdf.file_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
+    return {
+        "project_id": project.project_id,
+        "file_id": pdf.file_id,
+        "deck_id": deck.deck_id,
+        "chapter_ids": chapter_ids,
+    }
 
 
 def _payload(seed: dict[str, object]) -> dict[str, object]:
@@ -268,6 +286,30 @@ def _payload(seed: dict[str, object]) -> dict[str, object]:
 
 def _db_factory(db_path: Path) -> sessionmaker[Session]:
     return create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+
+
+def _create_and_start(
+    client: TestClient, db_path: Path, *, user: dict[str, str], seed: dict[str, object]
+) -> str:
+    """V2.5 生命周期推进：创建 DRAFT → 请求样卡 → 显式扫描（样卡 worker）→ start
+    → 返回 task_id（进入 GENERATING+PLANNING，供 executor 扫描完成正式生成）。"""
+    resp = client.post(
+        f"/projects/{seed['project_id']}/tasks",
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 201
+    task_id = str(resp.json()["task_id"])
+    assert client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
+    scan_tasks(
+        _db_factory(db_path),
+        settings=_SETTINGS,
+        client_factory=_pipeline_factory(cards=_valid_cards()),
+    )
+    resp = client.get(f"/tasks/{task_id}", headers=user)
+    assert resp.status_code == 200 and resp.json()["status"] == "AWAITING_SAMPLE_CONFIRMATION"
+    assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
+    return task_id
 
 
 def _valid_cards(n: int = 6) -> list[dict[str, object]]:
@@ -300,14 +342,7 @@ def test_acceptance_ac04_valid_cards_inserted_and_completed(
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
-        json=_payload(seed),
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
+    task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=_valid_cards())
     body = client.get(f"/tasks/{task_id}", headers=user).json()
     assert body["status"] == "COMPLETED"
@@ -331,14 +366,7 @@ def test_acceptance_ac04_invalid_cards_not_inserted_skipped(
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
-        json=_payload(seed),
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
+    task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=[{"type": "QUESTION"}])
     body = client.get(f"/tasks/{task_id}", headers=user).json()
     assert body["status"] == "COMPLETED"  # 批次级失败不中断任务（4.2）
@@ -366,14 +394,7 @@ def test_acceptance_ac04_rubric_no_auto_fix_prune_or_regenerate(
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
-        json=_payload(seed),
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
+    task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=_valid_cards(), scores=_LOW_SCORES)
     body = client.get(f"/tasks/{task_id}", headers=user).json()
     assert body["status"] == "COMPLETED"
@@ -403,14 +424,7 @@ def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
-        json=_payload(seed),
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
+    task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=_valid_cards())
     resp = client.get(f"/tasks/{task_id}/batches", headers=user)
     assert resp.status_code == 200
@@ -461,14 +475,7 @@ def test_acceptance_ac07_abnormal_cache_data_does_not_gate_insertion(
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post(
-        "/tasks",
-        params={"file_id": seed["file_id"]},
-        json=_payload(seed),
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 201
-    task_id = resp.json()["task_id"]
+    task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=_valid_cards(), with_usage=False)
     body = client.get(f"/tasks/{task_id}", headers=user).json()
     assert body["status"] == "COMPLETED"

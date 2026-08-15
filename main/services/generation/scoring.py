@@ -6,14 +6,14 @@
   scoring_max_input_chars 双限再拆，卡片+锚定+去重页原文全量计字符）；APPLICATION
   逐单元；组批后调用数 > max_scoring_calls_per_task → 按层配额（候选数占比，最大
   余数法）+ 哈希序确定性缩减。组数即计划调用数（§8 调用上限口径）。
-- run_scoring_stage：逐组——事务内重读 Task（须 RUNNING+SCORING，否则不发请求）→
+- run_scoring_stage：逐组——事务内重读 Task（须 GENERATING+SCORING，否则不发请求）→
   create_attempt(STARTED, stage="SCORING", operation_key=f"scoring:{group_key}") +
   心跳同事务 commit → 事务外 chat → 事务外 validate_scores → 事务内：重读各卡
   （version/内容 hash 与指纹重推导不一致 → 整组 finish_failed，内部原因
   STALE_SCORING_INPUT，卡评分留 NULL）→ 回写 Card 5 字段（总分 = 代码计算四维和）+
   Batch 质量 + finish_success + 心跳 commit。任何失败（RetryableUpstreamError/
   AppError/输出非法/STALE）→ finish_failed、不重试、不阻塞，继续下一组。全部组后
-  条件更新 WHERE status='RUNNING' AND stage='SCORING' → COMPLETED（rowcount=0 →
+  条件更新 WHERE status='GENERATING' AND stage='SCORING' → COMPLETED（rowcount=0 →
   不覆盖并发 cancel）。
 - 账本纪律（§9）：STARTED 先 commit → 事务外 chat → 终态+领域写同事务；恢复时以
   账本为已尝试游标（同 operation_key 任何尝试状态 ≥1 → 跳过，失败不重试）；
@@ -586,7 +586,7 @@ def _run_scoring_group(
         return
     # 事务内：重读卡（populate_existing——identity map 陈旧快照不反映并发编辑）+ 指纹重推导
     session.expire_all()
-    if task.status != "RUNNING" or task.stage != _SCORING_STAGE:
+    if task.status != "GENERATING" or task.stage != _SCORING_STAGE:
         return  # 调用期间已取消/转移 → 不再回写（STARTED 留给恢复转 UNKNOWN）
     fresh_unit_cards = _task_unit_cards(session, task_id=task.task_id, refresh=True)
     fresh_units = list(
@@ -704,21 +704,21 @@ def _finish_group_failed(
 def run_scoring_stage(
     session: Session, *, task: Task, settings: Settings, client: DeepSeekClient
 ) -> None:
-    """SCORING 阶段执行（spec §8）：逐组（重读 Task 须 RUNNING+SCORING）→ 全部组后
-    条件更新 WHERE status='RUNNING' AND stage='SCORING' → COMPLETED（rowcount=0 →
+    """SCORING 阶段执行（spec §8）：逐组（重读 Task 须 GENERATING+SCORING）→ 全部组后
+    条件更新 WHERE status='GENERATING' AND stage='SCORING' → COMPLETED（rowcount=0 →
     不覆盖并发 cancel）。失败不重试不阻塞；账本为已尝试游标 + 调用上限权威。
     """
     versions = asset_versions()
     groups = plan_scoring_groups(session, task=task, settings=settings)
     for group in groups:
         session.refresh(task)
-        if task.status != "RUNNING" or task.stage != _SCORING_STAGE:
+        if task.status != "GENERATING" or task.stage != _SCORING_STAGE:
             return  # 取消/转移 → 停止（不再付费调用）
         if scoring_attempt_total(session, task_id=task.task_id) >= max(
             0, settings.max_scoring_calls_per_task
         ):
             # §9 调用前账本条件校验：STARTED/FAILED/UNKNOWN 都占上限。剩余组跳过但
-            # 任务仍须走最终条件更新完成（break——不 return，否则 RUNNING+SCORING 悬挂）
+            # 任务仍须走最终条件更新完成（break——不 return，否则 GENERATING+SCORING 悬挂）
             logger.warning(
                 "scoring call cap reached, remaining groups skipped",
                 extra={
@@ -747,7 +747,7 @@ def run_scoring_stage(
             update(Task)
             .where(
                 Task.task_id == task.task_id,
-                Task.status == "RUNNING",
+                Task.status == "GENERATING",
                 Task.stage == _SCORING_STAGE,
             )
             .values(status="COMPLETED", ended_at=now, resumable=0, updated_at=now)
@@ -761,14 +761,14 @@ def run_scoring_stage(
 
 def enter_scoring_stage(session: Session, *, task_id: str, settings: Settings) -> bool:
     """GENERATING 批循环结束后进入 SCORING（spec §8 独立阶段）：条件更新
-    WHERE status='RUNNING' AND stage='GENERATING' → stage='SCORING'（+ 心跳）。
+    WHERE status='GENERATING' AND stage='GENERATING' → stage='SCORING'（+ 心跳）。
     rowcount=0 → 并发取消/转移，不覆盖，返回 False。"""
     now = _now_utc()
     result = cast(
         CursorResult[Any],
         session.execute(
             update(Task)
-            .where(Task.task_id == task_id, Task.status == "RUNNING", Task.stage == "GENERATING")
+            .where(Task.task_id == task_id, Task.status == "GENERATING", Task.stage == "GENERATING")
             .values(stage=_SCORING_STAGE, updated_at=now)
         ),
     )
