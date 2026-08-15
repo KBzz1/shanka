@@ -389,6 +389,27 @@ class V25RepositoryContractTest {
     }
 
     @Test
+    fun `saveApiKey redacts the plaintext key from every failure field including code`() = runBlocking {
+        // Worst-case server reflection: the key echoed back in every envelope field.
+        val transport = FakeTransport().apply {
+            handler = {
+                HttpResult(
+                    401,
+                    """{"error": {"code": "sk-secret-1234", "message": "rejected sk-secret-1234", "localization_key": "sk-secret-1234"}}""",
+                    emptyMap(),
+                )
+            }
+        }
+        val repo = repository(FakeSessionStore(session), transport)
+
+        val result = repo.saveApiKey("sk-secret-1234") as V25Result.Failure
+
+        assertFalse(result.code.contains("sk-secret-1234"))
+        assertFalse(result.message.orEmpty().contains("sk-secret-1234"))
+        assertFalse(result.localizationKey.orEmpty().contains("sk-secret-1234"))
+    }
+
+    @Test
     fun `apiKeyStatus maps the wire UNKNOWN state to UNSET`() = runBlocking {
         val transport = FakeTransport().apply {
             handler = { HttpResult(200, """{"status": "UNKNOWN", "masked_key": "", "updated_at": "2026-08-14T09:00:00Z"}""", emptyMap()) }

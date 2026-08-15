@@ -24,7 +24,9 @@ import org.json.JSONObject
  * The production implementation reuses the existing bearer-session and Idempotency-Key
  * mechanisms of [BackendClient] unchanged; only the multipart uploads — which the legacy
  * client cannot express (its [BackendClient.uploadPdf] is Uri-based and pinned to `/pdfs`)
- * — are implemented here, using the same header and retry semantics.
+ * — are implemented here. JSON calls share the client's 429 Retry-After retry loop;
+ * multipart uploads carry the same auth and idempotency headers but do NOT retry on 429
+ * (deferred work item, tracked for the terminal review).
  */
 interface V25Transport {
     /** A JSON request. `idempotent` asks the transport to attach an Idempotency-Key header. */
@@ -48,6 +50,14 @@ interface V25Transport {
         name: String? = null,
     ): HttpResult
 }
+
+/**
+ * Neutralises characters that would break the multipart frame when a file name is embedded
+ * in a Content-Disposition header value: CR/LF must never reach a header line, and a double
+ * quote would prematurely close the quoted value.
+ */
+internal fun escapeMultipartFileName(fileName: String): String =
+    fileName.replace("\r", "").replace("\n", "").replace("\"", "%22")
 
 /**
  * Production transport: delegates JSON calls to the shared [BackendClient] (same 429
@@ -114,7 +124,7 @@ class BackendV25Transport(
                     output.write("\r\n".toByteArray())
                 }
                 output.write("--$boundary\r\n".toByteArray())
-                output.write("Content-Disposition: form-data; name=\"file\"; filename=\"$fileName\"\r\n".toByteArray())
+                output.write("Content-Disposition: form-data; name=\"file\"; filename=\"${escapeMultipartFileName(fileName)}\"\r\n".toByteArray())
                 output.write("Content-Type: application/pdf\r\n\r\n".toByteArray())
                 content.use { it.copyTo(output) }
                 output.write("\r\n--$boundary--\r\n".toByteArray())

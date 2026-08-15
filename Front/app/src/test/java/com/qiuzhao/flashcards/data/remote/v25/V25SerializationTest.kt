@@ -18,6 +18,7 @@ import java.time.Instant
 import java.time.LocalDate
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -279,8 +280,19 @@ class V25SerializationTest {
     @Test
     fun `stats activity dates derive from the timezone aware week start`() {
         val stats = parseStatsDashboard(JSONObject(statsBody()))
-        // period.start is Monday midnight in the account timezone (+08:00 here): the UTC
-        // date is 2026-08-09, but the account-local Monday is 2026-08-10.
+        // The wire start is UTC ("...T16:00:00.000Z"): it must be projected through the
+        // dashboard's timezone field (Asia/Shanghai) to land on the account-local Monday
+        // 2026-08-10; projecting the raw UTC instant instead would yield 2026-08-09.
+        assertEquals(LocalDate.parse("2026-08-10"), stats.weeklyActivity[0].studyDate)
+        assertEquals(LocalDate.parse("2026-08-16"), stats.weeklyActivity[6].studyDate)
+    }
+
+    @Test
+    fun `stats activity dates hold for a UTC bucketing timezone`() {
+        val stats = parseStatsDashboard(JSONObject(statsBody()
+            .replace("2026-08-09T16:00:00.000Z", "2026-08-10T00:00:00.000Z")
+            .replace("2026-08-15T15:59:59.000Z", "2026-08-16T23:59:59.000Z")
+            .replace("\"timezone\": \"Asia/Shanghai\"", "\"timezone\": \"UTC\"")))
         assertEquals(LocalDate.parse("2026-08-10"), stats.weeklyActivity[0].studyDate)
         assertEquals(LocalDate.parse("2026-08-16"), stats.weeklyActivity[6].studyDate)
     }
@@ -296,6 +308,16 @@ class V25SerializationTest {
         assertNull(stats.recallAccuracy)
         assertNull(stats.firstAttemptAccuracy)
         assertNull(stats.retentionRate)
+    }
+
+    @Test
+    fun `multipart file names are escaped before framing`() {
+        // Header-safe names pass through untouched; quotes and line breaks that could
+        // break the multipart frame are neutralised.
+        assertEquals("report_2026.pdf", escapeMultipartFileName("report_2026.pdf"))
+        assertEquals("a%22b.pdf", escapeMultipartFileName("a\"b.pdf"))
+        assertFalse(escapeMultipartFileName("x\r\ny.pdf").contains("\r"))
+        assertFalse(escapeMultipartFileName("x\r\ny.pdf").contains("\n"))
     }
 
     @Test
@@ -485,8 +507,11 @@ class V25SerializationTest {
          "expires_at": "2026-08-16T09:00:00Z", "created_at": "2026-08-15T09:00:00Z"}
     """.trimIndent()
 
+    // period timestamps are real wire shapes: infra/db/session.py format_utc always emits
+    // UTC ("...T16:00:00.000Z" = Asia/Shanghai Monday 00:00); the dashboard timezone field
+    // names the actual bucketing zone.
     private fun statsBody(): String = """
-        {"period": {"start": "2026-08-10T00:00:00+08:00", "end": "2026-08-16T23:59:59+08:00", "week_ordinal": 33},
+        {"period": {"start": "2026-08-09T16:00:00.000Z", "end": "2026-08-15T15:59:59.000Z", "week_ordinal": 33},
          "timezone": "Asia/Shanghai",
          "weekly_activity": [5, 3, 0, 4, 2, 6, 1], "weekly_total": 21, "weekly_completed_count": 7,
          "week_change_rate": null, "weekly_goal": 350, "weekly_goal_progress": 0.02,

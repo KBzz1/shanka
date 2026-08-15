@@ -355,10 +355,9 @@ class RemoteV25Repository(
         path: String,
         body: String? = null,
         idempotent: Boolean = true,
-        token: String? = null,
         map: (JSONObject) -> T,
     ): V25Result<T> {
-        val result = transport.request(operation, method, path, body, idempotent = idempotent, token = token)
+        val result = transport.request(operation, method, path, body, idempotent = idempotent)
         if (result.status !in 200..299) return result.toFailure()
         return runCatching { V25Result.Success(map(jsonObject(result.body))) }
             .getOrElse { V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, it.message) }
@@ -390,7 +389,7 @@ class RemoteV25Repository(
     /** Defense in depth for [saveApiKey]: never let the plaintext cross the boundary in text. */
     private fun V25Result.Failure.withoutKey(key: String): V25Result.Failure =
         V25Result.Failure(
-            code = code,
+            code = code.replace(key, REDACTED),
             localizationKey = localizationKey?.replace(key, REDACTED),
             message = message?.replace(key, REDACTED),
         )

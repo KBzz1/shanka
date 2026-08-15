@@ -43,6 +43,7 @@ import com.qiuzhao.flashcards.domain.v25.V25UserPreferences
 import java.time.Instant
 import java.time.LocalDate
 import java.time.OffsetDateTime
+import java.time.ZoneId
 import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
@@ -314,9 +315,13 @@ internal fun parseRatingResult(value: JSONObject): V25RatingResult = V25RatingRe
 
 internal fun parseStatsDashboard(value: JSONObject): V25StatsDashboard {
     val period = requiredObject(value, "period")
-    // period.start is Monday midnight in the account learning timezone — parse through the
-    // offset so the local date is the account-local Monday, not the UTC projection.
-    val weekStart = OffsetDateTime.parse(requiredString(period, "start")).toLocalDate()
+    // Backend format_utc always emits period bounds in UTC ("...T16:00:00.000Z"); the
+    // dashboard's required timezone field names the actual bucketing zone (openapi: 实际分桶
+    // 时区 = 账号学习时区). period.start is Monday midnight in that zone, so project the
+    // instant through it — reading the raw UTC instant would shift every studyDate back a day
+    // for UTC+ zones.
+    val zoneId = ZoneId.of(requiredString(value, "timezone"))
+    val weekStart = Instant.parse(requiredString(period, "start")).atZone(zoneId).toLocalDate()
     val activityArray = value.optJSONArray("weekly_activity")
         ?: throw IllegalArgumentException("missing array 'weekly_activity'")
     val activity = List(activityArray.length()) { index ->
