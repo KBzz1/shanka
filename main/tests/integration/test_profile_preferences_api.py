@@ -10,13 +10,16 @@ API 测试在迁移后 schema 上跑（alembic upgrade head，同 test_auth.py �
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session as OrmSession
 
 from app.config import Settings
 from app.main import create_app
+from infra.db.models import LearningProject, PdfFile
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -60,6 +63,47 @@ def _error_code(response: Any) -> str:
     code: Any = response.json()["error"]["code"]
     assert isinstance(code, str)
     return code
+
+
+def _register_user(client: TestClient, username: str) -> tuple[dict[str, str], dict[str, Any]]:
+    """注册并返回 (Bearer 头, user dict)——current_project_id 用例需真实 user_id 种子项目。"""
+    headers = _register(client, username)
+    me = client.get("/auth/me", headers=headers)
+    assert me.status_code == 200
+    return headers, me.json()["user"]
+
+
+def _seed_project(client: TestClient, user_id: str, project_id: str) -> None:
+    """直接种子 learning_projects 行（Task 4 项目接口未落地前，测试经 ORM 建最小项目）。"""
+    engine = cast(FastAPI, client.app).state.engine
+    stamp = "2026-08-15T00:00:00.000Z"
+    with OrmSession(engine) as session:
+        session.add(
+            PdfFile(
+                file_id=f"{project_id}-file",
+                user_id=user_id,
+                filename="seed.pdf",
+                storage_key="seed-key",
+                size_bytes=1,
+                status="PARSED",
+                error_code=None,
+                created_at=stamp,
+            )
+        )
+        session.flush()  # 先落 pdf_files（learning_projects.file_id FK 依赖；unit-of-work 不排序裸 FK 插入）
+        session.add(
+            LearningProject(
+                project_id=project_id,
+                user_id=user_id,
+                file_id=f"{project_id}-file",
+                name="seed project",
+                chapters_confirmed_at=None,
+                version="v1",
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+        session.commit()
 
 
 # ---------- GET/PATCH /preferences 默认值与部分更新 ----------
@@ -148,6 +192,81 @@ def test_preferences_cross_user_isolation(client: TestClient) -> None:
     )
     assert rb2.status_code == 200, rb2.text
     assert client.get("/preferences", headers=headers_a).json()["daily_learning_goal"] == 180
+
+
+# ---------- current_project_id：保持/清空/存在性（R1 审查 I-1/I-2） ----------
+
+
+def test_preferences_patch_preserves_current_project_id_on_partial_update(
+    client: TestClient,
+) -> None:
+    """R1 I-1 回归：设置 current_project_id 后再部分更新其它字段，不得静默清空。"""
+    headers, user = _register_user(client, "alice")
+    project_id = str(uuid.uuid4())
+    _seed_project(client, user["user_id"], project_id)
+    r = client.patch(
+        "/preferences", headers=headers | _idem(), json={"current_project_id": project_id}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["current_project_id"] == project_id
+    # 部分更新只动提及字段：current_project_id 保持（last-success-wins）
+    r2 = client.patch("/preferences", headers=headers | _idem(), json={"daily_learning_goal": 80})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["current_project_id"] == project_id
+    assert r2.json()["daily_learning_goal"] == 80
+
+
+def test_preferences_patch_current_project_explicit_null_clears(client: TestClient) -> None:
+    headers, user = _register_user(client, "alice")
+    project_id = str(uuid.uuid4())
+    _seed_project(client, user["user_id"], project_id)
+    assert (
+        client.patch(
+            "/preferences", headers=headers | _idem(), json={"current_project_id": project_id}
+        ).status_code
+        == 200
+    )
+    r = client.patch("/preferences", headers=headers | _idem(), json={"current_project_id": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["current_project_id"] is None
+
+
+def test_preferences_patch_nonexistent_project_404(client: TestClient) -> None:
+    """R1 I-2 回归：格式合法但不存在的项目 UUID → 404 PROJECT_NOT_FOUND（不得 500）。"""
+    headers = _register(client, "alice")
+    r = client.patch(
+        "/preferences",
+        headers=headers | _idem(),
+        json={"current_project_id": str(uuid.uuid4())},
+    )
+    assert r.status_code == 404
+    assert _error_code(r) == "PROJECT_NOT_FOUND"
+    # 失败不落库
+    assert client.get("/preferences", headers=headers).json()["current_project_id"] is None
+
+
+def test_preferences_patch_other_users_project_404(client: TestClient) -> None:
+    """跨用户项目 → 统一 404 PROJECT_NOT_FOUND（不暴露存在性）。"""
+    headers_a = _register(client, "alice")
+    _headers_b, user_b = _register_user(client, "bob")
+    project_id = str(uuid.uuid4())
+    _seed_project(client, user_b["user_id"], project_id)
+    r = client.patch(
+        "/preferences", headers=headers_a | _idem(), json={"current_project_id": project_id}
+    )
+    assert r.status_code == 404
+    assert _error_code(r) == "PROJECT_NOT_FOUND"
+    assert client.get("/preferences", headers=headers_a).json()["current_project_id"] is None
+
+
+def test_preferences_patch_empty_body_true_noop(client: TestClient) -> None:
+    """R1 M-2：空 PATCH 为真 no-op——不刷新 updated_at、不改任何字段。"""
+    headers = _register(client, "alice")
+    before = client.get("/preferences", headers=headers).json()
+    r = client.patch("/preferences", headers=headers | _idem(), json={})
+    assert r.status_code == 200, r.text
+    after = client.get("/preferences", headers=headers).json()
+    assert after == before  # 含 updated_at 逐字节一致
 
 
 # ---------- 比例校验（I-2：INVALID_PREFERENCES 可达，非泛化 VALIDATION_ERROR） ----------

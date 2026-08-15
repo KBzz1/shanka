@@ -1,9 +1,11 @@
 """preferences.py：账号偏好路由（structure-contract 6.1；openapi /preferences；V2.5 新增）。
 
 - GET /preferences：get-or-create 默认行（BALANCED / 40/40/20 / 50 / Asia/Shanghai / 无当前项目）。
-- PATCH /preferences：部分更新 last-success-wins；比例/每日目标非法 → 400 INVALID_PREFERENCES
-  （服务层校验，I-2 修复：不得被 pydantic 拒绝成 VALIDATION_ERROR）；IANA 时区非法 →
-  400 INVALID_LEARNING_TIMEZONE；写操作强制 Idempotency-Key 并走 execute_idempotent。
+- PATCH /preferences：部分更新 last-success-wins（model_dump(exclude_unset=True)：未提及字段
+  保持原值，显式 null 清空 current_project_id）；比例/每日目标非法 → 400 INVALID_PREFERENCES
+  （服务层校验，不得被 pydantic 拒绝成 VALIDATION_ERROR）；IANA 时区非法 →
+  400 INVALID_LEARNING_TIMEZONE；不存在的项目 → 404 PROJECT_NOT_FOUND；
+  写操作强制 Idempotency-Key 并走 execute_idempotent。
 - API-key 字段不进入本资源载荷（6.1）；无 ORM 对象外泄（返回 schema 化 dict）。
 """
 
@@ -34,6 +36,8 @@ def get_preferences_endpoint(
 ) -> JSONResponse:
     now: datetime = SystemClock().now_utc()
     body = get_preferences(session, user_id=request.state.principal.user_id, now=now)
+    # get-or-create 是物化写：首次访问落默认值行须提交（依赖 teardown 只 close 不 commit）
+    session.commit()
     return JSONResponse(status_code=200, content=body)
 
 
@@ -50,8 +54,11 @@ def patch_preferences_endpoint(
     now: datetime = SystemClock().now_utc()
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        # 不 exclude_none：显式 null（current_project_id 清空语义）保留给服务层
-        result = update_preferences(session, user_id=user_id, payload=payload.model_dump(), now=now)
+        # exclude_unset：仅序列化显式提供的字段——未提及的字段（含 current_project_id）
+        # 保持原值（last-success-wins），显式 null 仍保留清空语义（R1 审查 I-1）
+        result = update_preferences(
+            session, user_id=user_id, payload=payload.model_dump(exclude_unset=True), now=now
+        )
         return 200, result
 
     _replayed, status, body = execute_idempotent(

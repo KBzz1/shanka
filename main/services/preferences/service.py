@@ -6,7 +6,8 @@
   全 0 非法）与每日目标（10~200 的 10 倍数）非法 → INVALID_PREFERENCES（400，不得泛化
   VALIDATION_ERROR——Task 2 审查遗留 I-2）；IANA 时区非法 → INVALID_LEARNING_TIMEZONE；
   coverage_mode 非法 → VALIDATION_ERROR（7 章未注册偏好码，按结构非法处理）。
-- current_project_id：uuid 或 null；项目存在性/归属由项目工作包（Task 4）承接，本任务只校验格式。
+- current_project_id：uuid 或 null；显式 null 清空；不存在/跨用户项目 → 404 PROJECT_NOT_FOUND
+  （R1 I-2：格式合法但不存在不得 FK IntegrityError → 500）。
 - 不返回密码/hash；API-key 字段不进入本资源载荷（6.1）。
 """
 
@@ -17,6 +18,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
@@ -28,7 +31,7 @@ from domain.preferences import (
     DEFAULT_LEARNING_TIMEZONE,
     DIFFICULTY_RATIO_TOTAL,
 )
-from infra.db.models import UserPreferences
+from infra.db.models import LearningProject, UserPreferences
 from infra.db.session import format_utc
 
 
@@ -64,6 +67,22 @@ def _validate_project_id(project_id: str) -> None:
         uuid.UUID(project_id)
     except ValueError as exc:
         raise AppError(ErrorCode.VALIDATION_ERROR, "current_project_id 须为 UUID") from exc
+
+
+def _check_project_owned(session: Session, *, user_id: str, project_id: str) -> None:
+    """项目不存在或跨用户 → 404 PROJECT_NOT_FOUND（6.2 统一 404，不暴露存在性）。
+
+    R1 审查 I-2 修复：合法格式但不存在的项目 UUID 不得触发 FK IntegrityError → 500；
+    先做存在性+归属查询（写路径动作），flush 时 FK 约束失败仍兜底映射同码（并发删除竞态）。
+    """
+    exists = session.scalar(
+        select(LearningProject.project_id).where(
+            LearningProject.project_id == project_id,
+            LearningProject.user_id == user_id,
+        )
+    )
+    if exists is None:
+        raise AppError(ErrorCode.PROJECT_NOT_FOUND, "项目不存在或无权访问")
 
 
 def _to_response(row: UserPreferences) -> dict[str, Any]:
@@ -137,11 +156,20 @@ def update_preferences(
         project_id = payload["current_project_id"]
         if project_id is not None:  # 显式 null = 清空当前项目（openapi type: [string, 'null']）
             _validate_project_id(project_id)
+            _check_project_owned(session, user_id=user_id, project_id=project_id)
         updates["current_project_id"] = project_id
     if not updates:
-        return _to_response(row)  # 空部分更新 = no-op（契约仅对 /auth/me 要求至少一个字段）
+        return _to_response(
+            row
+        )  # 空部分更新 = 真 no-op（不刷新 updated_at；契约仅对 /auth/me 要求至少一个字段）
     updates["updated_at"] = format_utc(now)
     for column, value in updates.items():
         setattr(row, column, value)
-    session.flush()
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        # FK 兜底（并发删除竞态）：current_project_id → learning_projects 约束失败，
+        # 与预查询同码（R1 I-2：不得 500）
+        session.rollback()
+        raise AppError(ErrorCode.PROJECT_NOT_FOUND, "项目不存在或无权访问") from exc
     return _to_response(row)
