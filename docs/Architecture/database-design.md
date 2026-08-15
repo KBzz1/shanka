@@ -1,6 +1,6 @@
-# 数据库表设计 v2.3
+# 数据库表设计 v2.5
 
-持久化映射,字段定义源自 [structure-contract.md](structure-contract.md) 第 3 章资源模型;ORM 实现(`main/infra/db/`)必须与本设计一致。
+持久化映射,字段定义源自 [structure-contract.md](structure-contract.md) 第 3 章资源模型;ORM 实现(`main/infra/db/`)必须与本设计一致。V2.5 目标设计见 [v2.5-target-architecture.md](v2.5-target-architecture.md) 第 5 章,迁移落地见本文件 §7.2。
 
 ## 0. 约定
 
@@ -17,18 +17,24 @@
 
 ```text
 users 1──N auth_sessions
+users 1──1 user_preferences ──current_project── learning_projects
 users 1──N pdf_files 1──N chapters
                     └──N text_chunks
+users 1──N learning_projects 1──1 pdf_files(file_id 唯一权威)
+                            1──1 project_study_settings
+                            1──N decks(project_id 可空=独立牌组)
+                            1──N tasks ──N batches 1──1 knowledge_points
+                                        └──N cards(source_task_id, STAGED/PUBLISHED)
 users 1──N decks 1──N cards 1──1 review_states
-users 1──N tasks 1──N batches 1──1 knowledge_points
-               │ └──N knowledge_points
 users 1──N review_events ──N cards
 users 1──N llm_call_attempts
+users 1──N card_deletion_batches ──N cards(delete_batch_id)
+users 1──N card_rewrite_previews ──1 cards
 users 1──1 api_keys（V2.2 主键重建）
 users 1──N idempotency_keys（V2.2 主键重建）
 ```
 
-注(V2.3):`users` 为根、`user_id` 为隔离键;`api_keys` / `idempotency_keys` 主键为 `user_id` 键(见 7.1);设备实体与 `device_id` 列已随 V2.3 彻底清除(见 7.1)。
+注(V2.5):`users` 为根、`user_id` 为隔离键;`learning_projects.file_id` 为 PDF↔项目唯一外键权威(PDF 表不重复存 project_id);`Deck.project_id = null` 表示独立牌组;`Card.chapter_id = null` 表示"未归属章节"。
 
 ## 2. 表定义
 
@@ -78,24 +84,29 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | --- | --- | --- | --- |
 | task_id | TEXT | PK | |
 | user_id | TEXT | NULL, FK → users | 数据主体隔离键(V2.2,决策 D-05);新写入保证必填 |
+| project_id | TEXT | NULL, FK → learning_projects ON DELETE SET NULL | V2.5 归属项目;新写入保证必填,NULL 只兼容迁移前已失去 PDF 的终态任务(只读历史,不可重试) |
 | file_id | TEXT | NULL, FK → pdf_files ON DELETE SET NULL | 删除 PDF 后任务保留,file_id 置空 |
-| deck_id | TEXT | NULL, FK → decks ON DELETE SET NULL | 目标牌组;删除牌组后置空,任务保留(审核修复) |
-| status | TEXT | NOT NULL | `PENDING / RUNNING / PAUSED / COMPLETED / FAILED / CANCELLED` |
-| stage | TEXT | NULL | `PLANNING / GENERATING / SCORING` |
-| selected_chapters | TEXT | NOT NULL | 章节快照(JSON),与源 chapter 解耦;**两阶段语义**:POST /tasks 写入创建快照(保留用户请求与 PENDING 视图);首次 PLANNING 抢占(CAS1)同一短事务内按快照 chapter_id 重读章节最新 name/start_page/end_page 覆盖并冻结为规划快照 |
-| generation_config | TEXT | NOT NULL | 数量倾向/难度比例/自定义要求(JSON) |
+| deck_id | TEXT | NULL, FK → decks ON DELETE SET NULL | 目标牌组(必须同项目);删除牌组后置空,任务保留(审核修复) |
+| retry_of_task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | V2.5 只指向同用户失败任务 |
+| status | TEXT | NOT NULL | V2.5 `DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING / COMPLETED / FAILED / ABANDONED`(七态) |
+| stage | TEXT | NULL | V2.5 改名 `internal_stage` 语义:`PLANNING / GENERATING / SCORING / PUBLISHING`,仅运行期内部观测 |
+| selected_chapters | TEXT | NOT NULL | 章节快照(JSON),与源 chapter 解耦;开始正式生成前冻结快照 |
+| generation_config | TEXT | NOT NULL | coverage_mode/难度整数比例/deep_question/自定义要求(JSON,契约 3.5) |
+| sample_cards | TEXT | NULL | V2.5 持久化 1~3 张样卡(JSON);配置变化时清空 |
+| sample_config_hash | TEXT | NULL | V2.5 样卡配置指纹,防止确认过期样卡 |
+| sample_confirmed_at | TEXT | NULL | V2.5 样卡确认时间 |
 | cursor | TEXT | NULL | `{ "completed_batch_count": int }`(JSON);游标为唯一源,与 `completed_batch_count` 列同事务原子写入 |
-| generated_card_count | INTEGER | NOT NULL DEFAULT 0 | 已入库卡片数 |
+| generated_card_count | INTEGER | NOT NULL DEFAULT 0 | V2.5 只统计已发布卡;失败任务为 0 |
 | total_batch_count | INTEGER | NULL | 规划完成后写入 |
 | completed_batch_count | INTEGER | NULL | |
 | completion_reason | TEXT | NULL | 空单元三分支:`NO_GENERATION_UNITS`(全组成功但 0 个合法单元,COMPLETED) |
 | skipped_planning_group_count | INTEGER | NOT NULL DEFAULT 0 | 部分规划组失败被跳过的组数 |
-| resumable | INTEGER | NOT NULL DEFAULT 0 | 0/1 |
-| failure_stage | TEXT | NULL | `PLANNING / GENERATING / SCORING / WRITE_BACK` |
+| resumable | INTEGER | NOT NULL DEFAULT 0 | V2.5 内部租约恢复判定用(不暴露用户 API) |
+| failure_stage | TEXT | NULL | `PLANNING / GENERATING / SCORING / PUBLISHING` |
 | error_code | TEXT | NULL | |
 | created_at / started_at / ended_at / updated_at | TEXT | 按需 | |
 
-索引:`(user_id, created_at DESC)`。
+索引:`(user_id, created_at DESC)`、`(project_id)`。
 
 ### 2.6 knowledge_points
 
@@ -109,7 +120,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | source_chunk_ids | TEXT | NULL | 来源页文本标识列表(`text_chunks.chunk_id`,TEXT JSON,一页一个);运行时取原文以本列为权威;旧数据无值,新数据代码保证必填 |
 | source_chunk_id | TEXT | NOT NULL | 兼容投影列 = `source_chunk_ids[0]`(新单元写入;旧数据继续按此列读取) |
 | topic | TEXT | NOT NULL | 学习目标(Planner 输出,语义复用;不再"第X章-知识点N"占位) |
-| target_difficulty | TEXT | NULL | 规划锚定:`BASIC / UNDERSTANDING / APPLICATION`;旧数据无值,新数据保证必填 |
+| target_difficulty | TEXT | NULL | 规划锚定:`BASIC / UNDERSTANDING / DEEP_QUESTION`(V2.5 改名);旧数据无值,新数据保证必填;历史 `APPLICATION` 经迁移映射为 `DEEP_QUESTION` |
 | card_type | TEXT | NULL | 规划锚定:`QUESTION / TRUE_FALSE`;旧数据无值,新数据保证必填 |
 | priority | INTEGER | NOT NULL | 全局顺序(服务端按章序、组序、数组顺序合并分配) |
 | status | TEXT | NOT NULL | `PENDING / PROCESSED / SKIPPED` |
@@ -147,12 +158,13 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | --- | --- | --- | --- |
 | deck_id | TEXT | PK | |
 | user_id | TEXT | NULL, FK → users | 数据主体隔离键(V2.2,决策 D-05);新写入保证必填 |
+| project_id | TEXT | NULL, FK → learning_projects ON DELETE SET NULL | V2.5 归属项目;NULL = 手动/独立牌组 |
 | name | TEXT | NOT NULL | |
-| source | TEXT | NOT NULL | `MANUAL / IMPORTED` |
+| source | TEXT | NOT NULL | `MANUAL / IMPORTED / GENERATED`(V2.5 补 GENERATED) |
 | version | TEXT | NOT NULL | 变更版本,客户端缓存刷新用 |
 | created_at / updated_at | TEXT | NOT NULL | |
 
-索引:`(user_id, updated_at DESC)`。
+索引:`(user_id, updated_at DESC)`、`(project_id)`。
 
 ### 2.9 cards
 
@@ -170,7 +182,13 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | statement / explanation | TEXT | NULL | 仅 TRUE_FALSE 卡 |
 | answer_boolean | INTEGER | NULL | 仅 TRUE_FALSE 卡(0/1) |
 | generation_item_id | TEXT | NULL | 仅 GENERATED 卡 |
-| target_difficulty | TEXT | NULL | 仅 GENERATED 卡;`BASIC / UNDERSTANDING / APPLICATION` |
+| source_task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | V2.5 生成来源任务;删历史保留卡时置空 |
+| chapter_id | TEXT | NULL, FK → chapters ON DELETE SET NULL | V2.5 源章节;null = 未归属章节 |
+| publication_state | TEXT | NOT NULL DEFAULT 'PUBLISHED' | V2.5 `STAGED / PUBLISHED`;历史卡迁为 PUBLISHED |
+| delete_batch_id | TEXT | NULL, FK → card_deletion_batches ON DELETE SET NULL | V2.5 非空 = 10 秒待删除批次 |
+| pending_delete_at | TEXT | NULL | V2.5 服务端计时 |
+| undo_until | TEXT | NULL | V2.5 服务端撤销窗口 |
+| target_difficulty | TEXT | NULL | 仅 GENERATED 卡;`BASIC / UNDERSTANDING / DEEP_QUESTION`(V2.5 改名);手动/导入为 null |
 | knowledge_point_ids | TEXT | NULL | 仅 GENERATED 卡;JSON 数组,综合应用卡可多个(审核修复) |
 | evidence_score / correctness_score / difficulty_score / learning_value_score | INTEGER | NULL | Rubric 各维度 0~3,仅 GENERATED 卡(审核修复) |
 | rubric_total_score | INTEGER | NULL | Rubric 总分 0~12,仅 GENERATED 卡 |
@@ -181,7 +199,9 @@ users 1──N idempotency_keys（V2.2 主键重建）
 
 - **部分唯一索引**(SQLite 支持):`CREATE UNIQUE INDEX idx_cards_gen_item ON cards(generation_item_id) WHERE source = 'GENERATED' AND generation_item_id IS NOT NULL`(AC-05 重复入库率为 0)。
 - 唯一索引:`UNIQUE (deck_id, position)`(追加 position 分配的并发保护)。
-- 索引:`(user_id, deck_id)`。
+- 索引:`(user_id, deck_id)`、`(source_task_id)`、`(chapter_id)`、`(publication_state, delete_batch_id)`(统一可见谓词,契约 3.9)。
+
+**统一可见谓词(V2.5)**:`publication_state = 'PUBLISHED' AND delete_batch_id IS NULL`,所有列表、到期队列、今日计划、统计与进度聚合复用同一查询条件,禁止各模块自行漏写过滤。
 
 ### 2.10 review_states
 
@@ -211,7 +231,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | client_event_id | TEXT | NOT NULL | 客户端生成 |
 | rating | TEXT | NOT NULL | `AGAIN / HARD / GOOD / EASY` |
 | reviewed_at | TEXT | NOT NULL | 服务端时间 |
-| device_timezone | TEXT | NOT NULL | IANA 时区,仅看板分桶 |
+| device_timezone | TEXT | NULL | V2.5 降级为可空审计字段,不参与权威统计 |
 | created_at | TEXT | NOT NULL | |
 
 约束与索引:
@@ -298,13 +318,14 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 ### 2.15 users
 
 账号数据主体(V2.2,决策 D-05):`user_id` 为数据主体隔离键,替代 v2.1 匿名设备隔离。
-(V2.4:登录键切换为 email,username 降为展示名。)
+(V2.4:登录键切换为 email,username 降为展示名。V2.5:增加预设头像。)
 
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | user_id | TEXT | PK | 服务端生成 |
 | username | TEXT | NOT NULL | 展示名:1~24 位,中文/字母/数字/._-,可重名(无 UNIQUE) |
 | email | TEXT | NOT NULL | 登录键;服务端转小写规范化;UNIQUE(uq_users_email) |
+| avatar_key | TEXT | NOT NULL DEFAULT 'mood_01' | V2.5 预设头像:`mood_01`~`mood_12`,只接受内置预设 |
 | password_hash | TEXT | NOT NULL | Argon2id 输出(生产参数 ≥ `memory_cost=19456 KiB, time_cost=2, parallelism=1`);绝不进入日志/响应 |
 | created_at / updated_at | TEXT | NOT NULL | |
 
@@ -327,15 +348,85 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 有效判定:`revoked_at IS NULL AND expires_at > now`。
 V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structure-contract 6.11)。
 
+### 2.17 learning_projects（V2.5 新增）
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| project_id | TEXT | PK | 服务端生成 |
+| user_id | TEXT | NOT NULL, FK → users | 数据主体隔离键 |
+| file_id | TEXT | NOT NULL, UNIQUE FK → pdf_files | 唯一外键权威(一个项目恰好一份当前 PDF;PDF 表不重复存 project_id) |
+| name | TEXT | NOT NULL | 去首尾空白后 1~60 字符,可重名;默认取上传文件名去扩展名 |
+| chapters_confirmed_at | TEXT | NULL | 目录确认时间;`status` 由 PDF 状态与本列确定(契约 3.16,不建第二套状态列) |
+| version | TEXT | NOT NULL | 缓存刷新与并发检查 |
+| created_at / updated_at | TEXT | NOT NULL | |
+
+索引:`(user_id, updated_at)`。
+
+### 2.18 user_preferences（V2.5 新增）
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| user_id | TEXT | PK, FK → users | 一用户一行 |
+| coverage_mode | TEXT | NOT NULL DEFAULT 'BALANCED' | `COMPACT / BALANCED / EXTENSIVE` |
+| basic_ratio | INTEGER | NOT NULL DEFAULT 40 | 10% 整数档 0~100 |
+| understanding_ratio | INTEGER | NOT NULL DEFAULT 40 | 10% 整数档 0~100 |
+| deep_question_ratio | INTEGER | NOT NULL DEFAULT 20 | 10% 整数档 0~100 |
+| daily_goal | INTEGER | NOT NULL DEFAULT 50 | 10~200,10 的倍数 |
+| learning_timezone | TEXT | NOT NULL | 有效 IANA 时区,账号级权威 |
+| current_project_id | TEXT | NULL, FK → learning_projects ON DELETE SET NULL | 项目删除时置空 |
+| updated_at | TEXT | NOT NULL | 最后成功保存时间 |
+
+约束:`CHECK (basic_ratio % 10 = 0 AND basic_ratio BETWEEN 0 AND 100)`、同型 CHECK × 3、`CHECK (basic_ratio + understanding_ratio + deep_question_ratio = 100)`、`CHECK (daily_goal BETWEEN 10 AND 200 AND daily_goal % 10 = 0)`。
+
+### 2.19 project_study_settings（V2.5 新增）
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| project_id | TEXT | PK, FK → learning_projects ON DELETE CASCADE | 一项目一行 |
+| selected_chapter_ids | TEXT | NOT NULL DEFAULT '[]' | 新卡章节范围(JSON);空数组 = 暂无新卡范围 |
+| include_unassigned | INTEGER | NOT NULL DEFAULT 0 | 是否包含 `chapter_id = null` 的新卡(0/1) |
+| updated_at | TEXT | NOT NULL | |
+
+### 2.20 card_deletion_batches（V2.5 新增）
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| delete_batch_id | TEXT | PK | 服务端生成 |
+| user_id | TEXT | NOT NULL, FK → users | 数据主体隔离键 |
+| status | TEXT | NOT NULL | `PENDING / UNDONE / FINALIZED` |
+| undo_until | TEXT | NOT NULL | 服务端接受最后一次追加后 10 秒 |
+| created_at / updated_at | TEXT | NOT NULL | |
+
+索引:`(user_id, status, undo_until)`。
+规则:向仍为 `PENDING` 的批追加卡时,服务端原子更新整批 `undo_until = now + 10s`;撤销在同一事务清空所有卡片删除标记并置 `UNDONE`;过期批由后台清理器或任意相关读取前的惰性清理最终硬删除,两种路径必须幂等。
+
+### 2.21 card_rewrite_previews（V2.5 新增）
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| rewrite_id | TEXT | PK | 服务端生成 |
+| user_id | TEXT | NOT NULL, FK → users | 数据主体隔离键 |
+| card_id | TEXT | NOT NULL, FK → cards ON DELETE CASCADE | |
+| base_card_version | TEXT | NOT NULL | 应用时乐观并发校验(CAS) |
+| preview | TEXT | NOT NULL | 预览内容 JSON(front/back/card_type/target_difficulty) |
+| custom_requirements | TEXT | NULL | 不保存完整 Prompt |
+| status | TEXT | NOT NULL DEFAULT 'PENDING' | `PENDING / APPLIED / CANCELLED / EXPIRED` |
+| expires_at | TEXT | NOT NULL | 24 小时(实现常量统一) |
+| created_at / updated_at | TEXT | NOT NULL | |
+
+索引:`(user_id, status, expires_at)`(pending expiry 清理)。
+
 ## 3. 级联与并发
 
 | 删除对象 | 级联效果 |
 | --- | --- |
 | users | auth_sessions CASCADE(本期无用户删除接口,预留) |
-| decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL(存在非终态任务引用时删除被 `409 TASK_IN_PROGRESS` 拒绝,契约 6.5) |
-| pdf_files | chapters CASCADE;tasks.file_id SET NULL(存在非终态任务引用时删除被 `409 TASK_IN_PROGRESS` 拒绝,契约 6.1) |
-| tasks | knowledge_points、batches CASCADE(本期无任务删除接口,预留) |
-| cards | review_states、review_events CASCADE |
+| learning_projects | project_study_settings CASCADE;user_preferences.current_project_id SET NULL;decks.project_id SET NULL;tasks.project_id SET NULL |
+| decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL(活跃任务引用时删除被 `409 PROJECT_HAS_ACTIVE_TASK` 拒绝,契约 6.5) |
+| pdf_files | chapters CASCADE;tasks.file_id SET NULL(活跃任务引用时删除被 `409 PROJECT_HAS_ACTIVE_TASK` 拒绝;项目删除按 5.3 原子事务处理) |
+| tasks | knowledge_points、batches CASCADE;cards.source_task_id SET NULL(保留卡)或按用户选择删除其已发布卡(5.3) |
+| cards | review_states、review_events、card_rewrite_previews CASCADE |
+| card_deletion_batches | cards.delete_batch_id SET NULL |
 
 一致性规则:
 
@@ -344,6 +435,14 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
 - **resume 并发防护**:`resume` 在 `BEGIN IMMEDIATE` 事务内先校验 `status == 'PAUSED' AND resumable = 1` 再置 `RUNNING`,状态校验失败返回 `TASK_STATE_CONFLICT`;孤儿 `RUNNING`(心跳 `updated_at` 超过 30 分钟)允许抢占:条件更新 `status='RUNNING' AND updated_at < now-30min`(契约 4.1)。
 - 新建卡片时同事务插入初始 `review_states`(state=NEW,初始排程参数,审核修复)。
 - 单卡重写(FR-13,决策 C-05):原地更新 `cards` 行(新内容、新 `generation_item_id`,`position` 不变,`updated_at` / `version` 递增),`review_states` 重置为新卡初始状态;旧 `generation_item_id` 随列覆盖自然作废。
+- **V2.5 原子事务(5.3)**,必须在同一事务完成:
+  - 正式任务成功:校验至少一张合法 STAGED 卡 → 全部改 PUBLISHED → task COMPLETED/generated_card_count 更新;
+  - 任意正式阶段失败:task FAILED,STAGED 卡继续隔离;
+  - 项目删除:状态保护 → retain 选择对应 detach 或 delete → 删除 PDF/章节/任务/项目;
+  - 卡片删除批追加、撤销和最终清理;
+  - 重写预览应用:版本 CAS → 卡片正文更新 → ReviewState 重置 → preview APPLIED;
+  - 评级:ReviewEvent 插入 → ReviewState 更新;今日/周完成动态聚合,不另存易漂移计数。
+- **V2.5 LLM 调用不持有 SQLite 长写事务**:规划/生成/评分 LLM 调用发生在事务之外,事务只包短状态/发布更新(风险 R25-07);调用账本 STARTED 占位与领域写入按既有规则同事务提交。
 - `cards.user_id` 由服务端写入,保证与 `decks.user_id` 一致;数据主体隔离键为 `user_id`(V2.2);(V2.1 历史:v2.1 归属校验按 `device_id` 过滤,已随 V2.3 设备架构清除删除;无隔离键列的表如 chapters、knowledge_points、batches、review_states 经 FK join 到所属隔离键)。
 
 ## 4. 看板聚合实现说明
@@ -365,17 +464,22 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 | api_keys | 3.1 ApiKey |
 | users / auth_sessions | 3.14 AuthUser / 3.15 AuthSessionResponse(V2.2,已随数据地基迁移落地) |
 | pdf_files / chapters | 3.2 PdfFile / 3.3 Chapter |
-| tasks / generation_config | 3.4 Task / 3.5 GenerationConfig |
+| tasks / generation_config | 3.4 GenerationTask / 3.5 GenerationConfig |
 | knowledge_points | 3.6 KnowledgePoint(生成单元) |
 | batches | 3.7 Batch |
 | decks | 3.8 Deck |
 | cards | 3.9 Card |
 | review_states | 3.10 ReviewState |
 | review_events | 3.11 ReviewEvent |
-| (聚合计算) | 3.12 StatsDashboard |
+| (聚合计算) | 3.12 StatsDashboard / 3.20 TodayStudyPlan |
 | idempotency_keys | 总则 1.3 幂等约定 |
 | text_chunks | 3.6 KnowledgePoint 来源页底座(来源分片标识) |
 | llm_call_attempts | 3.7 Batch / 8.5 评估骨架(调用账本) |
+| learning_projects | 3.16 LearningProject(V2.5 新增) |
+| user_preferences | 3.15 UserPreferences(V2.5 新增) |
+| project_study_settings | 3.17 ProjectStudySettings(V2.5 新增) |
+| card_deletion_batches | 3.18 CardDeletionBatch(V2.5 新增) |
+| card_rewrite_previews | 3.19 CardRewritePreview(V2.5 新增) |
 
 ## 7. 演进路径
 
@@ -422,7 +526,23 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 - 类型数可控(≤5)时继续用专用列;字段高度异构或继续膨胀时,评估 JSON 扩展列方案。
 - 所有结构变更走迁移工具。
 
-### 7.3 迁移工具选型
+### 7.3 V2.5 落地(2026-08-15,学习项目与整批发布;不可逆)
+
+V2.5 使用一个**新的不可逆 Alembic revision**;迁移从运行时真实 head 生成,不预写 revision ID。升级前备份数据库,downgrade 继续 fail-closed。不得清空 V2.4 用户数据。
+
+- **新表**:`learning_projects`、`user_preferences`、`project_study_settings`、`card_deletion_batches`、`card_rewrite_previews`(定义见 2.17~2.21)。
+- **现有表调整**:
+  - `users`:新增 `avatar_key NOT NULL DEFAULT 'mood_01'`。
+  - `decks`:新增 `project_id NULL FK → learning_projects ON DELETE SET NULL`;source 枚举补 `GENERATED`。
+  - `tasks`:新增 `project_id NULL FK`(新写入必填,NULL 只兼容迁移前已失去 PDF 的终态任务)、`retry_of_task_id NULL FK SET NULL`、`sample_cards`/`sample_config_hash`/`sample_confirmed_at`;状态迁移 `PENDING→DRAFT`、`RUNNING→GENERATING`、`COMPLETED→COMPLETED`、`FAILED→FAILED`、`CANCELLED→ABANDONED`;历史 `PAUSED` 迁为 `FAILED` 并写 `error_code=LEGACY_PAUSED_TASK`,禁止留下 V2.5 不可表达状态。
+  - `cards`:新增 `source_task_id NULL FK tasks SET NULL`、`chapter_id NULL FK chapters SET NULL`、`publication_state NOT NULL DEFAULT 'PUBLISHED'`、`delete_batch_id NULL FK card_deletion_batches SET NULL`、`pending_delete_at`/`undo_until`;历史卡均迁为 `PUBLISHED`。
+  - `knowledge_points`/`cards` 历史 `target_difficulty='APPLICATION'` 映射为 `DEEP_QUESTION`。
+  - `review_events.device_timezone`:改为可空审计字段;不删除历史值。
+- **回填**:每个现有 PDF 建一个学习项目,名称取 filename 去扩展名;`PARSED` PDF 项目默认 `chapters_confirmed_at = migrated_at`,其他按 PDF 状态映射;既有 generated deck 若能从 task.file_id 唯一定位项目则绑定,无法唯一定位的牌组保持独立;现有 task 绑定其 file 对应项目;`file_id = null` 的既有终态任务保留为只读历史且不可重试。迁移报告必须记录无法归属的牌组/任务数量。
+- 删除不可逆:`downgrade` 第一行 `raise RuntimeError`(fail-closed,延续 V2.3/V2.4 精神);回退仅限恢复升级前备份。
+- §0/§1/§2/§3/§6 与 ORM 同批更新(见 structure-contract v2.5)。
+
+### 7.4 迁移工具选型
 
 - 选型:**Alembic**(SQLAlchemy 官方迁移工具);P0-2 引入并生成首个迁移。
 - 迁移纪律:与 ORM 模型同 PR 提交;破坏性变更需同步更新 database-design 与契约。

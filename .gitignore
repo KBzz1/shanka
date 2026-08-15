@@ -1,4 +1,6 @@
 /res/*.pdf
+# 正式 APK 输出（V2.5 Release 构建契约:固定覆盖 releases/app-release.apk,不入 Git）
+/releases/
 /.env
 # SDD 工作区（git-ignored scratch，ledger/brief/report/review-package）
 /.superpowers/
