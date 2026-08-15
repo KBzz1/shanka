@@ -374,25 +374,20 @@ def test_sample_worker_unexpected_error_fails_task_and_continues_round(
             task_id = task.task_id
             request_samples(session, user_id=user, task_id=task_id, now=_NOW)
             session.commit()
-    # 注入：样卡写入抛非输入类异常（complete_samples 位于 _complete_sample_task 内层
-    # try 之外——异常可逃逸至 worker 层，模拟 DB/编程错误）
-    original = tasks_executor.complete_samples
+    # 注入：单任务样卡路径抛非输入类异常（R2：补丁目标取 executor 本模块定义的
+    # _complete_sample_task——complete_samples 为 executor 从 service 再导入的名字，
+    # 非模块显式导出，mypy 全仓库 implicit-reexport 会拒绝 patch；语义等价，异常
+    # 同样可逃逸至 worker 层守卫）
+    original = tasks_executor._complete_sample_task
     calls = {"n": 0}
 
-    def flaky(
-        session: Session,
-        *,
-        task_id: str,
-        cards: list[dict[str, object]],
-        config_hash: str,
-        now: str,
-    ) -> bool:
+    def flaky(session: Session, task: Task) -> int:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("注入的样卡写入异常（DB/编程错误）")
-        return original(session, task_id=task_id, cards=cards, config_hash=config_hash, now=now)
+            raise RuntimeError("注入的样卡路径异常（DB/编程错误）")
+        return original(session, task)
 
-    monkeypatch.setattr(tasks_executor, "complete_samples", flaky)
+    monkeypatch.setattr(tasks_executor, "_complete_sample_task", flaky)
     with session_factory() as session:
         process_active_tasks(session, settings=_settings())  # 异常被兜底，不向上传播
         session.commit()
