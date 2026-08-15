@@ -1,5 +1,10 @@
 """services.stats 看板聚合集成测试（真实 SQLite + zoneinfo 分桶）。
 
+V2.5（Task 11）：dashboard 不再接受客户端 timezone/weekly_goal——服务端按账号学习时区
+（preferences get-or-create 默认 Asia/Shanghai）分桶，周目标 = daily_learning_goal × 7
+（默认 50 × 7 = 350）；完整时区/DST/可见性/隔离语义见 test_v25_stats_dashboard.py，
+本文件保留 V2.4 既有口径回归（周界/比率/streak/已掌握）。
+
 与 brief 草稿的修正（校准结论登记 task-4-report）：
 - FK 强制（engine 级 PRAGMA foreign_keys=ON）：_seed_events 前置 User/Deck/Card 行
   （carry-forward：test_review_service 已实证违约）；每事件一张卡（card_id FK → cards）；
@@ -22,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Card, ReviewEvent, ReviewState, User
+from infra.db.models import Base, Card, ReviewEvent, ReviewState, User, UserPreferences
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from services.stats.service import dashboard
@@ -107,9 +112,8 @@ def _seed_events(
 def test_stats_dashboard_empty_has_data_false(session_factory: Callable[[], Session]) -> None:
     user = _uuid()
     with session_factory() as session:
-        result = dashboard(
-            session, user_id=user, timezone="Asia/Shanghai", weekly_goal=None, now=_now()
-        )
+        _seed_user(session, user_id=user)  # 认证用户不变量（get-or-create 偏好行 FK → users）
+        result = dashboard(session, user_id=user, now=_now())
     assert result["has_data"] is False
     assert result["weekly_total"] == 0
     assert result["weekly_activity"] == [0] * 7
@@ -149,15 +153,13 @@ def test_stats_dashboard_weekly_bucketing_monday(session_factory: Callable[[], S
         )
         session.commit()
     with session_factory() as session:
-        result = dashboard(
-            session, user_id=user, timezone="Asia/Shanghai", weekly_goal=10, now=_now()
-        )
+        result = dashboard(session, user_id=user, now=_now())
     assert result["has_data"] is True
     assert result["weekly_total"] == 2  # 周一+周日
     assert result["weekly_activity"] == [1, 0, 0, 0, 0, 0, 1]  # 周一~周日
     assert result["week_change_rate"] == 1.0  # (2-1)/1
-    assert result["weekly_goal"] == 10
-    assert result["weekly_goal_progress"] == 0.2
+    assert result["weekly_goal"] == 350  # V2.5 服务端派生（默认每日目标 50 × 7）
+    assert result["weekly_goal_progress"] == pytest.approx(2 / 350)
     assert result["recall_accuracy"] == 0.5  # 1 GOOD / 2
     assert result["retention_rate"] is None  # 每事件各自卡的首次 → 非首次分母 0
     period = result["period"]
@@ -175,9 +177,7 @@ def test_stats_dashboard_week_change_null_when_last_week_zero(
         _seed_events(session, user_id=user, events=[("e1", "GOOD", "2026-08-10T01:00:00.000Z")])
         session.commit()
     with session_factory() as session:
-        result = dashboard(
-            session, user_id=user, timezone="Asia/Shanghai", weekly_goal=None, now=_now()
-        )
+        result = dashboard(session, user_id=user, now=_now())
     assert result["week_change_rate"] is None  # 上周 0 → null
 
 
@@ -197,9 +197,7 @@ def test_stats_dashboard_first_answer_accuracy_historical(
         )
         session.commit()
     with session_factory() as session:
-        result = dashboard(
-            session, user_id=user, timezone="Asia/Shanghai", weekly_goal=None, now=_now()
-        )
+        result = dashboard(session, user_id=user, now=_now())
     assert result["first_answer_accuracy"] == 0.5
 
 
@@ -220,9 +218,7 @@ def test_stats_dashboard_retention_non_first_same_card(
         )
         session.commit()
     with session_factory() as session:
-        result = dashboard(
-            session, user_id=user, timezone="Asia/Shanghai", weekly_goal=None, now=_now()
-        )
+        result = dashboard(session, user_id=user, now=_now())
     assert result["retention_rate"] == 0.0  # 非首次 1 个（e2 AGAIN）
     assert result["first_answer_accuracy"] == 1.0  # 该卡首个事件 e1 GOOD
     assert result["recall_accuracy"] == 0.5
@@ -244,9 +240,7 @@ def test_stats_dashboard_streak_days(session_factory: Callable[[], Session]) -> 
         )
         session.commit()
     with session_factory() as session:
-        result = dashboard(
-            session, user_id=user, timezone="Asia/Shanghai", weekly_goal=None, now=_now()
-        )
+        result = dashboard(session, user_id=user, now=_now())
     assert result["streak_days"] == 3
 
 
@@ -288,16 +282,33 @@ def test_stats_dashboard_mastered_count(session_factory: Callable[[], Session]) 
             )
         session.commit()
     with session_factory() as session:
-        result = dashboard(
-            session, user_id=user, timezone="Asia/Shanghai", weekly_goal=None, now=_now()
-        )
+        result = dashboard(session, user_id=user, now=_now())
     assert result["mastered_card_count"] == 1
     assert result["has_data"] is True  # mastered>0 即使周内无事件
 
 
-def test_stats_dashboard_invalid_timezone_rejected(session_factory: Callable[[], Session]) -> None:
-    """非法 IANA 时区 → AppError(VALIDATION_ERROR)（400）。"""
+def test_stats_dashboard_corrupted_preferences_timezone_rejected(
+    session_factory: Callable[[], Session],
+) -> None:
+    """偏好损坏防御：learning_timezone 非合法 IANA（写路径已校验，仅 DB 篡改可致）→
+    AppError(INVALID_LEARNING_TIMEZONE)，不得 500。"""
     user = _uuid()
+    with session_factory() as session:
+        _seed_user(session, user_id=user)
+        session.add(
+            UserPreferences(
+                user_id=user,
+                coverage_mode="BALANCED",
+                basic_ratio=40,
+                understanding_ratio=40,
+                deep_question_ratio=20,
+                daily_goal=50,
+                learning_timezone="Not/AZone",
+                current_project_id=None,
+                updated_at="2026-01-01T00:00:00.000Z",
+            )
+        )
+        session.commit()
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        dashboard(session, user_id=user, timezone="Not/AZone", weekly_goal=None, now=_now())
-    assert excinfo.value.code == ErrorCode.VALIDATION_ERROR
+        dashboard(session, user_id=user, now=_now())
+    assert excinfo.value.code == ErrorCode.INVALID_LEARNING_TIMEZONE

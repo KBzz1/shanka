@@ -1,118 +1,157 @@
 """services.stats：看板聚合（structure-contract 3.12/PRD 5.16；database-design §4 直接基于 review_events 聚合）。
 
-口径（R-12 裁决，登记 Progress）：
-- 周活动/周总数/周变化率/周目标完成率/回忆正确率/记忆保持率：当前自然周（周一）按上报 timezone 分桶；
-- 首次答对率：每卡历史首个事件为 GOOD 的比例（契约字面无周期限定，累计口径）；
-- 连续学习天数：按本次上报 timezone 截至本地当天连续有事件的自然日数；
-- 已掌握：C-03（REVIEW 且 stability>=21）去重卡数（全量）；
-- 分母 0 的比率一律 None（PRD 5.16）。
+V2.5 口径（Task 11 实现）：
+- 全部周口径（周活动/周总数/周变化率/周完成/回忆正确率/记忆保持率/streak/周界）按
+  账号学习时区（preferences.learning_timezone，契约 1.2）分桶：UTC reviewed_at 折算，
+  不改写事件（时区改变后重新分桶）；学习日期换算复用 services.preferences.service
+  learning_date——统计不得自造第二套时区换算。
+- 周目标 = daily_learning_goal × 7（服务端派生；不再接受客户端 timezone/weekly_goal）。
+- 首次答对率：每卡历史首个事件为 GOOD 的比例（契约字面无周期限定，累计口径）。
+- 已掌握：C-03（REVIEW 且 stability>=21）去重卡数（全量）。
+- 统计源 = review_events（评级事件）：自由刷题不写事件不计统计；事件按卡片当前可见性
+  （统一可见谓词 domain/card.py）过滤——STAGED/删除批次卡的事件不进入任何口径
+  （删除批次最终清理级联删事件，撤销窗口内也不保留幽灵计数）。
+- 分母 0 的比率一律 None（PRD 5.16）；无数据时不伪造固定日期数组或伪 0%。
+
+性能（database-design §4 基线：千级卡片、万级事件）：周窗口一次区间查询（索引
+ix_review_events_user_reviewed 覆盖）+ 全历史一次有序遍历（集合式，无 N+1），
+已掌握为单条 COUNT；实测见 tests/integration/test_v25_stats_performance.py。
 """
 
-from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from domain.card import VISIBLE_PREDICATE_SQL
-from infra.db.models import Card, ReviewEvent, ReviewState, UserPreferences
+from infra.db.models import Card, ReviewEvent, ReviewState
+from infra.db.session import format_utc
+from services.preferences.service import get_preferences, learning_date
 
 _WEEKDAYS = 7
 
 
-def _week_bounds(tz: ZoneInfo, now: datetime) -> tuple[datetime, datetime]:
-    """当前自然周（周一 00:00 ~ 下周一 00:00，本地时区）。"""
-    local = now.astimezone(tz)
-    monday = local - timedelta(days=local.weekday())
-    start = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+def _account_tz(timezone_name: str) -> ZoneInfo:
+    """账号学习时区（写路径已校验 INVALID_LEARNING_TIMEZONE；防御性兜底：损坏偏好不得 500）。"""
+    try:
+        return ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise AppError(
+            ErrorCode.INVALID_LEARNING_TIMEZONE, f"无效的学习时区: {timezone_name}"
+        ) from exc
+
+
+def _week_bounds(timezone: str, now: datetime) -> tuple[datetime, datetime]:
+    """当前自然周（周一 00:00 ~ 下周一 00:00，账号学习时区）。
+
+    学习日期经 learning_date 折算（复用偏好服务换算），周一算术只做本地日期偏移。
+    """
+    local_date = date.fromisoformat(learning_date(format_utc(now), timezone))
+    monday = local_date - timedelta(days=local_date.weekday())
+    start = datetime(monday.year, monday.month, monday.day, tzinfo=ZoneInfo(timezone))
     return start, start + timedelta(days=7)
 
 
-def _parse_tz(timezone_name: str) -> ZoneInfo:
-    try:
-        return ZoneInfo(timezone_name)
-    except Exception as exc:
-        raise AppError(ErrorCode.VALIDATION_ERROR, f"非法 IANA 时区: {timezone_name}") from exc
+def dashboard(session: Session, *, user_id: str, now: datetime) -> dict[str, object]:
+    prefs = get_preferences(session, user_id=user_id, now=now)
+    timezone = prefs["learning_timezone"]
+    _account_tz(timezone)
+    weekly_goal = prefs["daily_learning_goal"] * 7
 
+    start, end = _week_bounds(timezone, now)
+    start_str, end_str = format_utc(start), format_utc(end)
+    last_start = start - timedelta(days=7)
 
-def _as_utc_str(dt: datetime) -> str:
-    from infra.db.session import format_utc
-
-    return format_utc(dt.astimezone(UTC))
-
-
-def dashboard(
-    session: Session, *, user_id: str, timezone: str, weekly_goal: int | None, now: datetime
-) -> dict[str, object]:
-    tz = _parse_tz(timezone)
-    start, end = _week_bounds(tz, now)
-    start_str, end_str = _as_utc_str(start), _as_utc_str(end)
-
-    # 周内事件（按 reviewed_at 字符串比较——统一格式字典序=时间序）
-    week_events = session.scalars(
-        select(ReviewEvent).where(
+    # 周窗口（上周+本周）事件：join 可见卡（统一可见谓词），user+reviewed_at 索引区间。
+    # 不可见卡（STAGED/删除批次）事件不进入任何统计口径。
+    rows = session.execute(
+        select(
+            ReviewEvent.card_id,
+            ReviewEvent.rating,
+            ReviewEvent.reviewed_at,
+        )
+        .join(
+            Card,
+            (Card.card_id == ReviewEvent.card_id) & (Card.user_id == ReviewEvent.user_id),
+        )
+        .where(
             ReviewEvent.user_id == user_id,
-            ReviewEvent.reviewed_at >= start_str,
+            ReviewEvent.reviewed_at >= format_utc(last_start),
             ReviewEvent.reviewed_at < end_str,
+            text(VISIBLE_PREDICATE_SQL),
         )
     ).all()
-    # 上周事件（start 已是本地周一 00:00 → 上周 = [start-7d, start)，不再过 _week_bounds）
-    last_start, last_end = start - timedelta(days=7), start
-    last_week_count = (
-        session.scalar(
-            select(func.count(ReviewEvent.review_event_id)).where(
-                ReviewEvent.user_id == user_id,
-                ReviewEvent.reviewed_at >= _as_utc_str(last_start),
-                ReviewEvent.reviewed_at < _as_utc_str(last_end),
-            )
-        )
-        or 0
-    )
+    # format_utc 恒 3 位毫秒 Z——字典序 = 时间序（database-design §0）
+    last_week = [r for r in rows if r.reviewed_at < start_str]
+    week = [r for r in rows if r.reviewed_at >= start_str]
 
     weekly_activity = [0] * _WEEKDAYS
-    for ev in week_events:
-        local = datetime.fromisoformat(ev.reviewed_at).astimezone(tz)
+    for r in week:
+        local = date.fromisoformat(learning_date(r.reviewed_at, timezone))
         weekly_activity[local.weekday()] += 1
-    weekly_total = sum(weekly_activity)
+    weekly_total = len(week)
 
     # 回忆正确率（周内 GOOD/全部）
-    good_week = sum(1 for ev in week_events if ev.rating == "GOOD")
-    recall = good_week / weekly_total if weekly_total else None
+    recall = sum(1 for r in week if r.rating == "GOOD") / weekly_total if weekly_total else None
 
-    # 记忆保持率（周内非首次事件：该卡在本事件前已有更早事件）
-    non_first = [ev for ev in week_events if _is_non_first(session, user_id=user_id, ev=ev)]
-    retention = (
-        sum(1 for ev in non_first if ev.rating == "GOOD") / len(non_first) if non_first else None
-    )
-
-    # 首次答对率（每卡历史首个事件为 GOOD）
-    first_answer = _first_answer_accuracy(session, user_id=user_id)
-
-    # 周变化率
+    # 周变化率：上周为 0 时 null（客户端显示"暂无对比"）
+    last_week_count = len(last_week)
     week_change = (weekly_total - last_week_count) / last_week_count if last_week_count else None
 
-    # V2.5：weekly_completed_count = 本周不同 (账号学习日期, card_id) 数（去重口径，
-    # 按分桶时区分桶；账号学习时区权威见契约 1.2，本过渡期沿用请求时区）
-    completed_pairs = {
-        (datetime.fromisoformat(ev.reviewed_at).astimezone(tz).date(), ev.card_id)
-        for ev in week_events
-    }
-    weekly_completed_count = len(completed_pairs)
-
-    # V2.5：weekly_goal 服务端派生 = daily_learning_goal × 7（3.12/3.15）；偏好行未建立
-    # （Task 3 前）回落默认每日目标 50；客户端 weekly_goal 参数为过渡期兼容（Task 11 移除）
-    pref_daily_goal = session.scalar(
-        select(UserPreferences.daily_goal).where(UserPreferences.user_id == user_id)
+    # 周完成：本周不同 (账号学习日期, card_id) 数（去重；同日同卡多次评级只计 1）
+    weekly_completed_count = len(
+        {(learning_date(r.reviewed_at, timezone), r.card_id) for r in week}
     )
-    derived_weekly_goal = (pref_daily_goal or 50) * 7
-    weekly_goal = weekly_goal if weekly_goal is not None else derived_weekly_goal
 
-    # 周目标完成率（V2.5 口径：weekly_completed_count / weekly_goal）
+    # 周目标完成率：min(weekly_completed_count / weekly_goal, 1)
     goal_progress = min(weekly_completed_count / weekly_goal, 1.0) if weekly_goal else None
 
-    # 连续学习天数（截至本地当天）
-    streak = _streak_days(session, user_id=user_id, tz=tz, now=now)
+    # 首事件遍历（全历史，可见卡，一次有序查询）：每卡首个事件 = 组内最小
+    # (reviewed_at, created_at)（ORDER BY 组序保证）；非首次 = 存在严格更早
+    # reviewed_at（同毫秒事件不互判非首次，与历史口径一致）。
+    walk = session.execute(
+        select(
+            ReviewEvent.card_id,
+            ReviewEvent.rating,
+            ReviewEvent.reviewed_at,
+        )
+        .join(
+            Card,
+            (Card.card_id == ReviewEvent.card_id) & (Card.user_id == ReviewEvent.user_id),
+        )
+        .where(ReviewEvent.user_id == user_id, text(VISIBLE_PREDICATE_SQL))
+        .order_by(ReviewEvent.card_id, ReviewEvent.reviewed_at, ReviewEvent.created_at)
+    ).all()
+    first_rating: dict[str, str] = {}
+    min_reviewed_at: dict[str, str] = {}
+    learning_days: set[str] = set()  # streak：有可见卡事件的学习日
+    for r in walk:
+        if r.card_id not in min_reviewed_at:
+            first_rating[r.card_id] = r.rating
+            min_reviewed_at[r.card_id] = r.reviewed_at
+        learning_days.add(learning_date(r.reviewed_at, timezone))
+
+    # 记忆保持率（周内非首次事件 GOOD 占比）
+    non_first = [r for r in week if r.reviewed_at > min_reviewed_at[r.card_id]]
+    retention = (
+        sum(1 for r in non_first if r.rating == "GOOD") / len(non_first) if non_first else None
+    )
+
+    # 首次答对率（每卡历史首个事件为 GOOD 的比例）
+    first_answer = (
+        sum(1 for rating in first_rating.values() if rating == "GOOD") / len(first_rating)
+        if first_rating
+        else None
+    )
+
+    # 连续学习天数（截至账号学习时区当天；只计可见卡事件日）
+    today = date.fromisoformat(learning_date(format_utc(now), timezone))
+    streak = 0
+    while today.isoformat() in learning_days:
+        streak += 1
+        today -= timedelta(days=1)
 
     # 已掌握（C-03；只含可见卡——统一可见谓词 3.9）
     mastered = (
@@ -143,65 +182,6 @@ def dashboard(
         "retention_rate": retention,
         "streak_days": streak,
         "mastered_card_count": mastered,
-        "updated_at": _as_utc_str(now),
+        "updated_at": format_utc(now),
         "has_data": weekly_total > 0 or mastered > 0,
     }
-
-
-def _is_non_first(session: Session, *, user_id: str, ev: ReviewEvent) -> bool:
-    earlier = session.scalar(
-        select(func.count(ReviewEvent.review_event_id)).where(
-            ReviewEvent.user_id == user_id,
-            ReviewEvent.card_id == ev.card_id,
-            ReviewEvent.reviewed_at < ev.reviewed_at,
-        )
-    )
-    return bool(earlier)
-
-
-def _first_answer_accuracy(session: Session, *, user_id: str) -> float | None:
-    """每卡历史首个事件为 GOOD 的比例（只含可见卡——统一可见谓词 3.9）。"""
-    cards_with_events = (
-        session.execute(
-            select(Card.card_id)
-            .join(ReviewEvent, ReviewEvent.card_id == Card.card_id)
-            .where(Card.user_id == user_id, text(VISIBLE_PREDICATE_SQL))
-            .distinct()
-        )
-        .scalars()
-        .all()
-    )
-    if not cards_with_events:
-        return None
-    first_good = 0
-    for card_id in cards_with_events:
-        first_event = session.scalar(
-            select(ReviewEvent)
-            .where(ReviewEvent.user_id == user_id, ReviewEvent.card_id == card_id)
-            .order_by(ReviewEvent.reviewed_at, ReviewEvent.created_at)
-            .limit(1)
-        )
-        if first_event is not None and first_event.rating == "GOOD":
-            first_good += 1
-    return first_good / len(cards_with_events)
-
-
-def _streak_days(session: Session, *, user_id: str, tz: ZoneInfo, now: datetime) -> int:
-    local_today = now.astimezone(tz).date()
-    streak = 0
-    day = local_today
-    while True:
-        day_start = datetime(day.year, day.month, day.day, tzinfo=tz)
-        day_end = day_start + timedelta(days=1)
-        count = session.scalar(
-            select(func.count(ReviewEvent.review_event_id)).where(
-                ReviewEvent.user_id == user_id,
-                ReviewEvent.reviewed_at >= _as_utc_str(day_start),
-                ReviewEvent.reviewed_at < _as_utc_str(day_end),
-            )
-        )
-        if not count:
-            break
-        streak += 1
-        day -= timedelta(days=1)
-    return streak

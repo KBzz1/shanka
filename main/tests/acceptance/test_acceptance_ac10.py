@@ -111,25 +111,19 @@ def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
         "device_timezone": "Asia/Shanghai",
     }
     client.post("/review-events", json=payload, headers={**device, **_idem()})
-    resp = client.get(
-        "/stats/dashboard", params={"timezone": "Asia/Shanghai", "weekly_goal": 50}, headers=device
-    )
+    resp = client.get("/stats/dashboard", headers=device)
     assert resp.status_code == 200
     body = resp.json()
     assert body["has_data"] is True
     assert body["weekly_total"] == 1
     assert sum(body["weekly_activity"]) == 1  # 周活动每日计数合计 = 周总数
-    assert body["weekly_goal"] == 50
-    assert body["weekly_goal_progress"] == 0.02  # 1/50
+    assert body["weekly_goal"] == 350  # V2.5 服务端派生（默认每日目标 50 × 7）
+    assert body["weekly_goal_progress"] == 1 / 350
     assert body["recall_accuracy"] == 1.0  # 周内 1 GOOD / 1
     assert body["streak_days"] >= 1  # 今天有事件（事件 reviewed_at = 服务端真实 now）
     assert body["period"]["week_ordinal"] >= 1
-    # 空态（新用户）：非示例值；V2.5 weekly_goal 服务端派生（默认每日目标 50 × 7 = 350）
-    empty = client.get(
-        "/stats/dashboard",
-        params={"timezone": "Asia/Shanghai"},
-        headers=_user(client, "user2", "pass-2222"),
-    )
+    # 空态（新用户）：非示例值；weekly_goal 服务端派生（默认每日目标 50 × 7 = 350）
+    empty = client.get("/stats/dashboard", headers=_user(client, "user2", "pass-2222"))
     assert empty.status_code == 200
     empty_body = empty.json()
     assert empty_body["has_data"] is False

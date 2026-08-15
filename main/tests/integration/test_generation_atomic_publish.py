@@ -596,13 +596,7 @@ def test_visible_predicate_stats_mastered_excludes_staged(
         )
         session.commit()
     with session_factory() as session:
-        stats = dashboard(
-            session,
-            user_id=user,
-            timezone="Asia/Shanghai",
-            weekly_goal=50,
-            now=datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
-        )
+        stats = dashboard(session, user_id=user, now=datetime(2026, 8, 15, 12, 0, tzinfo=UTC))
     assert stats["mastered_card_count"] == 1
     assert stats["has_data"] is True
 

@@ -75,21 +75,20 @@ def test_stats_api_review_counts_into_dashboard(client: TestClient) -> None:
         headers=_headers(client, str(uuid.uuid4())),
     )
     assert resp.status_code == 200, resp.text
-    # 4. 看板立即计入
-    resp = client.get(
-        "/stats/dashboard?timezone=Asia/Shanghai&weekly_goal=50", headers=_headers(client)
-    )
+    # 4. 看板立即计入（V2.5：无客户端参数，服务端按账号偏好派生）
+    resp = client.get("/stats/dashboard", headers=_headers(client))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["weekly_total"] == 1
     assert body["has_data"] is True
     assert body["recall_accuracy"] == 1.0
-    assert body["weekly_goal_progress"] == 0.02  # min(1/50, 1)
+    assert body["weekly_goal"] == 350  # 默认每日目标 50 × 7
+    assert body["weekly_goal_progress"] == pytest.approx(1 / 350)
 
 
 def test_stats_api_empty_has_data_false(client: TestClient) -> None:
     """空用户看板 has_data=false（前端空态判定）。"""
-    resp = client.get("/stats/dashboard?timezone=Asia/Shanghai", headers=_headers(client))
+    resp = client.get("/stats/dashboard", headers=_headers(client))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["has_data"] is False

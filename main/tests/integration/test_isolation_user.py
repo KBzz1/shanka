@@ -206,10 +206,10 @@ def test_cross_user_stats_isolation(client: TestClient) -> None:
         headers={**h1, **_idem()},
     )
     assert resp.status_code == 200
-    d1 = client.get("/stats/dashboard", params={"timezone": "Asia/Shanghai"}, headers=h1).json()
+    d1 = client.get("/stats/dashboard", headers=h1).json()
     assert d1["has_data"] is True
     assert d1["weekly_total"] == 1
-    d2 = client.get("/stats/dashboard", params={"timezone": "Asia/Shanghai"}, headers=h2).json()
+    d2 = client.get("/stats/dashboard", headers=h2).json()
     assert d2["has_data"] is False
     assert d2["weekly_total"] == 0
 
