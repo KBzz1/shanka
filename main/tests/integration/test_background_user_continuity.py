@@ -83,13 +83,13 @@ def _create_task_before_executor(client: TestClient, user: dict[str, str]) -> tu
     assert deck_resp.status_code == 201
     resp = client.post(
         "/tasks",
+        params={"file_id": file_id},  # V2.5 过渡：file_id 经 query 参数传入
         json={
-            "file_id": file_id,
             "deck_id": deck_resp.json()["deck_id"],
             "chapter_ids": [c["chapter_id"] for c in chapters[:2]],
             "generation_config": {
-                "quantity_tendency": "COMPACT",
-                "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+                "coverage_mode": "COMPACT",
+                "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
             },
         },
         headers={**user, **_idem()},

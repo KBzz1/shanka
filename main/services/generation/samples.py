@@ -32,7 +32,7 @@ def generate_samples(
     missing = [cid for cid in chapter_ids if cid not in by_id]
     if missing:
         raise AppError(ErrorCode.PDF_NOT_FOUND, "章节不属于该 PDF")
-    # 样卡：1 基础 + 1 理解 + 1 应用；2 问答 + 1 判断（fake 生成器按难度定类型）。
+    # 样卡：1 基础 + 1 理解 + 1 开放深问（V2.5 难度改名；DEEP_QUESTION 为 QUESTION 卡）。
     # task_id 固定 "sample"：样卡不入库不参与去重（F-1 修复后 seed 带任务维度）
     first = by_id[chapter_ids[0]]
     return [
@@ -51,9 +51,9 @@ def generate_samples(
             "sample",
         ),
         generate_card(
-            "样卡主题-应用",
+            "样卡主题-深问",
             first.name,
-            "APPLICATION",
+            "DEEP_QUESTION",
             config.custom_requirements,
             "sample",
         ),

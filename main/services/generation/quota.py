@@ -9,9 +9,13 @@ _DENSITY = {"COMPACT": 1, "BALANCED": 2, "EXTENSIVE": 3}
 _BASE_CHUNKS = 3  # 每章基础分块数（确定性；真实文本分块 V5A 接入）
 
 
-def task_unit_budget(chapter_count: int, quantity_tendency: str) -> int:
-    """任务总预算（5.4.1 口径）：章节数 × 3 × 密度系数，未知密度回落 BALANCED。"""
-    density = _DENSITY.get(quantity_tendency, 2)
+def task_unit_budget(chapter_count: int, coverage_mode: str) -> int:
+    """任务总预算（5.4.1 口径）：章节数 × 3 × 密度系数，未知密度回落 BALANCED。
+
+    V2.5：quantity_tendency 改名 coverage_mode（隐藏安全硬上限仍由代码控制，
+    不承诺卡片数量，PRD 5.4.1）。
+    """
+    density = _DENSITY.get(coverage_mode, 2)
     return chapter_count * _BASE_CHUNKS * density
 
 

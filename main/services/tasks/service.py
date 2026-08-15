@@ -49,15 +49,21 @@ def _owned_task(session: Session, *, user_id: str, task_id: str) -> Task:
 
 
 def task_view(task: Task) -> dict[str, object]:
-    """任务视图：selected_chapters/generation_config/cursor 从 JSON 反序列化；resumable bool。"""
+    """任务视图：selected_chapters/generation_config/cursor/sample_cards 从 JSON 反序列化；
+    resumable bool；internal_stage 取自 stage 列（V2.5 改名 internal_stage 语义）。"""
     return {
         "task_id": task.task_id,
+        "project_id": task.project_id,  # V2.5 归属项目；迁移前历史任务可为 null
         "file_id": task.file_id,
         "deck_id": task.deck_id,
+        "retry_of_task_id": task.retry_of_task_id,  # V2.5 失败重试关联
         "status": task.status,
-        "stage": task.stage,
+        "internal_stage": task.stage,  # V2.5：stage 列 → internal_stage 语义（运行期观测）
         "selected_chapters": json.loads(task.selected_chapters),
         "generation_config": json.loads(task.generation_config),
+        "sample_cards": json.loads(task.sample_cards) if task.sample_cards else None,
+        "sample_config_hash": task.sample_config_hash,
+        "sample_confirmed_at": task.sample_confirmed_at,
         "cursor": json.loads(task.cursor) if task.cursor else None,
         "generated_card_count": task.generated_card_count,
         "total_batch_count": task.total_batch_count,
@@ -128,7 +134,9 @@ def create_task(
             settings = injected
         else:
             settings = Settings()
-    budget = task_unit_budget(len(chapter_ids), config.quantity_tendency)
+    budget = task_unit_budget(
+        len(chapter_ids), config.coverage_mode
+    )  # V2.5：quantity_tendency 改名 coverage_mode
     if budget > settings.max_generation_units_per_task:
         raise AppError(ErrorCode.VALIDATION_ERROR, "生成单元预算超出上限")
     # 创建即 PENDING+PLANNING（spec §6.1）：只落创建快照，started_at/total_batch_count 留空，

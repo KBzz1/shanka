@@ -18,14 +18,16 @@ def test_fake_card_differs_by_input() -> None:
 
 def test_fake_card_type_by_difficulty() -> None:
     basic = generate_card("t", "c", "BASIC", None, "task-1")
-    app = generate_card("t", "c", "APPLICATION", None, "task-1")
+    deep = generate_card("t", "c", "DEEP_QUESTION", None, "task-1")  # V2.5 改名
     assert basic["card_type"] == "QUESTION"
-    assert app["card_type"] == "TRUE_FALSE"
+    # V2.5：DEEP_QUESTION 只允许 QUESTION 卡型（契约 3.6 组合规则）
+    assert deep["card_type"] == "QUESTION"
+    assert deep["target_difficulty"] == "DEEP_QUESTION"
 
 
 def test_fake_card_ids_stable_and_unique() -> None:
     a = generate_card("主题X", "c", "BASIC", None, "task-1")
-    b = generate_card("主题X", "c", "APPLICATION", None, "task-1")
+    b = generate_card("主题X", "c", "DEEP_QUESTION", None, "task-1")  # V2.5 改名
     assert a["card_id"] != b["card_id"]
     assert a["generation_item_id"] != b["generation_item_id"]
 

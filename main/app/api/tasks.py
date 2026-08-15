@@ -9,7 +9,7 @@
 import json
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -45,6 +45,9 @@ def _now() -> str:
 @router.post("", status_code=201, response_model=TaskSchema)
 def create_task_endpoint(
     request: Request,
+    file_id: Annotated[
+        str, Query(description="过渡期参数：V2.5 起 project_id 取自路径，file_id 由项目派生")
+    ],
     payload: TaskCreateRequest,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
@@ -58,7 +61,7 @@ def create_task_endpoint(
         task = create_task(
             session,
             user_id=user_id,
-            file_id=payload.file_id,
+            file_id=file_id,
             deck_id=payload.deck_id,
             chapter_ids=payload.chapter_ids,
             config=payload.generation_config,

@@ -64,8 +64,8 @@ def _user(
 
 def _config() -> dict[str, object]:
     return {
-        "quantity_tendency": "BALANCED",
-        "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+        "coverage_mode": "BALANCED",
+        "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
     }
 
 
@@ -131,9 +131,14 @@ def test_samples_post_three_cards_without_idempotency_key(
     assert resp.status_code == 200
     cards = resp.json()["sample_cards"]
     assert len(cards) == 3
-    assert {c["target_difficulty"] for c in cards} == {"BASIC", "UNDERSTANDING", "APPLICATION"}
-    assert sum(1 for c in cards if c["card_type"] == "QUESTION") == 2
-    assert sum(1 for c in cards if c["card_type"] == "TRUE_FALSE") == 1
+    assert {c["target_difficulty"] for c in cards} == {
+        "BASIC",
+        "UNDERSTANDING",
+        "DEEP_QUESTION",
+    }  # V2.5 改名
+    # V2.5：DEEP_QUESTION 只允许 QUESTION 卡型（契约 3.6），样卡全为问答卡
+    assert sum(1 for c in cards if c["card_type"] == "QUESTION") == 3
+    assert sum(1 for c in cards if c["card_type"] == "TRUE_FALSE") == 0
     # R-14：SampleCard 轻量组件（structure-contract 3.13）——无落库/归属/版本占位字段
     for c in cards:
         assert {"card_id", "front", "back", "card_type"} <= set(c)
@@ -167,7 +172,11 @@ def test_samples_invalid_ratio_400(ctx: tuple[TestClient, Path]) -> None:
     user = _user(client)
     seed = _seed_pdf(db_path, user_id=_user_id(db_path))
     bad_config = _config()
-    bad_config["difficulty_ratio"] = {"basic": 0.5, "understanding": 0.5, "application": 0.2}
+    bad_config["difficulty_ratio"] = {
+        "basic": 50,
+        "understanding": 50,
+        "deep_question": 20,
+    }  # 合计 120 非法
     resp = client.post(
         "/samples",
         json={

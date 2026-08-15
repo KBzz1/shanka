@@ -61,7 +61,7 @@ def submit_review_endpoint(
             card_id=payload.card_id,
             rating=payload.rating,
             client_event_id=payload.client_event_id,
-            device_timezone=payload.device_timezone,
+            device_timezone=None,  # V2.5：请求不再携带 device_timezone（可空审计字段）
             now=_now(),
         )
         return 200, view

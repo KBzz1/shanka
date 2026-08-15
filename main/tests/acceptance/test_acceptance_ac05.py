@@ -173,12 +173,11 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
 
 def _payload(seed: dict[str, object]) -> dict[str, object]:
     return {
-        "file_id": seed["file_id"],
         "deck_id": seed["deck_id"],
         "chapter_ids": seed["chapter_ids"],
         "generation_config": {
-            "quantity_tendency": "COMPACT",  # 预算 6 单元（BASIC 3 / UNDERSTANDING 2 / APPLICATION 1）
-            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            "coverage_mode": "COMPACT",  # 预算 6 单元（BASIC 3 / UNDERSTANDING 2 / DEEP_QUESTION 1）
+            "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
         },
     }
 
@@ -300,7 +299,12 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     client, db_path, settings = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
 
@@ -456,7 +460,12 @@ def test_acceptance_ac05_cancel_keeps_inserted_cards(
     client, db_path, _ = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
 

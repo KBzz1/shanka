@@ -54,6 +54,12 @@ def test_alembic_upgrade_creates_all_tables(alembic_env: tuple[Config, Path]) ->
         "llm_call_attempts",
         "users",
         "auth_sessions",
+        # V2.5 新表（database-design 2.17~2.21）
+        "learning_projects",
+        "user_preferences",
+        "project_study_settings",
+        "card_deletion_batches",
+        "card_rewrite_previews",
         "alembic_version",
     }
     assert expected <= tables
@@ -109,6 +115,7 @@ def test_alembic_users_auth_sessions_columns(alembic_env: tuple[Config, Path]) -
         "user_id",
         "username",
         "email",
+        "avatar_key",
         "password_hash",
         "created_at",
         "updated_at",
@@ -116,6 +123,8 @@ def test_alembic_users_auth_sessions_columns(alembic_env: tuple[Config, Path]) -
     assert users["user_id"][5] == 1  # PK
     assert users["username"][3] == 1  # NOT NULL
     assert users["email"][3] == 1  # NOT NULL
+    assert users["avatar_key"][3] == 1  # NOT NULL（V2.5 预设头像）
+    assert users["avatar_key"][4] == "'mood_01'"  # DEFAULT 'mood_01'（SQLite dflt_value 含引号）
     assert users["password_hash"][3] == 1
     assert users["created_at"][3] == 1 and users["updated_at"][3] == 1
     assert "uq_users_email" in users_sql  # users.email UNIQUE（V2.4 登录键）
@@ -494,3 +503,312 @@ def test_v2_4_account_data_wiped_and_downgrade_rejected(
     # V2.4 downgrade 显式拒绝（fail-closed）：迁移文件 downgrade 第一行 raise
     with pytest.raises(RuntimeError, match="迁移不可逆"):
         command.downgrade(config, "b92357b079ca")
+
+
+# ---------- V2.5（database-design 7.3：学习项目与整批发布；不可逆） ----------
+
+_V25_LEGACY_REVISION = "ad7849aad10e"  # V2.4 终态 = V2.5 升级前 head
+
+
+def _upgrade_v24_db_with_rows(config: Config, db_path: Path) -> None:
+    """在 V2.4 旧库副本直插用户域行后 upgrade 到 head（V2.5 前置副本 seed 模式）。
+
+    行覆盖：PARSED/FAILED PDF 各 1、章节、GENERATED 牌组（可唯一绑定）、MANUAL 独立
+    牌组、各遗留状态的 tasks（PENDING/RUNNING/COMPLETED/FAILED/CANCELLED/PAUSED/
+    file_id=null 终态）、knowledge_points/cards 的 APPLICATION 难度、review_events。
+    """
+    command.upgrade(config, _V25_LEGACY_REVISION)
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO users (user_id, username, email, password_hash, created_at,"
+                " updated_at) VALUES ('u1', 'alice', 'alice@example.com', 'hash',"
+                " '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO pdf_files (file_id, user_id, filename, storage_key, size_bytes,"
+                " status, error_code, created_at) VALUES ('f1', 'u1', '算法导论.pdf', 'stor-1',"
+                " 10, 'PARSED', NULL, '2026-01-01T00:00:00.000Z')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO pdf_files (file_id, user_id, filename, storage_key, size_bytes,"
+                " status, error_code, created_at) VALUES ('f2', 'u1', 'broken.pdf', 'stor-2',"
+                " 5, 'FAILED', 'PDF_PARSE_FAILED', '2026-01-01T00:00:00.000Z')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO chapters (chapter_id, file_id, name, start_page, end_page)"
+                " VALUES ('ch1', 'f1', '第一章', 1, 10)"
+            )
+        )
+        # GENERATED 牌组 d1（tasks 只引用 f1 → 可唯一绑定项目）+ MANUAL 独立牌组 d2
+        conn.execute(
+            text(
+                "INSERT INTO decks (deck_id, user_id, name, source, version, created_at,"
+                " updated_at) VALUES ('d1', 'u1', '生成牌组', 'GENERATED', 'v1',"
+                " '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO decks (deck_id, user_id, name, source, version, created_at,"
+                " updated_at) VALUES ('d2', 'u1', '手动牌组', 'MANUAL', 'v1',"
+                " '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
+            )
+        )
+        # 六种遗留状态任务 + file_id=null 终态历史任务（保留只读历史）
+        legacy_statuses = [
+            ("t-pending", "f1", "PENDING"),
+            ("t-running", "f1", "RUNNING"),
+            ("t-completed", "f1", "COMPLETED"),
+            ("t-failed", "f1", "FAILED"),
+            ("t-cancelled", "f1", "CANCELLED"),
+            ("t-paused", "f1", "PAUSED"),
+            ("t-orphan", None, "COMPLETED"),
+        ]
+        for task_id, file_id, status in legacy_statuses:
+            file_sql = f"'{file_id}'" if file_id else "NULL"
+            conn.execute(
+                text(
+                    f"INSERT INTO tasks (task_id, user_id, file_id, deck_id, status, stage,"
+                    f" selected_chapters, generation_config, cursor, generated_card_count,"
+                    f" total_batch_count, completed_batch_count, resumable, failure_stage,"
+                    f" error_code, created_at, started_at, ended_at, updated_at)"
+                    f" VALUES ('{task_id}', 'u1', {file_sql}, 'd1', '{status}', NULL, '[]',"
+                    f" '{{}}', NULL, 0, NULL, NULL, 0, NULL, NULL,"
+                    f" '2026-01-01T00:00:00.000Z', NULL, NULL, NULL)"
+                )
+            )
+        # APPLICATION 难度：knowledge_points 1 行 + cards 1 行
+        conn.execute(
+            text(
+                "INSERT INTO knowledge_points (knowledge_point_id, task_id, chapter_id,"
+                " source_chunk_id, topic, priority, status, target_difficulty, card_type,"
+                " source_chunk_ids) VALUES ('kp1', 't-completed', 'ch1', 'sc1', 'Topic', 1,"
+                " 'PROCESSED', 'APPLICATION', 'QUESTION', '[\"sc1\"]')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO cards (card_id, deck_id, user_id, source, position, front, back,"
+                " code, card_type, question, answer, statement, explanation, answer_boolean,"
+                " generation_item_id, target_difficulty, knowledge_point_ids, evidence_score,"
+                " correctness_score, difficulty_score, learning_value_score, rubric_total_score,"
+                " version, created_at, updated_at) VALUES ('c1', 'd1', 'u1', 'GENERATED', 1,"
+                " 'front', 'back', NULL, 'QUESTION', 'q', 'a', NULL, NULL, NULL, 'g1',"
+                " 'APPLICATION', NULL, NULL, NULL, NULL, NULL, NULL, 'v1',"
+                " '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO review_events (review_event_id, user_id, card_id, client_event_id,"
+                " rating, reviewed_at, device_timezone, created_at) VALUES ('re1', 'u1', 'c1',"
+                " 'ce1', 'GOOD', '2026-01-01T00:00:00.000Z', 'Asia/Shanghai',"
+                " '2026-01-01T00:00:00.000Z')"
+            )
+        )
+    command.upgrade(config, "head")
+
+
+def test_v25_fresh_upgrade_creates_new_schema(alembic_env: tuple[Config, Path]) -> None:
+    """全新空库 upgrade head：V2.5 新表/列/外键/索引/CHECK 全部落地。"""
+    config, db_path = alembic_env
+    command.upgrade(config, "head")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        tables = {
+            r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+        }
+        for t in (
+            "learning_projects",
+            "user_preferences",
+            "project_study_settings",
+            "card_deletion_batches",
+            "card_rewrite_previews",
+        ):
+            assert t in tables
+        users_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('users')"))}
+        cards_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('cards')"))}
+        tasks_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('tasks')"))}
+        decks_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('decks')"))}
+        review_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('review_events')"))}
+        # 列存在性 + 默认值（SQLite dflt_value 含引号）
+        assert users_cols["avatar_key"][4] == "'mood_01'"
+        assert cards_cols["publication_state"][4] == "'PUBLISHED'"
+        for col in (
+            "project_id",
+            "retry_of_task_id",
+            "sample_cards",
+            "sample_config_hash",
+            "sample_confirmed_at",
+        ):
+            assert col in tasks_cols
+        assert "project_id" in decks_cols
+        for col in (
+            "source_task_id",
+            "chapter_id",
+            "delete_batch_id",
+            "pending_delete_at",
+            "undo_until",
+        ):
+            assert col in cards_cols
+        assert review_cols["device_timezone"][3] == 0  # 可空（V2.5 审计字段）
+        # 外键（PRAGMA foreign_key_list 行：(id, seq, table, from, ...)）
+        tasks_fks = {(r[2], r[3]) for r in conn.execute(text("PRAGMA foreign_key_list('tasks')"))}
+        cards_fks = {(r[2], r[3]) for r in conn.execute(text("PRAGMA foreign_key_list('cards')"))}
+        assert ("learning_projects", "project_id") in tasks_fks
+        assert ("tasks", "retry_of_task_id") in tasks_fks
+        assert ("tasks", "source_task_id") in cards_fks
+        assert ("chapters", "chapter_id") in cards_fks
+        assert ("card_deletion_batches", "delete_batch_id") in cards_fks
+        lp_fks = {
+            (r[2], r[3]) for r in conn.execute(text("PRAGMA foreign_key_list('learning_projects')"))
+        }
+        assert ("pdf_files", "file_id") in lp_fks
+        assert ("users", "user_id") in lp_fks  # 隔离键 FK
+        # 索引
+        cards_idx = {r[1] for r in conn.execute(text("PRAGMA index_list('cards')"))}
+        tasks_idx = {r[1] for r in conn.execute(text("PRAGMA index_list('tasks')"))}
+        decks_idx = {r[1] for r in conn.execute(text("PRAGMA index_list('decks')"))}
+        assert "ix_cards_publication_delete" in cards_idx
+        assert "ix_cards_source_task" in cards_idx
+        assert "ix_cards_chapter_id" in cards_idx
+        assert "ix_tasks_project_id" in tasks_idx
+        assert "ix_decks_project_id" in decks_idx
+        assert "ix_learning_projects_user_updated" in {
+            r[1] for r in conn.execute(text("PRAGMA index_list('learning_projects')"))
+        }
+        assert "ix_deletion_batches_user_status_undo" in {
+            r[1] for r in conn.execute(text("PRAGMA index_list('card_deletion_batches')"))
+        }
+        assert "ix_rewrite_previews_user_status_expires" in {
+            r[1] for r in conn.execute(text("PRAGMA index_list('card_rewrite_previews')"))
+        }
+        # user_preferences CHECK 约束（sqlite_master 保留声明名）
+        prefs_sql = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='user_preferences'")
+        ).scalar_one()
+        assert "basic_ratio % 10 = 0" in prefs_sql
+        assert "basic_ratio + understanding_ratio + deep_question_ratio = 100" in prefs_sql
+        assert "daily_goal" in prefs_sql and "% 10 = 0" in prefs_sql
+        # learning_projects.file_id UNIQUE
+        assert {"file_id"} in _unique_constraint_column_sets(conn, "learning_projects")
+
+
+def test_v25_legacy_db_maps_states_and_backfills(alembic_env: tuple[Config, Path]) -> None:
+    """复制自 V2.4 的旧库：状态迁移、APPLICATION→DEEP_QUESTION、STAGED/PUBLISHED、
+    项目回填与牌组/任务绑定、默认值、历史行保留。"""
+    config, db_path = alembic_env
+    _upgrade_v24_db_with_rows(config, db_path)
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        # 1) 任务七态迁移（PENDING→DRAFT、RUNNING→GENERATING、CANCELLED→ABANDONED、
+        #    PAUSED→FAILED + LEGACY_PAUSED_TASK 占位；COMPLETED/FAILED 原样）
+        status_map = {
+            task_id: (status, error_code)
+            for task_id, status, error_code in conn.execute(
+                text("SELECT task_id, status, error_code FROM tasks")
+            )
+        }
+        assert status_map["t-pending"] == ("DRAFT", None)
+        assert status_map["t-running"] == ("GENERATING", None)
+        assert status_map["t-completed"] == ("COMPLETED", None)
+        assert status_map["t-failed"] == ("FAILED", None)
+        assert status_map["t-cancelled"] == ("ABANDONED", None)
+        assert status_map["t-paused"] == ("FAILED", "LEGACY_PAUSED_TASK")
+        assert status_map["t-orphan"] == ("COMPLETED", None)
+        assert all(
+            s
+            in {
+                "DRAFT",
+                "SAMPLE_GENERATING",
+                "AWAITING_SAMPLE_CONFIRMATION",
+                "GENERATING",
+                "COMPLETED",
+                "FAILED",
+                "ABANDONED",
+            }
+            for s, _ in status_map.values()
+        )
+        # 2) APPLICATION → DEEP_QUESTION（knowledge_points + cards）
+        assert (
+            conn.execute(
+                text(
+                    "SELECT target_difficulty FROM knowledge_points WHERE knowledge_point_id='kp1'"
+                )
+            ).scalar()
+            == "DEEP_QUESTION"
+        )
+        assert (
+            conn.execute(text("SELECT target_difficulty FROM cards WHERE card_id='c1'")).scalar()
+            == "DEEP_QUESTION"
+        )
+        # 3) 历史卡迁为 PUBLISHED；review_events.device_timezone 历史值保留
+        assert (
+            conn.execute(text("SELECT publication_state FROM cards WHERE card_id='c1'")).scalar()
+            == "PUBLISHED"
+        )
+        assert (
+            conn.execute(
+                text("SELECT device_timezone FROM review_events WHERE review_event_id='re1'")
+            ).scalar()
+            == "Asia/Shanghai"
+        )
+        # 4) 项目回填：每个现有 PDF 一个项目；PARSED → chapters_confirmed_at = migrated_at，
+        #    FAILED → NULL；名称取 filename 去扩展名
+        projects = {
+            file_id: (name, confirmed)
+            for file_id, name, confirmed in conn.execute(
+                text(
+                    "SELECT file_id, name, chapters_confirmed_at FROM learning_projects"
+                    " ORDER BY file_id"
+                )
+            )
+        }
+        assert set(projects) == {"f1", "f2"}
+        assert projects["f1"][0] == "算法导论"
+        assert projects["f1"][1] is not None
+        assert projects["f2"][0] == "broken"
+        assert projects["f2"][1] is None
+        # 5) 牌组/任务绑定：GENERATED 牌组 d1（唯一 file 定位）绑定项目；MANUAL d2 独立；
+        #    tasks 绑定其 file 对应项目；file_id=null 终态任务 project_id 保持 NULL
+    with engine.connect() as conn:
+        proj_f1 = conn.execute(
+            text("SELECT project_id FROM learning_projects WHERE file_id='f1'")
+        ).scalar_one()
+        assert (
+            conn.execute(text("SELECT project_id FROM decks WHERE deck_id='d1'")).scalar()
+            == proj_f1
+        )
+        assert (
+            conn.execute(text("SELECT project_id FROM decks WHERE deck_id='d2'")).scalar() is None
+        )
+        task_projects = {
+            task_id: pid
+            for task_id, pid in conn.execute(text("SELECT task_id, project_id FROM tasks"))
+        }
+        assert task_projects["t-pending"] == proj_f1
+        assert task_projects["t-orphan"] is None
+        # 6) users.avatar_key 默认值 + user_preferences 存在（无行）
+        assert (
+            conn.execute(text("SELECT avatar_key FROM users WHERE user_id='u1'")).scalar()
+            == "mood_01"
+        )
+        assert conn.execute(text("SELECT COUNT(*) FROM user_preferences")).scalar() == 0
+        # 7) 升级后无 FK 悬挂（回填自证）
+        assert conn.execute(text("PRAGMA foreign_key_check")).fetchall() == []
+
+
+def test_v25_downgrade_fail_closed(alembic_env: tuple[Config, Path]) -> None:
+    """V2.5 downgrade 第一行 raise（fail-closed，database-design 7.3：升级前备份，不假装可回滚）。"""
+    config, db_path = alembic_env
+    _upgrade_v24_db_with_rows(config, db_path)
+    with pytest.raises(RuntimeError, match="迁移不可逆"):
+        command.downgrade(config, _V25_LEGACY_REVISION)

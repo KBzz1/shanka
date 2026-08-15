@@ -8,6 +8,7 @@ executor.scan_once——V3A 同款"显式 scan_once"模式）；种子直写迁�
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -211,15 +212,31 @@ def _seed_context(db_path: Path, *, user_id: str, with_key: bool = True) -> dict
 
 
 def _payload(seed: dict[str, object], *, tendency: str = "COMPACT") -> dict[str, object]:
+    """V2.5 请求体（project_id 取自路径；file_id 经 query 过渡参数传入）。"""
     return {
-        "file_id": seed["file_id"],
         "deck_id": seed["deck_id"],
         "chapter_ids": seed["chapter_ids"],
         "generation_config": {
-            "quantity_tendency": tendency,
-            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            "coverage_mode": tendency,
+            "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
         },
     }
+
+
+def _post_task(
+    client: TestClient,
+    seed: dict[str, object],
+    user: dict[str, str],
+    idem: dict[str, str] | None = None,
+) -> httpx.Response:
+    """POST /tasks（V2.5 过渡：file_id 为 query 参数）。"""
+    headers = {**user, **(idem or _idem())}
+    return cast(
+        httpx.Response,
+        client.post(
+            "/tasks", params={"file_id": seed["file_id"]}, json=_payload(seed), headers=headers
+        ),
+    )
 
 
 def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, Path]) -> None:
@@ -228,17 +245,17 @@ def test_tasks_create_201_pending_with_chapter_snapshot(ctx: tuple[TestClient, P
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = _post_task(client, seed, user)
     assert resp.status_code == 201
     body = resp.json()
     assert body["status"] == "PENDING"
-    assert body["stage"] == "PLANNING"
+    assert body["internal_stage"] == "PLANNING"  # V2.5 stage 列 → internal_stage 语义
     assert body["generated_card_count"] == 0
     chapters = body["selected_chapters"]
     assert len(chapters) == 2
     assert set(chapters[0]) == {"chapter_id", "name", "start_page", "end_page"}
     assert chapters[0]["name"] == "第1章"
-    assert body["generation_config"]["quantity_tendency"] == "COMPACT"
+    assert body["generation_config"]["coverage_mode"] == "COMPACT"  # V2.5 改名
     assert body["resumable"] is False
 
 
@@ -247,7 +264,9 @@ def test_tasks_create_missing_idempotency_key_400(ctx: tuple[TestClient, Path]) 
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers=user)
+    resp = client.post(
+        "/tasks", params={"file_id": seed["file_id"]}, json=_payload(seed), headers=user
+    )
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
@@ -257,7 +276,7 @@ def test_tasks_create_without_api_key_422(ctx: tuple[TestClient, Path]) -> None:
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path), with_key=False)
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = _post_task(client, seed, user)
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "API_KEY_NOT_SET"
 
@@ -269,8 +288,8 @@ def test_tasks_create_idempotent_replay(ctx: tuple[TestClient, Path]) -> None:
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     headers = {**user, **_idem()}
     payload = _payload(seed)
-    r1 = client.post("/tasks", json=payload, headers=headers)
-    r2 = client.post("/tasks", json=payload, headers=headers)
+    r1 = client.post("/tasks", params={"file_id": seed["file_id"]}, json=payload, headers=headers)
+    r2 = client.post("/tasks", params={"file_id": seed["file_id"]}, json=payload, headers=headers)
     assert r1.status_code == 201 and r2.status_code == 201
     assert r1.json() == r2.json()
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
@@ -285,8 +304,18 @@ def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> 
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     headers = {**user, **_idem()}
-    assert client.post("/tasks", json=_payload(seed), headers=headers).status_code == 201
-    resp = client.post("/tasks", json=_payload(seed, tendency="EXTENSIVE"), headers=headers)
+    assert (
+        client.post(
+            "/tasks", params={"file_id": seed["file_id"]}, json=_payload(seed), headers=headers
+        ).status_code
+        == 201
+    )
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed, tendency="EXTENSIVE"),
+        headers=headers,
+    )
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
 
@@ -296,7 +325,7 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = _post_task(client, seed, user)
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     task_factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
@@ -319,7 +348,7 @@ def test_tasks_cancel_200(ctx: tuple[TestClient, Path]) -> None:
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = _post_task(client, seed, user)
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     resp = client.post(f"/tasks/{task_id}/cancel", headers={**user, **_idem()})
@@ -338,7 +367,7 @@ def test_tasks_resume_200_then_409(ctx: tuple[TestClient, Path]) -> None:
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = _post_task(client, seed, user)
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     # 直写 PAUSED + resumable=1（服务端无 PAUSED 入口；后台循环间隔 3600 不干预）

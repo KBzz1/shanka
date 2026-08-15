@@ -21,19 +21,26 @@ class ErrorCode(StrEnum):
     AUTH_INVALID = "AUTH_INVALID"
     INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
     EMAIL_TAKEN = "EMAIL_TAKEN"
-    # PDF
+    # 偏好（V2.5）
+    INVALID_PREFERENCES = "INVALID_PREFERENCES"
+    INVALID_LEARNING_TIMEZONE = "INVALID_LEARNING_TIMEZONE"
+    # PDF/项目
     PDF_UPLOAD_INVALID = "PDF_UPLOAD_INVALID"
     PDF_PARSE_FAILED = "PDF_PARSE_FAILED"
     PDF_TOC_MISSING = "PDF_TOC_MISSING"
     PDF_NOT_FOUND = "PDF_NOT_FOUND"
     CHAPTER_NOT_FOUND = "CHAPTER_NOT_FOUND"
+    PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"  # V2.5 项目不存在或跨用户（统一 404）
+    PROJECT_STATE_CONFLICT = "PROJECT_STATE_CONFLICT"  # V2.5 当前项目状态不允许操作
+    PROJECT_HAS_ACTIVE_TASK = "PROJECT_HAS_ACTIVE_TASK"  # V2.5 删除被活跃任务阻止
     # API Key
     API_KEY_UNAVAILABLE = "API_KEY_UNAVAILABLE"
     API_KEY_NOT_SET = "API_KEY_NOT_SET"
     # 任务
     TASK_NOT_FOUND = "TASK_NOT_FOUND"
     TASK_STATE_CONFLICT = "TASK_STATE_CONFLICT"
-    TASK_NOT_RESUMABLE = "TASK_NOT_RESUMABLE"
+    TASK_ZERO_CARDS = "TASK_ZERO_CARDS"  # V2.5 正式生成无有效卡（整体失败）
+    SAMPLE_STALE = "SAMPLE_STALE"  # V2.5 配置变化后仍尝试确认旧样卡
     TASK_IN_PROGRESS = "TASK_IN_PROGRESS"
     GENERATION_FAILED = "GENERATION_FAILED"
     # 牌组/卡片
@@ -41,6 +48,9 @@ class ErrorCode(StrEnum):
     CARD_NOT_FOUND = "CARD_NOT_FOUND"
     GENERATION_ITEM_CONFLICT = "GENERATION_ITEM_CONFLICT"
     IMPORT_PARSE_ERROR = "IMPORT_PARSE_ERROR"
+    CARD_DELETE_WINDOW_EXPIRED = "CARD_DELETE_WINDOW_EXPIRED"  # V2.5 撤销窗口已过
+    CARD_REWRITE_UNAVAILABLE = "CARD_REWRITE_UNAVAILABLE"  # V2.5 来源已失效或非生成卡
+    CARD_VERSION_CONFLICT = "CARD_VERSION_CONFLICT"  # V2.5 重写预览基于旧版本（CAS 失败）
     REWRITE_SCHEMA_INVALID = "REWRITE_SCHEMA_INVALID"
     # 复习
     REVIEW_EVENT_INVALID = "REVIEW_EVENT_INVALID"
@@ -56,22 +66,31 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.AUTH_INVALID: 401,
     ErrorCode.INVALID_CREDENTIALS: 401,
     ErrorCode.EMAIL_TAKEN: 409,
+    ErrorCode.INVALID_PREFERENCES: 400,
+    ErrorCode.INVALID_LEARNING_TIMEZONE: 400,
     ErrorCode.PDF_UPLOAD_INVALID: 400,
     ErrorCode.PDF_PARSE_FAILED: 422,
     ErrorCode.PDF_TOC_MISSING: 422,
     ErrorCode.PDF_NOT_FOUND: 404,
     ErrorCode.CHAPTER_NOT_FOUND: 404,
+    ErrorCode.PROJECT_NOT_FOUND: 404,
+    ErrorCode.PROJECT_STATE_CONFLICT: 409,
+    ErrorCode.PROJECT_HAS_ACTIVE_TASK: 409,
     ErrorCode.API_KEY_UNAVAILABLE: 502,
     ErrorCode.API_KEY_NOT_SET: 422,
     ErrorCode.TASK_NOT_FOUND: 404,
     ErrorCode.TASK_STATE_CONFLICT: 409,
-    ErrorCode.TASK_NOT_RESUMABLE: 409,
+    ErrorCode.TASK_ZERO_CARDS: 422,
+    ErrorCode.SAMPLE_STALE: 409,
     ErrorCode.TASK_IN_PROGRESS: 409,
     ErrorCode.GENERATION_FAILED: 500,
     ErrorCode.DECK_NOT_FOUND: 404,
     ErrorCode.CARD_NOT_FOUND: 404,
     ErrorCode.GENERATION_ITEM_CONFLICT: 409,
     ErrorCode.IMPORT_PARSE_ERROR: 422,
+    ErrorCode.CARD_DELETE_WINDOW_EXPIRED: 409,
+    ErrorCode.CARD_REWRITE_UNAVAILABLE: 409,
+    ErrorCode.CARD_VERSION_CONFLICT: 409,
     ErrorCode.REWRITE_SCHEMA_INVALID: 422,
     ErrorCode.REVIEW_EVENT_INVALID: 400,
     ErrorCode.REVIEW_EVENT_CONFLICT: 409,
@@ -88,22 +107,31 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.auth_invalid",
         "error.invalid_credentials",
         "error.email_taken",
+        "error.invalid_preferences",
+        "error.invalid_learning_timezone",
         "error.pdf_upload_invalid",
         "error.pdf_parse_failed",
         "error.pdf_toc_missing",
         "error.pdf_not_found",
         "error.chapter_not_found",
+        "error.project_not_found",
+        "error.project_state_conflict",
+        "error.project_has_active_task",
         "error.api_key_unavailable",
         "error.api_key_not_set",
         "error.task_not_found",
         "error.task_state_conflict",
-        "error.task_not_resumable",
+        "error.task_zero_cards",
+        "error.sample_stale",
         "error.task_in_progress",
         "error.generation_failed",
         "error.deck_not_found",
         "error.card_not_found",
         "error.generation_item_conflict",
         "error.import_parse_error",
+        "error.card_delete_window_expired",
+        "error.card_rewrite_unavailable",
+        "error.card_version_conflict",
         "error.rewrite_schema_invalid",
         "error.review_event_invalid",
         "error.review_event_conflict",

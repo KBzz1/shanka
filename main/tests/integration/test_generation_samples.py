@@ -76,8 +76,8 @@ def _seed_pdf(session: Session, *, user_id: str) -> tuple[str, list[str]]:
 
 def _config(quantity: str = "BALANCED") -> GenerationConfig:
     return GenerationConfig(
-        quantity_tendency=quantity,
-        difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+        coverage_mode=quantity,
+        difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
     )
 
 
@@ -92,10 +92,14 @@ def test_samples_generates_three_not_persisted(session_factory: Callable[[], Ses
         )
         session.commit()
     assert len(cards) == 3
-    assert {c["target_difficulty"] for c in cards} == {"BASIC", "UNDERSTANDING", "APPLICATION"}
+    assert {c["target_difficulty"] for c in cards} == {
+        "BASIC",
+        "UNDERSTANDING",
+        "DEEP_QUESTION",
+    }  # V2.5 改名
     q_count = sum(1 for c in cards if c["card_type"] == "QUESTION")
     tf_count = sum(1 for c in cards if c["card_type"] == "TRUE_FALSE")
-    assert q_count == 2 and tf_count == 1
+    assert q_count == 3 and tf_count == 0  # V2.5：DEEP_QUESTION 只允许 QUESTION 卡型（契约 3.6）
     with session_factory() as session:
         assert session.scalar(select(Card).limit(1)) is None  # 不入库
 
@@ -130,19 +134,33 @@ def test_samples_chapter_not_in_file_404(session_factory: Callable[[], Session])
 
 def test_samples_validate_config() -> None:
     validate_config(_config())  # 合法
-    with pytest.raises(AppError) as excinfo:
-        validate_config(
-            GenerationConfig(
-                quantity_tendency="BALANCED",
-                difficulty_ratio=DifficultyRatio(basic=0.5, understanding=0.5, application=0.2),
-            )
+    # V2.5：非法比例/非法 coverage_mode 由 Pydantic 模型层拦截（构造即 ValidationError）
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        DifficultyRatio(basic=50, understanding=50, deep_question=20)  # 合计 120 非法
+    with pytest.raises(pydantic.ValidationError):
+        GenerationConfig(
+            coverage_mode="HUGE",
+            difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
         )
-    assert excinfo.value.code is ErrorCode.VALIDATION_ERROR
+    # service 层兜底（model_construct 绕过模型 validator 的防御路径）：
+    # 比例语义非法 / coverage_mode 值域非法 → INVALID_PREFERENCES（V2.5 语义）
+    bypassed_ratio = GenerationConfig.model_construct(
+        coverage_mode="BALANCED",
+        difficulty_ratio=DifficultyRatio.model_construct(
+            basic=50, understanding=50, deep_question=20
+        ),
+    )
     with pytest.raises(AppError) as excinfo:
-        validate_config(
-            GenerationConfig(
-                quantity_tendency="HUGE",
-                difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
-            )
-        )
-    assert excinfo.value.code is ErrorCode.VALIDATION_ERROR
+        validate_config(bypassed_ratio)
+    assert excinfo.value.code is ErrorCode.INVALID_PREFERENCES
+    bypassed_mode = GenerationConfig.model_construct(
+        coverage_mode="HUGE",
+        difficulty_ratio=DifficultyRatio.model_construct(
+            basic=40, understanding=40, deep_question=20
+        ),
+    )
+    with pytest.raises(AppError) as excinfo:
+        validate_config(bypassed_mode)
+    assert excinfo.value.code is ErrorCode.INVALID_PREFERENCES

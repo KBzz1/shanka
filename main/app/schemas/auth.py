@@ -1,4 +1,8 @@
-"""账号 schema 锚点（openapi 2.4.0 AuthRegisterRequest/AuthLoginRequest/AuthUser/AuthSessionResponse）。"""
+"""账号 schema 锚点（openapi AuthRegisterRequest/AuthLoginRequest/AuthUser/AuthMeUpdateRequest/AuthSessionResponse）。
+
+V2.5：AuthUser 含 email（只读，不可 PATCH）与 avatar_key（mood_01~mood_12 预设头像）；
+PATCH /auth/me 仅接受 { username?, avatar_key? }，至少一个字段。
+"""
 
 from pydantic import BaseModel, Field
 
@@ -17,7 +21,16 @@ class AuthLoginRequest(BaseModel):
 class AuthUser(BaseModel):
     user_id: str
     username: str
+    email: str  # V2.5 只读返回规范化后的当前登录邮箱；不可 PATCH
+    avatar_key: str  # V2.5 预设头像 mood_01~mood_12；默认 mood_01
     created_at: str
+
+
+class AuthMeUpdateRequest(BaseModel):
+    """更新昵称或预设头像（openapi AuthMeUpdateRequest；V2.5：至少一个字段，email 只读）。"""
+
+    username: str | None = Field(default=None, min_length=1, max_length=24)
+    avatar_key: str | None = None  # mood_01~mood_12（域校验见后续任务 handler）
 
 
 class AuthSessionResponse(BaseModel):

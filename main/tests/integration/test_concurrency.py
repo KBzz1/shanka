@@ -45,7 +45,7 @@ def _seed_task(
     session: Session,
     *,
     user_id: str,
-    quantity_tendency: str = "COMPACT",
+    coverage_mode: str = "COMPACT",
     n_units: int | None = None,
 ) -> str:
     """种子：RUNNING+GENERATING 任务 + 页文本 + 生成单元（锚定难度/卡型/来源页）+
@@ -119,8 +119,8 @@ def _seed_task(
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
-            quantity_tendency=quantity_tendency,
-            difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+            coverage_mode=coverage_mode,
+            difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
         ),
         now="2026-08-10T00:00:00.000Z",
     )
@@ -132,9 +132,7 @@ def _seed_task(
         select(TextChunk).where(TextChunk.file_id == pdf.file_id).order_by(TextChunk.page_number)
     ).all()
     diffs = ["BASIC", "UNDERSTANDING", "APPLICATION"]
-    n_kps = (
-        n_units if n_units is not None else {"COMPACT": 3, "BALANCED": 6}.get(quantity_tendency, 3)
-    )
+    n_kps = n_units if n_units is not None else {"COMPACT": 3, "BALANCED": 6}.get(coverage_mode, 3)
     kps = [
         KnowledgePoint(
             knowledge_point_id=str(uuid.uuid4()),
@@ -260,7 +258,7 @@ def test_concurrency_batch_commit_survives_crash(
     """
     user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, user_id=user, quantity_tendency="BALANCED")
+        task_id = _seed_task(session, user_id=user, coverage_mode="BALANCED")
     with session_factory() as session:
         seeded = session.get(Task, task_id)
         assert seeded is not None

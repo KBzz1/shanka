@@ -114,8 +114,8 @@ def test_stats_dashboard_empty_has_data_false(session_factory: Callable[[], Sess
     assert result["weekly_total"] == 0
     assert result["weekly_activity"] == [0] * 7
     assert result["week_change_rate"] is None
-    assert result["weekly_goal"] is None
-    assert result["weekly_goal_progress"] is None
+    assert result["weekly_goal"] == 350  # V2.5 服务端派生 = 默认每日目标 50 × 7
+    assert result["weekly_goal_progress"] == 0.0  # 无事件 → 0/350
     assert result["recall_accuracy"] is None
     assert result["first_answer_accuracy"] is None
     assert result["retention_rate"] is None

@@ -54,8 +54,10 @@ def _auth_headers(
     body = r.json()
     assert body["token_type"] == "Bearer"
     assert set(body) == {"user", "access_token", "token_type", "expires_at"}
-    assert set(body["user"]) == {"user_id", "username", "created_at"}
+    assert set(body["user"]) == {"user_id", "username", "email", "avatar_key", "created_at"}
     assert body["user"]["username"] == username
+    assert body["user"]["email"] == email  # V2.5 规范化邮箱
+    assert body["user"]["avatar_key"] == "mood_01"  # V2.5 默认预设头像
     return {"Authorization": f"Bearer {body['access_token']}"}
 
 
@@ -67,6 +69,8 @@ def test_register_login_logout_me_flow(client: TestClient) -> None:
         "user": {
             "user_id": me.json()["user"]["user_id"],
             "username": "alice",
+            "email": "alice@example.com",  # V2.5 规范化邮箱
+            "avatar_key": "mood_01",  # V2.5 默认预设头像
             "created_at": me.json()["user"]["created_at"],
         }
     }
@@ -160,8 +164,9 @@ def test_login_success_200_shape(client: TestClient) -> None:
     body = r.json()
     assert body["token_type"] == "Bearer"
     assert set(body) == {"user", "access_token", "token_type", "expires_at"}
-    assert set(body["user"]) == {"user_id", "username", "created_at"}
+    assert set(body["user"]) == {"user_id", "username", "email", "avatar_key", "created_at"}
     assert body["user"]["username"] == "alice"
+    assert body["user"]["avatar_key"] == "mood_01"
 
 
 def test_multiple_sessions_coexist_logout_only_current(client: TestClient) -> None:

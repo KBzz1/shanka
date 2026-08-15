@@ -1,9 +1,11 @@
 """契约守卫：StatsDashboard/ReviewState/ReviewQueueItem ↔ openapi（守卫 1 扩展，红线 1）。
 
-覆盖三个响应模型（V2-T5 裁决）：ReviewEventRequest 是请求模型、openapi 无命名 schema，跳过。
 ReviewQueueItem 为 openapi allOf（Card + review_state）平铺——守卫 allOf 展平合并后比对。
 ReviewState.state 用 str（非 enum）——`_is_enum(str)` False 不校验 enum 值集（与 V1 口径一致，
 值域由 service 落库大写保证，openapi ReviewStateValue 枚举）。
+V2.5：StatsDashboard 增 weekly_completed_count（去重口径）；weekly_goal / weekly_goal_progress
+改为必填（服务端派生，不再接受客户端参数）；ReviewEventRequest 锚定见
+test_v25_resources_schemas_guard（V2.5 不再要求 device_timezone）。
 """
 
 from app.schemas.review import ReviewQueueItem, ReviewState

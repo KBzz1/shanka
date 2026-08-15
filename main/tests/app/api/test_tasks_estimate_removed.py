@@ -45,8 +45,8 @@ def test_estimate_endpoint_removed(tmp_path: Path, session_factory: sessionmaker
         json={
             "chapter_ids": [str(uuid.uuid4())],
             "generation_config": {
-                "quantity_tendency": "COMPACT",
-                "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+                "coverage_mode": "COMPACT",
+                "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
             },
         },
         headers=headers,

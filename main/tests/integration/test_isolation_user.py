@@ -136,21 +136,24 @@ def test_task_pdf_deck_user_consistency(client: TestClient, tmp_path: Path) -> N
     chapter1 = _seed_chapter(tmp_path / "iso.db", r1.json()["file_id"])
     chapter2 = _seed_chapter(tmp_path / "iso.db", r2.json()["file_id"])
     payload = {
-        "file_id": r1.json()["file_id"],
         "deck_id": deck1,
         "chapter_ids": [chapter1],
         "generation_config": {
-            "quantity_tendency": "COMPACT",
-            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            "coverage_mode": "COMPACT",
+            "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
         },
     }
-    resp = client.post("/tasks", json=payload, headers={**h2, **_idem()})
+    # V2.5 过渡：file_id 经 query 参数传入（请求体为 V2.5 形状）
+    resp = client.post(
+        "/tasks", params={"file_id": r1.json()["file_id"]}, json=payload, headers={**h2, **_idem()}
+    )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "PDF_NOT_FOUND"
     # user2 自己的 PDF + user1 的 deck → 404 DECK_NOT_FOUND
-    payload["file_id"] = r2.json()["file_id"]
     payload["chapter_ids"] = [chapter2]
-    resp = client.post("/tasks", json=payload, headers={**h2, **_idem()})
+    resp = client.post(
+        "/tasks", params={"file_id": r2.json()["file_id"]}, json=payload, headers={**h2, **_idem()}
+    )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
 

@@ -3,7 +3,11 @@
 import hashlib
 import uuid
 
-_DIFFICULTY_LABEL = {"BASIC": "基础记忆", "UNDERSTANDING": "理解分析", "APPLICATION": "综合应用"}
+_DIFFICULTY_LABEL = {
+    "BASIC": "基础记忆",
+    "UNDERSTANDING": "理解分析",
+    "DEEP_QUESTION": "开放深问",
+}
 
 
 def _stable_uuid(seed: str) -> str:
@@ -22,7 +26,9 @@ def generate_card(
     card_id = _stable_uuid(f"card|{seed}")
     gen_item = _stable_uuid(f"gen|{seed}")
     label = _DIFFICULTY_LABEL.get(difficulty, difficulty)
-    is_tf = difficulty == "APPLICATION"
+    # V2.5：DEEP_QUESTION（原 APPLICATION 改名）只允许 QUESTION 卡型（契约 3.6 组合规则）；
+    # fake 样卡生成路径不再产出 TRUE_FALSE（判断题属前两档，后续任务按需引入）
+    is_tf = False
     front = f"【{label}】{topic}（来自《{chapter_name}》）"
     back = f"参考答案：{topic} 的核心要点（{label} 口径）"
     return {

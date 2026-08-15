@@ -165,11 +165,12 @@ def _submit_review_inner(
     card_id: str,
     rating_value: str,
     client_event_id: str,
-    device_timezone: str,
+    device_timezone: str | None,
     now: str,
 ) -> tuple[bool, dict[str, object]]:
     """执行评级（幂等原语 fn 内）：返回 (是否因 client_event_id 兜底重放, 响应视图)。"""
-    _validate_timezone(device_timezone)  # M-3：非法 IANA → 400 VALIDATION_ERROR
+    if device_timezone is not None:
+        _validate_timezone(device_timezone)  # M-3：非法 IANA → 400 VALIDATION_ERROR
     card = session.get(Card, card_id)
     if card is None or card.user_id != user_id:
         raise AppError(ErrorCode.CARD_NOT_FOUND, "卡片不存在")
@@ -229,7 +230,7 @@ def submit_review(
     card_id: str,
     rating: str,
     client_event_id: str,
-    device_timezone: str,
+    device_timezone: str | None,
     now: str,
 ) -> dict[str, object]:
     """评级事务入口（handler 层再包 execute_idempotent，Task 3）。"""

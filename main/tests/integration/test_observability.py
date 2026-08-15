@@ -218,12 +218,11 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
 
 def _payload(seed: dict[str, object]) -> dict[str, object]:
     return {
-        "file_id": seed["file_id"],
         "deck_id": seed["deck_id"],
         "chapter_ids": seed["chapter_ids"],
         "generation_config": {
-            "quantity_tendency": "COMPACT",
-            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            "coverage_mode": "COMPACT",
+            "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
         },
     }
 
@@ -231,7 +230,12 @@ def _payload(seed: dict[str, object]) -> dict[str, object]:
 def _run_task(client: TestClient, db_path: Path, *, user: dict[str, str]) -> tuple[str, str]:
     """POST 任务 → 显式 executor 扫描（mock transport 两批）→ 返回 (task_id, file_id)。"""
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
@@ -423,7 +427,12 @@ def test_cancel_metric_counts_transition_once(ctx: tuple[TestClient, Path]) -> N
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201  # 任务创建即 RUNNING（未跑 executor）
     task_id = resp.json()["task_id"]
     labels = ['result="CANCELLED"']

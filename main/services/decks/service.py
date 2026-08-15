@@ -97,6 +97,7 @@ def _to_deck_view(deck: Deck, progress: dict[str, int | float]) -> dict[str, obj
         "deck_id": deck.deck_id,
         "name": deck.name,
         "source": deck.source,
+        "project_id": deck.project_id,  # V2.5 归属学习项目；null = 手动/独立牌组
         "card_count": progress["card_count"],
         "due_count": progress["due_count"],
         "mastered_card_count": progress["mastered_card_count"],

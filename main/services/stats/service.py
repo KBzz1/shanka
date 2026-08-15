@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Card, ReviewEvent, ReviewState
+from infra.db.models import Card, ReviewEvent, ReviewState, UserPreferences
 
 _WEEKDAYS = 7
 
@@ -91,8 +91,24 @@ def dashboard(
     # 周变化率
     week_change = (weekly_total - last_week_count) / last_week_count if last_week_count else None
 
-    # 周目标
-    goal_progress = min(weekly_total / weekly_goal, 1.0) if weekly_goal else None
+    # V2.5：weekly_completed_count = 本周不同 (账号学习日期, card_id) 数（去重口径，
+    # 按分桶时区分桶；账号学习时区权威见契约 1.2，本过渡期沿用请求时区）
+    completed_pairs = {
+        (datetime.fromisoformat(ev.reviewed_at).astimezone(tz).date(), ev.card_id)
+        for ev in week_events
+    }
+    weekly_completed_count = len(completed_pairs)
+
+    # V2.5：weekly_goal 服务端派生 = daily_learning_goal × 7（3.12/3.15）；偏好行未建立
+    # （Task 3 前）回落默认每日目标 50；客户端 weekly_goal 参数为过渡期兼容（Task 11 移除）
+    pref_daily_goal = session.scalar(
+        select(UserPreferences.daily_goal).where(UserPreferences.user_id == user_id)
+    )
+    derived_weekly_goal = (pref_daily_goal or 50) * 7
+    weekly_goal = weekly_goal if weekly_goal is not None else derived_weekly_goal
+
+    # 周目标完成率（V2.5 口径：weekly_completed_count / weekly_goal）
+    goal_progress = min(weekly_completed_count / weekly_goal, 1.0) if weekly_goal else None
 
     # 连续学习天数（截至本地当天）
     streak = _streak_days(session, user_id=user_id, tz=tz, now=now)
@@ -116,6 +132,7 @@ def dashboard(
         "timezone": timezone,
         "weekly_activity": weekly_activity,
         "weekly_total": weekly_total,
+        "weekly_completed_count": weekly_completed_count,
         "week_change_rate": week_change,
         "weekly_goal": weekly_goal,
         "weekly_goal_progress": goal_progress,

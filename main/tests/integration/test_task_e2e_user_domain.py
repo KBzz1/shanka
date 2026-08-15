@@ -178,13 +178,13 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
     # 4. 建任务（前 2 章 COMPACT；Key 校验按 user_id）
     resp = client.post(
         "/tasks",
+        params={"file_id": file_id},  # V2.5 过渡：file_id 经 query 参数传入
         json={
-            "file_id": file_id,
             "deck_id": deck_id,
             "chapter_ids": [c["chapter_id"] for c in chapters[:2]],
             "generation_config": {
-                "quantity_tendency": "COMPACT",
-                "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+                "coverage_mode": "COMPACT",
+                "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
             },
         },
         headers={**user, **_idem()},

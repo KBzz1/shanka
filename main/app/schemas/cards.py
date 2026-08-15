@@ -1,4 +1,9 @@
-"""cards.py：卡片请求/响应模型（openapi Card；structure-contract 3.9）。"""
+"""cards.py：卡片请求/响应模型（openapi Card；structure-contract 3.9）。
+
+V2.5 增量：source_task_id / chapter_id（生成来源任务与源章节）、
+publication_state（STAGED/PUBLISHED）、delete_batch_id + pending_delete_at/undo_until
+（10 秒撤销删除批次）。
+"""
 
 from typing import Literal
 
@@ -20,6 +25,12 @@ class Card(BaseModel):
     answer_boolean: bool | None = None
     explanation: str | None = None
     generation_item_id: str | None = None
+    source_task_id: str | None = None  # V2.5 生成来源任务；删历史保留卡时置空
+    chapter_id: str | None = None  # V2.5 源章节；null 显示"未归属章节"
+    publication_state: str = "PUBLISHED"  # V2.5 STAGED/PUBLISHED；历史卡均迁为 PUBLISHED
+    delete_batch_id: str | None = None  # V2.5 非空 = 10 秒待删除批次
+    pending_delete_at: str | None = None  # V2.5 服务端计时
+    undo_until: str | None = None  # V2.5 服务端撤销窗口
     target_difficulty: str | None = None
     knowledge_point_ids: list[str] | None = None
     evidence_score: int | None = None

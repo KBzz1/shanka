@@ -123,6 +123,7 @@ def register_user(
     _validate_username(normalized_username)
     _validate_email(normalized_email)
     _validate_password(password)
+    user_avatar_key = "mood_01"  # V2.5 预设头像默认值（domain.enums.AvatarKey）
     existing = session.scalar(select(User).where(User.email == normalized_email))
     if existing is not None:
         raise AppError(ErrorCode.EMAIL_TAKEN, "邮箱已被占用")
@@ -144,7 +145,13 @@ def register_user(
         # 并发注册同 email：UNIQUE 约束兜底 → 409
         raise AppError(ErrorCode.EMAIL_TAKEN, "邮箱已被占用") from exc
     token, expires_at = _create_session(session, user_id=user_id, now=now, ttl_days=ttl_days)
-    user_dict = {"user_id": user_id, "username": normalized_username, "created_at": created_at}
+    user_dict = {
+        "user_id": user_id,
+        "username": normalized_username,
+        "email": normalized_email,  # V2.5 只读返回规范化后的当前登录邮箱
+        "avatar_key": user_avatar_key,  # V2.5 预设头像（默认 mood_01）
+        "created_at": created_at,
+    }
     return user_dict, token, expires_at
 
 
@@ -177,6 +184,8 @@ def login_user(
     user_dict = {
         "user_id": user.user_id,
         "username": user.username,
+        "email": user.email,  # V2.5 只读返回规范化后的当前登录邮箱
+        "avatar_key": user.avatar_key,  # V2.5 预设头像
         "created_at": user.created_at,
     }
     return user_dict, token, expires_at
@@ -207,6 +216,8 @@ def get_current_user(session: Session, *, session_id: str) -> dict[str, str]:
     return {
         "user_id": user.user_id,
         "username": user.username,
+        "email": user.email,  # V2.5 只读返回规范化后的当前登录邮箱
+        "avatar_key": user.avatar_key,  # V2.5 预设头像
         "created_at": user.created_at,
     }
 

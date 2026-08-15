@@ -159,11 +159,24 @@ def test_review_api_invalid_rating_400(client: TestClient) -> None:
     assert resp.json()["error"]["code"] == "REVIEW_EVENT_INVALID"
 
 
-def test_review_api_invalid_timezone_400(client: TestClient) -> None:
-    """M-3（final review）：device_timezone 非 IANA 时区 → 400 VALIDATION_ERROR（契约第 7 章）。"""
+def test_review_api_without_device_timezone_ok(client: TestClient) -> None:
+    """V2.5：评级请求不再要求 device_timezone（可空审计字段，契约 1.2/3.11）——
+    缺省与携带非法值时均按正常评级处理，不再 400 校验。"""
     user = _user(client)
     _, card_id = _make_deck_card(client, user)
+    # 缺省 device_timezone：正常评级
     resp = client.post(
+        "/review-events",
+        json={
+            "card_id": card_id,
+            "rating": "GOOD",
+            "client_event_id": str(uuid.uuid4()),
+        },
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 200, resp.text
+    # 携带非法 device_timezone（客户端兼容残留）：不再参与校验，仍正常评级
+    resp2 = client.post(
         "/review-events",
         json={
             "card_id": card_id,
@@ -173,8 +186,7 @@ def test_review_api_invalid_timezone_400(client: TestClient) -> None:
         },
         headers={**user, **_idem()},
     )
-    assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert resp2.status_code == 200, resp2.text
 
 
 def test_review_api_cross_user_404(client: TestClient) -> None:

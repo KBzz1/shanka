@@ -78,26 +78,43 @@ class Chapter(Base):
 
 
 class Task(Base):
-    """2.5 tasks：生成任务（file_id/deck_id 删除后 SET NULL 保留任务）。
+    """2.5 tasks：生成任务（V2.5 七态；file_id/deck_id/project_id 删除后 SET NULL 保留任务）。
 
     V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
+    V2.5：status 七态（DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION/GENERATING/
+    COMPLETED/FAILED/ABANDONED）；stage 列改名 internal_stage 语义（仅运行期内部观测）；
+    project_id/retry_of_task_id 归属与重试关联；sample_cards 持久化样卡。
     """
 
     __tablename__ = "tasks"
-    __table_args__ = (Index("ix_tasks_user_created", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_tasks_user_created", "user_id", "created_at"),
+        Index("ix_tasks_project_id", "project_id"),
+    )
 
     task_id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("learning_projects.project_id", ondelete="SET NULL"), nullable=True
+    )  # V2.5 归属项目；新写入必填，NULL 只兼容迁移前已失去 PDF 的终态任务
     file_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("pdf_files.file_id", ondelete="SET NULL"), nullable=True
     )
     deck_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("decks.deck_id", ondelete="SET NULL"), nullable=True
     )
-    status: Mapped[str] = mapped_column(String, nullable=False)
-    stage: Mapped[str | None] = mapped_column(String, nullable=True)
+    retry_of_task_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("tasks.task_id", ondelete="SET NULL"), nullable=True
+    )  # V2.5 只指向同用户失败任务
+    status: Mapped[str] = mapped_column(String, nullable=False)  # V2.5 七态
+    stage: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # V2.5 改名 internal_stage 语义
     selected_chapters: Mapped[str] = mapped_column(Text, nullable=False)  # JSON 快照
     generation_config: Mapped[str] = mapped_column(Text, nullable=False)  # JSON
+    sample_cards: Mapped[str | None] = mapped_column(Text, nullable=True)  # V2.5 样卡 JSON
+    sample_config_hash: Mapped[str | None] = mapped_column(String, nullable=True)  # V2.5 配置指纹
+    sample_confirmed_at: Mapped[str | None] = mapped_column(String, nullable=True)  # V2.5 确认时间
     cursor: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
     generated_card_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_batch_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -134,7 +151,7 @@ class KnowledgePoint(Base):
     status: Mapped[str] = mapped_column(String, nullable=False)  # PENDING/PROCESSED/SKIPPED
     target_difficulty: Mapped[str | None] = mapped_column(
         String, nullable=True
-    )  # BASIC/UNDERSTANDING/APPLICATION（规划锚定）
+    )  # BASIC/UNDERSTANDING/DEEP_QUESTION（规划锚定；历史 APPLICATION 经迁移映射）
     card_type: Mapped[str | None] = mapped_column(String, nullable=True)  # QUESTION/TRUE_FALSE
     source_chunk_ids: Mapped[str | None] = mapped_column(Text, nullable=True)  # TEXT JSON 数组
 
@@ -182,23 +199,24 @@ class Batch(Base):
 
 
 class Deck(Base):
-    """2.8 decks：牌组。
-
-    契约观察（登记 Progress R-11，V4 裁决）：structure-contract 3.8 Deck.source 为
-    MANUAL/IMPORTED/GENERATED，而 database-design 2.8 只列 MANUAL/IMPORTED——
-    字段权威在 structure-contract，database-design 派生遗漏 GENERATED 枚举说明。
-    F1 建表用 TEXT 无 DB CHECK，不受影响；V4 创建 GENERATED 牌组时若需确认落点再更新 database-design。
+    """2.8 decks：牌组（V2.5：project_id 归属学习项目；source 枚举补 GENERATED）。
 
     V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
     """
 
     __tablename__ = "decks"
-    __table_args__ = (Index("ix_decks_user_updated", "user_id", "updated_at"),)
+    __table_args__ = (
+        Index("ix_decks_user_updated", "user_id", "updated_at"),
+        Index("ix_decks_project_id", "project_id"),
+    )
 
     deck_id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.user_id"), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("learning_projects.project_id", ondelete="SET NULL"), nullable=True
+    )  # V2.5 归属项目；NULL = 手动/独立牌组
     name: Mapped[str] = mapped_column(String, nullable=False)
-    source: Mapped[str] = mapped_column(String, nullable=False)  # MANUAL/IMPORTED
+    source: Mapped[str] = mapped_column(String, nullable=False)  # MANUAL/IMPORTED/GENERATED
     version: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
@@ -208,12 +226,18 @@ class Card(Base):
     """2.9 cards：卡片（部分唯一索引 generation_item_id；UNIQUE(deck_id, position)）。
 
     V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
+    V2.5：publication_state=STAGED/PUBLISHED + delete_batch_id（10 秒撤销批次），
+    统一可见谓词 `publication_state='PUBLISHED' AND delete_batch_id IS NULL`（契约 3.9）；
+    source_task_id/chapter_id 生成来源；索引 (publication_state, delete_batch_id)。
     """
 
     __tablename__ = "cards"
     __table_args__ = (
         UniqueConstraint("deck_id", "position", name="uq_cards_deck_position"),
         Index("ix_cards_user_deck", "user_id", "deck_id"),
+        Index("ix_cards_source_task", "source_task_id"),
+        Index("ix_cards_chapter_id", "chapter_id"),
+        Index("ix_cards_publication_delete", "publication_state", "delete_batch_id"),
         Index(
             "ix_cards_gen_item_partial",
             "generation_item_id",
@@ -239,6 +263,22 @@ class Card(Base):
     explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
     answer_boolean: Mapped[int | None] = mapped_column(Integer, nullable=True)
     generation_item_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_task_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("tasks.task_id", ondelete="SET NULL"), nullable=True
+    )  # V2.5 生成来源任务；删历史保留卡时置空
+    chapter_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("chapters.chapter_id", ondelete="SET NULL"), nullable=True
+    )  # V2.5 源章节；null = 未归属章节
+    publication_state: Mapped[str] = mapped_column(
+        String, nullable=False, default="PUBLISHED", server_default=text("'PUBLISHED'")
+    )  # V2.5 STAGED/PUBLISHED；历史卡均迁为 PUBLISHED
+    delete_batch_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("card_deletion_batches.delete_batch_id", ondelete="SET NULL"),
+        nullable=True,
+    )  # V2.5 非空 = 10 秒待删除批次
+    pending_delete_at: Mapped[str | None] = mapped_column(String, nullable=True)  # V2.5 服务端计时
+    undo_until: Mapped[str | None] = mapped_column(String, nullable=True)  # V2.5 服务端撤销窗口
     target_difficulty: Mapped[str | None] = mapped_column(String, nullable=True)
     knowledge_point_ids: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON 数组
     evidence_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -298,7 +338,9 @@ class ReviewEvent(Base):
     client_event_id: Mapped[str] = mapped_column(String, nullable=False)
     rating: Mapped[str] = mapped_column(String, nullable=False)  # AGAIN/HARD/GOOD/EASY
     reviewed_at: Mapped[str] = mapped_column(String, nullable=False)
-    device_timezone: Mapped[str] = mapped_column(String, nullable=False)
+    device_timezone: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # V2.5 降级为可空审计字段，不参与权威统计（1.2）
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
@@ -402,7 +444,7 @@ class User(Base):
 
     email 为登录键（服务端 lowercase 规范化，UNIQUE）；username 为展示名
     （1-24 位中文/字母/数字/._-，可重名）；password_hash 为 Argon2id 输出，
-    绝不进入日志/响应。
+    绝不进入日志/响应。V2.5：avatar_key 预设头像（mood_01~mood_12，默认 mood_01）。
     """
 
     __tablename__ = "users"
@@ -411,6 +453,9 @@ class User(Base):
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
     username: Mapped[str] = mapped_column(String, nullable=False)
     email: Mapped[str] = mapped_column(String, nullable=False)
+    avatar_key: Mapped[str] = mapped_column(
+        String, nullable=False, default="mood_01", server_default=text("'mood_01'")
+    )  # V2.5 预设头像，只接受内置预设
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
@@ -433,3 +478,139 @@ class AuthSession(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     expires_at: Mapped[str] = mapped_column(String, nullable=False)
     revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class LearningProject(Base):
+    """2.17 learning_projects（V2.5 新增）：学习项目；file_id 为 PDF↔项目唯一外键权威。
+
+    项目状态由 PDF 状态与 chapters_confirmed_at 确定（契约 3.16，不建第二套状态列）。
+    """
+
+    __tablename__ = "learning_projects"
+    __table_args__ = (Index("ix_learning_projects_user_updated", "user_id", "updated_at"),)
+
+    project_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.user_id"), nullable=False)
+    file_id: Mapped[str] = mapped_column(
+        String, ForeignKey("pdf_files.file_id"), unique=True, nullable=False
+    )  # 唯一外键权威（一个项目恰好一份当前 PDF）
+    name: Mapped[str] = mapped_column(String, nullable=False)  # 1~60 字符，可重名
+    chapters_confirmed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    version: Mapped[str] = mapped_column(String, nullable=False)  # 缓存刷新与并发检查
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class UserPreferences(Base):
+    """2.18 user_preferences（V2.5 新增）：账号偏好，一用户一行。
+
+    比例约束（database-design 2.18）：三档 10% 整数档 0~100、合计 100；
+    daily_goal 10~200 且 10 的倍数。
+    """
+
+    __tablename__ = "user_preferences"
+    __table_args__ = (
+        CheckConstraint(
+            "basic_ratio % 10 = 0 AND basic_ratio BETWEEN 0 AND 100",
+            name="ck_user_prefs_basic_ratio",
+        ),
+        CheckConstraint(
+            "understanding_ratio % 10 = 0 AND understanding_ratio BETWEEN 0 AND 100",
+            name="ck_user_prefs_understanding_ratio",
+        ),
+        CheckConstraint(
+            "deep_question_ratio % 10 = 0 AND deep_question_ratio BETWEEN 0 AND 100",
+            name="ck_user_prefs_deep_question_ratio",
+        ),
+        CheckConstraint(
+            "basic_ratio + understanding_ratio + deep_question_ratio = 100",
+            name="ck_user_prefs_ratio_total",
+        ),
+        CheckConstraint(
+            "daily_goal BETWEEN 10 AND 200 AND daily_goal % 10 = 0",
+            name="ck_user_prefs_daily_goal",
+        ),
+    )
+
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id"), primary_key=True
+    )  # 一用户一行
+    coverage_mode: Mapped[str] = mapped_column(
+        String, nullable=False, default="BALANCED", server_default=text("'BALANCED'")
+    )  # COMPACT/BALANCED/EXTENSIVE
+    basic_ratio: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=40, server_default=text("40")
+    )
+    understanding_ratio: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=40, server_default=text("40")
+    )
+    deep_question_ratio: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=20, server_default=text("20")
+    )
+    daily_goal: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=50, server_default=text("50")
+    )  # 10~200，10 的倍数
+    learning_timezone: Mapped[str] = mapped_column(String, nullable=False)  # 有效 IANA 时区
+    current_project_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("learning_projects.project_id", ondelete="SET NULL"), nullable=True
+    )  # 项目删除时置空
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProjectStudySettings(Base):
+    """2.19 project_study_settings（V2.5 新增）：项目学习设置，一项目一行。"""
+
+    __tablename__ = "project_study_settings"
+
+    project_id: Mapped[str] = mapped_column(
+        String, ForeignKey("learning_projects.project_id", ondelete="CASCADE"), primary_key=True
+    )
+    selected_chapter_ids: Mapped[str] = mapped_column(
+        Text, nullable=False, default="[]", server_default=text("'[]'")
+    )  # 新卡章节范围 JSON；空数组 = 暂无新卡范围
+    include_unassigned: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )  # 是否包含 chapter_id=null 的新卡（0/1）
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class CardDeletionBatch(Base):
+    """2.20 card_deletion_batches（V2.5 新增）：卡片删除批次（10 秒撤销窗口）。"""
+
+    __tablename__ = "card_deletion_batches"
+    __table_args__ = (
+        Index("ix_deletion_batches_user_status_undo", "user_id", "status", "undo_until"),
+    )
+
+    delete_batch_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.user_id"), nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)  # PENDING/UNDONE/FINALIZED
+    undo_until: Mapped[str] = mapped_column(String, nullable=False)  # 最后一次追加后 10 秒
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class CardRewritePreview(Base):
+    """2.21 card_rewrite_previews（V2.5 新增）：单卡 AI 重写预览（两阶段；24 小时过期）。"""
+
+    __tablename__ = "card_rewrite_previews"
+    __table_args__ = (
+        Index("ix_rewrite_previews_user_status_expires", "user_id", "status", "expires_at"),
+    )
+
+    rewrite_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.user_id"), nullable=False)
+    card_id: Mapped[str] = mapped_column(
+        String, ForeignKey("cards.card_id", ondelete="CASCADE"), nullable=False
+    )
+    base_card_version: Mapped[str] = mapped_column(String, nullable=False)  # 应用时 CAS
+    preview: Mapped[str] = mapped_column(Text, nullable=False)  # 预览内容 JSON
+    custom_requirements: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )  # 不保存完整 Prompt
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="PENDING", server_default=text("'PENDING'")
+    )  # PENDING/APPLIED/CANCELLED/EXPIRED
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)  # 24 小时（实现常量统一）
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)

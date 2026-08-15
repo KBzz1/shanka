@@ -117,8 +117,8 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
 
 def _config(tendency: str = "BALANCED") -> GenerationConfig:
     return GenerationConfig(
-        quantity_tendency=tendency,
-        difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+        coverage_mode=tendency,
+        difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
     )
 
 

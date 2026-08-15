@@ -145,12 +145,11 @@ def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dic
 
 def _payload(seed: dict[str, object], *, tendency: str = "COMPACT") -> dict[str, object]:
     return {
-        "file_id": seed["file_id"],
         "deck_id": seed["deck_id"],
         "chapter_ids": seed["chapter_ids"],
         "generation_config": {
-            "quantity_tendency": tendency,
-            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            "coverage_mode": tendency,
+            "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
         },
     }
 
@@ -160,11 +159,16 @@ def test_tasks_create_201_pending_planning_view(ctx: tuple[TestClient, Path]) ->
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     body = resp.json()
     assert body["status"] == "PENDING"
-    assert body["stage"] == "PLANNING"
+    assert body["internal_stage"] == "PLANNING"  # V2.5：stage 列 → internal_stage 语义
     assert body["started_at"] is None
     assert body["total_batch_count"] is None
     assert body["completion_reason"] is None
@@ -173,7 +177,7 @@ def test_tasks_create_201_pending_planning_view(ctx: tuple[TestClient, Path]) ->
     assert len(chapters) == 2
     assert set(chapters[0]) == {"chapter_id", "name", "start_page", "end_page"}
     assert chapters[0]["name"] == "第1章"
-    assert body["generation_config"]["quantity_tendency"] == "COMPACT"
+    assert body["generation_config"]["coverage_mode"] == "COMPACT"
     assert body["resumable"] is False
 
 
@@ -182,7 +186,12 @@ def test_tasks_create_budget_exceeded_400(ctx_strict: tuple[TestClient, Path]) -
     client, db_path = ctx_strict
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path), chapter_count=5)
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 400
     error = resp.json()["error"]
     assert error["code"] == "VALIDATION_ERROR"

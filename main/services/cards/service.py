@@ -130,6 +130,12 @@ def card_view(card: Card) -> dict[str, object]:
         "answer_boolean": card.answer_boolean,
         "explanation": card.explanation,
         "generation_item_id": card.generation_item_id,
+        "source_task_id": card.source_task_id,  # V2.5 生成来源任务；删历史保留卡时置空
+        "chapter_id": card.chapter_id,  # V2.5 源章节；null 显示"未归属章节"
+        "publication_state": card.publication_state,  # V2.5 STAGED/PUBLISHED
+        "delete_batch_id": card.delete_batch_id,  # V2.5 非空 = 10 秒待删除批次
+        "pending_delete_at": card.pending_delete_at,  # V2.5 服务端计时
+        "undo_until": card.undo_until,  # V2.5 服务端撤销窗口
         "target_difficulty": card.target_difficulty,
         "knowledge_point_ids": card.knowledge_point_ids,
         "evidence_score": card.evidence_score,

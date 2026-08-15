@@ -44,7 +44,7 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMPACT") -> str:
+def _seed_task(session: Session, *, user_id: str, coverage_mode: str = "COMPACT") -> str:
     """种子：PENDING+PLANNING 任务直接转 RUNNING+GENERATING + 页文本 + 生成单元
     （锚定难度/卡型/来源页）+ 按单元建批（generation_unit_id 必填——LLM 升级管线
     spec §7 批=单元，1 单元 1 批）。
@@ -111,8 +111,8 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
-            quantity_tendency=quantity_tendency,
-            difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+            coverage_mode=coverage_mode,
+            difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
         ),
         now="2026-08-11T00:00:00.000Z",
     )
@@ -124,7 +124,7 @@ def _seed_task(session: Session, *, user_id: str, quantity_tendency: str = "COMP
         select(TextChunk).where(TextChunk.file_id == pdf.file_id).order_by(TextChunk.page_number)
     ).all()
     diffs = ["BASIC", "UNDERSTANDING", "APPLICATION"]
-    n_kps = {"COMPACT": 3, "BALANCED": 6}.get(quantity_tendency, 3)
+    n_kps = {"COMPACT": 3, "BALANCED": 6}.get(coverage_mode, 3)
     kps = [
         KnowledgePoint(
             knowledge_point_id=str(uuid.uuid4()),
@@ -237,8 +237,8 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
-            quantity_tendency="COMPACT",
-            difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+            coverage_mode="COMPACT",
+            difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
         ),
         now="2026-08-11T00:00:00.000Z",
     )
@@ -351,7 +351,7 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
     """
     user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, user_id=user, quantity_tendency="BALANCED")
+        task_id = _seed_task(session, user_id=user, coverage_mode="BALANCED")
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -404,7 +404,7 @@ def test_executor_cancel_between_batches_preserves_cancelled(
     """
     user = _uuid()
     with session_factory() as session:
-        task_id = _seed_task(session, user_id=user, quantity_tendency="BALANCED")
+        task_id = _seed_task(session, user_id=user, coverage_mode="BALANCED")
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:

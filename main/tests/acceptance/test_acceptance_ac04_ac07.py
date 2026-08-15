@@ -257,12 +257,11 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
 
 def _payload(seed: dict[str, object]) -> dict[str, object]:
     return {
-        "file_id": seed["file_id"],
         "deck_id": seed["deck_id"],
         "chapter_ids": seed["chapter_ids"],
         "generation_config": {
-            "quantity_tendency": "COMPACT",  # 预算 6 单元（BASIC 3 / UNDERSTANDING 2 / APPLICATION 1）
-            "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+            "coverage_mode": "COMPACT",  # 预算 6 单元（BASIC 3 / UNDERSTANDING 2 / DEEP_QUESTION 1）
+            "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
         },
     }
 
@@ -301,7 +300,12 @@ def test_acceptance_ac04_valid_cards_inserted_and_completed(
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     _run_to_completed(db_path, cards=_valid_cards())
@@ -327,7 +331,12 @@ def test_acceptance_ac04_invalid_cards_not_inserted_skipped(
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     _run_to_completed(db_path, cards=[{"type": "QUESTION"}])
@@ -357,7 +366,12 @@ def test_acceptance_ac04_rubric_no_auto_fix_prune_or_regenerate(
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     _run_to_completed(db_path, cards=_valid_cards(), scores=_LOW_SCORES)
@@ -389,7 +403,12 @@ def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     _run_to_completed(db_path, cards=_valid_cards())
@@ -442,7 +461,12 @@ def test_acceptance_ac07_abnormal_cache_data_does_not_gate_insertion(
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
-    resp = client.post("/tasks", json=_payload(seed), headers={**user, **_idem()})
+    resp = client.post(
+        "/tasks",
+        params={"file_id": seed["file_id"]},
+        json=_payload(seed),
+        headers={**user, **_idem()},
+    )
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
     _run_to_completed(db_path, cards=_valid_cards(), with_usage=False)

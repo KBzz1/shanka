@@ -140,8 +140,8 @@ def _seed_unit_task(
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
-            quantity_tendency="COMPACT",
-            difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+            coverage_mode="COMPACT",
+            difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
             custom_requirements=custom_requirements,
         ),
         now=_NOW,

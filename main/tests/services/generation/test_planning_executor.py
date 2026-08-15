@@ -82,7 +82,7 @@ def _seed_planning_task(
     chapter_start_page: int = 1,
     chapter_end_page: int = 2,
     text_page_range: tuple[int, int] | None = None,
-    quantity_tendency: str = "COMPACT",
+    coverage_mode: str = "COMPACT",
 ) -> tuple[str, str, str]:
     """PENDING+PLANNING 任务 + 章节 + 页文本（text_chunks）；返回 (task_id, chapter_id, file_id)。
 
@@ -152,8 +152,8 @@ def _seed_planning_task(
         deck_id=deck.deck_id,
         chapter_ids=[ch.chapter_id],
         config=GenerationConfig(
-            quantity_tendency=quantity_tendency,
-            difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+            coverage_mode=coverage_mode,
+            difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
         ),
         now=_NOW,
     )
@@ -617,7 +617,7 @@ def test_planning_groups_split_and_sub_quota(
             user_id=user,
             chapter_start_page=1,
             chapter_end_page=4,
-            quantity_tendency="EXTENSIVE",
+            coverage_mode="EXTENSIVE",
         )
         received: list[list[str]] = []
         calls = 0

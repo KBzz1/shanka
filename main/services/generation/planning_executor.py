@@ -273,11 +273,21 @@ def run_planning(
     # 2. 三层配额（§3.5）：任务总配额 → 章配额 → 组子配额（char_count 占比）
     config = json.loads(task.generation_config)
     ratio = config["difficulty_ratio"]
+    # V2.5 兼容读取：新配置键 coverage_mode / deep_question（0~100 整数档），
+    # 迁移前旧行保留 quantity_tendency / application（0~1 浮点）——统一归一化为比例小数
+    mode = config.get("coverage_mode", config.get("quantity_tendency", "BALANCED"))
+    ratio_basic = ratio.get("basic", 0)
+    ratio_understanding = ratio.get("understanding", 0)
+    ratio_deep = ratio.get("deep_question", ratio.get("application", 0))
+
+    def _fraction(value: float) -> float:
+        return value / 100 if value > 1 else value
+
     task_quota = allocate_task_quota(
-        task_unit_budget(len(chapters), config["quantity_tendency"]),
-        ratio["basic"],
-        ratio["understanding"],
-        ratio["application"],
+        task_unit_budget(len(chapters), mode),
+        _fraction(ratio_basic),
+        _fraction(ratio_understanding),
+        _fraction(ratio_deep),
     )
     chapter_quotas = allocate_chapter_quota(task_quota, len(chapters))
     # 3. 组调用（账本恢复/预算；STARTED 心跳 commit → 事务外 chat → 终态+心跳 commit）

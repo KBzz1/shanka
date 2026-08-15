@@ -122,7 +122,7 @@ def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
     assert body["recall_accuracy"] == 1.0  # 周内 1 GOOD / 1
     assert body["streak_days"] >= 1  # 今天有事件（事件 reviewed_at = 服务端真实 now）
     assert body["period"]["week_ordinal"] >= 1
-    # 空态（新用户）：非示例值，weekly_goal 未上报 → null
+    # 空态（新用户）：非示例值；V2.5 weekly_goal 服务端派生（默认每日目标 50 × 7 = 350）
     empty = client.get(
         "/stats/dashboard",
         params={"timezone": "Asia/Shanghai"},
@@ -131,6 +131,6 @@ def test_acceptance_ac10_dashboard_real_data(client: TestClient) -> None:
     assert empty.status_code == 200
     empty_body = empty.json()
     assert empty_body["has_data"] is False
-    assert empty_body["weekly_goal"] is None
-    assert empty_body["weekly_goal_progress"] is None
+    assert empty_body["weekly_goal"] == 350  # V2.5 服务端派生
+    assert empty_body["weekly_goal_progress"] == 0.0
     assert empty_body["recall_accuracy"] is None

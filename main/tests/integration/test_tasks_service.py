@@ -106,8 +106,8 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
 
 def _config(tendency: str = "BALANCED") -> GenerationConfig:
     return GenerationConfig(
-        quantity_tendency=tendency,
-        difficulty_ratio=DifficultyRatio(basic=0.4, understanding=0.4, application=0.2),
+        coverage_mode=tendency,
+        difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
     )
 
 

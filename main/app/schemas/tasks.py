@@ -1,13 +1,15 @@
-"""任务 schema（openapi Task/TaskCreateRequest/Chapter/KnowledgePoint；structure-contract 3.4/3.6/6.4）。
+"""任务 schema（openapi Task/TaskCreateRequest/TaskUpdateRequest/Chapter/KnowledgePoint；structure-contract 3.4/3.6/6.4）。
 
 Task 视图：selected_chapters 为 Chapter 对象数组快照（契约 3.4/3.6，章节删除后名称可还原）。
 KnowledgePoint 为内部资源（契约 3.6；本期无独立接口，经任务详情/批次观测间接呈现）——
 视图模型作为守卫锚点（红线 1：app/schemas ↔ openapi 三处一致）。
+V2.5：七态 + internal_stage + project_id/retry_of_task_id/样卡持久化字段；
+TaskCreateRequest 的 project_id 取自路径（openapi 描述），file_id 由项目派生。
 """
 
 from pydantic import BaseModel, Field
 
-from app.schemas.samples import GenerationConfig
+from app.schemas.samples import GenerationConfig, SampleCard
 
 
 class Chapter(BaseModel):
@@ -18,10 +20,20 @@ class Chapter(BaseModel):
 
 
 class TaskCreateRequest(BaseModel):
-    file_id: str
+    """建立 DRAFT 任务（openapi TaskCreateRequest；project_id 取自路径）。"""
+
     deck_id: str
     chapter_ids: list[str] = Field(min_length=1)
     generation_config: GenerationConfig
+
+
+class TaskUpdateRequest(BaseModel):
+    """更新任务配置（openapi TaskUpdateRequest；仅 DRAFT/AWAITING_SAMPLE_CONFIRMATION
+    可改，修改后样卡失效）。"""
+
+    deck_id: str | None = None
+    chapter_ids: list[str] | None = None
+    generation_config: GenerationConfig | None = None
 
 
 class TaskCursor(BaseModel):
@@ -44,25 +56,32 @@ class KnowledgePoint(BaseModel):
 
 
 class Task(BaseModel):
+    """任务视图（openapi Task；structure-contract 3.4，V2.5 七态）。"""
+
     task_id: str
+    project_id: str | None
     file_id: str | None
     deck_id: str | None
-    status: str  # PENDING/RUNNING/PAUSED/COMPLETED/FAILED/CANCELLED
-    stage: str | None  # PLANNING/GENERATING/SCORING
+    retry_of_task_id: str | None = None
+    status: str  # V2.5 七态（DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION/GENERATING/COMPLETED/FAILED/ABANDONED）
+    internal_stage: str | None = None  # PLANNING/GENERATING/SCORING/PUBLISHING（运行期观测）
     selected_chapters: list[Chapter]
     generation_config: GenerationConfig
-    cursor: TaskCursor | None
+    sample_cards: list[SampleCard] | None = None
+    sample_config_hash: str | None = None
+    sample_confirmed_at: str | None = None
+    cursor: TaskCursor | None = None
     generated_card_count: int
-    total_batch_count: int | None
-    completed_batch_count: int | None
-    resumable: bool
-    failure_stage: str | None  # PLANNING/GENERATING/SCORING/WRITE_BACK
-    error_code: str | None
-    completion_reason: str | None  # NO_GENERATION_UNITS 等空单元三分支（spec §6.4）
+    total_batch_count: int | None = None
+    completed_batch_count: int | None = None
+    completion_reason: str | None = None  # NO_GENERATION_UNITS 等空单元三分支（spec §6.4）
     skipped_planning_group_count: int  # 部分规划组失败被跳过的组数（spec §6.4）
+    resumable: bool
+    failure_stage: str | None = None  # PLANNING/GENERATING/SCORING/PUBLISHING
+    error_code: str | None = None
     created_at: str
-    started_at: str | None
-    ended_at: str | None
+    started_at: str | None = None
+    ended_at: str | None = None
     updated_at: str
 
 

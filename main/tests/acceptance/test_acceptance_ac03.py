@@ -2,8 +2,8 @@
 
 映射（PRD AC-03 四条）：
 - AC-03-a 每次生成固定输出 3 张样卡 → len(sample_cards) == 3
-- AC-03-b 三档难度各有 1 张 → target_difficulty == {BASIC, UNDERSTANDING, APPLICATION}
-- AC-03-c 2 张普通问答 + 1 张判断题 → card_type 计 QUESTION==2 / TRUE_FALSE==1
+- AC-03-b 三档难度各有 1 张 → target_difficulty == {BASIC, UNDERSTANDING, DEEP_QUESTION}（V2.5 改名）
+- AC-03-c DEEP_QUESTION 只允许 QUESTION 卡型 → card_type 计 QUESTION==3 / TRUE_FALSE==0
 - AC-03-d 不能编辑且不入牌组不统计 → 样卡不落库（cards/review_states 无行）：
   无持久化即无编辑入口（"不能编辑"由结构保证）；正式统计只读库内卡片，无卡片自然不统计。
 
@@ -53,8 +53,8 @@ def _user(client: TestClient) -> dict[str, str]:
 
 def _config() -> dict[str, object]:
     return {
-        "quantity_tendency": "BALANCED",
-        "difficulty_ratio": {"basic": 0.4, "understanding": 0.4, "application": 0.2},
+        "coverage_mode": "BALANCED",
+        "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
     }
 
 
@@ -110,10 +110,15 @@ def test_acceptance_ac03_sample_cards(client: TestClient) -> None:
     # AC-03-a：固定 3 张
     assert len(cards) == 3
     # AC-03-b：三档难度各有 1 张
-    assert {c["target_difficulty"] for c in cards} == {"BASIC", "UNDERSTANDING", "APPLICATION"}
-    # AC-03-c：2 张普通问答 + 1 张判断题
-    assert sum(1 for c in cards if c["card_type"] == "QUESTION") == 2
-    assert sum(1 for c in cards if c["card_type"] == "TRUE_FALSE") == 1
+    assert {c["target_difficulty"] for c in cards} == {
+        "BASIC",
+        "UNDERSTANDING",
+        "DEEP_QUESTION",
+    }  # V2.5 改名
+    # AC-03-c：DEEP_QUESTION 只允许 QUESTION 卡型（V2.5 契约 3.6）
+    assert sum(1 for c in cards if c["card_type"] == "QUESTION") == 3
+    # V2.5：DEEP_QUESTION 只允许 QUESTION 卡型（契约 3.6），样卡全为问答卡
+    assert sum(1 for c in cards if c["card_type"] == "TRUE_FALSE") == 0
     # R-14：SampleCard 轻量组件（structure-contract 3.13）——无落库/归属/版本占位字段
     for c in cards:
         assert {"card_id", "front", "back", "card_type"} <= set(c)
