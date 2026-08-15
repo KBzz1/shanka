@@ -3,7 +3,7 @@
 - plan_scoring_groups：候选 = 全单元（经 Batch→Card 有卡）；层 = (chapter_id,
   target_difficulty, card_type)；层内 sha256(task_id+unit_id) 确定性抽样排序；
   BASIC/UNDERSTANDING 按层合批（受 scoring_max_cards_per_call /
-  scoring_max_input_chars 双限再拆，卡片+锚定+去重页原文全量计字符）；APPLICATION
+  scoring_max_input_chars 双限再拆，卡片+锚定+去重页原文全量计字符）；DEEP_QUESTION
   逐单元；组批后调用数 > max_scoring_calls_per_task → 按层配额（候选数占比，最大
   余数法）+ 哈希序确定性缩减。组数即计划调用数（§8 调用上限口径）。
 - run_scoring_stage：逐组——事务内重读 Task（须 GENERATING+SCORING，否则不发请求）→
@@ -292,7 +292,7 @@ def _group_fingerprint(
 
 def plan_scoring_groups(session: Session, *, task: Task, settings: Settings) -> list[ScoringGroup]:
     """分层抽样 + 合批规划（spec §8）：层 = (chapter_id, target_difficulty, card_type)；
-    层内哈希序确定性；BASIC/UNDERSTANDING 按层合批（双限再拆）、APPLICATION 逐单元；
+    层内哈希序确定性；BASIC/UNDERSTANDING 按层合批（双限再拆）、DEEP_QUESTION 逐单元；
     组数超 max_scoring_calls_per_task → 按层配额（候选数占比，最大余数法）+ 哈希序缩减。
     """
     versions = asset_versions()
@@ -346,7 +346,7 @@ def plan_scoring_groups(session: Session, *, task: Task, settings: Settings) -> 
                 e[0].knowledge_point_id,
             )
         )
-    # 合批：BASIC/UNDERSTANDING 按层合批（双限再拆）；APPLICATION 逐单元
+    # 合批：BASIC/UNDERSTANDING 按层合批（双限再拆）；DEEP_QUESTION 逐单元
     max_cards = max(1, settings.scoring_max_cards_per_call)
     max_chars = max(1, settings.scoring_max_input_chars)
     layer_groups: dict[str, list[list[tuple[KnowledgePoint, list[str]]]]] = {}
@@ -356,7 +356,7 @@ def plan_scoring_groups(session: Session, *, task: Task, settings: Settings) -> 
         current: list[tuple[KnowledgePoint, list[str]]] = []
         for entry in entries:
             if not merged:
-                # APPLICATION 等：逐单元单独调用（每单元 1 卡 = 每卡一次）
+                # DEEP_QUESTION 等：逐单元单独调用（每单元 1 卡 = 每卡一次）
                 if current:
                     groups.append(current)
                     current = []

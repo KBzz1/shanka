@@ -10,7 +10,7 @@ from services.generation.rubric import batch_quality
 def test_rubric_batch_quality_shape() -> None:
     cards = [
         {"type": "QUESTION", "target_difficulty": "BASIC", "chapter_id": "c1"},
-        {"type": "TRUE_FALSE", "target_difficulty": "APPLICATION", "chapter_id": "c1"},
+        {"type": "TRUE_FALSE", "target_difficulty": "UNDERSTANDING", "chapter_id": "c1"},
     ]
     q = batch_quality(cards, total_kps=3, duplicated=0)
     assert q["coverage_rate"] == 2 / 3

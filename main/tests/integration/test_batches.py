@@ -198,7 +198,7 @@ def test_batches_plan_and_process_all(session_factory: Callable[[], Session]) ->
     assert len(cards) == total_batches  # 每单元 1 卡
     assert all(c.source == "GENERATED" for c in cards)
     # T10：批=单元 → coverage=0/1；Rubric 评分字段留 NULL 待 SCORING（T11 回写）
-    assert all(b.rubric_version == "v2" for b in batches)
+    assert all(b.rubric_version == "v3" for b in batches)
     assert all(b.coverage_rate == 1.0 for b in batches)
     assert all(
         c.evidence_score is None
@@ -296,5 +296,5 @@ def test_batches_usage_and_versions_recorded(session_factory: Callable[[], Sessi
     assert batch.cache_miss_tokens == 8
     assert batch.output_tokens == 5
     assert batch.model == "deepseek-v4-flash"
-    assert batch.prompt_version == "v3" and batch.schema_version == "v2"
+    assert batch.prompt_version == "v4" and batch.schema_version == "v3"
     assert batch.http_status == 200

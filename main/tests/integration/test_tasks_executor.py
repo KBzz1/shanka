@@ -472,6 +472,7 @@ def test_executor_full_flow_plan_then_generate(
                             "learning_objective": "全流程目标",
                             "target_difficulty": "BASIC",
                             "card_type": "QUESTION",
+                            "coverage_tier": "CORE",
                         }
                     ]
                 },

@@ -1,4 +1,7 @@
-"""v3/v2 LLM 资产静态守卫：入口、输入信封、fail-closed 语义与 JSON Schema。"""
+"""当前 LLM 资产结构守卫：入口、输入信封、fail-closed 语义与 JSON Schema。
+
+资产版本随 manifest 演进至 v4/v3（Task 7）；版本对齐与标签/语义守卫见
+test_prompt_assets_v4.py，本文件只保留对当前资产通用的结构断言。"""
 
 import json
 from typing import Any
@@ -87,7 +90,7 @@ def test_generator_output_v2_schema_wraps_zero_or_one_minimal_card() -> None:
         )
 
 
-def test_planner_output_v2_schema_contract() -> None:
+def test_planner_output_schema_contract() -> None:
     schema = _schema("planner_output")
     assert schema["additionalProperties"] is False
     unit = schema["properties"]["units"]["items"]
@@ -97,6 +100,7 @@ def test_planner_output_v2_schema_contract() -> None:
         "learning_objective",
         "target_difficulty",
         "card_type",
+        "coverage_tier",
     }
     assert "priority" not in unit["properties"]
     jsonschema.validate({"units": []}, schema)
@@ -132,21 +136,21 @@ def test_scoring_output_v2_schema_contract() -> None:
 def test_manifest_has_new_entries() -> None:
     manifest = load_manifest()
     assert "scoring" in manifest["prompts"]
-    assert manifest["prompts"]["scoring"]["version"] == "v2"
+    assert manifest["prompts"]["scoring"]["version"] == "v3"
     assert "planner_output" in manifest["schemas"]
     assert "scoring_output" in manifest["schemas"]
 
 
 def test_versions_extended() -> None:
     v = asset_versions()
-    assert v["generator_prompt_version"] == "v3"
-    assert v["planner_prompt_version"] == "v3"
-    assert v["rewrite_prompt_version"] == "v3"
-    assert v["scoring_prompt_version"] == "v2"
+    assert v["generator_prompt_version"] == "v4"
+    assert v["planner_prompt_version"] == "v4"
+    assert v["rewrite_prompt_version"] == "v4"
+    assert v["scoring_prompt_version"] == "v3"
     assert v["card_schema_version"] == "v1"
-    assert v["planner_output_schema_version"] == "v2"
-    assert v["scoring_output_schema_version"] == "v2"
-    assert v["rubric_version"] == "v2"
+    assert v["planner_output_schema_version"] == "v3"
+    assert v["scoring_output_schema_version"] == "v3"
+    assert v["rubric_version"] == "v3"
 
 
 def test_versions_keep_backward_compat_keys() -> None:

@@ -2,10 +2,10 @@
 quality-summary 聚合（user 隔离）、metrics 文本（llm/generation/batch 指标）。
 
 mock transport 全链路驱动（LLM 升级管线：规划 → 生成 → 评分，一次 scan 衔接）：
-COMPACT 2 章 → 6 生成单元（配额 BASIC 3/UNDERSTANDING 2/APPLICATION 1）→ 6 批
+COMPACT 2 章 → 6 生成单元（配额 BASIC 3/UNDERSTANDING 2/DEEP_QUESTION 1）→ 6 批
 （1 单元 1 批）→ 每批 1 张合法卡 → 6 卡；评分 mock 返回确定性分数
 （evidence=1/correctness=1/difficulty=1/learning=2，总分代码计算 5）；
-usage 统一 hit=2/miss=8/output=5，model deepseek-v4-flash，rubric_version v2。
+usage 统一 hit=2/miss=8/output=5，model deepseek-v4-flash，rubric_version v3。
 """
 
 import json
@@ -62,6 +62,7 @@ def _dispatch(request: httpx.Request) -> httpx.Response:
                         "learning_objective": f"知识点{len(units)}",
                         "target_difficulty": difficulty,
                         "card_type": "QUESTION",
+                        "coverage_tier": "CORE",
                     }
                 )
         content = json.dumps({"units": units}, ensure_ascii=False)
@@ -308,16 +309,16 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
     assert first["output_tokens"] == 5
     # 版本/model/http_status/duration
     assert first["model"] == "deepseek-v4-flash"
-    assert first["prompt_version"] == "v3"
-    assert first["schema_version"] == "v2"
-    assert first["rubric_version"] == "v2"
+    assert first["prompt_version"] == "v4"
+    assert first["schema_version"] == "v3"
+    assert first["rubric_version"] == "v3"
     assert first["http_status"] == 200
     assert isinstance(first["duration_ms"], int)
     assert first["request_id"] is None  # carry-forward 决策：视图保留字段，R1 live 上游 id 透传
     # 质量（批=单元：分布按单元锚定单值）
     assert first["coverage_rate"] == 1.0  # 1 卡 / 1 单元
     assert first["duplicate_rate"] == 0.0
-    assert set(first["difficulty_distribution"]) <= {"BASIC", "UNDERSTANDING", "APPLICATION"}
+    assert set(first["difficulty_distribution"]) <= {"BASIC", "UNDERSTANDING", "DEEP_QUESTION"}
     assert sum(first["difficulty_distribution"].values()) == 1
     assert first["difficulty_deviation"] == 0.0  # V5A 简化（观测字段结构完整）
     # 成本估算（8.4 价格常量，仅观测）
@@ -342,7 +343,7 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     assert len(body["groups"]) == 1
     g = body["groups"][0]
     assert g["key"] == "deepseek-v4-flash"
-    assert g["rubric_version"] == "v2"  # 卡经批次归属 → 批次 rubric_version
+    assert g["rubric_version"] == "v3"  # 卡经批次归属 → 批次 rubric_version
     assert g["card_count"] == 6
     assert g["eligible_card_count"] == 6
     assert g["scored_card_count"] == 6
@@ -367,17 +368,17 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     assert groups[0]["card_count"] == 6
 
     # group_by=difficulty：键 = generation_unit_id → 单元 target_difficulty（确定性）；
-    # 配额 BASIC 3 / UNDERSTANDING 2 / APPLICATION 1 → 每单元 1 卡同分布。
+    # 配额 BASIC 3 / UNDERSTANDING 2 / DEEP_QUESTION 1 → 每单元 1 卡同分布。
     resp = client.get(
         "/observability/quality-summary", params={"group_by": "difficulty"}, headers=user
     )
     assert resp.status_code == 200
     groups = resp.json()["groups"]
     by_key = {g["key"]: g for g in groups}
-    assert set(by_key) == {"BASIC", "UNDERSTANDING", "APPLICATION"}
+    assert set(by_key) == {"BASIC", "UNDERSTANDING", "DEEP_QUESTION"}
     assert by_key["BASIC"]["card_count"] == 3
     assert by_key["UNDERSTANDING"]["card_count"] == 2
-    assert by_key["APPLICATION"]["card_count"] == 1
+    assert by_key["DEEP_QUESTION"]["card_count"] == 1
 
 
 def test_quality_summary_isolates_by_device(ctx: tuple[TestClient, Path]) -> None:

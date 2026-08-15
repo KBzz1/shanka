@@ -263,6 +263,7 @@ def _scripted_factory(
                                 "learning_objective": f"知识点{counter[0]}",
                                 "target_difficulty": difficulty,
                                 "card_type": "QUESTION",
+                                "coverage_tier": "CORE",
                             }
                         )
                         counter[0] += 1
@@ -439,7 +440,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     n = scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory)
     assert n == 1
     assert calls["n"] == 14  # 2 规划 + 7 生成（批 2 崩溃后重试一次）+ 5 评分组
-    # （评分分层：BASIC×2 章 + UNDERSTANDING×2 章 各一组、APPLICATION 逐单元 1 组）
+    # （评分分层：BASIC×2 章 + UNDERSTANDING×2 章 各一组、DEEP_QUESTION 逐单元 1 组）
     # AC-05-c：批 1 未重跑（重跑会再次出现 知识点0 生成调用）；批 2 崩溃+恢复共 2 次
     assert gen_objectives == [
         "知识点0",

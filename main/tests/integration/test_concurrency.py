@@ -350,12 +350,14 @@ def _planning_content(request: httpx.Request) -> str:
                     "learning_objective": "规划目标一",
                     "target_difficulty": "BASIC",
                     "card_type": "QUESTION",
+                    "coverage_tier": "CORE",
                 },
                 {
                     "source_chunk_ids": [chunk_ids[0]],
                     "learning_objective": "规划目标二",
                     "target_difficulty": "UNDERSTANDING",
                     "card_type": "QUESTION",
+                    "coverage_tier": "CORE",
                 },
             ]
         },

@@ -23,7 +23,7 @@ import jsonschema
 from app.errors import AppError, ErrorCode
 from infra.llm.prompts import load_schema_asset
 
-_DIFFICULTY_ORDER = ("BASIC", "UNDERSTANDING", "APPLICATION")
+_DIFFICULTY_ORDER = ("BASIC", "UNDERSTANDING", "DEEP_QUESTION")
 
 
 def _invalid(message: str) -> AppError:

@@ -53,9 +53,9 @@ def _client_factory(api_key: str) -> DeepSeekClient:
             )
             chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
             units: list[dict[str, object]] = []
-            # 难度键原样回显（与 test_observability 同款）：planner 输出 schema v2
-            # 枚举仍为 APPLICATION 时代（改名属 Task 7 资产 v4/v3），映射 DEEP_QUESTION
-            # 会被 schema 校验拒绝 → 组跳过（曾致 6→2 并掩盖于弱化断言，R1 已修复）
+            # 难度键原样回显（与 test_observability 同款）：planner 输出 schema v3
+            # 枚举为 BASIC/UNDERSTANDING/DEEP_QUESTION 且单元必填 coverage_tier
+            # （Task 7 资产 v4/v3 起服务端配额键与模型输出口径一致）
             for difficulty, quota in payload["difficulty_quota"].items():
                 for _ in range(quota):
                     units.append(
@@ -64,6 +64,7 @@ def _client_factory(api_key: str) -> DeepSeekClient:
                             "learning_objective": f"知识点{len(units)}",
                             "target_difficulty": difficulty,
                             "card_type": "QUESTION",
+                            "coverage_tier": "CORE",
                         }
                     )
             content = json.dumps({"units": units}, ensure_ascii=False)
@@ -362,7 +363,7 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
             break
     assert final["status"] == "COMPLETED"
     # COMPACT 2 章确定性 6 卡：mock planner 按请求配额产出 6 单元 → 6 批 → 每批 1 卡
-    # （_client_factory docstring；配额 BASIC 3/UNDERSTANDING 2/APPLICATION 1）
+    # （_client_factory docstring；配额 BASIC 3/UNDERSTANDING 2/DEEP_QUESTION 1）
     assert final["generated_card_count"] == 6
     assert final["ended_at"] is not None
     assert final["resumable"] is False

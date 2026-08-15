@@ -21,6 +21,7 @@ def test_truncate_by_quota_and_normalize() -> None:
                 "learning_objective": "b1",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
                 "priority": 1,
             },
             {
@@ -28,6 +29,7 @@ def test_truncate_by_quota_and_normalize() -> None:
                 "learning_objective": "b2",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
                 "priority": 2,
             },
             {
@@ -35,6 +37,7 @@ def test_truncate_by_quota_and_normalize() -> None:
                 "learning_objective": "u1",
                 "target_difficulty": "UNDERSTANDING",
                 "card_type": "TRUE_FALSE",
+                "coverage_tier": "CORE",
                 "priority": 1,
             },
         ]
@@ -42,7 +45,7 @@ def test_truncate_by_quota_and_normalize() -> None:
     out = validate_and_truncate(
         raw,
         allowed_page_ids={"ch1", "ch3"},
-        quota={"BASIC": 1, "UNDERSTANDING": 1, "APPLICATION": 0},
+        quota={"BASIC": 1, "UNDERSTANDING": 1, "DEEP_QUESTION": 0},
         max_pages_per_unit=2,
         max_chars_per_unit=9999,
         page_chars={"ch1": 10, "ch3": 20},
@@ -61,6 +64,7 @@ def test_rejects_outside_pages() -> None:
                 "learning_objective": "x",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
                 "priority": 1,
             }
         ]
@@ -69,7 +73,7 @@ def test_rejects_outside_pages() -> None:
         validate_and_truncate(
             raw,
             allowed_page_ids={"ch1"},
-            quota={"BASIC": 5, "UNDERSTANDING": 0, "APPLICATION": 0},
+            quota={"BASIC": 5, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
             max_pages_per_unit=2,
             max_chars_per_unit=9999,
             page_chars={"ch1": 1},
@@ -86,6 +90,7 @@ def test_rejects_extra_field() -> None:
                 "learning_objective": "x",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
                 "hint": "注入尝试",
             }
         ]
@@ -94,7 +99,7 @@ def test_rejects_extra_field() -> None:
         validate_and_truncate(
             raw,
             allowed_page_ids={"ch1"},
-            quota={"BASIC": 5, "UNDERSTANDING": 0, "APPLICATION": 0},
+            quota={"BASIC": 5, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
             max_pages_per_unit=2,
             max_chars_per_unit=9999,
             page_chars={"ch1": 1},
@@ -110,6 +115,7 @@ def test_rejects_missing_required_field() -> None:
                 "source_chunk_ids": ["ch1"],
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             }
         ]
     }
@@ -117,7 +123,7 @@ def test_rejects_missing_required_field() -> None:
         validate_and_truncate(
             raw,
             allowed_page_ids={"ch1"},
-            quota={"BASIC": 5, "UNDERSTANDING": 0, "APPLICATION": 0},
+            quota={"BASIC": 5, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
             max_pages_per_unit=2,
             max_chars_per_unit=9999,
             page_chars={"ch1": 1},
@@ -134,6 +140,7 @@ def test_rejects_empty_source_chunk_ids() -> None:
                 "learning_objective": "x",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             }
         ]
     }
@@ -141,7 +148,7 @@ def test_rejects_empty_source_chunk_ids() -> None:
         validate_and_truncate(
             raw,
             allowed_page_ids={"ch1"},
-            quota={"BASIC": 5, "UNDERSTANDING": 0, "APPLICATION": 0},
+            quota={"BASIC": 5, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
             max_pages_per_unit=2,
             max_chars_per_unit=9999,
             page_chars={"ch1": 1},
@@ -158,6 +165,7 @@ def test_rejects_duplicate_source_chunk_ids() -> None:
                 "learning_objective": "x",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             }
         ]
     }
@@ -165,7 +173,7 @@ def test_rejects_duplicate_source_chunk_ids() -> None:
         validate_and_truncate(
             raw,
             allowed_page_ids={"ch1"},
-            quota={"BASIC": 5, "UNDERSTANDING": 0, "APPLICATION": 0},
+            quota={"BASIC": 5, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
             max_pages_per_unit=2,
             max_chars_per_unit=9999,
             page_chars={"ch1": 1},
@@ -182,6 +190,7 @@ def test_rejects_anchor_enum_violation() -> None:
                 "learning_objective": "x",
                 "target_difficulty": "EXPERT",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             }
         ]
     }
@@ -189,7 +198,7 @@ def test_rejects_anchor_enum_violation() -> None:
         validate_and_truncate(
             raw,
             allowed_page_ids={"ch1"},
-            quota={"BASIC": 5, "UNDERSTANDING": 0, "APPLICATION": 0},
+            quota={"BASIC": 5, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
             max_pages_per_unit=2,
             max_chars_per_unit=9999,
             page_chars={"ch1": 1},
@@ -206,6 +215,7 @@ def test_rejects_too_many_pages() -> None:
                 "learning_objective": "x",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             }
         ]
     }
@@ -213,7 +223,7 @@ def test_rejects_too_many_pages() -> None:
         validate_and_truncate(
             raw,
             allowed_page_ids={"ch1", "ch2", "ch3"},
-            quota={"BASIC": 5, "UNDERSTANDING": 0, "APPLICATION": 0},
+            quota={"BASIC": 5, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
             max_pages_per_unit=2,
             max_chars_per_unit=9999,
             page_chars={"ch1": 1, "ch2": 1, "ch3": 1},
@@ -230,6 +240,7 @@ def test_rejects_too_many_chars() -> None:
                 "learning_objective": "x",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             }
         ]
     }
@@ -237,7 +248,7 @@ def test_rejects_too_many_chars() -> None:
         validate_and_truncate(
             raw,
             allowed_page_ids={"ch1", "ch2"},
-            quota={"BASIC": 5, "UNDERSTANDING": 0, "APPLICATION": 0},
+            quota={"BASIC": 5, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
             max_pages_per_unit=2,
             max_chars_per_unit=5,
             page_chars={"ch1": 3, "ch2": 3},
@@ -254,19 +265,21 @@ def test_priority_absent_uses_array_order() -> None:
                 "learning_objective": "b1",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             },
             {
                 "source_chunk_ids": ["ch2"],
                 "learning_objective": "b2",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             },
         ]
     }
     out = validate_and_truncate(
         raw,
         allowed_page_ids={"ch1", "ch2"},
-        quota={"BASIC": 1, "UNDERSTANDING": 0, "APPLICATION": 0},
+        quota={"BASIC": 1, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
         max_pages_per_unit=2,
         max_chars_per_unit=9999,
         page_chars={"ch1": 10, "ch2": 20},
@@ -283,6 +296,7 @@ def test_truncation_tie_keeps_original_order() -> None:
                 "learning_objective": "first",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
                 "priority": 1,
             },
             {
@@ -290,6 +304,7 @@ def test_truncation_tie_keeps_original_order() -> None:
                 "learning_objective": "second",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
                 "priority": 1,
             },
         ]
@@ -297,7 +312,7 @@ def test_truncation_tie_keeps_original_order() -> None:
     out = validate_and_truncate(
         raw,
         allowed_page_ids={"ch1", "ch2"},
-        quota={"BASIC": 1, "UNDERSTANDING": 0, "APPLICATION": 0},
+        quota={"BASIC": 1, "UNDERSTANDING": 0, "DEEP_QUESTION": 0},
         max_pages_per_unit=2,
         max_chars_per_unit=9999,
         page_chars={"ch1": 10, "ch2": 20},
@@ -312,15 +327,16 @@ def test_zero_quota_removes_difficulty() -> None:
             {
                 "source_chunk_ids": ["ch1"],
                 "learning_objective": "a1",
-                "target_difficulty": "APPLICATION",
+                "target_difficulty": "DEEP_QUESTION",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             }
         ]
     }
     out = validate_and_truncate(
         raw,
         allowed_page_ids={"ch1"},
-        quota={"BASIC": 1, "UNDERSTANDING": 1, "APPLICATION": 0},
+        quota={"BASIC": 1, "UNDERSTANDING": 1, "DEEP_QUESTION": 0},
         max_pages_per_unit=2,
         max_chars_per_unit=9999,
         page_chars={"ch1": 10},
@@ -333,7 +349,7 @@ def test_empty_units_accepted() -> None:
     out = validate_and_truncate(
         {"units": []},
         allowed_page_ids={"ch1"},
-        quota={"BASIC": 1, "UNDERSTANDING": 1, "APPLICATION": 1},
+        quota={"BASIC": 1, "UNDERSTANDING": 1, "DEEP_QUESTION": 1},
         max_pages_per_unit=2,
         max_chars_per_unit=9999,
         page_chars={"ch1": 10},
@@ -350,12 +366,14 @@ def test_normalize_units_dedupes_and_renumbers() -> None:
                 "learning_objective": "a",
                 "target_difficulty": "BASIC",
                 "card_type": "QUESTION",
+                "coverage_tier": "CORE",
             },
             {
                 "source_chunk_ids": ["ch3"],
                 "learning_objective": "b",
                 "target_difficulty": "UNDERSTANDING",
                 "card_type": "TRUE_FALSE",
+                "coverage_tier": "CORE",
             },
         ]
     )

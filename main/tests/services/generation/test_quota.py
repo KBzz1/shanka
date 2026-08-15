@@ -20,17 +20,17 @@ def test_task_quota_40_40_20_gives_3_2_1() -> None:
     assert allocate_task_quota(6, 0.4, 0.4, 0.2) == {
         "BASIC": 3,
         "UNDERSTANDING": 2,
-        "APPLICATION": 1,
+        "DEEP_QUESTION": 1,
     }
 
 
 def test_largest_remainder_total_preserved() -> None:
-    out = largest_remainder([2.4, 2.4, 1.2], 6, ["BASIC", "UNDERSTANDING", "APPLICATION"])
+    out = largest_remainder([2.4, 2.4, 1.2], 6, ["BASIC", "UNDERSTANDING", "DEEP_QUESTION"])
     assert sum(out.values()) == 6
 
 
 def test_chapter_quota_distributes_evenly() -> None:
-    q = allocate_chapter_quota({"BASIC": 3, "UNDERSTANDING": 2, "APPLICATION": 1}, 2)
+    q = allocate_chapter_quota({"BASIC": 3, "UNDERSTANDING": 2, "DEEP_QUESTION": 1}, 2)
     assert sum(ch["BASIC"] for ch in q) == 3
     assert len(q) == 2
 

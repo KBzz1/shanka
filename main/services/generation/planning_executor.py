@@ -82,12 +82,18 @@ def _format_cutoff(now: str, minutes: int) -> str:
 
 
 def group_fingerprint(
-    pages: Sequence[TextChunk], quota: dict[str, int], versions: dict[str, str]
+    pages: Sequence[TextChunk],
+    quota: dict[str, int],
+    versions: dict[str, str],
+    coverage_mode: str,
 ) -> str:
-    """规划组输入指纹（spec §6.2）：页 ID + content_sha256 + 子配额 + prompt/schema 版本。"""
+    """规划组输入指纹（spec §6.2）：页 ID + content_sha256 + 覆盖模式 + 子配额 + prompt/schema 版本。"""
     payload = {
         "pages": [{"chunk_id": p.chunk_id, "content_sha256": p.content_sha256} for p in pages],
-        "difficulty_quota": {d: quota.get(d, 0) for d in ("BASIC", "UNDERSTANDING", "APPLICATION")},
+        "coverage_mode": coverage_mode,
+        "difficulty_quota": {
+            d: quota.get(d, 0) for d in ("BASIC", "UNDERSTANDING", "DEEP_QUESTION")
+        },
         "planner_prompt_version": versions["planner_prompt_version"],
         "planner_output_schema_version": versions["planner_output_schema_version"],
     }
@@ -317,7 +323,7 @@ def run_planning(
                 return  # 已取消/转移 → 停止（不再付费调用）
             operation_key = f"planning:{entry['chapter_id']}:{gi}"
             quota = sub_quotas[gi]
-            fingerprint = group_fingerprint(group, quota, versions)
+            fingerprint = group_fingerprint(group, quota, versions, str(mode))
             units = _run_group(
                 session,
                 task,
@@ -326,6 +332,7 @@ def run_planning(
                 operation_key=operation_key,
                 fingerprint=fingerprint,
                 quota=quota,
+                coverage_mode=str(mode),
                 pages=group,
                 chapter=entry,
                 custom_requirements=config.get("custom_requirements"),
@@ -384,6 +391,7 @@ def _run_group(
     operation_key: str,
     fingerprint: str,
     quota: dict[str, int],
+    coverage_mode: str,
     pages: list[TextChunk],
     chapter: dict[str, Any],
     custom_requirements: Any,
@@ -441,6 +449,7 @@ def _run_group(
     system_prompt, user_prompt = _build_planner_prompts(
         chapter=chapter,
         quota=quota,
+        coverage_mode=coverage_mode,
         pages=pages,
         settings=settings,
         custom_requirements=custom_requirements,
@@ -565,6 +574,7 @@ def _build_planner_prompts(
     *,
     chapter: dict[str, Any],
     quota: dict[str, int],
+    coverage_mode: str,
     pages: list[TextChunk],
     settings: Settings,
     custom_requirements: Any,
@@ -581,6 +591,7 @@ def _build_planner_prompts(
             "start_page": chapter["start_page"],
             "end_page": chapter["end_page"],
         },
+        "coverage_mode": coverage_mode,
         "difficulty_quota": quota,
         "limits": {
             "max_source_chunks_per_unit": settings.max_source_pages_per_unit,
@@ -783,7 +794,7 @@ def _finish_planning_generating(
 
 def _difficulty_distribution(units: list[dict[str, Any]]) -> dict[str, int]:
     """实际难度分布（§3.5 观测；不强制补满配额）。"""
-    distribution = {"BASIC": 0, "UNDERSTANDING": 0, "APPLICATION": 0}
+    distribution = {"BASIC": 0, "UNDERSTANDING": 0, "DEEP_QUESTION": 0}
     for unit in units:
         distribution[unit["target_difficulty"]] += 1
     return distribution

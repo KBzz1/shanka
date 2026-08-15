@@ -195,6 +195,7 @@ def _planning_response_from_request(
             "learning_objective": f"目标{i}",
             "target_difficulty": diffs[i % len(diffs)],
             "card_type": "QUESTION",
+            "coverage_tier": "CORE",
         }
         for i in range(count)
     ]
@@ -380,7 +381,7 @@ def test_planning_success_units_and_batches(
     assert cursor is not None and cursor["difficulty_distribution"] == {
         "BASIC": 1,
         "UNDERSTANDING": 1,
-        "APPLICATION": 0,
+        "DEEP_QUESTION": 0,
     }
 
 
@@ -404,7 +405,7 @@ def test_planning_success_reuses_normalized(
         )
         quota = _expected_sub_quota(pages)
         op_key = f"planning:{chapter_id}:0"
-        fp = group_fingerprint(pages, quota, asset_versions())
+        fp = group_fingerprint(pages, quota, asset_versions(), "COMPACT")
         units = [
             {
                 "source_chunk_ids": [pages[0].chunk_id],
@@ -480,7 +481,7 @@ def test_planning_budget_reset_prevented(
         )
         quota = _expected_sub_quota(pages)
         op_key = f"planning:{chapter_id}:0"
-        fp = group_fingerprint(pages, quota, asset_versions())
+        fp = group_fingerprint(pages, quota, asset_versions(), "COMPACT")
         for attempt_no in (1, 2, 3):
             att = create_attempt(
                 session,
@@ -911,7 +912,7 @@ def test_planning_mixed_skipped_and_empty_records_skips(
         chapter_quotas = allocate_chapter_quota(task_quota, 1)
         sub_quotas = allocate_group_quota(chapter_quotas[0], [300, 100])
         op_key0 = f"planning:{chapter_id}:0"
-        fp0 = group_fingerprint(pages[:3], sub_quotas[0], asset_versions())
+        fp0 = group_fingerprint(pages[:3], sub_quotas[0], asset_versions(), "COMPACT")
         for attempt_no in (1, 2, 3):
             att = create_attempt(
                 session,

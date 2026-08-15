@@ -85,7 +85,7 @@ def _seed_card(session: Session, *, encrypted_key: str = _ENCRYPTED_TEST_KEY) ->
         question="旧问题？",
         answer="旧答案",
         generation_item_id="gen-old-0000",
-        target_difficulty="APPLICATION",
+        target_difficulty="DEEP_QUESTION",
         knowledge_point_ids='["kp-1"]',
         evidence_score=1,
         version="v3",
@@ -203,7 +203,7 @@ def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> No
         assert stored.question == "新问题？改进后"
         assert stored.answer == "新答案。更详细。"
         assert stored.generation_item_id != "gen-old-0000"  # 新版本新标识（旧标识随覆盖作废）
-        assert stored.target_difficulty == "APPLICATION"  # 保留原值
+        assert stored.target_difficulty == "DEEP_QUESTION"  # 保留原值
         assert stored.knowledge_point_ids == '["kp-1"]'  # 保留原值
         assert stored.version == "v4"  # v3 → 递增
         assert stored.updated_at == _NEW_NOW
@@ -312,9 +312,9 @@ def test_rewrite_ledger_success_row(session_factory: Callable[[], Session]) -> N
             f"rewrite:{card_id}:v3:{hashlib.sha256(idempotency_key.encode()).hexdigest()[:16]}"
         )
         assert row.prompt_name == "rewrite"
-        assert row.prompt_version == "v3"
+        assert row.prompt_version == "v4"
         assert row.schema_name == "generator_output"
-        assert row.schema_version == "v2"
+        assert row.schema_version == "v3"
         assert row.cache_hit == 2 and row.cache_miss == 8 and row.output_tokens == 5
         assert row.http_status == 200
         assert row.normalized_result is None  # REWRITE 不写规范化结果（红线 4）

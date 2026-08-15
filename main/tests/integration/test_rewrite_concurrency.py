@@ -90,7 +90,7 @@ def _seed_card(session: Session) -> Card:
         question="旧问题？",
         answer="旧答案",
         generation_item_id="gen-old-0000",
-        target_difficulty="APPLICATION",
+        target_difficulty="DEEP_QUESTION",
         knowledge_point_ids='["kp-1"]',
         evidence_score=1,
         version="v3",

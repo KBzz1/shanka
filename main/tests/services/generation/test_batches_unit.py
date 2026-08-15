@@ -298,7 +298,7 @@ def test_process_batch_anchored_card(session_factory: Callable[[], Session]) -> 
     assert batch.retry_count == 0
     assert batch.cache_hit_tokens == 2 and batch.cache_miss_tokens == 8 and batch.output_tokens == 5
     assert batch.model == "deepseek-v4-flash" and batch.http_status == 200
-    assert batch.prompt_version == "v3" and batch.schema_version == "v2"
+    assert batch.prompt_version == "v4" and batch.schema_version == "v3"
     assert unit.status == "PROCESSED"
     # V2.5（3.4/4.1）：生成期不累加——generated_card_count 只在发布时按已发布卡统计
     # （失败任务为 0）；单卡先 STAGED 隔离（可见谓词 3.9 排除），任务成功才发布
@@ -313,19 +313,19 @@ def test_process_batch_anchored_card(session_factory: Callable[[], Session]) -> 
     assert attempts[0].operation_key == f"generating:{batch.batch_id}"
     assert attempts[0].stage == "GENERATING"
     assert attempts[0].prompt_name == "generator"
-    assert attempts[0].prompt_version == "v3"
+    assert attempts[0].prompt_version == "v4"
     assert attempts[0].schema_name == "generator_output"
-    assert attempts[0].schema_version == "v2"
+    assert attempts[0].schema_version == "v3"
     assert attempts[0].cache_hit == 2 and attempts[0].output_tokens == 5
     assert attempts[0].normalized_result is None  # 红线 4：GENERATING 不写 normalized_result
 
 
 def test_process_batch_true_false_projection(session_factory: Callable[[], Session]) -> None:
-    """锚定 TRUE_FALSE+APPLICATION：front=statement/back=explanation 投影 + answer_boolean 落库。"""
+    """锚定 UNDERSTANDING+TRUE_FALSE：front=statement/back=explanation 投影 + answer_boolean 落库。"""
     user = _uuid()
     with session_factory() as session:
         task_id = _seed_unit_task(
-            session, user_id=user, difficulty="APPLICATION", card_type="TRUE_FALSE"
+            session, user_id=user, difficulty="UNDERSTANDING", card_type="TRUE_FALSE"
         )
         content = json.dumps(
             {
@@ -353,7 +353,7 @@ def test_process_batch_true_false_projection(session_factory: Callable[[], Sessi
     assert card.front == "该请求已完成认证因此可以执行。"
     assert card.back == "认证只是必要条件之一。"
     assert card.answer_boolean == 0
-    assert card.target_difficulty == "APPLICATION"
+    assert card.target_difficulty == "UNDERSTANDING"
     assert card.statement is not None and card.explanation is not None
 
 

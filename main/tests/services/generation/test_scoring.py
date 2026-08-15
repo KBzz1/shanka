@@ -418,12 +418,12 @@ def _scoring_attempts(session: Session, *, task_id: str) -> list[LlmCallAttempt]
 
 
 def test_sampling_deterministic(session_factory: Callable[[], Session]) -> None:
-    """30 单元（10 BASIC + 10 UNDERSTANDING + 10 APPLICATION）：两次 plan_scoring_groups
-    全等；BASIC/UNDERSTANDING 合批、APPLICATION 逐单元；组数 ≤ max_scoring_calls_per_task。"""
+    """30 单元（10 BASIC + 10 UNDERSTANDING + 10 DEEP_QUESTION）：两次 plan_scoring_groups
+    全等；BASIC/UNDERSTANDING 合批、DEEP_QUESTION 逐单元；组数 ≤ max_scoring_calls_per_task。"""
     from services.generation.scoring import plan_scoring_groups
 
     user = _uuid()
-    difficulties = ["BASIC"] * 10 + ["UNDERSTANDING"] * 10 + ["APPLICATION"] * 10
+    difficulties = ["BASIC"] * 10 + ["UNDERSTANDING"] * 10 + ["DEEP_QUESTION"] * 10
     with session_factory() as session:
         task_id = _seed_scoring_task(session, user_id=user, difficulties=difficulties, n_units=30)
         task = session.get(Task, task_id)
@@ -432,8 +432,8 @@ def test_sampling_deterministic(session_factory: Callable[[], Session]) -> None:
         g2 = plan_scoring_groups(session, task=task, settings=_SETTINGS)
     assert [g.operation_key for g in g1] == [g.operation_key for g in g2]  # 确定性
     assert len(g1) <= _SETTINGS.max_scoring_calls_per_task
-    assert len(g1) == 12  # BASIC 1 组（10 卡 ≤ 12）+ UNDERSTANDING 1 组 + APPLICATION 10 组
-    assert all(len(g.unit_ids) == 1 for g in g1 if "APPLICATION" in g.group_key)
+    assert len(g1) == 12  # BASIC 1 组（10 卡 ≤ 12）+ UNDERSTANDING 1 组 + DEEP_QUESTION 10 组
+    assert all(len(g.unit_ids) == 1 for g in g1 if "DEEP_QUESTION" in g.group_key)
     assert all(len(g.card_ids) <= _SETTINGS.scoring_max_cards_per_call for g in g1)
     assert len({g.operation_key for g in g1}) == len(g1)  # 组 key 唯一
 
@@ -471,7 +471,7 @@ def test_plan_groups_cap_reduction_by_layer_quota(
         max_scoring_calls_per_task=5,
         _env_file=None,  # type: ignore[call-arg]
     )
-    difficulties = ["BASIC"] * 10 + ["UNDERSTANDING"] * 10 + ["APPLICATION"] * 10
+    difficulties = ["BASIC"] * 10 + ["UNDERSTANDING"] * 10 + ["DEEP_QUESTION"] * 10
     with session_factory() as session:
         task_id = _seed_scoring_task(
             session, user_id=user, difficulties=difficulties, n_units=30, settings=settings
@@ -528,8 +528,8 @@ def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Sessi
     assert attempts[0].operation_key.startswith("scoring:")
     assert attempts[0].prompt_name == "scoring"
     assert attempts[0].schema_name == "scoring_output"
-    assert attempts[0].schema_version == "v2"
-    assert attempts[0].rubric_version == "v2"
+    assert attempts[0].schema_version == "v3"
+    assert attempts[0].rubric_version == "v3"
     assert attempts[0].normalized_result is None  # 红线 4：SCORING 不写 normalized_result
     assert batch.coverage_rate == 1.0  # 批次质量字段由评分回写期重写（apply_batch_quality）
 
@@ -825,12 +825,12 @@ def test_scan_takes_over_scoring_orphan(session_factory: Callable[[], Session]) 
     user = _uuid()
     with session_factory() as session:
         task_id = _seed_scoring_task(
-            session, user_id=user, difficulties=["APPLICATION", "APPLICATION"], n_units=2
+            session, user_id=user, difficulties=["DEEP_QUESTION", "DEEP_QUESTION"], n_units=2
         )
         task = session.get(Task, task_id)
         assert task is not None
         groups = plan_scoring_groups(session, task=task, settings=_SETTINGS)
-        assert len(groups) == 2  # APPLICATION 逐单元
+        assert len(groups) == 2  # DEEP_QUESTION 逐单元
         create_attempt(
             session,
             user_id=user,

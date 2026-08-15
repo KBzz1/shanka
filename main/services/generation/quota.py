@@ -1,6 +1,6 @@
 """quota.py：任务预算与三层配额（纯函数，无 DB 依赖；spec 3.5 难度配额算法）。
 
-三层确定性分配全部代码计算，固定顺序（BASIC < UNDERSTANDING < APPLICATION、
+三层确定性分配全部代码计算，固定顺序（BASIC < UNDERSTANDING < DEEP_QUESTION、
 章序、组序）消除随机性：任务总配额 → 章配额 → 子配额，各层均用最大余数法
 （largest remainder）取整到总和守恒。
 """
@@ -40,17 +40,17 @@ def allocate_task_quota(
     total_budget: int,
     ratio_basic: float,
     ratio_understanding: float,
-    ratio_application: float,
+    ratio_deep_question: float,
 ) -> dict[str, int]:
     """任务三层配额：总预算 × 难度占比，最大余数法取整到总和 = 总预算。"""
     return largest_remainder(
         [
             total_budget * ratio_basic,
             total_budget * ratio_understanding,
-            total_budget * ratio_application,
+            total_budget * ratio_deep_question,
         ],
         total_budget,
-        ["BASIC", "UNDERSTANDING", "APPLICATION"],
+        ["BASIC", "UNDERSTANDING", "DEEP_QUESTION"],
     )
 
 

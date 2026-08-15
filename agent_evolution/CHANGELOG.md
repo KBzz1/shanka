@@ -32,3 +32,29 @@
 - manifest 已切换到上述新资产。Planner/Generator/Rewrite/Scoring 的运行时组装必须按各
   Prompt 声明的 XML 标记包裹服务端 JSON 序列化输入；未完成新链路组装前不得将该 manifest
   单独部署到旧执行器。
+
+## 2026-08-16
+
+- **prompts/planner v3 → v4**：规划对象升级为来源接地语义单元，每单元新增
+  `coverage_tier` 标签（`CORE` / `IMPORTANT` / `LOW_FREQUENCY`）；运行时输入新增
+  `coverage_mode`（`COMPACT` / `BALANCED` / `EXTENSIVE`），覆盖模式选择语义范围而非
+  数量；难度配额键改为 `BASIC / UNDERSTANDING / DEEP_QUESTION`（原 APPLICATION 改名，
+  结构契约 3.5/3.6）。`DEEP_QUESTION` 只允许 QUESTION 卡型，判断题只属于前两档；
+  知识稀疏章节在 EXTENSIVE 下允许围绕同一知识点规划不同学习角度，禁止同义重复。
+- **prompts/generator v3 → v4**：难度枚举改为 `BASIC / UNDERSTANDING /
+  DEEP_QUESTION`；`DEEP_QUESTION` 只映射开放深问卡（QUESTION），背面为参考思路而非
+  唯一标准答案；判断题只属于前两档；软长度表新增 DEEP_QUESTION 行。
+- **prompts/rewrite v3 → v4**：补充 `DEEP_QUESTION` 原卡重写规则——保持开放问题开放性
+  与参考思路性质，不得改写为“唯一标准答案”式断言。
+- **rubrics/main v2 → v3**：难度口径改为 `BASIC / UNDERSTANDING / DEEP_QUESTION`；
+  新增 DEEP_QUESTION 评分边界（参考思路不得因多解而扣分、不得伪装唯一答案、必须真实
+  承担迁移/权衡/综合）；校准例同步。
+- **prompts/scoring v2 → v3**：补充 DEEP_QUESTION 参考思路评分口径，其余不变。
+- **schemas/planner_output v2 → v3**：单元必填新增 `coverage_tier`（枚举
+  `CORE / IMPORTANT / LOW_FREQUENCY`），`target_difficulty` 枚举改为
+  `BASIC / UNDERSTANDING / DEEP_QUESTION`；generator_output 与 scoring_output 随
+  manifest 对齐提升到 v3（结构与 v2 一致）。
+- manifest 已切换到上述新资产。Planner/Generator/Rewrite/Scoring 的运行时组装必须按各
+  Prompt 声明的 XML 标记包裹服务端 JSON 序列化输入；服务端难度键须为
+  `DEEP_QUESTION`（Task 7 起规划/配额/分布口径同步改名），历史 `APPLICATION` 值经
+  迁移映射（`domain/task.py` DIFFICULTY_V25_MIGRATION）为 `DEEP_QUESTION`。
