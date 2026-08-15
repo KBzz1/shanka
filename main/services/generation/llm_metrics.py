@@ -1,8 +1,8 @@
 """services.generation.llm_metrics：8.3 llm 指标上报（批次生成与单卡重写共用）。
 
 - 上报点：批次生成编排点（services/generation/batches.py process_next_batch，usage 落
-  Batch 观测列之前）与单卡重写编排点（services/cards/rewrite.py rewrite_card，chat 返回后、
-  响应解析前）。
+  Batch 观测列之前）与单卡重写预览创建编排点（services/cards/rewrite.py
+  create_rewrite_preview，chat 返回后、响应解析前；apply 零 LLM 调用不上报）。
 - llm_requests_total(model, http_status) / llm_request_duration_seconds(model) /
   llm_tokens_total(kind: cache_hit/cache_miss/output)；缺失字段不计数（observe 0 亦无意义）。
 - 8.3 观测范围仅 DeepSeek API：任何 chat 调用成功返回后都必须走本上报（失败路径由

@@ -40,7 +40,7 @@ PRD 9 AC-01~11 验收映射（逐条核对映射存在性，全部已由 V1-V6 a
 | AC-03 | test_acceptance_ac03_sample_cards（3 张/三档/2 问答+1 判断/不入库） | — |
 | AC-04 | test_acceptance_ac04_valid_cards_inserted_and_completed；ac04_invalid_cards_not_inserted_skipped；ac04_rubric_no_auto_fix_prune_or_regenerate | — |
 | AC-05 | test_acceptance_ac05_crash_resume_cursor_and_dedup；ac05_cancel_keeps_inserted_cards | — |
-| AC-06 | test_acceptance_ac06_rewrite_succeeds；ac06_schema_invalid_preserves_card；ac06_idempotent_replay；ac06_idempotency_conflict；ac06_error_path_no_idempotency_record；ac06_api_key_not_set_422；ac06_corrupted_encrypted_key_502；ac06_cross_device_404 | — |
+| AC-06 | test_acceptance_ac06_rewrite_preview_then_apply；ac06_schema_invalid_preserves_card；ac06_idempotent_replay；ac06_apply_idempotent_replay；ac06_idempotency_conflict；ac06_error_path_no_idempotency_record；ac06_api_key_not_set_422；ac06_corrupted_encrypted_key_502；ac06_cross_user_404 | — |
 | AC-07 | test_acceptance_ac07_quality_and_cache_recorded；ac07_abnormal_cache_data_does_not_gate_insertion | — |
 | AC-08 | Key 部分：ac11_no_plaintext_in_logs、ac11_save_and_status；PDF/Prompt 内容级此前无断言 | 本文件两条（见 7.1 表） |
 | AC-09 | test_acceptance_ac09_deck_card_workflow；ac09_real_progress；ac09_delete_removes_from_reads；ac09_import_empty_front_or_back_422；ac09_cards_cross_device_404；ac09_delete_requires_idempotency_key；ac09_import_idempotency_replay；ac09_concurrent_idempotency_single_side_effect | — |

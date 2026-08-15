@@ -222,6 +222,6 @@ def test_cross_user_rewrite_404(client: TestClient) -> None:
     card = client.post(
         f"/decks/{deck_id}/cards", json={"front": "f", "back": "b"}, headers={**h1, **_idem()}
     ).json()
-    resp = client.post(f"/cards/{card['card_id']}/rewrite", headers={**h2, **_idem()})
+    resp = client.post(f"/cards/{card['card_id']}/rewrite-previews", headers={**h2, **_idem()})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "CARD_NOT_FOUND"

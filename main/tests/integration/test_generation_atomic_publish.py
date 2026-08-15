@@ -49,7 +49,7 @@ from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from services.cards.deletion import mark_card_deleted
-from services.cards.rewrite import rewrite_card
+from services.cards.rewrite import create_rewrite_preview
 from services.cards.service import list_cards, update_card
 from services.decks.service import deck_progress
 from services.generation.batches import plan_batches
@@ -629,7 +629,7 @@ def test_visible_predicate_single_card_operations_hidden_for_staged(
         mark_card_deleted(session, user_id=user, card_id=staged_id, delete_batch_id=None, now=_NOW)
     assert excinfo.value.code is ErrorCode.CARD_NOT_FOUND
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=user,
             card_id=staged_id,

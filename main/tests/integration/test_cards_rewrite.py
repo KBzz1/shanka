@@ -1,6 +1,12 @@
-"""services.cards 单卡重写集成测试（V6）：原地替换/失败保留/ReviewState 重置/Rubric 记录。
+"""services.cards.rewrite 两阶段重写集成测试（V2.5 3.19/6.5）：LLM 侧行为与账本。
 
-种子写入真实加密 Key（rewrite_card 解密路径，用户域 Core 直写）；client_factory 注入 mock transport（不触网）。
+本文件聚焦创建预览的 LLM 编排细节（双消息组装、账本、指标、Key 错误、响应语义）与
+apply 的替换语义（类型切换/多卡取首）；完整生命周期/CAS/幂等/过期见
+test_card_rewrite_preview_apply.py。
+
+种子写入真实加密 Key（create_rewrite_preview 解密路径，用户域 Core 直写）+ 完整来源链
+（pdf→chapter→task→card.source_task_id/chapter_id——来源可用谓词依赖）；client_factory
+注入 mock transport（不触网）。
 """
 
 import hashlib
@@ -18,12 +24,23 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.db.models import ApiKey, Base, Card, LlmCallAttempt, ReviewState, User
+from infra.db.models import (
+    ApiKey,
+    Base,
+    Card,
+    CardRewritePreview,
+    Chapter,
+    LlmCallAttempt,
+    PdfFile,
+    ReviewState,
+    Task,
+    User,
+)
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from infra.llm.prompts import load_asset
-from services.cards.rewrite import rewrite_card
+from services.cards.rewrite import apply_rewrite_preview, create_rewrite_preview
 from services.decks.service import create_deck
 
 _SETTINGS = Settings(api_key_encryption_key="aa" * 32)
@@ -48,7 +65,7 @@ def _uuid() -> str:
 
 
 def _seed_card(session: Session, *, encrypted_key: str = _ENCRYPTED_TEST_KEY) -> Card:
-    """user 域 GENERATED 卡 + 非初始 ReviewState + AVAILABLE Key（重写前状态）。"""
+    """user 域 GENERATED 卡 + 完整来源链 + 非初始 ReviewState + AVAILABLE Key。"""
     session.add(
         User(
             user_id=_USER,
@@ -72,6 +89,38 @@ def _seed_card(session: Session, *, encrypted_key: str = _ENCRYPTED_TEST_KEY) ->
     session.flush()
     deck = create_deck(session, user_id=_USER, name="D", now=_NOW)
     session.flush()
+    pdf = PdfFile(
+        file_id=_uuid(),
+        user_id=_USER,
+        filename="b.pdf",
+        storage_key=_uuid(),
+        size_bytes=1,
+        status="PARSED",
+        created_at=_NOW,
+    )
+    session.add(pdf)
+    session.flush()
+    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    session.add(ch)
+    session.flush()
+    task = Task(
+        task_id=_uuid(),
+        user_id=_USER,
+        file_id=pdf.file_id,
+        deck_id=deck.deck_id,
+        status="COMPLETED",
+        stage=None,
+        selected_chapters=json.dumps(
+            [{"chapter_id": ch.chapter_id, "start_page": 1, "end_page": 2}]
+        ),
+        generation_config="{}",
+        generated_card_count=1,
+        resumable=0,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(task)
+    session.flush()
     card = Card(
         card_id=_uuid(),
         deck_id=deck.deck_id,
@@ -85,6 +134,8 @@ def _seed_card(session: Session, *, encrypted_key: str = _ENCRYPTED_TEST_KEY) ->
         question="旧问题？",
         answer="旧答案",
         generation_item_id="gen-old-0000",
+        source_task_id=task.task_id,
+        chapter_id=ch.chapter_id,
         target_difficulty="DEEP_QUESTION",
         knowledge_point_ids='["kp-1"]',
         evidence_score=1,
@@ -148,51 +199,67 @@ def _client_returning(content: str) -> tuple[DeepSeekClient, list[dict[str, Any]
     return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler)), captured
 
 
-def _metric_value(name: str, fragments: list[str]) -> float:
-    """Prometheus 文本中指定 name+label 片段的数值（label 顺序不敏感）；不存在返回 0。"""
-    for line in generate_latest(REGISTRY).decode().splitlines():
-        if not line.startswith(f"{name}{{"):
-            continue
-        labels = line.split("{", 1)[1].split("}", 1)[0]
-        if all(frag in labels for frag in fragments):
-            return float(line.split()[-1])
-    return 0.0
+def _create_preview(
+    session: Session,
+    *,
+    card_id: str,
+    custom_requirements: str | None,
+    client: DeepSeekClient,
+    now: str = _NEW_NOW,
+) -> CardRewritePreview:
+    """创建预览并 commit（成功路径封装；返回预览行）。"""
+    preview = create_rewrite_preview(
+        session,
+        user_id=_USER,
+        card_id=card_id,
+        custom_requirements=custom_requirements,
+        now=now,
+        settings=_SETTINGS,
+        client_factory=lambda _api_key: client,
+    )
+    session.commit()
+    return preview
 
 
-def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> None:
-    """成功替换：card_id/position/source/code 不变；内容/generation_item_id/version/updated_at
-    更新；ReviewState 原子重置 NEW 初始值；Rubric 5 字段落卡非 None。"""
+def test_rewrite_preview_created_then_apply_replaces_in_place(
+    session_factory: Callable[[], Session],
+) -> None:
+    """两阶段成功路径：预览创建（chat 1、原卡零改动）→ apply（零 chat）→ 原子替换：
+    card_id/position/source/code 不变；内容/generation_item_id/version/updated_at 更新；
+    ReviewState 原子重置 NEW 初始值；预览 APPLIED。"""
     with session_factory() as session:
         seeded = _seed_card(session)
         card_id, deck_id, created_at = seeded.card_id, seeded.deck_id, seeded.created_at
     client, captured = _client_returning(_rewrite_cards_json())
     with session_factory() as session:
-        card = rewrite_card(
+        preview = _create_preview(
             session,
-            user_id=_USER,
             card_id=card_id,
             custom_requirements="用更简洁的语言",
-            now=_NEW_NOW,
-            settings=_SETTINGS,
-            client_factory=lambda _api_key: client,
+            client=client,
+        )
+        # 创建后原卡零改动（两阶段核心：预览不改卡）
+        card = session.get(Card, card_id)
+        assert card is not None
+        assert card.front == "旧正面" and card.back == "旧背面"
+        assert card.version == "v3" and card.updated_at == _NOW
+        assert preview.status == "PENDING"
+        assert preview.base_card_version == "v3"
+        assert preview.custom_requirements == "用更简洁的语言"
+    assert len(captured) == 1  # 创建阶段一次 chat
+    with session_factory() as session:
+        replaced = apply_rewrite_preview(
+            session, user_id=_USER, card_id=card_id, rewrite_id=preview.rewrite_id, now=_NEW_NOW
         )
         session.commit()
-        replaced_id = card.card_id
+        replaced_id = replaced.card_id
     assert replaced_id == card_id
-    assert len(captured) == 1
-    system, user = captured[0]["messages"][0], captured[0]["messages"][1]
-    assert system["role"] == "system" and user["role"] == "user"
-    # 信封与动态内容在 user 消息（system 只承载稳定资产）
-    assert '"custom_requirements":"用更简洁的语言"' in user["content"]
-    assert "<REWRITE_INPUT>" in user["content"] and "</REWRITE_INPUT>" in user["content"]
-    assert "旧正面" in user["content"] and "旧背面" in user["content"]
-    assert "旧正面" not in system["content"]
+    assert len(captured) == 1  # apply 零 chat
     with session_factory() as session:
         stored = session.get(Card, card_id)
         assert stored is not None
         rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
         assert rs is not None
-        assert stored.card_id == card_id
         assert stored.deck_id == deck_id
         assert stored.position == 1
         assert stored.source == "GENERATED"  # source 保留
@@ -224,28 +291,27 @@ def test_rewrite_succeeds_in_place(session_factory: Callable[[], Session]) -> No
         assert stored.difficulty_score is None
         assert stored.learning_value_score is None
         assert stored.rubric_total_score is None
+        row = session.get(CardRewritePreview, preview.rewrite_id)
+        assert row is not None
+        assert row.status == "APPLIED"
 
 
 def test_rewrite_dual_message_shape_and_max_tokens(
     session_factory: Callable[[], Session],
 ) -> None:
-    """§5.7 Rewrite 行：messages[0]=system（rewrite v3 + generator-output schema v2 原文，
+    """§5.7 Rewrite 行：messages[0]=system（rewrite v4 + generator-output schema v3 原文，
     不含动态内容）、messages[1]=user（仅 <REWRITE_INPUT> 信封，不含资产）；max_tokens=768。"""
     with session_factory() as session:
         seeded = _seed_card(session)
         card_id = seeded.card_id
     client, captured = _client_returning(_rewrite_cards_json())
     with session_factory() as session:
-        rewrite_card(
+        _create_preview(
             session,
-            user_id=_USER,
             card_id=card_id,
             custom_requirements="用更简洁的语言",
-            now=_NEW_NOW,
-            settings=_SETTINGS,
-            client_factory=lambda _api_key: client,
+            client=client,
         )
-        session.commit()
     assert len(captured) == 1
     body = captured[0]
     assert body["max_tokens"] == 768
@@ -258,7 +324,7 @@ def test_rewrite_dual_message_shape_and_max_tokens(
     schema_text = load_asset("schemas", "generator_output")
     assert rewrite_asset in system["content"]
     assert "<GENERATOR_OUTPUT_SCHEMA>" in system["content"]
-    assert schema_text.strip() in system["content"]  # schema v2 原文在 system
+    assert schema_text.strip() in system["content"]  # schema v3 原文在 system
     # system 只承载稳定资产：不含动态原卡/用户要求（资产文档对 <REWRITE_INPUT>
     # 协议的说明属稳定文本，非动态数据）
     assert "旧正面" not in system["content"]
@@ -282,7 +348,7 @@ def test_rewrite_ledger_success_row(session_factory: Callable[[], Session]) -> N
     client, _ = _client_returning(_rewrite_cards_json())
     idempotency_key = str(uuid.uuid4())
     with session_factory() as session:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=_USER,
             card_id=card_id,
@@ -323,8 +389,10 @@ def test_rewrite_ledger_success_row(session_factory: Callable[[], Session]) -> N
         assert "旧答案" not in (row.input_fingerprint or "")
 
 
-def test_rewrite_ledger_failed_on_llm_error(session_factory: Callable[[], Session]) -> None:
-    """§9：LLM 调用异常 → 账本 REWRITE FAILED（独立 commit 落库），原卡保留。"""
+def test_rewrite_ledger_failed_on_llm_error_no_preview(
+    session_factory: Callable[[], Session],
+) -> None:
+    """§9：LLM 调用异常 → 账本 REWRITE FAILED（独立 commit 落库），无预览行，原卡保留。"""
     with session_factory() as session:
         seeded = _seed_card(session)
         card_id = seeded.card_id
@@ -334,7 +402,7 @@ def test_rewrite_ledger_failed_on_llm_error(session_factory: Callable[[], Sessio
 
     client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=_USER,
             card_id=card_id,
@@ -356,6 +424,10 @@ def test_rewrite_ledger_failed_on_llm_error(session_factory: Callable[[], Sessio
         assert row.status == "FAILED"
         assert row.error_code == "GENERATION_FAILED"
         assert row.task_id is None
+        assert (
+            session.scalar(select(CardRewritePreview).where(CardRewritePreview.card_id == card_id))
+            is None
+        )  # 无预览行
         card = session.get(Card, card_id)
         assert card is not None
         assert card.front == "旧正面"  # 原卡保留
@@ -386,7 +458,7 @@ def test_rewrite_ledger_started_committed_before_chat(
 
     client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
     with session_factory() as session, pytest.raises(AppError):
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=_USER,
             card_id=card_id,
@@ -410,15 +482,17 @@ def test_rewrite_ledger_started_committed_before_chat(
         assert row.status == "FAILED"
 
 
-def test_rewrite_schema_invalid_preserves_card(session_factory: Callable[[], Session]) -> None:
+def test_rewrite_schema_invalid_preserves_card(
+    session_factory: Callable[[], Session],
+) -> None:
     """Schema 违约（缺 question/answer，front/back 派生缺失）：REWRITE_SCHEMA_INVALID 422，
-    原卡全字段 + review_state 原值保留（不做任何写）。"""
+    无预览行，原卡全字段 + review_state 原值保留（不做任何写）。"""
     with session_factory() as session:
         seeded = _seed_card(session)
         card_id = seeded.card_id
     client, _ = _client_returning(json.dumps({"cards": [{"type": "QUESTION"}]}))
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=_USER,
             card_id=card_id,
@@ -433,6 +507,10 @@ def test_rewrite_schema_invalid_preserves_card(session_factory: Callable[[], Ses
         assert card is not None
         rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
         assert rs is not None
+        assert (
+            session.scalar(select(CardRewritePreview).where(CardRewritePreview.card_id == card_id))
+            is None
+        )
         assert card.front == "旧正面"
         assert card.back == "旧背面"
         assert card.card_type == "QUESTION"
@@ -459,7 +537,7 @@ def test_rewrite_empty_cards_response_schema_invalid(
         card_id = seeded.card_id
     client, _ = _client_returning(json.dumps({"cards": []}))
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=_USER,
             card_id=card_id,
@@ -477,40 +555,6 @@ def test_rewrite_empty_cards_response_schema_invalid(
         assert card.updated_at == _NOW
 
 
-def test_rewrite_llm_error_preserves_card(session_factory: Callable[[], Session]) -> None:
-    """LLM 调用异常（transport 网络错误 → adapter GENERATION_FAILED）：保留原卡，不做任何写。"""
-    with session_factory() as session:
-        seeded = _seed_card(session)
-        card_id = seeded.card_id
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("upstream unreachable")
-
-    client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
-    with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
-            session,
-            user_id=_USER,
-            card_id=card_id,
-            custom_requirements=None,
-            now=_NEW_NOW,
-            settings=_SETTINGS,
-            client_factory=lambda _api_key: client,
-        )
-    assert excinfo.value.code is ErrorCode.GENERATION_FAILED
-    with session_factory() as session:
-        card = session.get(Card, card_id)
-        assert card is not None
-        rs = session.scalar(select(ReviewState).where(ReviewState.card_id == card_id))
-        assert rs is not None
-        assert card.front == "旧正面"
-        assert card.generation_item_id == "gen-old-0000"
-        assert card.version == "v3"
-        assert card.updated_at == _NOW
-        assert rs.state == "REVIEW"
-        assert rs.stability == 0.5
-
-
 def test_rewrite_no_api_key_422(session_factory: Callable[[], Session]) -> None:
     """api_keys 无 AVAILABLE 行 → API_KEY_NOT_SET（422，契约 ch7「未保存 Key」语义），且不构造 client。"""
     with session_factory() as session:
@@ -526,7 +570,7 @@ def test_rewrite_no_api_key_422(session_factory: Callable[[], Session]) -> None:
         raise AssertionError("无 Key 时不得构造 client")
 
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=_USER,
             card_id=card_id,
@@ -545,7 +589,7 @@ def test_rewrite_no_encryption_config_422(session_factory: Callable[[], Session]
         seeded = _seed_card(session)  # Key 行存在但加密配置缺失
         card_id = seeded.card_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=_USER,
             card_id=card_id,
@@ -565,7 +609,7 @@ def test_rewrite_decrypt_failure_502(session_factory: Callable[[], Session]) -> 
         seeded = _seed_card(session, encrypted_key=wrong_payload)
         card_id = seeded.card_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id=_USER,
             card_id=card_id,
@@ -577,12 +621,12 @@ def test_rewrite_decrypt_failure_502(session_factory: Callable[[], Session]) -> 
 
 
 def test_rewrite_cross_user_404(session_factory: Callable[[], Session]) -> None:
-    """跨用户查卡 → CARD_NOT_FOUND（统一 404，不暴露存在性）。"""
+    """跨用户查卡 → CARD_NOT_FOUND（统一 404，不暴露存在性；归属校验先于来源判定）。"""
     with session_factory() as session:
         seeded = _seed_card(session)
         card_id = seeded.card_id
     with session_factory() as session, pytest.raises(AppError) as excinfo:
-        rewrite_card(
+        create_rewrite_preview(
             session,
             user_id="other",
             card_id=card_id,
@@ -596,9 +640,8 @@ def test_rewrite_cross_user_404(session_factory: Callable[[], Session]) -> None:
 def test_rewrite_true_false_response_switches_type(
     session_factory: Callable[[], Session],
 ) -> None:
-    """T3 审查 Minor 1：QUESTION→TRUE_FALSE 类型切换——question/answer 清 None、
-    statement/answer_boolean(int)/explanation 填充、front/back 由 statement/explanation 派生、
-    Rubric 评分正常（statement/explanation 入评）。"""
+    """T3 审查 Minor 1：QUESTION→TRUE_FALSE 类型切换——apply 时 question/answer 清 None、
+    statement/answer_boolean(int)/explanation 填充、front/back 由 statement/explanation 派生。"""
     with session_factory() as session:
         seeded = _seed_card(session)
         card_id = seeded.card_id
@@ -617,14 +660,9 @@ def test_rewrite_true_false_response_switches_type(
     )
     client, _ = _client_returning(response)
     with session_factory() as session:
-        rewrite_card(
-            session,
-            user_id=_USER,
-            card_id=card_id,
-            custom_requirements=None,
-            now=_NEW_NOW,
-            settings=_SETTINGS,
-            client_factory=lambda _api_key: client,
+        preview = _create_preview(session, card_id=card_id, custom_requirements=None, client=client)
+        apply_rewrite_preview(
+            session, user_id=_USER, card_id=card_id, rewrite_id=preview.rewrite_id, now=_NEW_NOW
         )
         session.commit()
     with session_factory() as session:
@@ -658,7 +696,7 @@ def test_rewrite_true_false_response_switches_type(
 def test_rewrite_multi_card_response_takes_first(
     session_factory: Callable[[], Session],
 ) -> None:
-    """T3 审查 Minor 3：响应多卡取首张——{"cards": [卡A, 卡B]} → 替换内容为卡A（首张），
+    """T3 审查 Minor 3：响应多卡取首张——{"cards": [卡A, 卡B]} → 预览/替换内容为卡A（首张），
     卡B 被忽略（重写单卡语义）。"""
     with session_factory() as session:
         seeded = _seed_card(session)
@@ -674,14 +712,10 @@ def test_rewrite_multi_card_response_takes_first(
     )
     client, _ = _client_returning(response)
     with session_factory() as session:
-        rewrite_card(
-            session,
-            user_id=_USER,
-            card_id=card_id,
-            custom_requirements=None,
-            now=_NEW_NOW,
-            settings=_SETTINGS,
-            client_factory=lambda _api_key: client,
+        preview = _create_preview(session, card_id=card_id, custom_requirements=None, client=client)
+        assert json.loads(preview.preview)["front"] == "首张问题"  # 预览内容 = 首张
+        apply_rewrite_preview(
+            session, user_id=_USER, card_id=card_id, rewrite_id=preview.rewrite_id, now=_NEW_NOW
         )
         session.commit()
     with session_factory() as session:
@@ -708,7 +742,7 @@ def test_rewrite_next_version_rule() -> None:
 
 
 def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> None:
-    """final review Important 1：rewrite 的 chat 调用上报 8.3 llm 指标——成功一次 →
+    """final review Important 1：预览创建的 chat 调用上报 8.3 llm 指标——成功一次 →
     llm_requests_total{model="deepseek-v4-flash", http_status="200"} +1、
     llm_tokens_total 按 usage（cache_hit=2 + cache_miss=8 + output=5）。
     断言用 before/after 差值（REGISTRY 全局共享，批次路径可能已 inc 同 label）。"""
@@ -724,16 +758,7 @@ def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> 
         for kind in ("cache_hit", "cache_miss", "output")
     }
     with session_factory() as session:
-        rewrite_card(
-            session,
-            user_id=_USER,
-            card_id=card_id,
-            custom_requirements=None,
-            now=_NEW_NOW,
-            settings=_SETTINGS,
-            client_factory=lambda _api_key: client,
-        )
-        session.commit()
+        _create_preview(session, card_id=card_id, custom_requirements=None, client=client)
     after_requests = _metric_value(
         "llm_requests_total", ['model="deepseek-v4-flash"', 'http_status="200"']
     )
@@ -745,3 +770,14 @@ def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> 
     assert after_tokens["cache_hit"] - before_tokens["cache_hit"] == 2
     assert after_tokens["cache_miss"] - before_tokens["cache_miss"] == 8
     assert after_tokens["output"] - before_tokens["output"] == 5
+
+
+def _metric_value(name: str, fragments: list[str]) -> float:
+    """Prometheus 文本中指定 name+label 片段的数值（label 顺序不敏感）；不存在返回 0。"""
+    for line in generate_latest(REGISTRY).decode().splitlines():
+        if not line.startswith(f"{name}{{"):
+            continue
+        labels = line.split("{", 1)[1].split("}", 1)[0]
+        if all(frag in labels for frag in fragments):
+            return float(line.split()[-1])
+    return 0.0
