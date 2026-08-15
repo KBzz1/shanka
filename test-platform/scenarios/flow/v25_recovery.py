@@ -116,128 +116,153 @@ def run(
         check("logout(前置失败路径)", r.status == 204, f"({r.status})")
         raise SystemExit(f"项目 {project_id[:8]} 无章节,无法建任务")
 
-    deck_id = client.body(c.request("POST", "/decks",
-                                    body={"name": f"v25-recovery-{run_id[:6]}",
-                                          "project_id": project_id},
-                                    idempotent=True, step="deck-create")).get("deck_id")
-    check("POST /decks 建项目牌组 -> 201", isinstance(deck_id, str), f"deck={str(deck_id)[:8]}")
-    if not isinstance(deck_id, str):
-        raise SystemExit("建牌组响应缺 deck_id")
+    # 2. 自有资源:READY 项目前置 + 项目牌组 + DRAFT 自动保存任务(零 LLM)
+    #    自建资源起进入 try/finally:任何 SystemExit/未预期异常都由 finally 兜底清理
+    #    (删任务→删牌组→注销,镜像 core_flow 异常路径清理模式)
+    deck_id: str | None = None
+    task_id: str | None = None
+    retried_id: str | None = None
+    own_cleaned = False       # 步骤 7 显式清理完成(自有任务+牌组)
+    retried_cleaned = False   # 步骤 10 显式清理完成(重试任务)
+    try:
+        deck_id = client.body(c.request("POST", "/decks",
+                                        body={"name": f"v25-recovery-{run_id[:6]}",
+                                              "project_id": project_id},
+                                        idempotent=True, step="deck-create")).get("deck_id")
+        check("POST /decks 建项目牌组 -> 201", isinstance(deck_id, str),
+              f"deck={str(deck_id)[:8]}")
+        if not isinstance(deck_id, str):
+            raise SystemExit("建牌组响应缺 deck_id")
 
-    r = client.create_task(c, project_id=project_id, deck_id=deck_id,
-                           chapter_ids=[chapters[0]["chapter_id"]],
-                           generation_config=_RECOVERY_CONFIG)
-    body = client.body(r)
-    check("POST /projects/{id}/tasks -> 201 DRAFT", r.status == 201 and body.get("status") == "DRAFT",
-          f"({r.status}) {body.get('status')}")
-    task_id = body.get("task_id")
-    if not isinstance(task_id, str):
-        raise SystemExit(f"任务创建响应缺 task_id: {body}")
-    r = c.request("GET", f"/tasks/{task_id}", step="task-get")
-    check("GET /tasks/{id} DRAFT 自动保存可读", client.body(r).get("status") == "DRAFT",
-          f"status={client.body(r).get('status')}")
+        r = client.create_task(c, project_id=project_id, deck_id=deck_id,
+                               chapter_ids=[chapters[0]["chapter_id"]],
+                               generation_config=_RECOVERY_CONFIG)
+        body = client.body(r)
+        check("POST /projects/{id}/tasks -> 201 DRAFT",
+              r.status == 201 and body.get("status") == "DRAFT",
+              f"({r.status}) {body.get('status')}")
+        task_id = body.get("task_id")
+        if not isinstance(task_id, str):
+            raise SystemExit(f"任务创建响应缺 task_id: {body}")
+        r = c.request("GET", f"/tasks/{task_id}", step="task-get")
+        check("GET /tasks/{id} DRAFT 自动保存可读", client.body(r).get("status") == "DRAFT",
+              f"status={client.body(r).get('status')}")
 
-    # 3. 设备无关检索:新客户端实例(另一台设备/重装)登录后读取任务与牌组
-    c2 = client_factory()
-    session2 = account.bootstrap(c2, environment=environment, username=username,
-                                 email=email, password=password)
-    check("第二客户端(设备无关)会话建立", session2 is not None)
-    if session2 is None:
-        # 新客户端会话失败(如限流):自有资源清理后退出,不留下半成品
-        client.abandon_task(c, task_id, step="task-abandon-fallback")
-        client.delete_task(c, task_id, step="task-delete-fallback")
-        c.request("DELETE", f"/decks/{deck_id}", idempotent=True, step="deck-cleanup-fallback")
+        # 3. 设备无关检索:新客户端实例(另一台设备/重装)登录后读取任务与牌组
+        c2 = client_factory()
+        session2 = account.bootstrap(c2, environment=environment, username=username,
+                                     email=email, password=password)
+        check("第二客户端(设备无关)会话建立", session2 is not None)
+        if session2 is None:
+            raise SystemExit("第二客户端会话建立失败(设备无关读取无法执行)")
+        r = c2.request("GET", f"/tasks/{task_id}", step="task-read-other-client")
+        check("新客户端读取任务 -> 200 DRAFT(设备无关)",
+              r.status == 200 and client.body(r).get("status") == "DRAFT",
+              f"({r.status}) {client.body(r).get('status')}")
+        r = c2.request("GET", f"/decks/{deck_id}", step="deck-read-other-client")
+        check("新客户端读取牌组 -> 200", r.status == 200, f"({r.status})")
+        r = c2.logout()
+        check("第二客户端 logout -> 204", r.status == 204, f"({r.status})")
+
+        # 4. 退出再登录不取消生成任务(DRAFT 自动保存语义;生成期任务由服务端 worker 继续)
         r = c.logout()
-        check("第二客户端会话失败: 清理自有资源后退出", r.status == 204, f"({r.status})")
-        raise SystemExit("第二客户端会话建立失败(设备无关读取无法执行)")
-    r = c2.request("GET", f"/tasks/{task_id}", step="task-read-other-client")
-    check("新客户端读取任务 -> 200 DRAFT(设备无关)",
-          r.status == 200 and client.body(r).get("status") == "DRAFT",
-          f"({r.status}) {client.body(r).get('status')}")
-    r = c2.request("GET", f"/decks/{deck_id}", step="deck-read-other-client")
-    check("新客户端读取牌组 -> 200", r.status == 200, f"({r.status})")
-    r = c2.logout()
-    check("第二客户端 logout -> 204", r.status == 204, f"({r.status})")
+        check("主客户端 logout -> 204", r.status == 204, f"({r.status})")
+        session3 = account.bootstrap(c, environment=environment, username=username,
+                                     email=email, password=password)
+        check("重新登录", session3 is not None)
+        if session3 is None:
+            raise SystemExit("重新登录失败")
+        shlogging.set_context(suite=SUITE, scenario=NAME, user_id=session["user_id"])
+        r = c.request("GET", f"/tasks/{task_id}", step="task-after-relogin")
+        check("重登录后任务仍 DRAFT(未取消)",
+              r.status == 200 and client.body(r).get("status") == "DRAFT",
+              f"status={client.body(r).get('status')}")
 
-    # 4. 退出再登录不取消生成任务(DRAFT 自动保存语义;生成期任务由服务端 worker 继续)
-    r = c.logout()
-    check("主客户端 logout -> 204", r.status == 204, f"({r.status})")
-    session3 = account.bootstrap(c, environment=environment, username=username,
-                                 email=email, password=password)
-    check("重新登录", session3 is not None)
-    if session3 is None:
-        raise SystemExit("重新登录失败")
-    shlogging.set_context(suite=SUITE, scenario=NAME, user_id=session["user_id"])
-    r = c.request("GET", f"/tasks/{task_id}", step="task-after-relogin")
-    check("重登录后任务仍 DRAFT(未取消)",
-          r.status == 200 and client.body(r).get("status") == "DRAFT",
-          f"status={client.body(r).get('status')}")
+        # 5. retry 负向控制:非失败任务 retry 拒绝(409 TASK_STATE_CONFLICT,零 LLM)
+        r = client.retry_task(c, task_id, step="task-retry-rejected")
+        check("DRAFT 任务 retry -> 409(仅失败可重试)", r.status == 409, f"({r.status})")
+        check("错误码 TASK_STATE_CONFLICT", client.error_code(r) == "TASK_STATE_CONFLICT",
+              client.error_code(r))
 
-    # 5. retry 负向控制:非失败任务 retry 拒绝(409 TASK_STATE_CONFLICT,零 LLM)
-    r = client.retry_task(c, task_id, step="task-retry-rejected")
-    check("DRAFT 任务 retry -> 409(仅失败可重试)", r.status == 409, f"({r.status})")
-    check("错误码 TASK_STATE_CONFLICT", client.error_code(r) == "TASK_STATE_CONFLICT",
-          client.error_code(r))
+        # 6. 放弃自有任务 + 零部分可见(未完成任务不发布任何卡片)
+        r = client.abandon_task(c, task_id, step="task-abandon")
+        body = client.body(r)
+        check("abandon -> 200 ABANDONED", r.status == 200 and body.get("status") == "ABANDONED",
+              f"({r.status}) {body.get('status')}")
+        check("abandon 记录 ended_at", bool(body.get("ended_at")), "")
+        r = c.request("GET", f"/tasks/{task_id}", step="task-after-abandon")
+        body = client.body(r)
+        check("终态 ABANDONED 可读", body.get("status") == "ABANDONED",
+              f"status={body.get('status')}")
+        check("零部分可见: generated_card_count == 0", body.get("generated_card_count") == 0,
+              f"cards={body.get('generated_card_count')}")
+        r = c.request("GET", f"/decks/{deck_id}/cards", step="deck-cards-zero-partial")
+        mine = [it for it in client.body(r).get("items", [])
+                if it.get("source_task_id") == task_id]
+        check("零部分可见: 牌组无本任务卡片", not mine, f"cards={len(mine)}")
 
-    # 6. 放弃自有任务 + 零部分可见(未完成任务不发布任何卡片)
-    r = client.abandon_task(c, task_id, step="task-abandon")
-    body = client.body(r)
-    check("abandon -> 200 ABANDONED", r.status == 200 and body.get("status") == "ABANDONED",
-          f"({r.status}) {body.get('status')}")
-    check("abandon 记录 ended_at", bool(body.get("ended_at")), "")
-    r = c.request("GET", f"/tasks/{task_id}", step="task-after-abandon")
-    body = client.body(r)
-    check("终态 ABANDONED 可读", body.get("status") == "ABANDONED", f"status={body.get('status')}")
-    check("零部分可见: generated_card_count == 0", body.get("generated_card_count") == 0,
-          f"cards={body.get('generated_card_count')}")
-    r = c.request("GET", f"/decks/{deck_id}/cards", step="deck-cards-zero-partial")
-    mine = [it for it in client.body(r).get("items", []) if it.get("source_task_id") == task_id]
-    check("零部分可见: 牌组无本任务卡片", not mine, f"cards={len(mine)}")
+        # 7. 清理自有资源(ABANDONED 终态删除 + 牌组);置标志让 finally 跳过
+        r = client.delete_task(c, task_id, step="task-delete")
+        check("删除 ABANDONED 任务 -> 204", r.status == 204, f"({r.status})")
+        r = c.request("GET", f"/tasks/{task_id}", step="task-after-delete")
+        check("任务已删除(404)", r.status == 404, f"({r.status})")
+        r = c.request("DELETE", f"/decks/{deck_id}", idempotent=True, step="deck-cleanup")
+        check("清理自有牌组", r.status in (200, 204), f"({r.status})")
+        own_cleaned = True
 
-    # 7. 清理自有资源(ABANDONED 终态删除 + 牌组)
-    r = client.delete_task(c, task_id, step="task-delete")
-    check("删除 ABANDONED 任务 -> 204", r.status == 204, f"({r.status})")
-    r = c.request("GET", f"/tasks/{task_id}", step="task-after-delete")
-    check("任务已删除(404)", r.status == 404, f"({r.status})")
-    r = c.request("DELETE", f"/decks/{deck_id}", idempotent=True, step="deck-cleanup")
-    check("清理自有牌组", r.status in (200, 204), f"({r.status})")
+        # 8. 失败任务重试(正向):关联新任务 + 复制项目/PDF/牌组 + 可恢复状态
+        orig_task_id = failed["task_id"]
+        r = client.retry_task(c, orig_task_id, step="task-retry")
+        body = client.body(r)
+        check("FAILED 任务 retry -> 201 新任务", r.status == 201 and bool(body.get("task_id")),
+              f"({r.status})")
+        new_id = body.get("task_id")
+        retried_id = new_id
+        check("retry 关联 retry_of_task_id = 原任务", body.get("retry_of_task_id") == orig_task_id,
+              f"retry_of={body.get('retry_of_task_id')}")
+        check("retry 复制项目/PDF/牌组",
+              body.get("project_id") == failed.get("project_id")
+              and body.get("file_id") == failed.get("file_id")
+              and body.get("deck_id") == failed.get("deck_id"),
+              "")
+        check("新任务可恢复状态(DRAFT/AWAITING_SAMPLE_CONFIRMATION)",
+              body.get("status") in _PRE_GENERATION_STATES, f"status={body.get('status')}")
+        r = c.request("GET", f"/tasks/{new_id}", step="task-retry-get")
+        check("新任务 GET 可读", client.body(r).get("task_id") == new_id, "")
 
-    # 8. 失败任务重试(正向):关联新任务 + 复制项目/PDF/牌组 + 可恢复状态
-    orig_task_id = failed["task_id"]
-    r = client.retry_task(c, orig_task_id, step="task-retry")
-    body = client.body(r)
-    check("FAILED 任务 retry -> 201 新任务", r.status == 201 and bool(body.get("task_id")),
-          f"({r.status})")
-    new_id = body.get("task_id")
-    check("retry 关联 retry_of_task_id = 原任务", body.get("retry_of_task_id") == orig_task_id,
-          f"retry_of={body.get('retry_of_task_id')}")
-    check("retry 复制项目/PDF/牌组",
-          body.get("project_id") == failed.get("project_id")
-          and body.get("file_id") == failed.get("file_id")
-          and body.get("deck_id") == failed.get("deck_id"),
-          "")
-    check("新任务可恢复状态(DRAFT/AWAITING_SAMPLE_CONFIRMATION)",
-          body.get("status") in _PRE_GENERATION_STATES, f"status={body.get('status')}")
-    r = c.request("GET", f"/tasks/{new_id}", step="task-retry-get")
-    check("新任务 GET 可读", client.body(r).get("task_id") == new_id, "")
+        # 9. 零部分可见(原失败任务):生成计数 0 + 其牌组无该任务已发布卡
+        r = c.request("GET", f"/tasks/{orig_task_id}", step="task-failed-get")
+        check("失败任务 generated_card_count == 0",
+              client.body(r).get("generated_card_count") == 0,
+              f"cards={client.body(r).get('generated_card_count')}")
+        r = c.request("GET", f"/decks/{failed['deck_id']}/cards", step="deck-failed-cards")
+        orig_cards = [it for it in client.body(r).get("items", [])
+                      if it.get("source_task_id") == orig_task_id]
+        check("零部分可见: 失败任务无已发布卡", not orig_cards, f"cards={len(orig_cards)}")
 
-    # 9. 零部分可见(原失败任务):生成计数 0 + 其牌组无该任务已发布卡
-    r = c.request("GET", f"/tasks/{orig_task_id}", step="task-failed-get")
-    check("失败任务 generated_card_count == 0", client.body(r).get("generated_card_count") == 0,
-          f"cards={client.body(r).get('generated_card_count')}")
-    r = c.request("GET", f"/decks/{failed['deck_id']}/cards", step="deck-failed-cards")
-    orig_cards = [it for it in client.body(r).get("items", [])
-                  if it.get("source_task_id") == orig_task_id]
-    check("零部分可见: 失败任务无已发布卡", not orig_cards, f"cards={len(orig_cards)}")
+        # 10. 清理重试任务(abandon 未生成新任务 + 删除;原失败任务保留供追溯)
+        r = client.abandon_task(c, new_id, step="task-retry-abandon")
+        check("放弃重试任务 -> 200", r.status == 200, f"({r.status})")
+        r = client.delete_task(c, new_id, step="task-retry-delete")
+        check("删除重试任务 -> 204", r.status == 204, f"({r.status})")
+        retried_cleaned = True
+    finally:
+        # 兜底清理(镜像 core_flow):仅清理未显式删除的资源;
+        # 任务非终态(DRAFT 等)须先 abandon 置终态再 DELETE(契约终态删除,失败容忍);
+        # 删除请求不参与断言(cleanup 非场景步骤),失败只留 JSONL 日志
+        if not own_cleaned:
+            if task_id is not None:
+                client.abandon_task(c, task_id, step="task-abandon-cleanup")
+                client.delete_task(c, task_id, step="task-delete-cleanup")
+            if deck_id is not None:
+                c.request("DELETE", f"/decks/{deck_id}", idempotent=True,
+                          step="deck-cleanup-finally")
+        if not retried_cleaned and retried_id is not None:
+            client.abandon_task(c, retried_id, step="task-retry-abandon-cleanup")
+            client.delete_task(c, retried_id, step="task-retry-delete-cleanup")
+        r = c.logout()
+        check("logout -> 204", r.status == 204, f"({r.status})")
 
-    # 10. 清理重试任务(abandon 未生成新任务 + 删除;原失败任务保留供追溯)
-    r = client.abandon_task(c, new_id, step="task-retry-abandon")
-    check("放弃重试任务 -> 200", r.status == 200, f"({r.status})")
-    r = client.delete_task(c, new_id, step="task-retry-delete")
-    check("删除重试任务 -> 204", r.status == 204, f"({r.status})")
-
-    r = c.logout()
-    check("logout -> 204", r.status == 204, f"({r.status})")
     if created:
         record("local_test_users_created", created)
     return summary()

@@ -446,14 +446,16 @@ class V25CoreFlowScenarioTest(unittest.TestCase):
         """前置缺失(无 READY 项目):非零退出,且偏好未被改动(前置在变更之前)。"""
         handler, _ = _core_handler(no_project=True)
         c = stub.StubClient(handler)
-        err = io.StringIO()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
             with self.assertRaises(SystemExit) as ctx:
                 v25_core_flow.run(
                     c, environment="local", username="tester", email=EMAIL, password=PASSWORD,
                     api_key=API_KEY, run_id="run-x", keep=False)
         self.assertNotEqual(ctx.exception.code, 0)
         self.assertIn("无 READY 项目", str(ctx.exception.code))
+        # M-1: me-check 明细不打印账号邮箱(掩码/省略,console 不出现 email 字段值)
+        self.assertNotIn("email': '", buf.getvalue())
         # 前置失败发生在偏好变更之前:无 /preferences 写操作,me 变更已恢复原值
         self.assertNotIn(("PATCH", "/preferences", mock.ANY), c.calls)
         me_patches = [body for m, p, body in c.calls if m == "PATCH" and p == "/auth/me"]
@@ -708,6 +710,106 @@ class V25RecoveryScenarioTest(unittest.TestCase):
         self.assertEqual(v25_recovery.LLM_CALLS, 0)
         self.assertFalse(suites.cost.requires_confirm(v25_recovery.LLM_CALLS))
 
+    def test_run_session2_failure_cleans_up_own_resources(self) -> None:
+        """第二客户端会话失败(设备无关读取无法执行):自有任务/牌组清理 + 注销,不留半成品。"""
+        handler, st = _recovery_handler()
+
+        def bad(method, path, body, auth, key):
+            if path == "/auth/login":
+                return Response(401, {"error": {"code": "INVALID_CREDENTIALS",
+                                                "message": "凭据无效",
+                                                "localization_key": "invalid_credentials"}})
+            return handler(method, path, body, auth, key)
+
+        c = stub.StubClient(handler)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                v25_recovery.run(
+                    c, environment="local", username="tester", email=EMAIL, password=PASSWORD,
+                    run_id="run-x", client_factory=lambda: stub.StubClient(bad))
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("第二客户端会话建立失败", str(ctx.exception.code))
+        # 清理发生:DRAFT 任务先置终态(abandon)再删除,牌组删除,会话注销
+        seq = _method_paths(c.calls)
+        self.assertLess(seq.index(("POST", "/tasks/task-2/abandon")),
+                        seq.index(("DELETE", "/tasks/task-2")))
+        self.assertIn(("DELETE", "/decks/deck-2"), seq)
+        self.assertTrue(st["own_task_deleted"] and st["own_deck_deleted"])
+        self.assertTrue(any(m == "logout" for m, _ in seq))
+
+    def test_run_relogin_failure_cleans_up_own_resources(self) -> None:
+        """重新登录失败(任务与牌组已建):finally 兜底清理,不留 DRAFT 任务/牌组残留。"""
+        handler, st = _recovery_handler()
+        login_count = 0
+
+        def wrap(method, path, body, auth, key):
+            nonlocal login_count
+            if path == "/auth/login":
+                login_count += 1
+                if login_count >= 2:  # 首次 bootstrap 成功;重登录时失败
+                    return Response(401, {"error": {"code": "INVALID_CREDENTIALS",
+                                                    "message": "凭据无效",
+                                                    "localization_key": "invalid_credentials"}})
+            return handler(method, path, body, auth, key)
+
+        c = stub.StubClient(wrap)
+        c2 = stub.StubClient(handler)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                v25_recovery.run(
+                    c, environment="local", username="tester", email=EMAIL, password=PASSWORD,
+                    run_id="run-x", client_factory=lambda: c2)
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("重新登录失败", str(ctx.exception.code))
+        # finally 兜底清理:DRAFT 非终态需 abandon 先于 DELETE(契约终态删除)
+        seq = _method_paths(c.calls)
+        self.assertLess(seq.index(("POST", "/tasks/task-2/abandon")),
+                        seq.index(("DELETE", "/tasks/task-2")))
+        self.assertIn(("DELETE", "/decks/deck-2"), seq)
+        self.assertTrue(st["own_task_deleted"] and st["own_deck_deleted"])
+        self.assertTrue(any(m == "logout" for m, _ in seq))
+
+    def test_run_task_created_missing_id_cleans_up_deck(self) -> None:
+        """任务创建响应缺 task_id(牌组已建):finally 删除已建牌组并注销。"""
+        handler, st = _recovery_handler()
+
+        def wrap(method, path, body, auth, key):
+            if path == "/projects/proj-1/tasks" and method == "POST":
+                return Response(201, {"name": "no-task-id"})
+            return handler(method, path, body, auth, key)
+
+        c = stub.StubClient(wrap)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                v25_recovery.run(
+                    c, environment="local", username="tester", email=EMAIL, password=PASSWORD,
+                    run_id="run-x")
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("任务创建响应缺 task_id", str(ctx.exception.code))
+        # 兜底:未拿到 task_id 无法删任务,但已建牌组被删除,会话注销
+        self.assertIn(("DELETE", "/decks/deck-2"), _method_paths(c.calls))
+        self.assertTrue(st["own_deck_deleted"])
+        self.assertTrue(any(m == "logout" for m, _ in _method_paths(c.calls)))
+
+    def test_run_deck_created_missing_id_still_logs_out(self) -> None:
+        """建牌组响应缺 deck_id(无法定位资源):finally 仍注销会话(不留悬挂会话)。"""
+        handler, _ = _recovery_handler()
+
+        def wrap(method, path, body, auth, key):
+            if path == "/decks" and method == "POST":
+                return Response(201, {"name": "no-deck-id"})
+            return handler(method, path, body, auth, key)
+
+        c = stub.StubClient(wrap)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                v25_recovery.run(
+                    c, environment="local", username="tester", email=EMAIL, password=PASSWORD,
+                    run_id="run-x")
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertIn("建牌组响应缺 deck_id", str(ctx.exception.code))
+        self.assertTrue(any(m == "logout" for m, _ in _method_paths(c.calls)))
+
 
 # ---------------------------------------------------------------- 套件注册与闸门
 
@@ -775,6 +877,20 @@ class V25SuitesTest(unittest.TestCase):
         self.assertFalse(m1.called)
         self.assertTrue(m2.called)
         self.assertNotIn("成本闸门: --confirm-cost 已确认", out.getvalue())  # 0 LLM 不提示确认
+
+    def test_v25_core_flow_scenario_requires_confirm_cost(self) -> None:
+        """M-2: selector 单独选 cost-confirmed 生成场景(无 --confirm-cost)必须拒绝(exit 1)。"""
+        env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_EMAIL": "u@local.test",
+               "SHANKA_TEST_PASSWORD": "p"}
+        with mock.patch.dict(os.environ, env):
+            with mock.patch.object(suites.v25_core_flow, "main", return_value=0) as m1, \
+                 mock.patch("sys.stdout", io.StringIO()), \
+                 mock.patch("sys.stderr", io.StringIO()) as err:
+                code = suites.main(["--environment", "local", "--suite", "v25",
+                                    "--scenario", "v25_core_flow"])
+        self.assertEqual(code, 1)
+        self.assertFalse(m1.called)  # 未过闸门不执行场景
+        self.assertIn("超过阈值", err.getvalue())
 
     def test_v25_unknown_scenario_rejected(self) -> None:
         env = {"SHANKA_TEST_USERNAME": "u", "SHANKA_TEST_EMAIL": "u@local.test",

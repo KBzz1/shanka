@@ -170,7 +170,7 @@ def run(
     check("GET /auth/me -> 200", r.status == 200, f"({r.status})")
     me = client.body(r).get("user") if isinstance(client.body(r), dict) else {}
     check("me 含 email/avatar_key", bool(me.get("email")) and bool(me.get("avatar_key")),
-          str(me)[:60])
+          "email/avatar_key 存在(字段值不外泄)")
     orig_username = me.get("username") or username
     orig_avatar = me.get("avatar_key") or "mood_01"
     new_username = f"{orig_username[:12]}-v25"
