@@ -10,17 +10,19 @@ usage 统一 hit=2/miss=8/output=5，model deepseek-v4-flash，rubric_version v2
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import insert, text
+from sqlalchemy import insert, select, text
+from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile, User
+from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -40,70 +42,68 @@ _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 _PER_BATCH_COST = pytest.approx(2 * 0.5e-6 + 8 * 2e-6 + 5 * 8e-6)  # 0.000057 元/批
 
 
-def _client_factory(api_key: str) -> DeepSeekClient:
-    """mock transport 全链路分派：<PLANNER_INPUT> → 按请求配额产出锚定单元（引用请求内
-    组页）；<SCORING_INPUT> → ID 守恒的确定性分数；其余（<GENERATOR_INPUT>）→ 1 张合法卡
-    （1 单元 1 批）。usage 统一 hit=2/miss=8/output=5——cost 估算可算。"""
+def _dispatch(request: httpx.Request) -> httpx.Response:
+    """mock transport 全链路分派（模块级，供失败注入工厂复用）：<PLANNER_INPUT> →
+    按请求配额产出锚定单元（引用请求内组页）；<SCORING_INPUT> → ID 守恒的确定性
+    分数；其余（<GENERATOR_INPUT>）→ 1 张合法卡（1 单元 1 批）。usage 统一
+    hit=2/miss=8/output=5——cost 估算可算。"""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        user = body["messages"][-1]["content"]
-        if "<PLANNER_INPUT>" in user:
-            payload = json.loads(
-                user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
-            )
-            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
-            units: list[dict[str, object]] = []
-            for difficulty, quota in payload["difficulty_quota"].items():
-                for _ in range(quota):
-                    units.append(
-                        {
-                            "source_chunk_ids": [chunk_ids[0]],
-                            "learning_objective": f"知识点{len(units)}",
-                            "target_difficulty": difficulty,
-                            "card_type": "QUESTION",
-                        }
-                    )
-            content = json.dumps({"units": units}, ensure_ascii=False)
-        elif "<SCORING_INPUT>" in user:
-            payload = json.loads(
-                user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0]
-            )
-            content = json.dumps(
-                {
-                    "scores": [
-                        {
-                            "generation_item_id": item["generation_item_id"],
-                            "evidence_score": 1,
-                            "correctness_score": 1,
-                            "difficulty_score": 1,
-                            "learning_value_score": 2,
-                        }
-                        for item in payload["items"]
-                    ]
-                },
-                ensure_ascii=False,
-            )
-        else:  # 生成调用：1 单元 1 批 → 每批 1 张合法卡
-            content = json.dumps(
-                {"cards": [{"type": "QUESTION", "question": "q0", "answer": "a0"}]},
-                ensure_ascii=False,
-            )
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": content}}],
-                "usage": {
-                    "prompt_tokens": 10,
-                    "completion_tokens": 5,
-                    "prompt_cache_hit_tokens": 2,
-                    "prompt_cache_miss_tokens": 8,
-                },
-                "model": "deepseek-v4-flash",
+    body = json.loads(request.content)
+    user = body["messages"][-1]["content"]
+    if "<PLANNER_INPUT>" in user:
+        payload = json.loads(user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0])
+        chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+        units: list[dict[str, object]] = []
+        for difficulty, quota in payload["difficulty_quota"].items():
+            for _ in range(quota):
+                units.append(
+                    {
+                        "source_chunk_ids": [chunk_ids[0]],
+                        "learning_objective": f"知识点{len(units)}",
+                        "target_difficulty": difficulty,
+                        "card_type": "QUESTION",
+                    }
+                )
+        content = json.dumps({"units": units}, ensure_ascii=False)
+    elif "<SCORING_INPUT>" in user:
+        payload = json.loads(user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0])
+        content = json.dumps(
+            {
+                "scores": [
+                    {
+                        "generation_item_id": item["generation_item_id"],
+                        "evidence_score": 1,
+                        "correctness_score": 1,
+                        "difficulty_score": 1,
+                        "learning_value_score": 2,
+                    }
+                    for item in payload["items"]
+                ]
             },
+            ensure_ascii=False,
         )
+    else:  # 生成调用：1 单元 1 批 → 每批 1 张合法卡
+        content = json.dumps(
+            {"cards": [{"type": "QUESTION", "question": "q0", "answer": "a0"}]},
+            ensure_ascii=False,
+        )
+    return httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": content}}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "prompt_cache_hit_tokens": 2,
+                "prompt_cache_miss_tokens": 8,
+            },
+            "model": "deepseek-v4-flash",
+        },
+    )
 
-    return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+
+def _client_factory(api_key: str) -> DeepSeekClient:
+    return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(_dispatch))
 
 
 @pytest.fixture
@@ -216,16 +216,17 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
             pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2, 3)],
             now="2026-08-11T00:00:00.000Z",
         )
-        session.execute(
-            insert(ApiKey).values(
-                user_id=user_id,
-                encrypted_key=_ENCRYPTED_TEST_KEY,
-                status="AVAILABLE",
-                masked_key="sk-****",
-                updated_at="2026-08-11T00:00:00.000Z",
+        if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:
+            session.execute(
+                insert(ApiKey).values(
+                    user_id=user_id,
+                    encrypted_key=_ENCRYPTED_TEST_KEY,
+                    status="AVAILABLE",
+                    masked_key="sk-****",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
             )
-        )
-        session.flush()
+            session.flush()
         session.commit()
     return {
         "project_id": project.project_id,
@@ -439,3 +440,112 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
     assert (
         _plain_value(after, "batch_retry_total") - _plain_value(before, "batch_retry_total")
     ) == 0.0
+
+
+def test_quality_summary_excludes_staged_and_failed_task_cards(
+    ctx: tuple[TestClient, Path],
+) -> None:
+    """R1 I-1：quality-summary 是全仓库唯一向已认证用户暴露的卡查询路径——必须与
+    用户侧查询同口径（统一可见谓词 3.9）：生成中任务（GENERATING）与已 FAILED
+    任务的 STAGED 卡不得计入 card_count 与各维度分数；只计已发布卡。
+
+    RED 语义：改造前该查询无谓词，STAGED 卡照常计入（6 张已发布 + 2 张 STAGED
+    = 8）；覆盖率/完成率等批次级聚合不受卡谓词影响（分母语义不变）。
+    """
+    client, db_path = ctx
+    user = _user(client)
+    _run_task(client, db_path, user=user)  # 1 个 COMPLETED 任务（6 卡 PUBLISHED）
+
+    def _create_scan_task(handler: Any) -> str:
+        """完整生命周期但注入自定义 transport handler（规划/评分走 _dispatch，
+        生成调用按 handler 注入失败）→ 返回 task_id。"""
+        seed = _seed_context(db_path, user_id=_user_id(db_path))
+        resp = client.post(
+            f"/projects/{seed['project_id']}/tasks",
+            json=_payload(seed),
+            headers={**user, **_idem()},
+        )
+        assert resp.status_code == 201
+        task_id = str(resp.json()["task_id"])
+        factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+        assert (
+            client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
+        )
+        n = scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory)
+        assert n == 1  # 样卡 worker 完成
+        assert (
+            client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
+        )
+        n = scan_tasks(
+            factory,
+            settings=_SETTINGS,
+            client_factory=lambda _k: DeepSeekClient(
+                _SETTINGS, transport=httpx.MockTransport(handler)
+            ),
+        )
+        assert n == 1  # 规划 + 批 1 完成（批 2 注入失败/崩溃）
+        return task_id
+
+    def _generation_fail_handler() -> Any:
+        """生成调用第 2 次起 401（批 1 成功 1 卡 → 任务 FAILED + 1 张 STAGED 卡）。"""
+        state = {"gen_calls": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            user_msg = body["messages"][-1]["content"]
+            if "<PLANNER_INPUT>" in user_msg or "<SCORING_INPUT>" in user_msg:
+                return _dispatch(request)
+            state["gen_calls"] += 1
+            if state["gen_calls"] == 2:
+                return httpx.Response(401, json={"error": {"message": "invalid api key"}})
+            return _dispatch(request)
+
+        return handler
+
+    def _generation_crash_handler() -> Any:
+        """生成调用第 2 次 SystemExit（模拟 worker 崩溃）→ 任务停留 GENERATING +
+        批 1 卡 STAGED 隔离（生成中任务的卡）。"""
+        state = {"gen_calls": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            user_msg = body["messages"][-1]["content"]
+            if "<PLANNER_INPUT>" in user_msg or "<SCORING_INPUT>" in user_msg:
+                return _dispatch(request)
+            state["gen_calls"] += 1
+            if state["gen_calls"] == 2:
+                raise SystemExit("模拟崩溃：批 2 处理中断")
+            return _dispatch(request)
+
+        return handler
+
+    # FAILED 任务：批 1 成功（1 张 STAGED 卡）、批 2 401 → 任务 FAILED
+    _create_scan_task(_generation_fail_handler())
+    with _db_factory(db_path)() as session:
+        failed_tasks = session.scalars(select(Task).where(Task.status == "FAILED")).all()
+        assert len(failed_tasks) == 1
+    # 生成中任务：批 1 成功（1 张 STAGED 卡）、批 2 崩溃 → 任务停留 GENERATING
+    with pytest.raises(SystemExit):
+        _create_scan_task(_generation_crash_handler())
+    with _db_factory(db_path)() as session:
+        gen_tasks = session.scalars(select(Task).where(Task.status == "GENERATING")).all()
+        assert len(gen_tasks) == 1
+
+    resp = client.get("/observability/quality-summary", headers=user)
+    assert resp.status_code == 200
+    by_key = {g["key"]: g for g in resp.json()["groups"]}
+    g = by_key["deepseek-v4-flash"]
+    assert g["card_count"] == 6  # 只计已发布卡（RED：改造前 STAGED 卡计入 → 8）
+    assert g["scored_card_count"] == 6
+    assert g["sampling_rate"] == 1.0
+    # 批次级聚合语义不受卡谓词影响（分母随 SKIPPED 覆盖率的既有语义不变）
+    assert g["task_completion_rate"] == pytest.approx(1 / 3)  # 1 COMPLETED / 3 任务
+    assert g["coverage_avg"] == 1.0  # 3 个 SUCCEEDED 批次覆盖 1.0（失败任务批 1 仍计入）
+    # PENDING 批次（model NULL）归 unknown 组：无卡（0 张 STAGED/PUBLISHED 经批次归属）
+    assert by_key["unknown"]["card_count"] == 0
+    assert by_key["unknown"]["task_completion_rate"] == 0.0
+
+
+def _db_factory(db_path: Path) -> Callable[[], Session]:
+    """测试内 DB 工厂（engine 每次新建，避免跨连接锁）。"""
+    return create_session_factory(create_db_engine(f"sqlite:///{db_path}"))

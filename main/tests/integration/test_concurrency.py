@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -28,7 +28,7 @@ from infra.llm.deepseek import DeepSeekClient
 from services.generation.batches import plan_batches, process_next_batch
 from services.generation.samples import config_fingerprint
 from services.generation.scoring import enter_scoring_stage, run_scoring_stage
-from services.tasks.executor import process_active_tasks
+from services.tasks.executor import _fail_task, process_active_tasks
 from services.tasks.service import delete_task, retry_task, start_task
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
@@ -856,3 +856,73 @@ def test_concurrency_zero_valid_cards_fails_task(
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None and task.status == "FAILED"
+
+
+def test_concurrency_stale_fail_task_does_not_overwrite_concurrent_result(
+    session_factory: Callable[[], Session],
+) -> None:
+    """M-2 R1 修复：`_fail_task` 必须是条件更新（WHERE 读取快照的 status+stage）——
+    stale worker（心跳超时 30 分钟后仍存活）异常路径不得覆盖并发 worker 已提交的
+    COMPLETED（卡已 PUBLISHED，任务却 FAILED 的不一致）；也不得把并发转移中的
+    任务（stage 已前进、另一 worker 在途）打死。RED：改造前 identity map 盲写
+    无条件覆盖（flush 的 UPDATE 只有主键条件）。"""
+    user = _uuid()
+    with session_factory() as session:
+        task_id = _seed_task(session, user_id=user, n_units=1)
+    # 场景 1：并发 worker 已完成原子发布（COMPLETED 已提交、卡 PUBLISHED）
+    with session_factory() as stale_session:
+        stale = stale_session.get(Task, task_id)  # stale worker 身份映射快照 GENERATING
+        assert stale is not None and stale.status == "GENERATING"
+        stale_session.commit()  # 读后提交释放写锁（BEGIN IMMEDIATE），快照保留（expire_on_commit=False）
+        with session_factory() as other:
+            other.execute(
+                update(Task)
+                .where(Task.task_id == task_id, Task.status == "GENERATING")
+                .values(status="COMPLETED", ended_at="2026-08-15T00:00:00.000Z", resumable=0)
+            )
+            other.commit()
+        _fail_task(stale_session, stale, error_code=ErrorCode.GENERATION_FAILED.value)
+        stale_session.commit()
+    with session_factory() as session:
+        row = session.get(Task, task_id)
+        assert row is not None
+        assert row.status == "COMPLETED"  # rowcount=0：不覆盖并发已提交的 COMPLETED
+        assert row.error_code is None and row.resumable == 0
+    # 场景 2：并发 worker 已把任务推进到 PUBLISHING（未终态，在途）→ 不打死
+    with session_factory() as session:
+        task2 = _seed_task(session, user_id=_uuid(), n_units=1)
+    with session_factory() as stale_session:
+        stale2 = stale_session.get(Task, task2)
+        assert stale2 is not None and stale2.stage == "GENERATING"
+        stale_session.commit()
+        with session_factory() as other:
+            other.execute(
+                update(Task)
+                .where(
+                    Task.task_id == task2,
+                    Task.status == "GENERATING",
+                    Task.stage == "GENERATING",
+                )
+                .values(stage="PUBLISHING")
+            )
+            other.commit()
+        _fail_task(stale_session, stale2, error_code=ErrorCode.GENERATION_FAILED.value)
+        stale_session.commit()
+    with session_factory() as session:
+        row2 = session.get(Task, task2)
+        assert row2 is not None
+        assert row2.status == "GENERATING" and row2.stage == "PUBLISHING"  # 不覆盖在途转移
+    # 场景 3（对照）：无并发转移 → 正常 FAILED + failure_stage 从快照派生 + resumable=0
+    with session_factory() as session:
+        task3 = _seed_task(session, user_id=_uuid(), n_units=1)
+        stale3 = session.get(Task, task3)
+        assert stale3 is not None
+        _fail_task(session, stale3, error_code=ErrorCode.GENERATION_FAILED.value)
+        session.commit()
+    with session_factory() as session:
+        row3 = session.get(Task, task3)
+        assert row3 is not None
+        assert row3.status == "FAILED"
+        assert row3.error_code == ErrorCode.GENERATION_FAILED.value
+        assert row3.failure_stage == "GENERATING"  # 从读取快照 stage 派生
+        assert row3.resumable == 0

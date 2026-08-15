@@ -191,6 +191,7 @@ def publish_generated_cards(session: Session, *, task: Task) -> None:
             },
         ):
             session.refresh(task)
+            _observe_task_result(task, "FAILED")  # 8.3（R1 M-3）：0 卡整体失败也计数
             logger.warning(
                 "task publish failed, zero valid cards",
                 extra={"task_id": task.task_id, "error_code": ErrorCode.TASK_ZERO_CARDS.value},
@@ -254,15 +255,44 @@ def _recover_generating_orphans(session: Session, *, task: Task, settings: Setti
         )
 
 
-def _fail_task(task: Task, *, error_code: str, failure_stage: str | None = None) -> None:
-    """任务 FAILED 落库；failure_stage 缺省从当前 stage 派生（GENERATING/SCORING
-    分支的 worker 错误各自归因——spec 6.4/8：failure_stage 增加 SCORING）。"""
-    task.status = "FAILED"
-    task.failure_stage = failure_stage or task.stage or "GENERATING"
-    task.error_code = error_code
-    task.ended_at = task.updated_at
-    task.resumable = 0
-    _observe_task_result(task, "FAILED")  # 8.3：系统级失败也计数
+def _fail_task(
+    session: Session, task: Task, *, error_code: str, failure_stage: str | None = None
+) -> None:
+    """任务 FAILED 条件更新（R1 M-2：与 _publish_guard_update 同款 CAS 门卫，不信任
+    identity map）——WHERE 当前 DB 状态 == 读取快照（status+stage）：stale worker
+    （心跳超时 30 分钟后仍存活）的异常路径不得覆盖并发 worker 已提交的 COMPLETED
+    （卡已 PUBLISHED 而任务 FAILED 的不一致），也不得打断并发转移中的任务
+    （stage 已前进、另一 worker 在途）。rowcount=0 → expire 放弃旧快照（防调用方
+    commit 时身份映射残写覆盖并发结果）。failure_stage 缺省从快照 stage 派生
+    （GENERATING/SCORING/PUBLISHING 分支各自归因——spec 6.4/8）；样卡路径
+    （stage 为 NULL）不写该列（M-5 裁决：枚举仅正式流水线阶段，NULL 即正确值）。
+    观测（8.3）只在实际转移（rowcount=1）时上报。"""
+    values: dict[str, Any] = {
+        "status": "FAILED",
+        "error_code": error_code,
+        "ended_at": task.updated_at,
+        "resumable": 0,
+    }
+    derived_stage = failure_stage if failure_stage is not None else task.stage
+    if derived_stage is not None:
+        values["failure_stage"] = derived_stage
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(Task)
+            .where(
+                Task.task_id == task.task_id,
+                Task.status == task.status,
+                Task.stage == task.stage,
+            )
+            .values(**values)
+        ),
+    )
+    if result.rowcount == 0:
+        session.expire(task)  # 并发已转移 → 不覆盖；放弃快照防残写
+        return
+    session.refresh(task)
+    _observe_task_result(task, "FAILED")  # 8.3：系统级失败也计数（仅实际转移时）
 
 
 def _complete_sample_task(session: Session, task: Task) -> int:
@@ -329,17 +359,16 @@ def _sample_worker(session: Session) -> int:
         try:
             written += _complete_sample_task(session, task)
         except AppError as exc:
-            _fail_task(task, error_code=exc.code.value)
-            # M-5 裁决：样卡阶段失败不写 failure_stage（枚举仅正式流水线阶段，
+            _fail_task(session, task, error_code=exc.code.value)
+            # M-5 裁决：样卡阶段失败不写 failure_stage（_fail_task 条件更新在
+            # stage=NULL 时跳过该列，DB 保持 NULL——枚举仅正式流水线阶段，
             # SAMPLE_GENERATING 无对应值，NULL 即正确值）
-            task.failure_stage = None
             logger.warning(
                 "task sample generation failed",
                 extra={"task_id": task.task_id, "error_code": exc.code.value},
             )
         except Exception:  # noqa: BLE001
-            _fail_task(task, error_code=ErrorCode.GENERATION_FAILED.value)
-            task.failure_stage = None  # M-5 裁决：同上，样卡阶段失败保持 NULL
+            _fail_task(session, task, error_code=ErrorCode.GENERATION_FAILED.value)
             logger.warning(
                 "task sample generation unexpected failure",
                 extra={"task_id": task.task_id},
@@ -388,14 +417,17 @@ def process_active_tasks(
                 client.close()
         except AppError as exc:
             # 系统级错误（Key 解密失败/上游不可用）→ FAILED + failure_stage=PLANNING（§6.3）
-            _fail_task(claimed, error_code=exc.code.value, failure_stage="PLANNING")
+            _fail_task(session, claimed, error_code=exc.code.value, failure_stage="PLANNING")
             logger.warning(
                 "task planning failed",
                 extra={"task_id": claimed.task_id, "error_code": exc.code.value},
             )
         except Exception:  # noqa: BLE001
             _fail_task(
-                claimed, error_code=ErrorCode.GENERATION_FAILED.value, failure_stage="PLANNING"
+                session,
+                claimed,
+                error_code=ErrorCode.GENERATION_FAILED.value,
+                failure_stage="PLANNING",
             )
             logger.warning("task planning unexpected failure", extra={"task_id": claimed.task_id})
     # 生成 worker 扫描：GENERATING + stage=GENERATING（避免与规划中任务冲突，spec §6.1）
@@ -409,13 +441,13 @@ def process_active_tasks(
             _execute_task(session, task, settings=settings, client_factory=client_factory)
         except AppError as exc:
             # 系统级错误（API Key 失效/上游持续不可用）→ FAILED；已入库卡片保留（4.1）
-            _fail_task(task, error_code=exc.code.value)
+            _fail_task(session, task, error_code=exc.code.value)
             logger.warning(
                 "task execution failed",
                 extra={"task_id": task.task_id, "error_code": exc.code.value},
             )
         except Exception:  # noqa: BLE001
-            _fail_task(task, error_code=ErrorCode.GENERATION_FAILED.value)
+            _fail_task(session, task, error_code=ErrorCode.GENERATION_FAILED.value)
             logger.warning("task execution unexpected failure", extra={"task_id": task.task_id})
     # 评分 worker 扫描：GENERATING + stage IN (SCORING, PUBLISHING)（spec §8 + 4.1：
     # 心跳超时孤儿可 CAS 接管——SCORING 重跑评分、PUBLISHING 直接发布；心跳新鲜 =
@@ -433,13 +465,13 @@ def process_active_tasks(
             )
         except AppError as exc:
             # 评分 worker 不可恢复错误（资产加载失败等）→ FAILED + failure_stage=SCORING
-            _fail_task(task, error_code=exc.code.value)
+            _fail_task(session, task, error_code=exc.code.value)
             logger.warning(
                 "task scoring failed",
                 extra={"task_id": task.task_id, "error_code": exc.code.value},
             )
         except Exception:  # noqa: BLE001
-            _fail_task(task, error_code=ErrorCode.GENERATION_FAILED.value)
+            _fail_task(session, task, error_code=ErrorCode.GENERATION_FAILED.value)
             logger.warning("task scoring unexpected failure", extra={"task_id": task.task_id})
     # 处理任务数：同一任务规划 + 生成同轮衔接只计一次；SCORING 孤儿接管按实际行动计数
     claimed_id = claimed.task_id if claimed is not None else None

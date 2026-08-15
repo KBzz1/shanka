@@ -513,3 +513,42 @@ def test_executor_full_flow_plan_then_generate(
     assert len(cards) == 1
     assert cards[0].rubric_total_score == 9  # 评分回写（代码计算四维和）
     assert task.generated_card_count == 1
+
+
+def test_executor_zero_cards_failure_counts_metric(
+    session_factory: Callable[[], Session],
+) -> None:
+    """M-3 R1 修复：TASK_ZERO_CARDS 发布失败同样计入 generation_tasks_total{FAILED}
+    （8.3 全终态路径口径——其余终态路径 executor.py 均上报，仅发布 0 卡分支此前漏报）。
+
+    RED 语义：改造前 0 张有效卡整体失败不出现在 GENERATION_TASKS 指标（差值 0）。"""
+    user = _uuid()
+    with session_factory() as session:
+        task_id = _seed_task(session, user_id=user)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 全部批次合法弃权（显式空数组）→ 发布阶段 TASK_ZERO_CARDS（4.1 V25-D-23）
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps({"cards": []}, ensure_ascii=False)}}
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    client = DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
+    before = _metric_value("generation_tasks_total", ['result="FAILED"'])
+    with session_factory() as session:
+        n = process_active_tasks(
+            session, settings=_SETTINGS, client_factory=lambda _api_key: client
+        )
+        session.commit()
+        task = session.get(Task, task_id)
+    after = _metric_value("generation_tasks_total", ['result="FAILED"'])
+    assert n == 1
+    assert task is not None
+    assert task.status == "FAILED"
+    assert task.error_code == "TASK_ZERO_CARDS"
+    assert after - before == 1.0  # 8.3：发布失败（0 张有效卡）同样计数

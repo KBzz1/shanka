@@ -2,7 +2,8 @@
 
 按当前 user_id 隔离聚合（跨用户聚合留给运营后台）：SQL 拉取窗口内批次（join Task），
 按 group_by 分组聚合——Rubric 各维平均（批次卡片经 generated_item_ids ↔
-Card.generation_item_id 关联，各维度只以对应字段非 NULL 的卡为分母，NULL 不计 0 分）、
+Card.generation_item_id 关联，各维度只以对应字段非 NULL 的卡为分母，NULL 不计 0 分；
+卡查询经统一可见谓词 3.9 只含已发布卡——生成中/已 FAILED 任务的 STAGED 卡不计入）、
 覆盖/重复率均值（SKIPPED 批次 coverage=0 计入分母）、任务完成率（COMPLETED/总数）、
 成本汇总（8.4 价格常量；Batch token 列为生成阶段兼容投影，估算标注
 scope=generation-stage-only，不引入账本双计）。
@@ -19,9 +20,10 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from domain.card import VISIBLE_PREDICATE_SQL
 from infra.clock import SystemClock
 from infra.db.models import Batch, Card, KnowledgePoint, Task
 from infra.db.session import format_utc, get_db_session
@@ -129,7 +131,12 @@ def _aggregate(
     item_ids = list(owner)
     for i in range(0, len(item_ids), _CARD_QUERY_CHUNK):
         chunk = item_ids[i : i + _CARD_QUERY_CHUNK]
-        for card in session.scalars(select(Card).where(Card.generation_item_id.in_(chunk))).all():
+        # 统一可见谓词（3.9，R1 I-1）：本端点对已认证用户暴露，卡查询与用户侧同口径——
+        # 生成中（GENERATING）与已 FAILED 任务的 STAGED 卡不计入 card_count 与各维度分数；
+        # 批次级聚合（coverage/成本/完成率）基于 Batch 行，分母语义不受影响
+        for card in session.scalars(
+            select(Card).where(Card.generation_item_id.in_(chunk), text(VISIBLE_PREDICATE_SQL))
+        ).all():
             card_item_id = card.generation_item_id
             if card_item_id is None:  # owner 键均为非空（批次产出 id）
                 continue
