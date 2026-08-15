@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from sqlalchemy import insert, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -163,7 +163,8 @@ def _complete_samples(session: Session, task_id: str) -> None:
 
 
 def _settings() -> Settings:
-    return Settings(api_key_encryption_key="aa" * 32)
+    # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
+    return Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
 
 
 # ---------- 启用难度 ↔ 样卡数（1~3 张） ----------
@@ -350,3 +351,57 @@ def test_sample_worker_failure_marks_failed(
         assert row is not None
         assert row.status == "FAILED"
         assert row.error_code is not None
+
+
+def test_sample_worker_unexpected_error_fails_task_and_continues_round(
+    session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I-1 守卫（评审 R1）：样卡路径非输入类异常（编程/DB 错误——_complete_sample_task
+    内层仅捕 ValueError/TypeError/KeyError）→ 该任务 FAILED 兜底，同轮其余任务照常完成
+    （不中止整轮扫描、不饿死后继任务）。样卡阶段失败不写 failure_stage（M-5 裁决：
+    枚举无 SAMPLE_GENERATING 对应值，NULL 即正确值）。"""
+    import services.tasks.executor as tasks_executor
+    from services.tasks.executor import process_active_tasks
+
+    user = _uuid()
+    with session_factory() as session:
+        ctx = _seed(session, user_id=user)
+        session.commit()
+    with session_factory() as session:
+        for _ in range(2):
+            task = _create_draft(session, ctx, user_id=user)
+            session.commit()
+            task_id = task.task_id
+            request_samples(session, user_id=user, task_id=task_id, now=_NOW)
+            session.commit()
+    # 注入：样卡写入抛非输入类异常（complete_samples 位于 _complete_sample_task 内层
+    # try 之外——异常可逃逸至 worker 层，模拟 DB/编程错误）
+    original = tasks_executor.complete_samples
+    calls = {"n": 0}
+
+    def flaky(
+        session: Session,
+        *,
+        task_id: str,
+        cards: list[dict[str, object]],
+        config_hash: str,
+        now: str,
+    ) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("注入的样卡写入异常（DB/编程错误）")
+        return original(session, task_id=task_id, cards=cards, config_hash=config_hash, now=now)
+
+    monkeypatch.setattr(tasks_executor, "complete_samples", flaky)
+    with session_factory() as session:
+        process_active_tasks(session, settings=_settings())  # 异常被兜底，不向上传播
+        session.commit()
+    with session_factory() as session:
+        rows = session.scalars(select(Task)).all()
+        assert {t.status for t in rows} == {"FAILED", "AWAITING_SAMPLE_CONFIRMATION"}
+        failed = next(t for t in rows if t.status == "FAILED")
+        awaiting = next(t for t in rows if t.status == "AWAITING_SAMPLE_CONFIRMATION")
+        assert failed.error_code == ErrorCode.GENERATION_FAILED.value
+        assert failed.failure_stage is None  # M-5 裁决：样卡阶段失败不写 failure_stage
+        assert awaiting.sample_cards is not None  # 同轮其余任务照常完成
+        assert calls["n"] == 2  # 两个任务都被处理（第二个未被饿死）

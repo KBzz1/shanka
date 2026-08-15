@@ -29,7 +29,8 @@ from tests.conftest import auth_headers
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
 # V5A executor 解密路径：种子写入真实加密 Key；scan_tasks 注入 mock transport（不触网）
-_SETTINGS = Settings(api_key_encryption_key="aa" * 32)
+# _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
+_SETTINGS = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
 _TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
 assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
@@ -52,9 +53,10 @@ def _client_factory(api_key: str) -> DeepSeekClient:
             )
             chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
             units: list[dict[str, object]] = []
+            # 难度键原样回显（与 test_observability 同款）：planner 输出 schema v2
+            # 枚举仍为 APPLICATION 时代（改名属 Task 7 资产 v4/v3），映射 DEEP_QUESTION
+            # 会被 schema 校验拒绝 → 组跳过（曾致 6→2 并掩盖于弱化断言，R1 已修复）
             for difficulty, quota in payload["difficulty_quota"].items():
-                # V2.5 改名（3.5）：历史 APPLICATION 键 → DEEP_QUESTION（落库合法值域）
-                difficulty = "DEEP_QUESTION" if difficulty == "APPLICATION" else difficulty
                 for _ in range(quota):
                     units.append(
                         {
@@ -359,6 +361,8 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
         if final["status"] == "COMPLETED":
             break
     assert final["status"] == "COMPLETED"
-    assert isinstance(final["generated_card_count"], int) and final["generated_card_count"] > 0
+    # COMPACT 2 章确定性 6 卡：mock planner 按请求配额产出 6 单元 → 6 批 → 每批 1 卡
+    # （_client_factory docstring；配额 BASIC 3/UNDERSTANDING 2/APPLICATION 1）
+    assert final["generated_card_count"] == 6
     assert final["ended_at"] is not None
     assert final["resumable"] is False

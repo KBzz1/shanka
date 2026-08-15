@@ -221,13 +221,37 @@ def _complete_sample_task(session: Session, task: Task) -> int:
 
 
 def _sample_worker(session: Session) -> int:
-    """样卡 worker：完成全部 SAMPLE_GENERATING 任务（后台请求，幂等键已防重复触发）。"""
+    """样卡 worker：完成全部 SAMPLE_GENERATING 任务（后台请求，幂等键已防重复触发）。
+
+    逐任务异常守卫（与规划/生成/评分 worker 同构）：单任务样卡路径异常（编程/DB
+    错误，_complete_sample_task 内层仅捕输入类异常）→ 该任务 FAILED 兜底，不中止
+    整轮扫描（其余样卡任务与后续 worker 照常处理）。"""
     tasks = session.scalars(
         select(Task)
         .where(Task.status == "SAMPLE_GENERATING")
         .order_by(Task.created_at, Task.task_id)
     ).all()
-    return sum(_complete_sample_task(session, task) for task in tasks)
+    written = 0
+    for task in tasks:
+        try:
+            written += _complete_sample_task(session, task)
+        except AppError as exc:
+            _fail_task(task, error_code=exc.code.value)
+            # M-5 裁决：样卡阶段失败不写 failure_stage（枚举仅正式流水线阶段，
+            # SAMPLE_GENERATING 无对应值，NULL 即正确值）
+            task.failure_stage = None
+            logger.warning(
+                "task sample generation failed",
+                extra={"task_id": task.task_id, "error_code": exc.code.value},
+            )
+        except Exception:  # noqa: BLE001
+            _fail_task(task, error_code=ErrorCode.GENERATION_FAILED.value)
+            task.failure_stage = None  # M-5 裁决：同上，样卡阶段失败保持 NULL
+            logger.warning(
+                "task sample generation unexpected failure",
+                extra={"task_id": task.task_id},
+            )
+    return written
 
 
 def process_active_tasks(

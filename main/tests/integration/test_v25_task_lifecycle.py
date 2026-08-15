@@ -728,9 +728,10 @@ def test_list_tasks_filters_by_project_and_status(
 def test_no_service_path_writes_legacy_task_status(
     session_factory: Callable[[], Session],
 ) -> None:
-    """I-1（Task 2 review）回归：完整生命周期（创建→样卡→start→执行→终态，含
-    abandon/重试/删除/配置变更）后，数据库任务状态全程只落七态；再加静态扫描
-    四个运行时模块的 Task 状态写入点，禁用 PENDING/RUNNING/PAUSED/CANCELLED。"""
+    """I-1（Task 2 review）回归：服务路径前半程生命周期（创建→样卡→start 至
+    GENERATING，含 abandon/重试/删除/配置变更）数据库任务状态全程只落七态；
+    GENERATING→COMPLETED 的执行路径由 test_tasks_api 轮询用例驱动，静态扫描
+    兜底——四个运行时模块的 Task 状态写入点禁用 PENDING/RUNNING/PAUSED/CANCELLED。"""
     from services.generation import planning_executor, scoring
     from services.tasks import executor as tasks_executor
     from services.tasks import service as tasks_service
@@ -796,7 +797,8 @@ def test_no_service_path_writes_legacy_task_status(
 
 def _ensure_settings(session: Session) -> Settings:
     """执行器缺省 settings：session.info 注入（executor 定式），避免触网配置读取。"""
-    settings = Settings(api_key_encryption_key="aa" * 32)
+    # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
+    settings = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
     session.info["settings"] = settings
     return settings
 
