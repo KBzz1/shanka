@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import insert, text
 
 from app.config import Settings
 from app.main import create_app
@@ -61,6 +61,97 @@ def _idempotency_rows(db_path: Path) -> int:
     engine = create_db_engine(f"sqlite:///{db_path}")
     with engine.connect() as conn:
         return conn.execute(text("SELECT count(*) FROM idempotency_keys")).scalar() or 0
+
+
+def _user_id(db_path: Path, username: str = "alice") -> str:
+    """注册用户（alice）的 user_id（users 表按 username 查询）。"""
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT user_id FROM users WHERE username = :u"), {"u": username}
+        ).scalar()
+    engine.dispose()
+    assert row is not None
+    return str(row)
+
+
+def _seed_project(db_path: Path, *, user_id: str, with_key: bool = False) -> dict[str, object]:
+    """ORM 直种 PARSED PDF + 2 章节 + 学习项目（+ 可选 ApiKey）。
+
+    V2.5 前置：任务创建要求项目归属牌组与已保存 Key（6.2），牌组由被测 API 路径创建；
+    项目/PDF/章节种子沿用 test_tasks_api._seed_context 同款模式（本测试只测
+    deck.project_id 写路径，不重复覆盖项目域）。
+    """
+    from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile, User
+    from infra.db.session import create_db_engine, create_session_factory
+
+    factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+    file_id, project_id = str(uuid.uuid4()), str(uuid.uuid4())
+    chapter_ids: list[str] = []
+    with factory() as session:
+        if session.get(User, user_id) is None:  # 注册端点已建行时复用
+            session.add(
+                User(
+                    user_id=user_id,
+                    username=f"u-{user_id[:8]}",
+                    email=f"u-{user_id[:8]}@example.com",
+                    password_hash="x",
+                    created_at="2026-08-11T00:00:00.000Z",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
+            )
+            session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
+        session.add(
+            PdfFile(
+                file_id=file_id,
+                user_id=user_id,
+                filename="seed.pdf",
+                storage_key=str(uuid.uuid4()),
+                size_bytes=10,
+                status="PARSED",
+                created_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()
+        session.add(
+            LearningProject(
+                project_id=project_id,
+                user_id=user_id,
+                file_id=file_id,
+                name="P",
+                chapters_confirmed_at="2026-08-11T00:00:00.000Z",
+                version="2026-08-11T00:00:00.000Z",
+                created_at="2026-08-11T00:00:00.000Z",
+                updated_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()
+        for i in range(2):
+            cid = str(uuid.uuid4())
+            session.add(
+                Chapter(
+                    chapter_id=cid,
+                    file_id=file_id,
+                    name=f"第{i + 1}章",
+                    start_page=i + 1,
+                    end_page=i + 2,
+                )
+            )
+            session.flush()
+            chapter_ids.append(cid)
+        if with_key:
+            # 只校验 status=AVAILABLE 行存在（_require_api_key 不解密），占位密文即可
+            session.execute(
+                insert(ApiKey).values(
+                    user_id=user_id,
+                    encrypted_key="enc",
+                    status="AVAILABLE",
+                    masked_key="sk-****",
+                    updated_at="2026-08-11T00:00:00.000Z",
+                )
+            )
+        session.commit()
+    return {"project_id": project_id, "file_id": file_id, "chapter_ids": chapter_ids}
 
 
 def test_decks_api_create_and_list(client: TestClient) -> None:
@@ -245,3 +336,133 @@ def test_decks_api_rename_cross_user_404(client: TestClient) -> None:
         headers={**_user(client, "user2", "pass-2222"), **_idem()},
     )
     assert resp.status_code == 404
+
+
+# ---------- V2.5：deck.project_id 生产写路径（OPEN-1 裁决；结构契约 3.8） ----------
+
+
+def test_decks_api_create_with_project_id_persists(client: TestClient, tmp_path: Path) -> None:
+    """POST /decks 带 project_id → 201 响应含 project_id 且落库（归属学习项目）。
+
+    RED 证据：修复前 handler 静默丢弃 payload.project_id——响应缺 project_id、
+    列表过滤失效（OPEN-1 裁决：deck.project_id 无生产写路径）。
+    """
+    user = _user(client)
+    seed = _seed_project(tmp_path / "api.db", user_id=_user_id(tmp_path / "api.db"))
+    project_id = str(seed["project_id"])
+    resp = client.post(
+        "/decks", json={"name": "PD", "project_id": project_id}, headers={**user, **_idem()}
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["project_id"] == project_id
+    deck_id = body["deck_id"]
+    # 落库断言：直接观测 decks 行
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT project_id FROM decks WHERE deck_id = :d"), {"d": deck_id}
+        ).scalar()
+    assert row == project_id
+    # 详情与列表均透出 project_id
+    assert client.get(f"/decks/{deck_id}", headers=user).json()["project_id"] == project_id
+    items = client.get("/decks", headers=user).json()["items"]
+    assert [it["deck_id"] for it in items] == [deck_id]
+    assert items[0]["project_id"] == project_id
+
+
+def test_decks_api_create_with_project_id_cross_user_404(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """跨用户项目归属 → 404 PROJECT_NOT_FOUND（统一 404 不暴露存在性，6.2 同口径）。"""
+    user = _user(client)
+    other = _user(client, "user2", "pass-2222")
+    seed = _seed_project(tmp_path / "api.db", user_id=_user_id(tmp_path / "api.db", "user2"))
+    resp = client.post(
+        "/decks",
+        json={"name": "PD", "project_id": str(seed["project_id"])},
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "PROJECT_NOT_FOUND"
+    # 归属校验失败不落幂等记录（非 2xx 失败不落库，与 DELETE 404 同语义）
+    assert _idempotency_rows(tmp_path / "api.db") == 0
+    # 列表互不泄漏：alice 无牌组，user2 也无
+    assert client.get("/decks", headers=user).json()["items"] == []
+    assert client.get("/decks", headers=other).json()["items"] == []
+
+
+def test_decks_api_create_with_project_id_missing_404(client: TestClient) -> None:
+    """不存在项目 → 404 PROJECT_NOT_FOUND（不做静默 null 回落）。"""
+    user = _user(client)
+    resp = client.post(
+        "/decks",
+        json={"name": "PD", "project_id": str(uuid.uuid4())},
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "PROJECT_NOT_FOUND"
+
+
+def test_decks_api_list_filter_by_project_id(client: TestClient, tmp_path: Path) -> None:
+    """GET /decks?project_id=X 过滤（openapi listDecks）；跨用户过滤 → 404。"""
+    user = _user(client)
+    seed = _seed_project(tmp_path / "api.db", user_id=_user_id(tmp_path / "api.db"))
+    project_id = str(seed["project_id"])
+    _create_deck(client, user)  # 独立牌组 project_id=null
+    resp = client.post(
+        "/decks", json={"name": "PD", "project_id": project_id}, headers={**user, **_idem()}
+    )
+    assert resp.status_code == 201
+    project_deck_id = resp.json()["deck_id"]
+    # 全部可见（2 个）；按项目过滤只剩归属牌组
+    assert len(client.get("/decks", headers=user).json()["items"]) == 2
+    items = client.get(f"/decks?project_id={project_id}", headers=user).json()["items"]
+    assert [it["deck_id"] for it in items] == [project_deck_id]
+    assert all(it["project_id"] == project_id for it in items)
+    # 无牌组项目 → 空列表（200，非 404）
+    empty_seed = _seed_project(tmp_path / "api.db", user_id=_user_id(tmp_path / "api.db"))
+    items = client.get(f"/decks?project_id={empty_seed['project_id']}", headers=user).json()[
+        "items"
+    ]
+    assert items == []
+    # 跨用户项目过滤 → 404（与 tasks 列表 project 过滤同口径）
+    _user(client, "user2", "pass-2222")  # 先注册 user2（用户行查询依赖）
+    other_seed = _seed_project(tmp_path / "api.db", user_id=_user_id(tmp_path / "api.db", "user2"))
+    resp = client.get(f"/decks?project_id={other_seed['project_id']}", headers=user)
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "PROJECT_NOT_FOUND"
+
+
+def test_decks_api_project_deck_enables_task_creation(client: TestClient, tmp_path: Path) -> None:
+    """端到端：建项目 → API 建 deck 带 project_id → POST /projects/{id}/tasks 成功。
+
+    RED 证据：修复前 API 建牌组 project_id 静默置空 → _require_same_project_deck
+    判 deck.project_id != project_id → 404 DECK_NOT_FOUND，生成主链经公开 API 不可达
+    （NV-06 今日计划对真实用户恒空）。
+    """
+    user = _user(client)
+    seed = _seed_project(tmp_path / "api.db", user_id=_user_id(tmp_path / "api.db"), with_key=True)
+    project_id = str(seed["project_id"])
+    resp = client.post(
+        "/decks", json={"name": "PD", "project_id": project_id}, headers={**user, **_idem()}
+    )
+    assert resp.status_code == 201
+    deck_id = resp.json()["deck_id"]
+    resp = client.post(
+        f"/projects/{project_id}/tasks",
+        json={
+            "deck_id": deck_id,
+            "chapter_ids": seed["chapter_ids"],
+            "generation_config": {
+                "coverage_mode": "COMPACT",
+                "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
+            },
+        },
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["status"] == "DRAFT"
+    assert body["project_id"] == project_id
+    assert body["deck_id"] == deck_id

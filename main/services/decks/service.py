@@ -12,19 +12,38 @@ from sqlalchemy.orm import Session
 from app.errors import AppError, ErrorCode
 from domain.card import VISIBLE_PREDICATE_SQL
 from domain.task import ACTIVE_TASK_STATUSES
-from infra.db.models import Card, Deck, ReviewEvent, ReviewState, Task
+from infra.db.models import Card, Deck, LearningProject, ReviewEvent, ReviewState, Task
 
 
 def _deck_id() -> str:
     return str(uuid.uuid4())
 
 
-def create_deck(session: Session, *, user_id: str, name: str, now: str) -> Deck:
+def _owned_project(session: Session, *, user_id: str, project_id: str) -> LearningProject:
+    """项目归属校验（与 projects.service/tasks.service 同口径）：不存在/跨用户 →
+    404 PROJECT_NOT_FOUND 不暴露存在性。"""
+    project = session.get(LearningProject, project_id)
+    if project is None or project.user_id != user_id:
+        raise AppError(ErrorCode.PROJECT_NOT_FOUND, "项目不存在或无权访问")
+    return project
+
+
+def create_deck(
+    session: Session, *, user_id: str, name: str, now: str, project_id: str | None = None
+) -> Deck:
+    """创建牌组（structure-contract 3.8）：project_id 归属学习项目（null = 手动/独立）。
+
+    V2.5（OPEN-1 裁决）：project_id 经归属校验后才落库——项目不存在/跨用户 →
+    404 PROJECT_NOT_FOUND，不做静默 null 回落（否则 API 建牌组无法挂任务）。
+    """
+    if project_id is not None:
+        _owned_project(session, user_id=user_id, project_id=project_id)
     deck = Deck(
         deck_id=_deck_id(),
         user_id=user_id,
         name=name,
         source="MANUAL",
+        project_id=project_id,
         version=now,
         created_at=now,
         updated_at=now,
@@ -122,10 +141,23 @@ def _to_deck_view(deck: Deck, progress: dict[str, int | float]) -> dict[str, obj
     }
 
 
-def list_decks(session: Session, *, user_id: str, now: str) -> list[dict[str, object]]:
-    decks = session.scalars(
-        select(Deck).where(Deck.user_id == user_id).order_by(Deck.updated_at.desc())
-    ).all()
+def list_decks(
+    session: Session,
+    *,
+    user_id: str,
+    now: str,
+    project_id: str | None = None,
+) -> list[dict[str, object]]:
+    """牌组列表（openapi listDecks）：user 域 + 可选 project_id 归属过滤。
+
+    过滤语义与 tasks 列表同口径：project 不存在/跨用户 → 404 PROJECT_NOT_FOUND；
+    归属项目无牌组 → 200 空列表。
+    """
+    stmt = select(Deck).where(Deck.user_id == user_id)
+    if project_id is not None:
+        _owned_project(session, user_id=user_id, project_id=project_id)
+        stmt = stmt.where(Deck.project_id == project_id)
+    decks = session.scalars(stmt.order_by(Deck.updated_at.desc())).all()
     result: list[dict[str, object]] = []
     for deck in decks:
         result.append(

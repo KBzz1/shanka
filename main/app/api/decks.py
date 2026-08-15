@@ -7,7 +7,7 @@
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -30,9 +30,17 @@ def _now() -> str:
 
 @router.get("", response_model=dict[str, list[Deck]])
 def list_decks_endpoint(
-    request: Request, session: Annotated[Session, Depends(get_db_session)]
+    request: Request,
+    session: Annotated[Session, Depends(get_db_session)],
+    project_id: Annotated[str | None, Query()] = None,
 ) -> JSONResponse:
-    items = list_decks(session, user_id=request.state.principal.user_id, now=_now())
+    """牌组列表：支持 project_id 归属过滤（openapi listDecks；跨用户 → 404）。"""
+    items = list_decks(
+        session,
+        user_id=request.state.principal.user_id,
+        now=_now(),
+        project_id=project_id,
+    )
     return JSONResponse(content={"items": items})
 
 
@@ -48,22 +56,16 @@ def create_deck_endpoint(
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        deck = create_deck(session, user_id=user_id, name=payload.name, now=_now())
+        deck = create_deck(
+            session,
+            user_id=user_id,
+            name=payload.name,
+            now=_now(),
+            project_id=payload.project_id,  # V2.5 归属项目（归属校验在 service 内）
+        )
         session.flush()
-        data: dict[str, Any] = {
-            "deck_id": deck.deck_id,
-            "name": deck.name,
-            "source": deck.source,
-            "card_count": 0,
-            "due_count": 0,
-            "mastered_card_count": 0,
-            "review_count": 0,
-            "mastery_ratio": 0.0,
-            "created_at": deck.created_at,
-            "updated_at": deck.updated_at,
-            "version": deck.version,
-        }
-        return 201, data
+        # 响应走真实进度视图（_to_deck_view 含 project_id），与 GET 详情同形
+        return 201, get_deck(session, user_id=user_id, deck_id=deck.deck_id, now=_now())
 
     _replayed, status, body = execute_idempotent(
         session,
