@@ -9,6 +9,12 @@
 - request 可选 idempotency_key:显式指定时复用该键(跨用户幂等复用场景),否则每次新键。
 - 每次请求后自动经 shanka.logging 记录请求事件(request_id 取后端 X-Request-ID);
   PUT /api-key 与 auth 凭据路径不记录事件(凭据脱敏,红线 4)。
+
+V2.5 复用助手(模块级函数,StubClient 同形状可共用):body/error_code 响应解析,
+create_task/request_samples/start_task/abandon_task/retry_task/delete_task/submit_review/
+delete_card/pending_deletion_batches/undo_deletion_batch/create_rewrite_preview/
+apply_rewrite_preview/cancel_rewrite_preview——写路径统一幂等键纪律(Idempotency-Key),
+路径集中于一处,场景不重复 HTTP 细节。
 """
 
 from __future__ import annotations
@@ -171,3 +177,134 @@ class ShankaClient:
                 error_code=err_code,
             )
         return response
+
+
+# ---- 响应解析(V2.5 场景复用;StubClient 同形状) ----
+
+
+def body(r: Response) -> dict:
+    """安全取响应 JSON 字典(非 dict/解析失败返回空字典)。"""
+    return r.json if isinstance(r.json, dict) else {}
+
+
+def error_code(r: Response) -> str:
+    """统一错误响应的稳定错误码(契约 1.4;非错误响应返回空串)。"""
+    err = body(r).get("error")
+    return err.get("code", "") if isinstance(err, dict) else ""
+
+
+# ---- V2.5 复用请求助手(写路径统一幂等键纪律;GET 简单路径由场景直连 request) ----
+
+
+def create_task(
+    c: ShankaClient,
+    *,
+    project_id: str,
+    deck_id: str,
+    chapter_ids: list[str],
+    generation_config: dict,
+    step: str = "task-create",
+) -> Response:
+    """POST /projects/{project_id}/tasks:建立 DRAFT 自动保存任务(幂等)。"""
+    return c.request(
+        "POST", f"/projects/{project_id}/tasks",
+        body={"deck_id": deck_id, "chapter_ids": chapter_ids,
+              "generation_config": generation_config},
+        idempotent=True, step=step,
+    )
+
+
+def request_samples(c: ShankaClient, task_id: str, step: str = "task-samples") -> Response:
+    """POST /tasks/{task_id}/samples:持久化样卡请求(幂等;worker 后台完成)。"""
+    return c.request("POST", f"/tasks/{task_id}/samples", idempotent=True, step=step)
+
+
+def start_task(c: ShankaClient, task_id: str, step: str = "task-start") -> Response:
+    """POST /tasks/{task_id}/start:校验样卡 hash 后进入 GENERATING(幂等)。"""
+    return c.request("POST", f"/tasks/{task_id}/start", idempotent=True, step=step)
+
+
+def abandon_task(c: ShankaClient, task_id: str, step: str = "task-abandon") -> Response:
+    """POST /tasks/{task_id}/abandon:放弃(仅正式生成前状态,幂等)。"""
+    return c.request("POST", f"/tasks/{task_id}/abandon", idempotent=True, step=step)
+
+
+def retry_task(c: ShankaClient, task_id: str, step: str = "task-retry") -> Response:
+    """POST /tasks/{task_id}/retry:失败任务创建关联新任务(幂等;新任务可沿用已确认样卡)。"""
+    return c.request("POST", f"/tasks/{task_id}/retry", idempotent=True, step=step)
+
+
+def delete_task(
+    c: ShankaClient,
+    task_id: str,
+    *,
+    delete_generated_cards: bool = False,
+    step: str = "task-delete",
+) -> Response:
+    """DELETE /tasks/{task_id}:删除终态任务(幂等)。"""
+    q = "?delete_generated_cards=true" if delete_generated_cards else ""
+    return c.request("DELETE", f"/tasks/{task_id}{q}", idempotent=True, step=step)
+
+
+def submit_review(
+    c: ShankaClient,
+    *,
+    card_id: str,
+    rating: str,
+    client_event_id: str,
+    idempotency_key: str | None = None,
+    step: str = "review-event",
+) -> Response:
+    """POST /review-events:提交评级(幂等;显式键重放返回首次结果,不重复计数)。"""
+    return c.request(
+        "POST", "/review-events",
+        body={"card_id": card_id, "rating": rating, "client_event_id": client_event_id},
+        idempotent=True, idempotency_key=idempotency_key, step=step,
+    )
+
+
+def delete_card(c: ShankaClient, card_id: str, step: str = "card-delete") -> Response:
+    """DELETE /cards/{card_id}:删除单卡进入 10 秒撤销批次(幂等;连续删除合并并重新计时)。"""
+    return c.request("DELETE", f"/cards/{card_id}", idempotent=True, step=step)
+
+
+def pending_deletion_batches(c: ShankaClient, step: str = "deletion-pending") -> Response:
+    """GET /card-deletion-batches/pending:App 重启恢复仍有效的撤销批次。"""
+    return c.request("GET", "/card-deletion-batches/pending", step=step)
+
+
+def undo_deletion_batch(
+    c: ShankaClient, delete_batch_id: str, step: str = "deletion-undo"
+) -> Response:
+    """POST /card-deletion-batches/{id}/undo:窗口内撤销整批(幂等;过期 409)。"""
+    return c.request("POST", f"/card-deletion-batches/{delete_batch_id}/undo",
+                     idempotent=True, step=step)
+
+
+def create_rewrite_preview(
+    c: ShankaClient,
+    card_id: str,
+    *,
+    custom_requirements: str | None = None,
+    step: str = "rewrite-preview",
+) -> Response:
+    """POST /cards/{card_id}/rewrite-previews:生成并持久化重写预览,不改原卡(幂等)。"""
+    return c.request("POST", f"/cards/{card_id}/rewrite-previews",
+                     body={"custom_requirements": custom_requirements},
+                     idempotent=True, step=step)
+
+
+def apply_rewrite_preview(
+    c: ShankaClient, card_id: str, rewrite_id: str, step: str = "rewrite-apply"
+) -> Response:
+    """POST /cards/{card_id}/rewrite-previews/{rewrite_id}/apply:版本一致原子替换(CAS,幂等)。"""
+    return c.request("POST", f"/cards/{card_id}/rewrite-previews/{rewrite_id}/apply",
+                     idempotent=True, step=step)
+
+
+def cancel_rewrite_preview(
+    c: ShankaClient, card_id: str, rewrite_id: str, step: str = "rewrite-cancel"
+) -> Response:
+    """DELETE /cards/{card_id}/rewrite-previews/{rewrite_id}:取消预览,原卡不变(幂等)。"""
+    return c.request("DELETE", f"/cards/{card_id}/rewrite-previews/{rewrite_id}",
+                     idempotent=True, step=step)

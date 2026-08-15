@@ -3,7 +3,9 @@
 套件:
   quick — auth + api_smoke,0 次 LLM 调用,纯无 Key 冒烟;
   full  — 非生成场景(auth/isolation/api_smoke,0 次 LLM;域场景实装后扩展);
-  live  — full + live_flow,含真实生成(最坏调用预算由 fixture 推导,超阈值必须 --confirm-cost)。
+  live  — full + live_flow,含真实生成(最坏调用预算由 fixture 推导,超阈值必须 --confirm-cost);
+  v25   — v25_core_flow + v25_recovery(V2.5 非可视化 Release 主链路:cost-confirmed 生成套件
+          [推导预算 + 重写预览] + zero-LLM 恢复套件)。
 凭据只从环境变量读取(SHANKA_TEST_USERNAME/SHANKA_TEST_EMAIL/SHANKA_TEST_PASSWORD),
 缺失拒绝执行;run_id 由 runner 生成并注入场景,日志身份字段为 user_id(会话建立前为空)。
 """
@@ -20,13 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shanka import cost, environments, logging as shlogging
 from scenarios.auth import auth
 from scenarios.baseline import api_smoke
-from scenarios.flow import live_flow
+from scenarios.flow import live_flow, v25_core_flow, v25_recovery
 from scenarios.isolation import isolation
 
 SUITES: dict[str, list] = {
     "quick": [auth, api_smoke],
     "full": [auth, isolation, api_smoke],
     "live": [auth, isolation, api_smoke, live_flow],
+    "v25": [v25_core_flow, v25_recovery],
 }
 
 
