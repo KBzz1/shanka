@@ -902,3 +902,63 @@ def test_v25_generation_config_backfill(alembic_env: tuple[Config, Path]) -> Non
         "difficulty_ratio": {"basic": 20, "understanding": 30, "deep_question": 50},
         "custom_requirements": "重点覆盖证明",
     }
+
+
+def test_v25_cursor_difficulty_backfill(alembic_env: tuple[Config, Path]) -> None:
+    """V2.5 契约缺口回填：cursor.difficulty_distribution 旧难度键 APPLICATION → DEEP_QUESTION。
+
+    0f8b9f33b769 迁移了 cards/knowledge_points 的 target_difficulty 但漏了任务 cursor
+    快照——历史任务列表响应透传旧键，客户端按 V2.5 难度枚举解析失败（视觉 lane 报
+    "任务列表不能完整解析"）。同名 DEEP_QUESTION 已存在时数值合并；无旧键的行不动。"""
+    config, db_path = alembic_env
+    command.upgrade(config, "30364748ec32")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO tasks (task_id, status, selected_chapters, generation_config,"
+                " cursor, generated_card_count, resumable, skipped_planning_group_count)"
+                " VALUES ('t-cursor-legacy', 'COMPLETED', '[]', '{}', :cursor, 0, 0, 0)"
+            ),
+            {
+                "cursor": json.dumps(
+                    {"difficulty_distribution": {"BASIC": 1, "UNDERSTANDING": 1, "APPLICATION": 1}}
+                )
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO tasks (task_id, status, selected_chapters, generation_config,"
+                " cursor, generated_card_count, resumable, skipped_planning_group_count)"
+                " VALUES ('t-cursor-v25', 'DRAFT', '[]', '{}', :cursor, 0, 0, 0)"
+            ),
+            {
+                "cursor": json.dumps(
+                    {
+                        "difficulty_distribution": {
+                            "BASIC": 1,
+                            "UNDERSTANDING": 2,
+                            "DEEP_QUESTION": 1,
+                        }
+                    }
+                )
+            },
+        )
+    command.upgrade(config, "head")
+    with create_db_engine(f"sqlite:///{db_path}").begin() as conn:
+        rows = {
+            r[0]: json.loads(r[1])
+            for r in conn.execute(
+                text("SELECT task_id, cursor FROM tasks WHERE cursor IS NOT NULL")
+            )
+        }
+    assert rows["t-cursor-legacy"]["difficulty_distribution"] == {
+        "BASIC": 1,
+        "UNDERSTANDING": 1,
+        "DEEP_QUESTION": 1,
+    }
+    assert rows["t-cursor-v25"]["difficulty_distribution"] == {
+        "BASIC": 1,
+        "UNDERSTANDING": 2,
+        "DEEP_QUESTION": 1,
+    }
