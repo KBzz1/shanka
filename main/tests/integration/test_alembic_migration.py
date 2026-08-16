@@ -4,6 +4,7 @@ V2.3 起 downgrade 显式拒绝（设备数据已物理删除，不可逆）—�
 e85c78b2a345（V2.3 前终态），不再降过 V2.3。
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -812,3 +813,92 @@ def test_v25_downgrade_fail_closed(alembic_env: tuple[Config, Path]) -> None:
     _upgrade_v24_db_with_rows(config, db_path)
     with pytest.raises(RuntimeError, match="迁移不可逆"):
         command.downgrade(config, _V25_LEGACY_REVISION)
+
+
+def _upgrade_v25_db_with_legacy_config_rows(config: Config, db_path: Path) -> None:
+    """V2.5 schema（0f8b9f33b769）直插旧形态 generation_config 任务行——真实 DB 现状复刻：
+    迁移已应用、JSON 仍是 V2.4 字段形态（quantity_tendency / application 浮点档）。"""
+    command.upgrade(config, "0f8b9f33b769")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO tasks (task_id, status, selected_chapters, generation_config,"
+                " generated_card_count, resumable, skipped_planning_group_count)"
+                " VALUES ('t-legacy-full', 'COMPLETED', '[]', :cfg, 0, 0, 0)"
+            ),
+            {
+                "cfg": json.dumps(
+                    {
+                        "quantity_tendency": "COMPACT",
+                        "difficulty_ratio": {
+                            "basic": 0.4,
+                            "understanding": 0.4,
+                            "application": 0.2,
+                        },
+                        "custom_requirements": None,
+                    }
+                )
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO tasks (task_id, status, selected_chapters, generation_config,"
+                " generated_card_count, resumable, skipped_planning_group_count)"
+                " VALUES ('t-legacy-empty', 'COMPLETED', '[]', '{}', 0, 0, 0)"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO tasks (task_id, status, selected_chapters, generation_config,"
+                " generated_card_count, resumable, skipped_planning_group_count)"
+                " VALUES ('t-v25-shape', 'DRAFT', '[]', :cfg, 0, 0, 0)"
+            ),
+            {
+                "cfg": json.dumps(
+                    {
+                        "coverage_mode": "EXTENSIVE",
+                        "difficulty_ratio": {
+                            "basic": 20,
+                            "understanding": 30,
+                            "deep_question": 50,
+                        },
+                        "custom_requirements": "重点覆盖证明",
+                    }
+                )
+            },
+        )
+    command.upgrade(config, "head")
+
+
+def test_v25_generation_config_backfill(alembic_env: tuple[Config, Path]) -> None:
+    """V2.5 契约缺口回填：历史任务 generation_config 旧形态 → V2.5 形态。
+
+    转换：quantity_tendency → coverage_mode（同名映射）；application → deep_question；
+    浮点 0~1 → 0~100 的 10% 整数档（合计恒 100）。空对象行补默认（BALANCED +
+    40/40/20）；已是 V2.5 形态的行保持原样（幂等）。GET /tasks 透传 JSON，
+    回填前客户端按 OpenAPI GenerationConfig 解析失败（视觉 lane 真机验证发现）。
+    """
+    config, db_path = alembic_env
+    _upgrade_v25_db_with_legacy_config_rows(config, db_path)
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.begin() as conn:
+        rows = {
+            r[0]: json.loads(r[1])
+            for r in conn.execute(text("SELECT task_id, generation_config FROM tasks"))
+        }
+    assert rows["t-legacy-full"] == {
+        "coverage_mode": "COMPACT",
+        "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
+        "custom_requirements": None,
+    }
+    assert rows["t-legacy-empty"] == {
+        "coverage_mode": "BALANCED",
+        "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
+        "custom_requirements": None,
+    }
+    assert rows["t-v25-shape"] == {
+        "coverage_mode": "EXTENSIVE",
+        "difficulty_ratio": {"basic": 20, "understanding": 30, "deep_question": 50},
+        "custom_requirements": "重点覆盖证明",
+    }
