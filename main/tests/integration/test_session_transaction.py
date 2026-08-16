@@ -1,4 +1,4 @@
-"""DB session 事务语义集成测试（database-design 0/3）：BEGIN IMMEDIATE + 回滚 + 请求级 session。"""
+"""DB session 事务语义集成测试（database-design 0/3）：回滚 + 请求级 session。"""
 
 from pathlib import Path
 from typing import Annotated

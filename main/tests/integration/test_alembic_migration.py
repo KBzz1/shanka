@@ -390,7 +390,7 @@ def test_legacy_device_rows_removed_on_v2_3(alembic_env: tuple[Config, Path]) ->
     _upgrade_legacy_db_with_rows(config, db_path)  # 2a391e994f93 → 直插旧行 → upgrade head
     engine = create_db_engine(f"sqlite:///{db_path}")
     # 表名检查在同一连接内完成（不再新开引擎）：多引擎连串（迁移/直插/断言）交错时
-    # 新引擎 BEGIN IMMEDIATE 可能撞上前一连接的 WAL checkpoint/滞留写锁
+    # 新引擎写事务可能撞上前一连接的 WAL checkpoint/滞留写锁
     # （database is locked，实测），单连接串行断言不受影响。
     with engine.begin() as conn:
         for table in _OWNER_TABLES:

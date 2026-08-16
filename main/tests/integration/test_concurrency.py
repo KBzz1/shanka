@@ -875,7 +875,7 @@ def test_concurrency_stale_fail_task_does_not_overwrite_concurrent_result(
     with session_factory() as stale_session:
         stale = stale_session.get(Task, task_id)  # stale worker 身份映射快照 GENERATING
         assert stale is not None and stale.status == "GENERATING"
-        stale_session.commit()  # 读后提交释放写锁（BEGIN IMMEDIATE），快照保留（expire_on_commit=False）
+        stale_session.commit()  # 读后提交释放事务，快照保留（expire_on_commit=False）
         with session_factory() as other:
             other.execute(
                 update(Task)

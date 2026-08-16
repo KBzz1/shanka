@@ -403,7 +403,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     # 可复算）已在库（等价旧语义"批 2 响应含批内重复内容"：新 pipeline 每批恰好 1 卡，
     # 内容重复只能经同 seed 重入出现，防重守卫 = generation_item_id 先查后插）
     dup_gen_item = _stable_uuid(f"gen|{task_id}|2|QUESTION|q1|a1")
-    owner_id = _user_id(db_path)  # 会话外取 user_id：engine 级 BEGIN IMMEDIATE（读也写事务）
+    owner_id = _user_id(db_path)  # 会话外取 user_id（独立连接读）
     with _db_factory(db_path)() as session:
         task_row = session.get(Task, task_id)
         assert task_row is not None and task_row.deck_id is not None

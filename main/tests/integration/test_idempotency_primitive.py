@@ -256,7 +256,8 @@ def test_idempotency_rollback_releases_claim(session_factory: Callable[[], Sessi
 def test_idempotency_flush_conflict_backstop_replays(tmp_path: Path) -> None:
     """flush 冲突兜底路径回归（review M-3，确定性构造）。
 
-    用无 BEGIN IMMEDIATE 的引擎 + WAL 读快照：A 未提交写占位 → B SELECT 读快照无 →
+    构造"调用方已开始事务"的降级场景：execute_idempotent 的 BEGIN IMMEDIATE
+    因事务已开启而失败（降级为普通事务）——A 未提交写占位 → B SELECT 读快照无 →
     B fn → B flush 阻塞至 A commit → IntegrityError → rollback 重读重放。
     事件链保证 B 的 flush 恒晚于 A 的 flush（b_started 由 B 的 fn 在 flush 前置位，
     而 A 在 b_started 后才 commit），无时序竞争。
@@ -270,7 +271,7 @@ def test_idempotency_flush_conflict_backstop_replays(tmp_path: Path) -> None:
 
     @event.listens_for(engine, "connect")
     def _configure_wal(dbapi_connection: Any, connection_record: Any) -> None:
-        # WAL：B 的 SELECT 可读 A 未提交写之前的快照（无 begin 事件 → 走 flush 冲突路径）
+        # WAL：B 的 SELECT 可读 A 未提交写之前的快照
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA foreign_keys=ON;")
@@ -321,6 +322,10 @@ def test_idempotency_flush_conflict_backstop_replays(tmp_path: Path) -> None:
     try:
         assert a_flushed.wait(timeout=10), "A 未在超时内 flush"
         with factory() as session:
+            # 预先读取（降级前提）：SQLAlchemy Transaction 已激活 → execute_idempotent
+            # 跳过 BEGIN IMMEDIATE；pysqlite 隐式事务不随 SELECT 开启，flush 的
+            # INSERT 作为首个 DML 才开启写事务（busy 等待 A commit）→ 唯一约束冲突兜底
+            session.execute(text("SELECT 1"))
             replayed, status, body_out = execute_idempotent(
                 session,
                 user_id="user-1",

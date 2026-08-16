@@ -3,7 +3,7 @@
 两阶段语义（3.19）：预览创建不改卡；apply 是版本 CAS 原子替换——并发两个预览
 （不同幂等键请求）各自基于同一 base_card_version，先 apply 者胜，后 apply 者
 409 CARD_VERSION_CONFLICT（与 V6 单步「后写覆盖先写」语义相反，CAS 保证只产生
-一次有效替换）。SQLite 单写者语义（BEGIN IMMEDIATE）下并发写被串行化，故用
+一次有效替换）。SQLite 单写者语义下并发写被串行化，故用
 **确定性顺序提交**模拟两个 session 的提交序列，断言「先应用者胜」的终态一致、
 无半覆盖（内容与排程同一版本来源）。
 

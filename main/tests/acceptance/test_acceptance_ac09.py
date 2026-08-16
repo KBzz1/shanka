@@ -195,7 +195,7 @@ def test_acceptance_ac09_concurrent_idempotency_single_side_effect(
     """补覆盖：handler 级并发幂等——两个线程同 (user, path, key) 并发 POST /decks。
 
     两个独立 TestClient（同库）经 threading.Barrier 同时发请求：唯一约束占位，
-    后到事务 BEGIN IMMEDIATE 串行化 → 回滚重读重放。HTTP 响应层面无法直接区分
+    后到事务由幂等占位锁串行化 → 回滚重读重放。HTTP 响应层面无法直接区分
     fresh/replay（两者 body 相同），以组合断言证明恰一 fresh 一 replay：
     两次均 201 且 deck_id 相同 + 幂等记录仅 1 行 + 牌组列表只有 1 个（单副作用）。
     """

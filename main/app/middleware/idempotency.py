@@ -4,8 +4,10 @@ execute_idempotent 由写接口 handler 在请求级 session 内调用：
 - 首次：执行 fn(session) → INSERT 幂等记录（response_status/response_body/request_body_hash），
   与业务副作用同一事务（调用方 commit；失败回滚同时释放占位）。
 - 重复：同键同 body → 重放首次成功响应（不执行业务）；同键异 body → 409 IDEMPOTENCY_CONFLICT。
-- 并发：唯一约束 (user_id, path, idempotency_key) 抢占；后到事务（BEGIN IMMEDIATE 串行化）回滚
-  后重读 → 重放，保证业务副作用仅一次（AC-05/AC-10）。
+- 并发：写事务以显式 `BEGIN IMMEDIATE` 开始（database-design §0/3 语义保留在写路径；
+  2026-08-16 起 engine 级全局 BEGIN IMMEDIATE 已移除，读事务不再抢写锁）——同键并发写
+  由 DB 级写锁串行化（跨进程同样成立），保证业务副作用仅一次（AC-05/AC-10）；
+  调用方已开始事务的降级场景由 flush 唯一约束冲突分支兜底（回滚后重读 → 重放）。
 - V2.2：幂等域 = user（P4-3 切换）；新行只写 user_id。
 """
 
@@ -57,7 +59,37 @@ def execute_idempotent[F: Callable[[Session], tuple[int, dict[str, Any]]]](
     """执行或重放幂等操作。返回 (是否重放, status, body)。
 
     调用方负责事务：成功后 commit（幂等记录与副作用同事务）；失败 rollback。
+    写事务以显式 BEGIN IMMEDIATE 开始（DB 级写锁串行化同键并发写，跨进程成立）；
+    调用方已开始事务（先读/先写）的降级场景由 flush 唯一约束冲突分支兜底。
     """
+    if session.in_transaction():
+        # 调用方已开始事务（SQLAlchemy Transaction 已激活）→ 无法升级为 IMMEDIATE，
+        # 降级为普通事务，并发单效果依赖 flush 唯一约束冲突分支兜底。
+        logger.debug(
+            "idempotency: transaction already open, degraded claim for key=%s", idempotency_key
+        )
+    else:
+        conn = session.connection()
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+    return _execute_idempotent_claimed(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=idempotency_key,
+        request_body_hash=request_body_hash,
+        fn=fn,
+    )
+
+
+def _execute_idempotent_claimed[F: Callable[[Session], tuple[int, dict[str, Any]]]](
+    session: Session,
+    *,
+    user_id: str,
+    path: str,
+    idempotency_key: str,
+    request_body_hash: str,
+    fn: F,
+) -> tuple[bool, int, dict[str, Any]]:
     existing = session.scalar(
         select(IdempotencyKey).where(
             IdempotencyKey.user_id == user_id,
@@ -92,7 +124,7 @@ def execute_idempotent[F: Callable[[Session], tuple[int, dict[str, Any]]]](
     try:
         session.flush()
     except Exception:
-        # 并发占位冲突：回滚后重读重放（业务副作用随事务回滚，不重复）
+        # 跨进程并发占位冲突：回滚后重读重放（业务副作用随事务回滚，不重复）
         session.rollback()
         existing = session.scalar(
             select(IdempotencyKey).where(

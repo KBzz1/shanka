@@ -522,7 +522,7 @@ def test_acceptance_ac06_api_key_not_set_422(
     （chat 0 不触网、幂等表无记录、原卡保留）。"""
     client, db_path, _ = ctx
     user = _user(client)
-    owner_id = _user_id(db_path)  # 会话外取 user_id：engine 级 BEGIN IMMEDIATE（读也写事务）
+    owner_id = _user_id(db_path)  # 会话外取 user_id（独立连接读）
     card_id, _ = _seed_card(db_path, user_id=owner_id)
     with _db_factory(db_path)() as session:
         session.execute(delete(ApiKey).where(ApiKey.user_id == owner_id))

@@ -51,7 +51,7 @@ def _pdf_scanner_loop(
     """扫描器后台循环（Task 4）：逐间隔 scan_once；单轮失败不中断循环。
 
     wait-first：首个间隔为启动宽限期（DB/表就绪后再扫描，避免与启动期 DDL 竞争
-    BEGIN IMMEDIATE 写锁——scan_once 走 engine 级 begin 事件，读也走写事务）。
+    写锁——scan_once 的读事务不再抢写锁（见 infra/db/session.py）。
     """
     while not stop_event.is_set():
         stop_event.wait(interval)
@@ -71,7 +71,7 @@ def _task_executor_loop(
     """任务执行器后台循环（Task 4）：逐间隔 scan_once；单轮失败不中断循环。
 
     wait-first：首个间隔为启动宽限期（与 PDF 扫描器同款，避免与启动期 DDL 竞争
-    BEGIN IMMEDIATE 写锁——executor 走 engine 级 begin 事件，读也走写事务）。
+    写锁——executor 的读事务不再抢写锁（见 infra/db/session.py）。
     """
     while not stop_event.is_set():
         stop_event.wait(interval)
