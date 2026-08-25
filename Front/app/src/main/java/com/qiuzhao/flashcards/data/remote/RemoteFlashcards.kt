@@ -3,12 +3,14 @@ package com.qiuzhao.flashcards.data.remote
 import android.content.Context
 import android.net.Uri
 import android.os.Build
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import android.util.Base64
 import android.util.Log
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.CardDraft
+import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
+import com.qiuzhao.flashcards.data.session.Session
+import com.qiuzhao.flashcards.data.session.SessionStore
+import com.qiuzhao.flashcards.data.session.SessionUser
+import com.qiuzhao.flashcards.data.session.loadQuietly
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,12 +26,7 @@ import java.io.File
 import java.io.FileNotFoundException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.security.KeyStore
 import java.util.UUID
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 /** Server-facing UI models. IDs are opaque UUIDs and must never be parsed as numbers. */
 data class DeckSummary(
@@ -143,7 +140,16 @@ data class ReviewCard(val card: FlashcardEntity, val reviewState: ReviewState?)
 data class ApiKeyStatus(val status: String, val maskedKey: String)
 data class PdfChapter(val id: String, val name: String, val startPage: Int, val endPage: Int)
 data class PdfFile(val id: String, val name: String, val status: String, val errorCode: String? = null, val chapters: List<PdfChapter> = emptyList())
-data class GeneratedTask(val id: String, val status: String, val stage: String? = null, val generatedCardCount: Int = 0, val resumable: Boolean = false, val errorCode: String? = null)
+data class GeneratedTask(
+    val id: String,
+    val status: String,
+    val stage: String? = null,
+    val generatedCardCount: Int = 0,
+    val skippedPlanningGroupCount: Int = 0,
+    val completionReason: String? = null,
+    val resumable: Boolean = false,
+    val errorCode: String? = null
+)
 data class Dashboard(val hasData: Boolean, val weeklyGoal: Int?, val completed: Int, val masteryRatio: Float?, val raw: JSONObject)
 
 sealed interface ApiResult<out T> {
@@ -151,52 +157,25 @@ sealed interface ApiResult<out T> {
     data class Failure(val status: Int, val code: String?, val localizationKey: String?, val message: String?) : ApiResult<Nothing>
 }
 
-internal data class HttpResult(val status: Int, val body: String, val headers: Map<String, List<String>>)
+data class HttpResult(val status: Int, val body: String, val headers: Map<String, List<String>>)
+
+/** Authorization header derived from a bearer token; empty when there is no session. */
+internal fun buildAuthHeaders(token: String?): Map<String, String> =
+    if (token == null) emptyMap() else mapOf("Authorization" to "Bearer $token")
 
 /**
- * The device id is deliberately encrypted at rest. It is a credential, so all callers only
- * receive it for a request header and no logging API accepts it.
+ * Which token a request carries: an explicit override (logout) wins, otherwise the stored
+ * session supplies it, unless the endpoint is unauthenticated (register/login).
  */
-private class SecureDeviceIdentityStore(context: Context) {
-    private val preferences = context.getSharedPreferences("remote_identity", Context.MODE_PRIVATE)
-    private val alias = "shanka_device_identity_key"
+internal fun requestAuthToken(authenticate: Boolean, tokenOverride: String?, session: Session?): String? =
+    tokenOverride ?: if (authenticate) session?.token else null
 
-    fun deviceId(): String {
-        preferences.getString("device_id", null)?.let { stored -> decrypt(stored)?.let { return it } }
-        return UUID.randomUUID().toString().also { preferences.edit().putString("device_id", encrypt(it)).apply() }
-    }
-
-    private fun key(): SecretKey {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (store.getKey(alias, null) as? SecretKey)?.let { return it }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        generator.init(
-            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .build()
-        )
-        return generator.generateKey()
-    }
-
-    private fun encrypt(value: String): String = Cipher.getInstance("AES/GCM/NoPadding").run {
-        init(Cipher.ENCRYPT_MODE, key())
-        Base64.encodeToString(iv + doFinal(value.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
-    }
-
-    private fun decrypt(value: String): String? = runCatching {
-        val bytes = Base64.decode(value, Base64.NO_WRAP)
-        require(bytes.size > 12)
-        Cipher.getInstance("AES/GCM/NoPadding").run {
-            init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, bytes.copyOfRange(0, 12)))
-            String(doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8)
-        }
-    }.getOrNull()
-}
-
-internal class BackendClient(context: Context, private val baseUrl: String = defaultBaseUrl()) {
+class BackendClient(
+    context: Context,
+    private val baseUrl: String = defaultBaseUrl(),
+    private val sessionStore: SessionStore = KeystoreSessionStore(context)
+) {
     private val appContext = context.applicationContext
-    private val identity = SecureDeviceIdentityStore(appContext)
 
     suspend fun request(
         operation: String,
@@ -204,7 +183,9 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
         path: String,
         body: String? = null,
         contentType: String = "application/json",
-        idempotent: Boolean = method in setOf("POST", "PUT", "PATCH", "DELETE") && path != "/samples"
+        idempotent: Boolean = method in setOf("POST", "PUT", "PATCH", "DELETE") && path != "/samples",
+        authenticate: Boolean = true,
+        token: String? = null
     ): HttpResult = withContext(Dispatchers.IO) {
         val trace = UUID.randomUUID().toString().take(8)
         val key = if (idempotent) UUID.randomUUID().toString() else null
@@ -215,7 +196,8 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
             // A development server is optional for the installed app.  In
             // particular, 10.0.2.2 is only meaningful to an emulator; a
             // physical phone must never be taken down by its absence.
-            last = runCatching { execute(method, path, body, contentType, key) }
+            val authToken = requestAuthToken(authenticate, token, sessionStore.loadQuietly())
+            last = runCatching { execute(method, path, body, contentType, key, authToken) }
                 .getOrElse { unavailableResult(it) }
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
             debug(requestLog(trace, operation, path, last, elapsedMs, attempt))
@@ -235,7 +217,7 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
         var last: HttpResult
         do {
             val started = System.nanoTime()
-            last = runCatching { executeMultipart(uri, key) }
+            last = runCatching { executeMultipart(uri, key, sessionStore.load()?.token) }
                 .getOrElse { unavailableResult(it) }
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
             debug(requestLog(trace, "upload_pdf", "/pdfs", last, elapsedMs, attempt))
@@ -248,13 +230,33 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
         last
     }
 
-    private fun execute(method: String, path: String, body: String?, contentType: String, key: String?): HttpResult {
+    /**
+     * The four auth endpoints. register/login are unauthenticated and deliberately skip the
+     * idempotency key (contract FR-19: no automatic retry that could silently create sessions);
+     * logout sends the explicit token so it works even when the store was replaced; me is a
+     * plain session-authenticated read.
+     */
+    suspend fun register(username: String, email: String, password: String): HttpResult = request(
+        "register", "POST", "/auth/register", registerBody(username, email, password),
+        idempotent = false, authenticate = false
+    )
+
+    suspend fun login(email: String, password: String): HttpResult = request(
+        "login", "POST", "/auth/login", credentialsBody(email, password),
+        idempotent = false, authenticate = false
+    )
+
+    suspend fun logout(token: String): HttpResult = request("logout", "POST", "/auth/logout", token = token)
+
+    suspend fun me(): HttpResult = request("me", "GET", "/auth/me")
+
+    private fun execute(method: String, path: String, body: String?, contentType: String, key: String?, authToken: String?): HttpResult {
         val connection = (URL(baseUrl.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 8_000
             readTimeout = 25_000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("X-Device-ID", identity.deviceId())
+            buildAuthHeaders(authToken).forEach { (name, value) -> setRequestProperty(name, value) }
             if (key != null) setRequestProperty("Idempotency-Key", key)
             if (body != null) {
                 doOutput = true
@@ -272,7 +274,7 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
         }
     }
 
-    private fun executeMultipart(uri: Uri, key: String): HttpResult {
+    private fun executeMultipart(uri: Uri, key: String, authToken: String?): HttpResult {
         val boundary = "----Shanka${UUID.randomUUID()}"
         val connection = (URL(baseUrl.trimEnd('/') + "/pdfs").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -280,7 +282,7 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
             readTimeout = 60_000
             doOutput = true
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("X-Device-ID", identity.deviceId())
+            buildAuthHeaders(authToken).forEach { (name, value) -> setRequestProperty(name, value) }
             setRequestProperty("Idempotency-Key", key)
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
         }
@@ -365,10 +367,41 @@ internal class BackendClient(context: Context, private val baseUrl: String = def
     }
 }
 
-internal class RemoteFlashcardRepository(
+/** Credentials travel only in the request body and never reach a log line. */
+internal fun registerBody(username: String, email: String, password: String): String =
+    JSONObject().put("username", username).put("email", email).put("password", password).toString()
+
+internal fun credentialsBody(email: String, password: String): String =
+    JSONObject().put("email", email).put("password", password).toString()
+
+/**
+ * The auth surface of the repository. Extracted as an interface so the session state machine
+ * stays JVM-testable with a fake instead of the Android-bound implementation.
+ */
+interface AuthRepository {
+    suspend fun register(username: String, email: String, password: String): ApiResult<Session>
+    suspend fun login(email: String, password: String): ApiResult<Session>
+    suspend fun refreshMe(): ApiResult<SessionUser>
+    /**
+     * Revokes the given token on the server. The token is explicit because the local store is
+     * cleared *before* revocation fires (logout is local-first); reading it back from the store
+     * here would silently skip the server call.
+     */
+    suspend fun logout(token: String): ApiResult<Unit>
+}
+
+/**
+ * Open so instrumented tests can subclass it as an injection seam: the fake overrides only the
+ * endpoints the startup path touches and issues no network traffic at all.
+ */
+open class RemoteFlashcardRepository(
     context: Context,
-    private val client: BackendClient = BackendClient(context)
-) {
+    private val sessionStore: SessionStore = KeystoreSessionStore(context),
+    private val client: BackendClient = BackendClient(context, sessionStore = sessionStore)
+) : AuthRepository {
+    /** Compatibility overload retained for existing instrumented transport tests. */
+    constructor(context: Context, client: BackendClient) : this(context, KeystoreSessionStore(context), client)
+
     private val _decks = MutableStateFlow<List<DeckSummary>>(emptyList())
     private val cardFlows = mutableMapOf<String, MutableStateFlow<List<FlashcardEntity>>>()
     val decks: Flow<List<DeckSummary>> = _decks
@@ -382,6 +415,42 @@ internal class RemoteFlashcardRepository(
     suspend fun refreshDecks(): ApiResult<List<DeckSummary>> = client.request("list_decks", "GET", "/decks").decode { value ->
         values(value, "decks").mapNotNull(::deck).also { _decks.value = it }
     }
+
+    override suspend fun register(username: String, email: String, password: String): ApiResult<Session> =
+        sessionResult(client.register(username, email, password))
+
+    override suspend fun login(email: String, password: String): ApiResult<Session> =
+        sessionResult(client.login(email, password))
+
+    private fun sessionResult(result: HttpResult): ApiResult<Session> {
+        val parsed = result.decode { parseSession(it) ?: error("Auth session response missing user or token") }
+        if (parsed is ApiResult.Success) runCatching { sessionStore.save(parsed.value.token, parsed.value.user) }
+        return parsed
+    }
+
+    override suspend fun refreshMe(): ApiResult<SessionUser> {
+        val result = client.me().decode {
+            parseSessionUser(it.optJSONObject("user")) ?: error("Me response missing user")
+        }
+        if (result is ApiResult.Failure && result.isAuthFailure()) runCatching { sessionStore.clear() }
+        return result
+    }
+
+    override suspend fun logout(token: String): ApiResult<Unit> = client.logout(token).decode { Unit }
+
+    suspend fun listProjects(): ApiResult<List<ProjectSummary>> =
+        client.request("list_projects", "GET", "/projects").decode { values(it, "items").mapNotNull(::project) }
+
+    suspend fun createProject(name: String, themeKey: String): ApiResult<ProjectSummary> =
+        client.request("create_project", "POST", "/projects", JSONObject().put("name", name.trim()).put("theme_key", themeKey).toString())
+            .decode { project(it) ?: error("Project response missing id") }
+
+    suspend fun projectDetail(projectId: String): ApiResult<ProjectDetail> =
+        client.request("get_project", "GET", "/projects/$projectId").decode(::projectDetail)
+
+    suspend fun projectStatistics(projectId: String, range: ProjectStatisticsRange, timezone: String): ApiResult<ProjectStatistics> =
+        client.request("project_statistics", "GET", "/projects/$projectId/statistics?range=${range.name}&timezone=${java.net.URLEncoder.encode(timezone, "UTF-8")}")
+            .decode { projectStatistics(it, range) }
 
     fun cards(deckId: String): Flow<List<FlashcardEntity>> = cardFlows.getOrPut(deckId) { MutableStateFlow(emptyList()) }
 
@@ -398,12 +467,13 @@ internal class RemoteFlashcardRepository(
         }
     }
 
-    suspend fun rate(cardId: String, rating: Rating): ApiResult<ReviewState> {
+    suspend fun rate(cardId: String, rating: Rating, activeDurationMs: Long = 0L): ApiResult<ReviewState> {
         val body = JSONObject()
             .put("card_id", cardId)
             .put("rating", rating.name)
             .put("client_event_id", UUID.randomUUID().toString())
             .put("device_timezone", java.util.TimeZone.getDefault().id)
+            .put("active_duration_ms", activeDurationMs.coerceIn(0L, 300_000L))
             .toString()
         return client.request("submit_review", "POST", "/review-events", body).decode { value ->
             ReviewState(value.optString("state", ""), value.optString("due").ifBlank { null })
@@ -512,6 +582,7 @@ internal class RemoteFlashcardRepository(
     }
 
     suspend fun getTask(taskId: String): ApiResult<GeneratedTask> = client.request("get_task", "GET", "/tasks/$taskId").decode(::task)
+    suspend fun pauseTask(taskId: String): ApiResult<GeneratedTask> = client.request("pause_task", "POST", "/tasks/$taskId/pause", JSONObject().toString()).decode(::task)
     suspend fun resumeTask(taskId: String): ApiResult<GeneratedTask> = client.request("resume_task", "POST", "/tasks/$taskId/resume", JSONObject().toString()).decode(::task)
 
     private fun <T> ApiResult<String>.asFailure(): ApiResult<T> = when (this) {
@@ -520,10 +591,29 @@ internal class RemoteFlashcardRepository(
     }
 }
 
-private fun <T> HttpResult.decode(mapper: (JSONObject) -> T): ApiResult<T> {
+internal fun <T> HttpResult.decode(mapper: (JSONObject) -> T): ApiResult<T> {
     if (status !in 200..299) return ApiResult.Failure(status, errorCode(body), errorLocalizationKey(body), errorMessage(body))
     return runCatching { mapper(objectValue(body)) }.fold({ ApiResult.Success(it) }, { ApiResult.Failure(status, "INVALID_RESPONSE", null, it.message) })
 }
+
+internal fun parseSession(value: JSONObject): Session? {
+    val user = parseSessionUser(value.optJSONObject("user")) ?: return null
+    val token = value.optString("access_token")
+    return if (token.isBlank()) null else Session(token, user)
+}
+
+/** /auth/me user object: {"user_id": ..., "username": ..., "created_at": ...}. */
+internal fun parseSessionUser(value: JSONObject?): SessionUser? {
+    if (value == null) return null
+    val userId = value.optString("user_id")
+    val username = value.optString("username")
+    if (userId.isBlank() || username.isBlank()) return null
+    return SessionUser(userId, username, value.optString("created_at"))
+}
+
+/** A 401 whose code means the stored session is dead; credential and network failures never qualify. */
+internal fun ApiResult.Failure.isAuthFailure(): Boolean =
+    status == 401 && (code == "AUTH_REQUIRED" || code == "AUTH_INVALID")
 
 private fun objectValue(body: String): JSONObject {
     if (body.isBlank()) return JSONObject()
@@ -684,6 +774,8 @@ private fun task(value: JSONObject): GeneratedTask = GeneratedTask(
     status = value.optString("status", "PENDING"),
     stage = value.optString("stage").ifBlank { null },
     generatedCardCount = value.optInt("generated_card_count", 0),
+    skippedPlanningGroupCount = value.optInt("skipped_planning_group_count", 0),
+    completionReason = value.optString("completion_reason").ifBlank { null },
     resumable = value.optBoolean("resumable", false),
     errorCode = value.optString("error_code").ifBlank { null }
 )

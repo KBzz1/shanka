@@ -28,6 +28,8 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -43,14 +45,21 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.qiuzhao.flashcards.data.remote.DeckSummary
+import com.qiuzhao.flashcards.data.remote.ProjectStatistics
+import com.qiuzhao.flashcards.data.remote.ProjectStatisticsRange
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 
 /** Figma 540:3778: a project owns a statistics and deck-management view. */
 @Composable
-internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummary>, nav: ScreenNavigator) {
+internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummary>, nav: ScreenNavigator, viewModel: AppViewModel) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     var section by rememberSaveable { mutableStateOf(ProjectDetailSection.STATISTICS) }
+    var showToday by rememberSaveable { mutableStateOf(true) }
+    val range = if (showToday) ProjectStatisticsRange.TODAY else ProjectStatisticsRange.TOTAL
+    val statistics by viewModel.projectStatistics.collectAsState()
+    LaunchedEffect(project.id, range) { viewModel.refreshProjectStatistics(project.id, range) }
+    val projectStatistics = statistics["${project.id}:${range.name}"]
     // Figma 540:3778 uses the pale-blue page canvas behind every white data
     // card. Keeping it solid also preserves the contrast after scrolling.
     Box(Modifier.fillMaxSize().background(AppColors.Blue.background)) {
@@ -67,7 +76,7 @@ internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummar
         ) {
             ProjectSectionSwitcher(section, { section = it }, theme = deckTheme(project))
             when (section) {
-                ProjectDetailSection.STATISTICS -> ProjectStatisticsContent(decks, scale, Modifier.weight(1f))
+                ProjectDetailSection.STATISTICS -> ProjectStatisticsContent(decks, projectStatistics, showToday, { showToday = it }, scale, Modifier.weight(1f))
                 ProjectDetailSection.DECKS -> ProjectDecksContent(project, decks, scale, nav, Modifier.weight(1f))
             }
         }
@@ -85,13 +94,13 @@ internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummar
 }
 
 @Composable
-private fun ProjectStatisticsContent(decks: List<DeckSummary>, scale: Float, modifier: Modifier) {
-    var showToday by rememberSaveable { mutableStateOf(true) }
-    val totalCards = decks.sumOf { it.cardCount }
-    val mastered = decks.sumOf { it.masteredCards }
-    val due = decks.sumOf { it.dueCount }
-    val reviewed = if (showToday) due else decks.sumOf { it.reviewCount }
-    val ratio = if (totalCards == 0) 0f else mastered.toFloat() / totalCards
+private fun ProjectStatisticsContent(
+    decks: List<DeckSummary>, statistics: ProjectStatistics?, showToday: Boolean, onTodayChange: (Boolean) -> Unit, scale: Float, modifier: Modifier
+) {
+    val totalCards = statistics?.cardCount ?: 0
+    val mastered = statistics?.masteredCards ?: 0
+    val reviewed = statistics?.reviewedCards ?: 0
+    val ratio = statistics?.masteryRatio ?: 0f
     LazyColumn(
         modifier = modifier.fillMaxWidth().clip(RoundedCornerShape((32 * scale).dp)), contentPadding = PaddingValues(bottom = (180 * scale).dp),
         verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
@@ -108,7 +117,7 @@ private fun ProjectStatisticsContent(decks: List<DeckSummary>, scale: Float, mod
                             Spacer(Modifier.width((8 * scale).dp))
                             AppText("学习数据", AppTextRole.CardTitle, color = LocalContentColor.current, designScale = scale)
                         }
-                        OverviewSwitcher(showToday, { showToday = it }, scale)
+                        OverviewSwitcher(showToday, onTodayChange, scale)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
                         Row(verticalAlignment = Alignment.Bottom) {
@@ -137,11 +146,11 @@ private fun ProjectStatisticsContent(decks: List<DeckSummary>, scale: Float, mod
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)) {
-                ProjectMetricCard("${if (showToday) "12min" else "2.4h"}", "学习时长", "acute", AppColors.Orange.primary, Modifier.weight(1f))
-                ProjectMetricCard("${if (showToday) mastered.coerceAtMost(2) else mastered}", "已掌握卡片", "editor_choice", AppColors.Green.primary, Modifier.weight(1f))
+                ProjectMetricCard(formatStudyDuration(statistics?.studyDurationMinutes ?: 0), "学习时长", "acute", AppColors.Orange.primary, Modifier.weight(1f))
+                ProjectMetricCard("$mastered", "已掌握卡片", "editor_choice", AppColors.Green.primary, Modifier.weight(1f))
             }
         }
-        item { ProjectProgressDistribution(scale, totalCards, mastered) }
+        item { ProjectProgressDistribution(scale, totalCards, mastered, statistics?.reviewStateDistribution.orEmpty()) }
     }
 }
 
@@ -176,17 +185,25 @@ private fun OverviewOption(label: String, selected: Boolean, onClick: () -> Unit
 ) { Box(contentAlignment = Alignment.Center) { AppText(label, AppTextRole.Label, color = LocalContentColor.current, designScale = scale, maxLines = 1) } }
 
 @Composable
-private fun ProjectProgressDistribution(scale: Float, total: Int, mastered: Int) = Surface(
+private fun ProjectProgressDistribution(scale: Float, total: Int, mastered: Int, distribution: Map<String, Int>) = Surface(
     color = AppColors.Card, shape = RoundedCornerShape((32 * scale).dp), modifier = Modifier.fillMaxWidth()
 ) {
     Column(Modifier.padding((24 * scale).dp), verticalArrangement = Arrangement.spacedBy((16 * scale).dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) { MaterialSymbol("local_fire_department", null, tint = AppColors.TextIconDark, size = fixedSp(28 * scale), filled = true); Spacer(Modifier.width((8 * scale).dp)); AppText("复习进度", AppTextRole.CardTitle, color = AppColors.TextIconDark, designScale = scale) }
+        val counts = listOf(
+            distribution["REVIEW"] ?: 0,
+            distribution["REVIEW_KNOWN"] ?: 0,
+            distribution["LEARNING"] ?: 0,
+            distribution["RELEARNING"] ?: 0,
+            distribution["NEW"] ?: 0
+        )
+        val maxCount = counts.maxOrNull()?.coerceAtLeast(1) ?: 1
         val values = listOf(
-            ProgressColumn("熟识", AppColors.Green.primaryStrong, 12.dp),
-            ProgressColumn("认识", AppColors.Green.primarySecondary, 27.dp),
-            ProgressColumn("模糊", AppColors.Orange.primary, 87.dp),
-            ProgressColumn("陌生", AppColors.WarningStrong, 19.dp),
-            ProgressColumn("没学", AppColors.Blue.primarySecondary, 97.dp)
+            ProgressColumn("熟识", AppColors.Green.primaryStrong, (120f * counts[0] / maxCount).dp),
+            ProgressColumn("认识", AppColors.Green.primarySecondary, (120f * counts[1] / maxCount).dp),
+            ProgressColumn("模糊", AppColors.Orange.primary, (120f * counts[2] / maxCount).dp),
+            ProgressColumn("陌生", AppColors.WarningStrong, (120f * counts[3] / maxCount).dp),
+            ProgressColumn("没学", AppColors.Blue.primarySecondary, (120f * counts[4] / maxCount).dp)
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             values.forEach { value ->
@@ -209,6 +226,12 @@ private fun ProjectProgressDistribution(scale: Float, total: Int, mastered: Int)
 }
 
 private data class ProgressColumn(val label: String, val color: Color, val fillHeight: androidx.compose.ui.unit.Dp)
+
+private fun formatStudyDuration(minutes: Int): String = if (minutes < 60) {
+    "${minutes}min"
+} else {
+    "${minutes / 60}.${(minutes % 60) / 6}h"
+}
 
 @Composable
 private fun ProjectDecksContent(project: ProjectSummary, decks: List<DeckSummary>, scale: Float, nav: ScreenNavigator, modifier: Modifier) = LazyColumn(

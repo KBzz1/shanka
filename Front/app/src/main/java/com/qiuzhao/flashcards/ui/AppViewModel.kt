@@ -24,10 +24,15 @@ import com.qiuzhao.flashcards.data.remote.PdfFile
 import com.qiuzhao.flashcards.data.remote.MaterialSummary
 import com.qiuzhao.flashcards.data.remote.MaterialStatus
 import com.qiuzhao.flashcards.data.remote.MaterialType
+import com.qiuzhao.flashcards.data.remote.ProjectStatistics
+import com.qiuzhao.flashcards.data.remote.ProjectStatisticsRange
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
 import com.qiuzhao.flashcards.data.remote.Rating
 import com.qiuzhao.flashcards.data.remote.RemoteFlashcardRepository
 import com.qiuzhao.flashcards.data.remote.projectsForDisplay
+import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
+import com.qiuzhao.flashcards.ui.auth.AuthState
+import com.qiuzhao.flashcards.ui.auth.AuthViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -35,6 +40,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -154,7 +160,10 @@ private object FrontendTestFixtures {
  * layer owns the encrypted device id and debug evidence; Room is deliberately not instantiated.
  */
 class AppViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = RemoteFlashcardRepository(application)
+    private val sessionStore = KeystoreSessionStore(application)
+    private val repository = RemoteFlashcardRepository(application, sessionStore = sessionStore)
+    private val auth = AuthViewModel(repository, sessionStore, viewModelScope)
+    val authState: StateFlow<AuthState> = auth.state
 
     val darkTheme: StateFlow<Boolean?> = application.dataStore.data.map { preferences ->
         if (preferences.contains(DARK_THEME)) preferences[DARK_THEME] else null
@@ -176,6 +185,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _frontendTestDecks: MutableStateFlow<List<DeckSummary>> = MutableStateFlow(FrontendTestFixtures.decks)
     private val _frontendTestCards: MutableStateFlow<Map<String, List<FlashcardEntity>>> = MutableStateFlow(FrontendTestFixtures.cards)
     private val _frontendTestProjects: MutableStateFlow<List<ProjectSummary>> = MutableStateFlow(FrontendTestFixtures.projects)
+    private val _remoteProjects = MutableStateFlow<List<ProjectSummary>>(emptyList())
+    private val _projectStatistics = MutableStateFlow<Map<String, ProjectStatistics>>(emptyMap())
+    val projectStatistics: StateFlow<Map<String, ProjectStatistics>> = _projectStatistics
     private val _frontendTestMaterials: MutableStateFlow<List<MaterialSummary>> = MutableStateFlow(FrontendTestFixtures.materials)
     val decks: StateFlow<List<DeckSummary>> = combine(frontendTestMode, repository.decks, _frontendTestDecks) { enabled, remote, test ->
         if (enabled) test else remote
@@ -184,8 +196,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (enabled) test.sumOf { it.dueCount } else remote
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
     /** Production decks remain visible in a per-device legacy project until the project API is live. */
-    val projects: StateFlow<List<ProjectSummary>> = combine(frontendTestMode, repository.decks, _frontendTestProjects, _frontendTestDecks) { enabled, remote, testProjects, testDecks ->
-        if (enabled) projectsForDisplay(testProjects, testDecks) else projectsForDisplay(emptyList(), remote)
+    val projects: StateFlow<List<ProjectSummary>> = combine(frontendTestMode, _remoteProjects, repository.decks, _frontendTestProjects, _frontendTestDecks) { enabled, remoteProjects, remoteDecks, testProjects, testDecks ->
+        if (enabled) projectsForDisplay(testProjects, testDecks) else projectsForDisplay(remoteProjects, remoteDecks)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     /** Real materials stay empty until the backend confirms the materials list endpoint. */
     val materials: StateFlow<List<MaterialSummary>> = combine(frontendTestMode, _frontendTestMaterials) { enabled, test ->
@@ -214,12 +226,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val textImportFlow: StateFlow<TextImportFlow?> = _textImportFlow
 
     init {
-        refreshDecks()
-        refreshDashboard()
+        auth.checkSession()
+        viewModelScope.launch {
+            auth.state.map { it is AuthState.LoggedIn }.distinctUntilChanged().collect { loggedIn ->
+                if (loggedIn) {
+                    refreshDecks()
+                    refreshProjects()
+                    refreshDashboard()
+                }
+            }
+        }
     }
+
+    fun checkSession() = auth.checkSession()
 
     fun refreshDecks() = viewModelScope.launch {
         if (!frontendTestMode.value) logFailure("list_decks", repository.refreshDecks())
+    }
+
+    fun refreshProjectStatistics(projectId: String, range: ProjectStatisticsRange) = viewModelScope.launch {
+        if (frontendTestMode.value) return@launch
+        when (val result = repository.projectStatistics(projectId, range, java.util.TimeZone.getDefault().id)) {
+            is ApiResult.Success -> _projectStatistics.value = _projectStatistics.value + ("$projectId:${range.name}" to result.value)
+            is ApiResult.Failure -> logFailure("project_statistics", result)
+        }
+    }
+
+    fun refreshProjects() = viewModelScope.launch {
+        if (!frontendTestMode.value) {
+            when (val result = repository.listProjects()) {
+                is ApiResult.Success -> _remoteProjects.value = result.value
+                is ApiResult.Failure -> logFailure("list_projects", result)
+            }
+        }
     }
     fun refreshDashboard() = viewModelScope.launch {
         if (frontendTestMode.value) return@launch
@@ -239,67 +278,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         getApplication<Application>().dataStore.edit { it[FRONTEND_TEST_MODE] = enabled }
     }
 
-    /**
-     * Project creation is intentionally local to the visual-test mode until the
-     * project write contract is supplied by the service. This prevents a new UI
-     * from guessing a production endpoint or silently creating orphaned decks.
-     */
     fun createFrontendTestProject(name: String, themeKey: String, onResult: (String?) -> Unit) = viewModelScope.launch {
         val normalizedName = name.trim()
-        when {
-            !frontendTestMode.value -> onResult("项目服务尚未接入，当前只能在 UI 测试模式中创建项目")
-            normalizedName.isBlank() -> onResult("请填写项目名称")
-            else -> {
-                val id = "frontend-project-${System.currentTimeMillis()}"
-                _frontendTestProjects.value = _frontendTestProjects.value + ProjectSummary(
-                    id = id,
-                    name = normalizedName,
-                    themeKey = themeKey
-                )
-                onResult(null)
-            }
+        if (normalizedName.isBlank()) { onResult("请填写项目名称"); return@launch }
+        if (frontendTestMode.value) {
+            val id = "frontend-project-${System.currentTimeMillis()}"
+            _frontendTestProjects.value = _frontendTestProjects.value + ProjectSummary(id = id, name = normalizedName, themeKey = themeKey)
+            onResult(null)
+            return@launch
+        }
+        when (val result = repository.createProject(normalizedName, themeKey)) {
+            is ApiResult.Success -> { _remoteProjects.value = _remoteProjects.value + result.value; onResult(null) }
+            is ApiResult.Failure -> { logFailure("create_project", result); onResult(result.code) }
         }
     }
 
-    /** Local-only account shell until the authentication service is connected. */
     fun login(email: String, password: String, onResult: (String?) -> Unit) = viewModelScope.launch {
-        val normalizedEmail = email.trim()
-        when {
-            normalizedEmail.isBlank() -> onResult("请输入邮箱")
-            password.isBlank() -> onResult("请输入密码")
-            else -> {
-                getApplication<Application>().dataStore.edit { preferences ->
-                    val savedEmail = preferences[ACCOUNT_EMAIL]
-                    val savedNickname = preferences[ACCOUNT_NICKNAME]
-                    preferences[ACCOUNT_EMAIL] = normalizedEmail
-                    preferences[ACCOUNT_NICKNAME] = if (savedEmail == normalizedEmail && !savedNickname.isNullOrBlank()) {
-                        savedNickname
-                    } else normalizedEmail.substringBefore('@').ifBlank { "学习者" }
-                    preferences[ACCOUNT_LOGGED_IN] = true
-                }
-                onResult(null)
+        if (email.isBlank() || password.isBlank()) { onResult("请输入邮箱和密码"); return@launch }
+        val error = auth.submitLogin(email.trim(), password)
+        if (error == null) {
+            getApplication<Application>().dataStore.edit { preferences ->
+                preferences[ACCOUNT_EMAIL] = email.trim()
+                preferences[ACCOUNT_NICKNAME] = email.trim().substringBefore('@').ifBlank { "学习者" }
+                preferences[ACCOUNT_LOGGED_IN] = true
             }
         }
+        onResult(error)
     }
 
     fun register(nickname: String, email: String, password: String, confirmation: String, onResult: (String?) -> Unit) = viewModelScope.launch {
-        val normalizedNickname = nickname.trim()
-        val normalizedEmail = email.trim()
-        when {
-            normalizedNickname.isBlank() -> onResult("请输入昵称")
-            normalizedEmail.isBlank() || !normalizedEmail.contains('@') -> onResult("请输入有效邮箱")
-            password.length < 6 -> onResult("密码至少需要 6 位")
-            password != confirmation -> onResult("两次输入的密码不一致")
-            else -> {
-                getApplication<Application>().dataStore.edit { preferences ->
-                    preferences[ACCOUNT_NICKNAME] = normalizedNickname
-                    preferences[ACCOUNT_EMAIL] = normalizedEmail
-                    preferences[ACCOUNT_LOGGED_IN] = false
-                }
-                onResult(null)
-            }
-        }
+        if (nickname.isBlank() || email.isBlank() || password.isBlank()) { onResult("请完整填写注册信息"); return@launch }
+        if (!AuthViewModel.passwordsMatch(password, confirmation)) { onResult(AuthViewModel.PASSWORD_MISMATCH_MESSAGE); return@launch }
+        onResult(auth.submitRegister(nickname.trim(), email.trim(), password))
     }
+
+    fun logout() = auth.logout()
+    fun clearAuthError() = auth.clearError()
 
     fun startStudy(deckId: String, reviewMode: Boolean) = viewModelScope.launch {
         if (frontendTestMode.value) {
@@ -317,7 +331,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshCards(deckId: String) = viewModelScope.launch {
         if (!frontendTestMode.value) logFailure("list_cards", repository.refreshCards(deckId))
     }
-    fun rate(cardId: String, rating: Rating) = viewModelScope.launch {
+    fun rate(cardId: String, rating: Rating, activeDurationMs: Long = 0L) = viewModelScope.launch {
         if (frontendTestMode.value) {
             val reviewed = _studyCards.value.firstOrNull { it.id == cardId }
             _studyCards.value = _studyCards.value.filterNot { it.id == cardId }
@@ -334,7 +348,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             return@launch
         }
-        when (val result = repository.rate(cardId, rating)) {
+        when (val result = repository.rate(cardId, rating, activeDurationMs)) {
             is ApiResult.Success -> refreshDecks()
             is ApiResult.Failure -> logFailure("submit_review", result)
         }
@@ -563,6 +577,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun pausePdfTask() = viewModelScope.launch {
+        val task = _pdfTask.value ?: return@launch
+        when (val result = repository.pauseTask(task.id)) {
+            is ApiResult.Success -> _pdfTask.value = result.value
+            is ApiResult.Failure -> logFailure("pause_task", result)
+        }
+    }
+
     fun resumePdfTask() = viewModelScope.launch {
         val task = _pdfTask.value ?: return@launch
         when (val result = repository.resumeTask(task.id)) {
@@ -668,6 +690,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun <T> logFailure(operation: String, result: ApiResult<T>) {
-        if (result is ApiResult.Failure && BuildConfig.DEBUG) Log.w("ShankaNetwork", "op=$operation status=${result.status} code=${result.code ?: "-"} localization=${result.localizationKey ?: "-"}")
+        if (result is ApiResult.Failure) {
+            auth.onBusinessFailure(result)
+            if (BuildConfig.DEBUG) Log.w("ShankaNetwork", "op=$operation status=${result.status} code=${result.code ?: "-"} localization=${result.localizationKey ?: "-"}")
+        }
     }
 }

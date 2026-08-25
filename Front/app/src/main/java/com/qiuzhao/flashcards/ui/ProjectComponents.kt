@@ -157,7 +157,7 @@ private fun AppBottomNavigationItemContent(
 internal fun ProjectSectionSwitcher(
     selected: ProjectDetailSection,
     onSelect: (ProjectDetailSection) -> Unit,
-    theme: DeckTheme,
+    theme: DeckTheme = DeckThemes.first(),
     modifier: Modifier = Modifier
 ) {
     Surface(

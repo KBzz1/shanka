@@ -2,6 +2,7 @@ package com.qiuzhao.flashcards.ui
 
 import android.app.Activity
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -179,6 +180,7 @@ internal fun StudyScreen(viewModel: AppViewModel, nav: ScreenNavigator, deckId: 
     if (reviewMode && remainingCards.isNotEmpty()) {
         val safeIndex = currentIndex.coerceIn(0, remainingCards.lastIndex)
         val card = remainingCards[safeIndex]
+        val cardShownAt = remember(card.id) { SystemClock.elapsedRealtime() }
         ReviewStudy(
             card = card,
             position = initialCardIds.orEmpty().indexOf(card.id) + 1,
@@ -192,7 +194,8 @@ internal fun StudyScreen(viewModel: AppViewModel, nav: ScreenNavigator, deckId: 
             onPrevious = { currentIndex = (safeIndex - 1).coerceAtLeast(0) },
             onNext = { currentIndex = (safeIndex + 1).coerceAtMost(remainingCards.lastIndex) },
             onRate = { rating ->
-                viewModel.rate(card.id, rating)
+                val activeDurationMs = (SystemClock.elapsedRealtime() - cardShownAt).coerceIn(0L, 300_000L)
+                viewModel.rate(card.id, rating, activeDurationMs)
                 if (rating == Rating.GOOD) rememberedCount++ else forgottenCount++
                 val updatedIds = initialCardIds.orEmpty().filterNot { it == card.id }
                 remainingCardIds = updatedIds

@@ -3,6 +3,7 @@ package com.qiuzhao.flashcards.ui
 import android.app.Activity
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -150,6 +151,8 @@ import com.qiuzhao.flashcards.ui.motion.AppMotion
 import com.qiuzhao.flashcards.ui.navigation.AppNavigator
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 import com.qiuzhao.flashcards.ui.navigation.rememberAppNavigationState
+import com.qiuzhao.flashcards.ui.navigation.RootNavigationRoutes
+import com.qiuzhao.flashcards.ui.auth.AuthState
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -166,20 +169,29 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val dueCount by viewModel.dueCount.collectAsState()
     val dashboard by viewModel.dashboard.collectAsState()
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
-    val accountBootstrap by viewModel.accountBootstrap.collectAsState()
-    val account = accountBootstrap.account
+    val authState by viewModel.authState.collectAsState()
+    val account = (authState as? AuthState.LoggedIn)?.user?.let { user ->
+        LocalAccount(user.username, viewModel.accountBootstrap.value.account?.email.orEmpty())
+    }
     var projectSearchQuery by remember { mutableStateOf("") }
-    var initialAuthNavigationHandled by rememberSaveable { mutableStateOf(false) }
-    val shouldOpenFirstLogin = accountBootstrap.loaded && account == null && !initialAuthNavigationHandled
-    LaunchedEffect(shouldOpenFirstLogin) {
-        if (shouldOpenFirstLogin) {
-            navigator.navigate(AppRoute.FirstLogin)
-            initialAuthNavigationHandled = true
+    val toastContext = LocalContext.current
+    LaunchedEffect(authState) {
+        when (val state = authState) {
+            AuthState.CheckingSession -> Unit
+            is AuthState.LoggedOut -> {
+                if (navigationState.currentRoute in RootNavigationRoutes) navigator.navigate(AppRoute.FirstLogin)
+            }
+            is AuthState.LoggedIn -> {
+                state.error?.let { message ->
+                    Toast.makeText(toastContext, message, Toast.LENGTH_SHORT).show()
+                    viewModel.clearAuthError()
+                }
+                while (navigationState.currentRoute !in RootNavigationRoutes) navigator.goBack()
+            }
         }
     }
-    // Do not briefly render Home while the local account record is loading or the
-    // first-login destination is being placed on the stack.
-    if (!accountBootstrap.loaded || shouldOpenFirstLogin) {
+    // The existing GitHub login/register Composables remain the sole visual source.
+    if (authState is AuthState.CheckingSession || (authState is AuthState.LoggedOut && navigationState.currentRoute in RootNavigationRoutes)) {
         Box(Modifier.fillMaxSize().background(AppColors.Blue.background))
         return
     }
@@ -199,7 +211,8 @@ fun FlashcardsApp(viewModel: AppViewModel) {
             if (project == null) LoadingScreen() else ProjectDetailScreen(
                 project,
                 decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id },
-                navigator
+                navigator,
+                viewModel
             )
         }
         entry<AppRoute.MaterialManagement> { SettingsUnbuiltScreen("资料管理", navigator) }
