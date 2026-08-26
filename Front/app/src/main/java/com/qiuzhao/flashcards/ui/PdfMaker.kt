@@ -64,7 +64,7 @@ private data class ChapterChoice(val chapter: PdfChapter, val selected: Boolean 
 /**
  * Reuses b944790 chapter/settings/sample visuals, but binds them to one existing V2.5 PDF
  * project. Project creation happens on the project page; this flow never accepts text/Markdown
- * and never exposes pause/resume semantics.
+ * and never exposes stopped-task controls.
  */
 @Composable
 internal fun PdfSmartCardsFlow(decks: List<DeckSummary>, viewModel: AppViewModel, nav: ScreenNavigator) {
@@ -266,7 +266,7 @@ internal fun PdfFlowLayout(
         Box(Modifier.fillMaxSize()) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(start = (16 * scale).dp, top = (132 * scale).dp, end = (16 * scale).dp)
-                    .clip(RoundedCornerShape((32 * scale).dp)),
+                    .clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
                 contentPadding = PaddingValues(bottom = if (footer == null) (NaturalScrollTail * scale).dp else (fixedBottomControlScrollTail(bottomOffset = 24) * scale).dp),
                 verticalArrangement = Arrangement.spacedBy((16 * scale).dp),
                 content = content,
@@ -366,7 +366,7 @@ private fun ChapterChoiceCard(
 ) {
     val surface = if (choice.selected) AppColors.Green.background else AppColors.Blue.background
     val accent = if (choice.selected) AppColors.Green.primary else AppColors.Blue.primary
-    Surface(onClick = onToggle, color = surface, shape = RoundedCornerShape((32 * scale).dp), modifier = Modifier.fillMaxWidth()) {
+    Surface(onClick = onToggle, color = surface, shape = RoundedCornerShape((AppShapeRadius * scale).dp), modifier = Modifier.fillMaxWidth()) {
         Row(
             Modifier.padding((20 * scale).dp),
             horizontalArrangement = Arrangement.spacedBy((12 * scale).dp),

@@ -180,7 +180,7 @@ internal fun HomeScreen(
             Box(Modifier.fillMaxSize().padding(start = sideInset.dp, top = (88 * compactScale).dp, end = sideInset.dp)) {
                 // The positioning box establishes the viewport bounds. Only its inner
                 // child is clipped, so the crop begins below the fixed settings layer.
-                Box(Modifier.fillMaxSize().clip(RoundedCornerShape(AppShapeRadius.dp))) {
+                Box(Modifier.fillMaxSize().clip(RoundedCornerShape(AppScrollableContentClipRadius.dp))) {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         // Keep the last card near, but clear of, the shared floating nav.
@@ -309,7 +309,7 @@ private fun ContinueLearningCard(
             progress = 0f,
             theme = deckTheme(ProjectSummary(id = "empty", name = "")),
             icon = "playing_cards",
-            variant = ProjectThemedCardVariant.TINTED,
+            variant = ProjectThemedCardVariant.BASE_PAGE,
             designScale = compactScale,
             onClick = onOpenDeck,
             actionLabel = "创建项目",
@@ -328,7 +328,7 @@ private fun ContinueLearningCard(
         progress = progress,
         theme = theme,
         icon = studyDeckIcon(deck),
-        variant = ProjectThemedCardVariant.TINTED,
+        variant = ProjectThemedCardVariant.BASE_PAGE,
         designScale = compactScale,
         onClick = onOpenDeck,
         actionLabel = "继续复习",
@@ -381,7 +381,7 @@ private fun QuickLearningCard(
             }
             Surface(
                 onClick = onClick,
-                shape = RoundedCornerShape(AppShapeRadius.dp),
+                shape = RoundedCornerShape((AppButtonShapeRadius * compactScale).dp),
                 color = button,
                 contentColor = textColor,
                 modifier = Modifier.fillMaxWidth().height((52 * compactScale).dp)

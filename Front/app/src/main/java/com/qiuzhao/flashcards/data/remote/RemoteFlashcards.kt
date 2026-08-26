@@ -557,7 +557,6 @@ open class RemoteFlashcardRepository(
     }
 
     suspend fun getTask(taskId: String): ApiResult<GeneratedTask> = client.request("get_task", "GET", "/tasks/$taskId").decode(::task)
-    suspend fun resumeTask(taskId: String): ApiResult<GeneratedTask> = client.request("resume_task", "POST", "/tasks/$taskId/resume", JSONObject().toString()).decode(::task)
 
     private fun <T> ApiResult<String>.asFailure(): ApiResult<T> = when (this) {
         is ApiResult.Failure -> this

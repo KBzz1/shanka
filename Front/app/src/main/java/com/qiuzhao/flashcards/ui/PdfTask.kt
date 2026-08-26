@@ -98,7 +98,7 @@ internal fun PdfTaskScreen(
 
 @Composable
 private fun TaskGenerationCard(designScale: Float, modifier: Modifier = Modifier) = Surface(
-    shape = RoundedCornerShape((32 * designScale).dp),
+    shape = RoundedCornerShape((AppShapeRadius * designScale).dp),
     color = AppColors.Blue.background,
     modifier = modifier.fillMaxWidth().height((265 * designScale).dp),
 ) {
@@ -123,7 +123,7 @@ private fun TaskGenerationCard(designScale: Float, modifier: Modifier = Modifier
 
 @Composable
 private fun TaskCompletedCard(generatedCardCount: Int, designScale: Float, modifier: Modifier = Modifier) = Surface(
-    shape = RoundedCornerShape((32 * designScale).dp),
+    shape = RoundedCornerShape((AppShapeRadius * designScale).dp),
     color = AppColors.Blue.background,
     modifier = modifier.fillMaxWidth(),
 ) {
@@ -142,7 +142,7 @@ private fun TaskCompletedCard(generatedCardCount: Int, designScale: Float, modif
 
 @Composable
 private fun TaskTerminalCard(title: String, detail: String, icon: String, designScale: Float, modifier: Modifier = Modifier) = Surface(
-    shape = RoundedCornerShape((32 * designScale).dp),
+    shape = RoundedCornerShape((AppShapeRadius * designScale).dp),
     color = AppColors.Blue.background,
     modifier = modifier.fillMaxWidth(),
 ) {

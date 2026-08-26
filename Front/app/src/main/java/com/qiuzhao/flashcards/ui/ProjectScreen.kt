@@ -33,6 +33,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -69,7 +70,8 @@ internal fun ProjectScreen(
                 scale = scale,
             ) { nav.navigate(AppRoute.ProjectCreate) }
             LazyColumn(
-                modifier = Modifier.weight(1f).fillMaxWidth(),
+                modifier = Modifier.weight(1f).fillMaxWidth()
+                    .clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
                 verticalArrangement = Arrangement.spacedBy((16 * scale).dp),
                 contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * scale).dp),
             ) {
@@ -117,7 +119,7 @@ private fun ProjectRootAction(
 @Composable
 private fun EmptyProjectCard(scale: Float) = Surface(
     color = AppColors.Blue.background,
-    shape = RoundedCornerShape((32 * scale).dp),
+    shape = RoundedCornerShape((AppShapeRadius * scale).dp),
     modifier = Modifier.fillMaxWidth(),
 ) {
     Column(
@@ -147,7 +149,7 @@ private fun ProjectSummaryCard(project: ProjectSummary, decks: List<DeckSummary>
         progress = ratio,
         theme = theme,
         icon = "heap_snapshot_multiple",
-        variant = ProjectThemedCardVariant.TINTED,
+        variant = ProjectThemedCardVariant.BASE_PAGE,
         designScale = scale,
         onClick = onClick,
     )
@@ -186,7 +188,8 @@ internal fun ProjectCreateScreen(
         )
         LazyColumn(
             modifier = Modifier.fillMaxSize().statusBarsPadding()
-                .padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp),
+                .padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp)
+                .clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
             contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail(bottomOffset = 16) * scale).dp),
             verticalArrangement = Arrangement.spacedBy((16 * scale).dp),
         ) {
@@ -263,7 +266,7 @@ internal fun ProjectCreateScreen(
 @Composable
 private fun ProjectCreationPanel(theme: DeckTheme, scale: Float, content: @Composable ColumnScope.() -> Unit) = Surface(
     color = theme.surface,
-    shape = RoundedCornerShape((32 * scale).dp),
+    shape = RoundedCornerShape((AppShapeRadius * scale).dp),
     modifier = Modifier.fillMaxWidth(),
 ) { Column(Modifier.padding((20 * scale).dp), verticalArrangement = Arrangement.spacedBy((16 * scale).dp), content = content) }
 
@@ -304,7 +307,7 @@ private fun ProjectPdfAction(selectedName: String?, theme: DeckTheme, scale: Flo
     onClick = onClick,
     color = theme.primary,
     contentColor = theme.onPrimary,
-    shape = RoundedCornerShape((32 * scale).dp),
+    shape = RoundedCornerShape((AppButtonShapeRadius * scale).dp),
     modifier = Modifier.fillMaxWidth().height((80 * scale).dp),
 ) {
     Row(Modifier.fillMaxSize().padding((12 * scale).dp), verticalAlignment = Alignment.CenterVertically) {

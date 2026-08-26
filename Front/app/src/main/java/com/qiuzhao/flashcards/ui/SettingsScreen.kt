@@ -179,7 +179,7 @@ internal fun SettingsScreen(viewModel: AppViewModel, nav: ScreenNavigator) {
                         top = (148 * designScale).dp,
                         end = (16 * designScale).dp
                     )
-                    .clip(RoundedCornerShape(AppShapeRadius.dp))
+                    .clip(RoundedCornerShape(AppScrollableContentClipRadius.dp))
             ) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -210,7 +210,6 @@ internal fun SettingsScreen(viewModel: AppViewModel, nav: ScreenNavigator) {
                     )
                     .zIndex(1f)
             )
-            BottomContentFade(designScale, Modifier.align(Alignment.BottomCenter))
         }
     }
 
