@@ -25,7 +25,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.draggable
@@ -285,7 +284,6 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                     selected = selectedRootTab,
                     onSettings = { navigator.navigate(AppRoute.Settings) },
                     account = account,
-                    onAvatar = { navigator.navigate(AppRoute.Login) },
                     projectSearchQuery = projectSearchQuery,
                     onProjectSearchChange = { projectSearchQuery = it }
                 )
@@ -314,7 +312,6 @@ private fun RootPersistentHeader(
     selected: RootTab,
     onSettings: () -> Unit,
     account: LocalAccount?,
-    onAvatar: () -> Unit,
     projectSearchQuery: String,
     onProjectSearchChange: (String) -> Unit
 ) {
@@ -326,12 +323,12 @@ private fun RootPersistentHeader(
         ) {
             SettingsHeaderButton(onSettings, (56 * scale).dp)
             StudySearchField(projectSearchQuery, onProjectSearchChange, Modifier.weight(1f), scale)
-            ImageAvatar((56 * scale).dp, account, onAvatar)
+            ImageAvatar((56 * scale).dp, account)
         }
     } else {
         ScreenTopInformationBar(
             title = null, subtitle = null, onBack = null, onSettings = onSettings,
-            account = account, onAvatar = onAvatar, modifier = Modifier.zIndex(2f)
+            account = account, modifier = Modifier.zIndex(2f)
         )
     }
 }
@@ -348,7 +345,6 @@ internal fun ScreenTopInformationBar(
     onBack: (() -> Unit)?,
     onSettings: (() -> Unit)? = null,
     account: LocalAccount? = null,
-    onAvatar: (() -> Unit)? = null,
     backContainer: Color? = null,
     titleColor: Color? = null,
     onTrailingAction: (() -> Unit)? = null,
@@ -364,7 +360,6 @@ internal fun ScreenTopInformationBar(
         onBack = onBack,
         onSettings = onSettings,
         account = account,
-        onAvatar = onAvatar,
         backContainer = backContainer,
         titleColor = titleColor,
         onTrailingAction = onTrailingAction,
@@ -383,7 +378,6 @@ private fun TopInformationBarContent(
     onBack: (() -> Unit)?,
     onSettings: (() -> Unit)?,
     account: LocalAccount?,
-    onAvatar: (() -> Unit)?,
     backContainer: Color?,
     titleColor: Color?,
     onTrailingAction: (() -> Unit)?,
@@ -396,7 +390,7 @@ private fun TopInformationBarContent(
     Box(modifier.height((56 * scale).dp)) {
         if (onBack == null) {
             SettingsHeaderButton(onSettings ?: {}, (56 * scale).dp)
-            Box(Modifier.align(Alignment.CenterEnd)) { ImageAvatar((56 * scale).dp, account, onAvatar ?: {}) }
+            Box(Modifier.align(Alignment.CenterEnd)) { ImageAvatar((56 * scale).dp, account) }
         } else {
             Surface(
                 onClick = onBack,
@@ -479,7 +473,6 @@ private fun SettingsHeaderButton(onClick: () -> Unit, size: androidx.compose.ui.
 private fun ImageAvatar(
     size: androidx.compose.ui.unit.Dp = 56.dp,
     account: LocalAccount? = null,
-    onClick: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier.size(size).clip(RoundedCornerShape(999.dp))
@@ -489,7 +482,6 @@ private fun ImageAvatar(
                 )
             )
             .padding((4f / 56f * size.value).dp)
-            .clickable(onClick = onClick)
     ) {
         if (account == null) {
             Surface(

@@ -1,6 +1,7 @@
 package com.qiuzhao.flashcards.ui
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -61,5 +62,23 @@ class ProjectComponentsTest {
 
         rule.onNodeWithContentDescription("返回").assertIsDisplayed()
         rule.onNodeWithContentDescription("编辑").assertIsDisplayed()
+    }
+
+    @Test fun primaryHeaderAvatarIsIdentityDisplayWithoutNavigationAction() {
+        rule.setContent {
+            AutumnFlashcardsTheme {
+                ScreenTopInformationBar(
+                    title = null,
+                    subtitle = null,
+                    onBack = null,
+                    onSettings = {},
+                    account = LocalAccount("酱油四", "979492620@qq.com"),
+                )
+            }
+        }
+
+        rule.onNodeWithContentDescription("酱油四的头像")
+            .assertIsDisplayed()
+            .assertHasNoClickAction()
     }
 }
