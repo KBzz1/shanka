@@ -4,11 +4,10 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -20,9 +19,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.qiuzhao.flashcards.ui.AppViewModel
 import com.qiuzhao.flashcards.ui.AutumnFlashcardsTheme
 import com.qiuzhao.flashcards.ui.FlashcardsApp
+import com.qiuzhao.flashcards.ui.LoginScreen
+import com.qiuzhao.flashcards.ui.RegisterScreen
 import com.qiuzhao.flashcards.ui.auth.AuthLoadingScreen
-import com.qiuzhao.flashcards.ui.auth.AuthScreen
 import com.qiuzhao.flashcards.ui.auth.AuthState
+import com.qiuzhao.flashcards.ui.navigation.AppNavigator
+import com.qiuzhao.flashcards.ui.navigation.AppRoute
+import com.qiuzhao.flashcards.ui.navigation.rememberAppNavigationState
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -44,29 +48,39 @@ class MainActivity : ComponentActivity() {
  */
 @Composable
 fun ShankaRoot(appViewModel: AppViewModel) {
-    val darkPreference by appViewModel.darkTheme.collectAsState()
-    val dark = darkPreference ?: isSystemInDarkTheme()
-    AutumnFlashcardsTheme(dark = dark) {
+    AutumnFlashcardsTheme {
         val authState by appViewModel.authState.collectAsState()
         when (authState) {
             is AuthState.CheckingSession -> AuthLoadingScreen()
-            is AuthState.LoggedOut -> AuthScreen(appViewModel.auth)
+            is AuthState.LoggedOut -> AuthEntry(appViewModel)
             is AuthState.LoggedIn -> {
-                // 启动校验网络失败时保留会话进入主界面，仅以 snackbar 提示网络错误。
-                val error = (authState as AuthState.LoggedIn).error
-                val snackbarHostState = remember { SnackbarHostState() }
-                LaunchedEffect(error) {
-                    if (error != null) {
-                        // showSnackbar 挂起到提示消失；在此之前清 error 会取消本效果导致提示一闪而过。
-                            snackbarHostState.showSnackbar(error)
-                            appViewModel.clearAuthError()
-                    }
+                val authError = (authState as AuthState.LoggedIn).error
+                val actionError by appViewModel.uiMessage.collectAsState()
+                val message = actionError ?: authError
+                LaunchedEffect(message) {
+                    if (message == null) return@LaunchedEffect
+                    // Release error feedback is transient: failures never look like a completed action.
+                    delay(3_000)
+                    if (actionError != null) appViewModel.clearUiMessage() else appViewModel.clearAuthError()
                 }
                 Box(Modifier.fillMaxSize()) {
                     FlashcardsApp(appViewModel)
-                    SnackbarHost(snackbarHostState, Modifier.align(Alignment.BottomCenter))
+                    if (message != null) {
+                        Snackbar(Modifier.align(Alignment.BottomCenter)) { Text(message) }
+                    }
                 }
             }
         }
+    }
+}
+
+/** The signed-out state uses the upstream b944790 login/register surfaces, not a second visual shell. */
+@Composable
+private fun AuthEntry(appViewModel: AppViewModel) {
+    val navigationState = rememberAppNavigationState()
+    val navigator = remember { AppNavigator(navigationState) }
+    when (navigationState.currentRoute) {
+        AppRoute.Register -> RegisterScreen(appViewModel, navigator)
+        else -> LoginScreen(appViewModel, navigator, showBack = false, firstLaunch = true)
     }
 }

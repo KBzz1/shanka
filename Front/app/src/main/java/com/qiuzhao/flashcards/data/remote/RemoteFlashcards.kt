@@ -2,7 +2,6 @@ package com.qiuzhao.flashcards.data.remote
 
 import android.content.Context
 import android.net.Uri
-import android.os.Build
 import android.util.Log
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.CardDraft
@@ -343,18 +342,8 @@ class BackendClient(
         const val MAX_DEBUG_LOG_BYTES = 256 * 1024L
         val debugLogLock = Any()
 
-        fun defaultBaseUrl(): String =
-            if (BuildConfig.DEBUG && isAndroidEmulator()) "http://10.0.2.2:8000" else "https://shanka.kbzz1.top"
-
-        fun isAndroidEmulator(): Boolean =
-            Build.FINGERPRINT.startsWith("generic") ||
-                Build.FINGERPRINT.startsWith("unknown") ||
-                Build.MODEL.contains("google_sdk", ignoreCase = true) ||
-                Build.MODEL.contains("Emulator", ignoreCase = true) ||
-                Build.MODEL.contains("Android SDK built for", ignoreCase = true) ||
-                Build.MANUFACTURER.contains("Genymotion", ignoreCase = true) ||
-                (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic")) ||
-                "google_sdk" == Build.PRODUCT
+        /** Build variants are the sole authority: debug emulator loopback or fixed Release host. */
+        fun defaultBaseUrl(): String = BuildConfig.API_BASE_URL
     }
 }
 

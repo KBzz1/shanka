@@ -20,13 +20,6 @@ sealed interface AppRoute : NavKey {
     @Serializable data object ProjectCreate : AppRoute
     /** Reuses the project form with a pre-existing project as its editing target. */
     @Serializable data class ProjectEdit(val id: String) : AppRoute
-    @Serializable data class ProjectTextEditor(
-        val materialId: String? = null,
-        val themeKey: String = "azure"
-    ) : AppRoute
-    @Serializable data object MaterialManagement : AppRoute
-    @Serializable data object MaterialImport : AppRoute
-    @Serializable data object TextImport : AppRoute
     @Serializable data class Deck(val id: String) : AppRoute
     @Serializable data class Study(val deckId: String, val reviewMode: Boolean) : AppRoute
     @Serializable data object Import : AppRoute
@@ -40,8 +33,6 @@ sealed interface AppRoute : NavKey {
     @Serializable data object Login : AppRoute
     @Serializable data object Register : AppRoute
     @Serializable data object Settings : AppRoute
-    @Serializable data object SettingsIdentity : AppRoute
-    @Serializable data class SettingsUnbuilt(val title: String) : AppRoute
 }
 
 /** Figma 568:2326 defines this root navigation order. */

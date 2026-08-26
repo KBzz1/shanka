@@ -4,6 +4,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import com.qiuzhao.flashcards.data.remote.ProjectSummary
 import org.junit.Rule
 import org.junit.Test
 
@@ -32,7 +33,11 @@ class ProjectComponentsTest {
     @Test fun projectSwitcherExposesSelectedSectionToAssistiveTechnology() {
         rule.setContent {
             AutumnFlashcardsTheme {
-                ProjectSectionSwitcher(ProjectDetailSection.DECKS, onSelect = {})
+                ProjectSectionSwitcher(
+                    selected = ProjectDetailSection.DECKS,
+                    onSelect = {},
+                    theme = deckTheme(ProjectSummary(id = "test", name = "test")),
+                )
             }
         }
 

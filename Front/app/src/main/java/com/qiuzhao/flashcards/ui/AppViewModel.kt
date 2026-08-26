@@ -2,12 +2,8 @@ package com.qiuzhao.flashcards.ui
 
 import android.app.Application
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
-import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.intPreferencesKey
-import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -16,392 +12,230 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.CardDraft
 import com.qiuzhao.flashcards.data.remote.ApiKeyStatus
-import com.qiuzhao.flashcards.data.remote.ApiResult
-import com.qiuzhao.flashcards.data.remote.Dashboard
+import com.qiuzhao.flashcards.data.remote.AuthRepository
 import com.qiuzhao.flashcards.data.remote.DeckProgress
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.FlashcardEntity
-import com.qiuzhao.flashcards.data.remote.GeneratedTask
 import com.qiuzhao.flashcards.data.remote.PdfChapter
 import com.qiuzhao.flashcards.data.remote.PdfFile
-import com.qiuzhao.flashcards.data.remote.MaterialSummary
-import com.qiuzhao.flashcards.data.remote.MaterialStatus
-import com.qiuzhao.flashcards.data.remote.MaterialType
-import com.qiuzhao.flashcards.data.remote.ProjectSummary
 import com.qiuzhao.flashcards.data.remote.Rating
 import com.qiuzhao.flashcards.data.remote.RemoteFlashcardRepository
-import com.qiuzhao.flashcards.data.remote.projectsForDisplay
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import com.qiuzhao.flashcards.data.remote.v25.BackendV25Transport
+import com.qiuzhao.flashcards.data.remote.v25.RemoteV25Repository
 import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
 import com.qiuzhao.flashcards.data.session.SessionStore
+import com.qiuzhao.flashcards.domain.v25.V25ApiKeyState
+import com.qiuzhao.flashcards.domain.v25.V25BrowseFilter
+import com.qiuzhao.flashcards.domain.v25.V25BrowseOrder
+import com.qiuzhao.flashcards.domain.v25.V25Card
+import com.qiuzhao.flashcards.domain.v25.V25CardDeletionBatch
+import com.qiuzhao.flashcards.domain.v25.V25CardDraft
+import com.qiuzhao.flashcards.domain.v25.V25CoverageMode
+import com.qiuzhao.flashcards.domain.v25.V25Deck
+import com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio
+import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
+import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
+import com.qiuzhao.flashcards.domain.v25.V25LearningProject
+import com.qiuzhao.flashcards.domain.v25.V25MasteryFilter
+import com.qiuzhao.flashcards.domain.v25.V25Rating
+import com.qiuzhao.flashcards.domain.v25.V25Repository
+import com.qiuzhao.flashcards.domain.v25.V25Result
+import com.qiuzhao.flashcards.domain.v25.V25StatsDashboard
+import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
+import com.qiuzhao.flashcards.domain.v25.V25TodayPlan
+import com.qiuzhao.flashcards.domain.v25.isAuthFailure
 import com.qiuzhao.flashcards.ui.auth.AuthState
 import com.qiuzhao.flashcards.ui.auth.AuthViewModel
+import com.qiuzhao.flashcards.ui.auth.ErrorMessages
+import java.time.Duration
+import java.time.Instant
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
-import kotlin.math.roundToInt
 
+/** Configuration captured before samples are requested. Percentages are validated by V2.5. */
 data class PdfGenerationConfig(
     val quantity: String = "BALANCED",
     val basic: Float = .4f,
     val understanding: Float = .4f,
     val application: Float = .2f,
-    val requirement: String = ""
+    val requirement: String = "",
 )
 
-/** Ephemeral handoff from pasted text into the shared smart-card generation flow. */
-data class TextImportFlow(val deckName: String, val cards: List<CardDraft>)
-internal enum class ProjectDraftMaterialType { FILE, TEXT }
-
-/** Creation-screen state deliberately remains local until the project API accepts writes. */
-internal data class ProjectDraftMaterial(
-    val id: String,
-    val type: ProjectDraftMaterialType,
-    val title: String,
-    val extension: String? = null,
-    val content: String = ""
-)
 data class LocalAccount(val nickname: String, val email: String)
+
 data class AccountBootstrap(val loaded: Boolean = false, val account: LocalAccount? = null)
 
 data class PdfReadFailure(val title: String, val detail: String)
 
-/** Server-derived weekly activity. It is not calculated from a local review history. */
+/** Server-derived weekly activity. The UI never derives it from a local review history. */
 data class WeeklyActivityData(
     val dailyCounts: List<Int> = List(7) { 0 },
     val total: Int = 0,
     val previousTotal: Int = 0,
-    val changePercent: Int? = null
+    val changePercent: Int? = null,
 )
 
-private fun dashboardWeeklyActivity(dashboard: Dashboard?): WeeklyActivityData {
-    val raw = dashboard?.raw ?: return WeeklyActivityData()
-    val activity = raw.optJSONArray("weekly_activity")
-    val dailyCounts = List(7) { index -> activity?.optInt(index, 0) ?: 0 }
-    val changePercent = if (raw.has("week_change_rate") && !raw.isNull("week_change_rate")) {
-        (raw.optDouble("week_change_rate") * 100).roundToInt()
-    } else {
-        null
-    }
-    return WeeklyActivityData(
-        dailyCounts = dailyCounts,
-        total = raw.optInt("weekly_total", dailyCounts.sum()),
-        changePercent = changePercent
-    )
-}
+/** Typed presentation projection of V2.5 dashboard data; no screen reads transport JSON. */
+data class DashboardUiState(
+    val hasData: Boolean = false,
+    val weeklyGoal: Int = 0,
+    val completed: Int = 0,
+    val weeklyGoalRate: Float? = null,
+    val recallAccuracy: Float? = null,
+    val firstAttemptAccuracy: Float? = null,
+    val retentionRate: Float? = null,
+    val streakDays: Int = 0,
+    val masteredCards: Int = 0,
+)
 
-private val Application.dataStore by preferencesDataStore("preferences")
-private val DARK_THEME = booleanPreferencesKey("dark_theme")
-private val WEEKLY_GOAL = intPreferencesKey("weekly_goal")
-private val FRONTEND_TEST_MODE = booleanPreferencesKey("frontend_test_mode")
-private val ACCOUNT_EMAIL = stringPreferencesKey("account_email")
-private val ACCOUNT_NICKNAME = stringPreferencesKey("account_nickname")
-private val ACCOUNT_LOGGED_IN = booleanPreferencesKey("account_logged_in")
-private const val DEFAULT_WEEKLY_GOAL = 50
+/** Typed projection of the server-computed plan used by the home page. */
+data class TodayPlanUiState(
+    val dailyGoal: Int = 0,
+    val completedCount: Int = 0,
+    val dueCount: Int = 0,
+    val remainingCount: Int = 0,
+)
 
-/** Local-only fixture data for visual and interaction testing. Edit these values to exercise UI states without changing a server record. */
-private object FrontendTestFixtures {
-    val projects: List<ProjectSummary> = listOf(
-        ProjectSummary(id = "frontend-project-design", name = "世界现代设计史", themeKey = "violet", materialCount = 2),
-        ProjectSummary(id = "frontend-project-mechanics", name = "机械振动基础", themeKey = "azure", materialCount = 1)
-    )
-
-    val materials: List<MaterialSummary> = listOf(
-        MaterialSummary("frontend-material-design-pdf", "世界现代设计史.pdf", MaterialType.PDF, MaterialStatus.READY, listOf("frontend-project-design"), chapterCount = 12),
-        MaterialSummary("frontend-material-design-md", "课堂笔记.md", MaterialType.MARKDOWN, MaterialStatus.READY, listOf("frontend-project-design")),
-        MaterialSummary("frontend-material-mechanics-pdf", "振动系统.pdf", MaterialType.PDF, MaterialStatus.PARSING, listOf("frontend-project-mechanics"), chapterCount = 3)
-    )
-
-    val decks: List<DeckSummary> = listOf(
-        DeckSummary(id = "frontend-test-design", name = "现代设计史", chapter = 3, source = "FRONTEND_TEST", themeKey = "violet", cardCount = 48, dueCount = 12, masteredCards = 31, reviewCount = 86, masteryRatio = .65f, projectId = "frontend-project-design", materialScopes = listOf(com.qiuzhao.flashcards.data.remote.DeckMaterialScope("frontend-material-design-pdf", listOf("chapter-1")))),
-        DeckSummary(id = "frontend-test-agent", name = "乌尔姆学院", chapter = 6, source = "FRONTEND_TEST", themeKey = "violet", cardCount = 26, dueCount = 6, masteredCards = 14, reviewCount = 43, masteryRatio = .54f, projectId = "frontend-project-design", materialScopes = listOf(com.qiuzhao.flashcards.data.remote.DeckMaterialScope("frontend-material-design-pdf", listOf("chapter-2")))),
-        DeckSummary(id = "frontend-test-legacy", name = "未归类卡组", source = "FRONTEND_TEST", themeKey = "azure", cardCount = 12, dueCount = 3, masteredCards = 4, reviewCount = 9)
-    )
-
-    val cards: Map<String, List<FlashcardEntity>> = mapOf(
-        "frontend-test-design" to listOf(
-            FlashcardEntity("frontend-test-design-1", "frontend-test-design", "可用性原则关注什么？", "让用户一眼理解界面元素能做什么，以及如何操作。", position = 0, source = "FRONTEND_TEST"),
-            FlashcardEntity("frontend-test-design-2", "frontend-test-design", "反馈在交互中的作用是什么？", "及时展示操作结果，帮助用户确认系统已经响应。", position = 1, source = "FRONTEND_TEST"),
-            FlashcardEntity("frontend-test-design-3", "frontend-test-design", "什么是认知负荷？", "用户为了理解界面、完成任务而消耗的心理资源。", position = 2, source = "FRONTEND_TEST")
-        ),
-        "frontend-test-agent" to listOf(
-            FlashcardEntity("frontend-test-agent-1", "frontend-test-agent", "Agent 的工具调用需要哪些约束？", "明确输入、输出、权限和失败后的恢复策略。", position = 0, source = "FRONTEND_TEST"),
-            FlashcardEntity("frontend-test-agent-2", "frontend-test-agent", "为什么要保留可追踪的执行记录？", "它能帮助定位失败、复现问题并评估改进效果。", position = 1, source = "FRONTEND_TEST")
-        )
-    )
-
-    val dashboard = Dashboard(
-        hasData = true, weeklyGoal = 60, completed = 42, masteryRatio = .68f,
-        raw = JSONObject()
-            .put("weekly_activity", JSONArray(listOf(4, 7, 5, 9, 6, 8, 3)))
-            .put("weekly_total", 42)
-            .put("week_change_rate", .2)
-            .put("recall_accuracy", .91)
-            .put("first_answer_accuracy", .78)
-            .put("retention_rate", .86)
-            .put("mastered_card_count", 1360)
-            .put("streak_days", 12)
-    )
-
-    val pdfChapters = listOf(
-        PdfChapter("frontend-pdf-chapter-1", "第一章 设计的基本原则", 1, 18),
-        PdfChapter("frontend-pdf-chapter-2", "第二章 用户认知与反馈", 19, 36),
-        PdfChapter("frontend-pdf-chapter-3", "第三章 信息架构", 37, 52)
-    )
-
-    val pdfSamples = listOf(
-        CardDraft("可用性原则关注什么？", "让用户一眼理解界面元素能做什么，以及如何操作。"),
-        CardDraft("反馈在交互中的作用是什么？", "及时展示操作结果，帮助用户确认系统已经响应。"),
-        CardDraft("什么是认知负荷？", "用户为了理解界面、完成任务而消耗的心理资源。")
-    )
-}
+/** Pending deletion stays server-authoritative and expires at its returned undo deadline. */
+data class PendingDeletionUiState(
+    val deleteBatchId: String,
+    val undoUntil: Instant,
+)
 
 /**
- * Business data is server-authoritative. DataStore keeps only user preferences and the network
- * layer owns the encrypted device id and debug evidence; Room is deliberately not instantiated.
+ * Release presentation facade. Upstream Compose screens retain their visual models, while this
+ * class is the only place that projects the typed V2.5 repository into those models. It owns
+ * loading/empty/error state, idempotent writes and session-expiry recovery; screens never parse
+ * HTTP responses or manufacture local records.
  */
 class AppViewModel(
     application: Application,
     private val sessionStore: SessionStore,
-    private val repository: RemoteFlashcardRepository,
+    /** Kept as `repository` for the existing auth-injection test seam; used only for auth. */
+    private val repository: AuthRepository,
+    private val v25Repository: V25Repository = RemoteV25Repository.create(application),
 ) : AndroidViewModel(application) {
     companion object {
-        /**
-         * 注入缝的默认生产路径：AndroidViewModelFactory 只反射单参数 (Application) 构造，
-         * 带注入参数的构造改走此显式工厂；默认行为等价于原先硬编码的 Keystore 存储 + 远端仓库。
-         */
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY]!!
                 val store = KeystoreSessionStore(app)
-                AppViewModel(app, store, RemoteFlashcardRepository(app, sessionStore = store))
+                val authRepository = RemoteFlashcardRepository(app, sessionStore = store)
+                val v25Repository = RemoteV25Repository(
+                    store,
+                    BackendV25Transport(
+                        com.qiuzhao.flashcards.data.remote.BackendClient(app, sessionStore = store),
+                        store,
+                    ),
+                )
+                AppViewModel(app, store, authRepository, v25Repository)
             }
         }
+
+        private val projectThemes = listOf("azure", "violet", "green", "orange", "pink")
     }
 
-    /** Auth 会话状态机：登录/登出/401 清会话的全部语义集中于此，独立可测。 */
+    /** Auth is separately testable; V2.5 data follows the same bearer session. */
     val auth = AuthViewModel(repository, sessionStore, viewModelScope)
     val authState: StateFlow<AuthState> = auth.state
 
-    val darkTheme: StateFlow<Boolean?> = application.dataStore.data.map { preferences ->
-        if (preferences.contains(DARK_THEME)) preferences[DARK_THEME] else null
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-    val frontendTestMode: StateFlow<Boolean> = application.dataStore.data
-        .map { preferences -> preferences[FRONTEND_TEST_MODE] ?: false }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-    val accountBootstrap: StateFlow<AccountBootstrap> = application.dataStore.data.map { preferences ->
-        val account = if (preferences[ACCOUNT_LOGGED_IN] == true) {
-            val email = preferences[ACCOUNT_EMAIL].orEmpty()
-            val nickname = preferences[ACCOUNT_NICKNAME].orEmpty()
-            if (email.isBlank() || nickname.isBlank()) null else LocalAccount(nickname, email)
-        } else null
-        AccountBootstrap(loaded = true, account = account)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AccountBootstrap())
-    val weeklyGoal = application.dataStore.data.map { it[WEEKLY_GOAL] ?: DEFAULT_WEEKLY_GOAL }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DEFAULT_WEEKLY_GOAL)
+    private val _accountBootstrap = MutableStateFlow(AccountBootstrap())
+    val accountBootstrap: StateFlow<AccountBootstrap> = _accountBootstrap.asStateFlow()
 
-    private val _frontendTestDecks: MutableStateFlow<List<DeckSummary>> = MutableStateFlow(FrontendTestFixtures.decks)
-    private val _frontendTestCards: MutableStateFlow<Map<String, List<FlashcardEntity>>> = MutableStateFlow(FrontendTestFixtures.cards)
-    private val _frontendTestProjects: MutableStateFlow<List<ProjectSummary>> = MutableStateFlow(FrontendTestFixtures.projects)
-    private val _frontendTestMaterials: MutableStateFlow<List<MaterialSummary>> = MutableStateFlow(FrontendTestFixtures.materials)
-    private val _projectCreationMaterials = MutableStateFlow<List<ProjectDraftMaterial>>(emptyList())
-    internal val projectCreationMaterials: StateFlow<List<ProjectDraftMaterial>> = _projectCreationMaterials
-    val decks: StateFlow<List<DeckSummary>> = combine(frontendTestMode, repository.decks, _frontendTestDecks) { enabled, remote, test ->
-        if (enabled) test else remote
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val dueCount: StateFlow<Int> = combine(frontendTestMode, repository.dueCount(), _frontendTestDecks) { enabled, remote, test ->
-        if (enabled) test.sumOf { it.dueCount } else remote
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
-    /** Production decks remain visible in a per-device legacy project until the project API is live. */
-    val projects: StateFlow<List<ProjectSummary>> = combine(frontendTestMode, repository.decks, _frontendTestProjects, _frontendTestDecks) { enabled, remote, testProjects, testDecks ->
-        if (enabled) projectsForDisplay(testProjects, testDecks) else projectsForDisplay(emptyList(), remote)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    /** Real materials stay empty until the backend confirms the materials list endpoint. */
-    val materials: StateFlow<List<MaterialSummary>> = combine(frontendTestMode, _frontendTestMaterials) { enabled, test ->
-        if (enabled) test else emptyList()
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    private val _projects = MutableStateFlow<List<com.qiuzhao.flashcards.data.remote.ProjectSummary>>(emptyList())
+    val projects: StateFlow<List<com.qiuzhao.flashcards.data.remote.ProjectSummary>> = _projects.asStateFlow()
+    private val projectsById = mutableMapOf<String, V25LearningProject>()
 
+    private val _decks = MutableStateFlow<List<DeckSummary>>(emptyList())
+    val decks: StateFlow<List<DeckSummary>> = _decks.asStateFlow()
+    val dueCount: StateFlow<Int> = _decks
+        .map { values -> values.sumOf { it.dueCount } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    private val cardFlows = mutableMapOf<String, MutableStateFlow<List<FlashcardEntity>>>()
     private val _studyCards = MutableStateFlow<List<FlashcardEntity>>(emptyList())
-    val studyCards: StateFlow<List<FlashcardEntity>> = _studyCards
-    private val _dashboard = MutableStateFlow<Dashboard?>(null)
-    val dashboard: StateFlow<Dashboard?> = combine(frontendTestMode, _dashboard) { enabled, remote ->
-        if (enabled) FrontendTestFixtures.dashboard else remote
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-    val weeklyActivity = dashboard.map(::dashboardWeeklyActivity)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), WeeklyActivityData())
+    val studyCards: StateFlow<List<FlashcardEntity>> = _studyCards.asStateFlow()
+
+    private val _dashboard = MutableStateFlow<DashboardUiState?>(null)
+    val dashboard: StateFlow<DashboardUiState?> = _dashboard.asStateFlow()
+    private val _weeklyActivity = MutableStateFlow(WeeklyActivityData())
+    val weeklyActivity: StateFlow<WeeklyActivityData> = _weeklyActivity.asStateFlow()
+    private val _todayPlan = MutableStateFlow(TodayPlanUiState())
+    val todayPlan: StateFlow<TodayPlanUiState> = _todayPlan.asStateFlow()
+
     private val _apiKeyStatus = MutableStateFlow<ApiKeyStatus?>(null)
-    val apiKeyStatus: StateFlow<ApiKeyStatus?> = _apiKeyStatus
+    val apiKeyStatus: StateFlow<ApiKeyStatus?> = _apiKeyStatus.asStateFlow()
+
     private val _pdfFile = MutableStateFlow<PdfFile?>(null)
-    val pdfFile: StateFlow<PdfFile?> = _pdfFile
+    val pdfFile: StateFlow<PdfFile?> = _pdfFile.asStateFlow()
     private val _pdfSamples = MutableStateFlow<List<CardDraft>>(emptyList())
-    val pdfSamples: StateFlow<List<CardDraft>> = _pdfSamples
-    private val _pdfTask = MutableStateFlow<GeneratedTask?>(null)
-    val pdfTask: StateFlow<GeneratedTask?> = _pdfTask
+    val pdfSamples: StateFlow<List<CardDraft>> = _pdfSamples.asStateFlow()
+    private val _pdfTask = MutableStateFlow<V25GenerationTask?>(null)
+    val pdfTask: StateFlow<V25GenerationTask?> = _pdfTask.asStateFlow()
     private val _pdfTaskDeckId = MutableStateFlow<String?>(null)
-    val pdfTaskDeckId: StateFlow<String?> = _pdfTaskDeckId
-    private val _textImportFlow = MutableStateFlow<TextImportFlow?>(null)
-    val textImportFlow: StateFlow<TextImportFlow?> = _textImportFlow
+    val pdfTaskDeckId: StateFlow<String?> = _pdfTaskDeckId.asStateFlow()
+    private val _activePdfProject = MutableStateFlow<V25LearningProject?>(null)
+    val activePdfProject: StateFlow<V25LearningProject?> = _activePdfProject.asStateFlow()
+
+    private val _pendingDeletion = MutableStateFlow<PendingDeletionUiState?>(null)
+    val pendingDeletion: StateFlow<PendingDeletionUiState?> = _pendingDeletion.asStateFlow()
+
+    private val _uiMessage = MutableStateFlow<String?>(null)
+    val uiMessage: StateFlow<String?> = _uiMessage.asStateFlow()
 
     init {
         checkSession()
-        // 业务数据只在登录态加载：登录成功或会话恢复时刷新一次；登出后不再产生 401 噪音。
         viewModelScope.launch {
-            auth.state.map { it is AuthState.LoggedIn }.distinctUntilChanged().collect { loggedIn ->
-                if (loggedIn) {
-                    refreshDecks()
-                    refreshDashboard()
+            auth.state
+                .map { it as? AuthState.LoggedIn }
+                .distinctUntilChanged()
+                .collect { loggedIn ->
+                    if (loggedIn == null) {
+                        _accountBootstrap.value = AccountBootstrap(loaded = true)
+                        clearAuthenticatedState()
+                    } else {
+                        _accountBootstrap.value = AccountBootstrap(
+                            loaded = true,
+                            account = LocalAccount(loggedIn.user.username, ""),
+                        )
+                        refreshAll()
+                    }
                 }
-            }
         }
-    }
-
-    fun refreshDecks() = viewModelScope.launch {
-        if (!frontendTestMode.value) logFailure("list_decks", repository.refreshDecks())
     }
 
     fun checkSession() = auth.checkSession()
 
-    /** 注销入口（Settings 接入点在后续任务落地）。 */
-    fun logout() = auth.logout()
-
     fun clearAuthError() = auth.clearError()
 
-    fun refreshDecks() = viewModelScope.launch {
-        if (!frontendTestMode.value) logFailure("list_decks", repository.refreshDecks())
-    }
-    fun refreshDashboard() = viewModelScope.launch {
-        if (frontendTestMode.value) return@launch
-        val goal = getApplication<Application>().dataStore.data.first()[WEEKLY_GOAL] ?: DEFAULT_WEEKLY_GOAL
-        when (val result = repository.dashboard(goal)) {
-            is ApiResult.Success -> _dashboard.value = result.value
-            is ApiResult.Failure -> logFailure("dashboard", result)
-        }
+    fun clearUiMessage() {
+        _uiMessage.value = null
     }
 
-    fun setWeeklyGoal(value: Int) = viewModelScope.launch {
-        getApplication<Application>().dataStore.edit { it[WEEKLY_GOAL] = value.coerceAtLeast(1) }
-        if (!frontendTestMode.value) refreshDashboard()
-    }
-
-    fun setFrontendTestMode(enabled: Boolean) = viewModelScope.launch {
-        getApplication<Application>().dataStore.edit { it[FRONTEND_TEST_MODE] = enabled }
-    }
-
-    /**
-     * Project creation is intentionally local to the visual-test mode until the
-     * project write contract is supplied by the service. This prevents a new UI
-     * from guessing a production endpoint or silently creating orphaned decks.
-     */
-    fun resetProjectCreationDraft() {
-        _projectCreationMaterials.value = emptyList()
-    }
-
-    fun addProjectDraftFile(name: String) {
-        val normalized = name.trim().ifBlank { "未命名文件" }
-        _projectCreationMaterials.value = _projectCreationMaterials.value + ProjectDraftMaterial(
-            id = "project-material-${System.currentTimeMillis()}",
-            type = ProjectDraftMaterialType.FILE,
-            title = normalized,
-            extension = normalized.substringAfterLast('.', "").lowercase().ifBlank { "file" }
-        )
-    }
-
-    fun upsertProjectDraftText(materialId: String?, title: String, content: String) {
-        val normalizedTitle = title.trim().ifBlank { "文本资料" }
-        val material = ProjectDraftMaterial(
-            id = materialId ?: "project-text-${System.currentTimeMillis()}",
-            type = ProjectDraftMaterialType.TEXT,
-            title = normalizedTitle,
-            content = content.trim()
-        )
-        _projectCreationMaterials.value = _projectCreationMaterials.value.let { materials ->
-            if (materialId == null) materials + material
-            else materials.map { if (it.id == materialId) material else it }
-        }
-    }
-
-    fun deleteProjectDraftMaterial(id: String) {
-        _projectCreationMaterials.value = _projectCreationMaterials.value.filterNot { it.id == id }
-    }
-
-    fun createFrontendTestProject(name: String, themeKey: String, onResult: (String?) -> Unit) = viewModelScope.launch {
-        val normalizedName = name.trim()
-        when {
-            !frontendTestMode.value -> onResult("项目服务尚未接入，当前只能在 UI 测试模式中创建项目")
-            normalizedName.isBlank() -> onResult("请填写项目名称")
-            else -> {
-                val id = "frontend-project-${System.currentTimeMillis()}"
-                val creationMaterials = _projectCreationMaterials.value
-                _frontendTestProjects.value = _frontendTestProjects.value + ProjectSummary(
-                    id = id,
-                    name = normalizedName,
-                    themeKey = themeKey,
-                    materialCount = creationMaterials.size
-                )
-                _frontendTestMaterials.value = _frontendTestMaterials.value + creationMaterials.map { material ->
-                    MaterialSummary(
-                        id = material.id,
-                        name = material.title,
-                        type = when (material.type) {
-                            ProjectDraftMaterialType.FILE -> when (material.extension) {
-                                "pdf" -> MaterialType.PDF
-                                "md", "markdown" -> MaterialType.MARKDOWN
-                                else -> MaterialType.UNKNOWN
-                            }
-                            ProjectDraftMaterialType.TEXT -> MaterialType.TEXT
-                        },
-                        status = MaterialStatus.READY,
-                        projectIds = listOf(id)
-                    )
-                }
-                resetProjectCreationDraft()
-                onResult(null)
-            }
-        }
-    }
-
-    /**
-     * The same form also edits a project in the visual-test data source.  The
-     * production service has no project write contract yet, so it is never
-     * guessed here.
-     */
-    fun updateFrontendTestProject(id: String, name: String, themeKey: String, onResult: (String?) -> Unit) = viewModelScope.launch {
-        val normalizedName = name.trim()
-        when {
-            !frontendTestMode.value -> onResult("项目服务尚未接入，当前只能在 UI 测试模式中编辑项目")
-            normalizedName.isBlank() -> onResult("请填写项目名称")
-            _frontendTestProjects.value.none { it.id == id } -> onResult("未找到要编辑的项目")
-            else -> {
-                _frontendTestProjects.value = _frontendTestProjects.value.map { project ->
-                    if (project.id == id) project.copy(name = normalizedName, themeKey = themeKey) else project
-                }
-                resetProjectCreationDraft()
-                onResult(null)
-            }
-        }
-    }
-
-    /** Upstream auth screen delegates to the authenticated repository flow. */
+    /** Auth screen delegates here so login/register stay on the bearer-session path. */
     fun login(email: String, password: String, onResult: (String?) -> Unit) = viewModelScope.launch {
         if (email.isBlank() || password.isBlank() || auth.submitting.value) return@launch
         onResult(auth.submitLogin(email.trim(), password))
     }
 
-    fun register(username: String, email: String, password: String, confirmation: String, onResult: (String?) -> Unit) = viewModelScope.launch {
-        if (username.isBlank() || email.isBlank() || password.isBlank() || auth.submitting.value) {
-            return@launch
-        }
+    fun register(
+        username: String,
+        email: String,
+        password: String,
+        confirmation: String,
+        onResult: (String?) -> Unit,
+    ) = viewModelScope.launch {
+        if (username.isBlank() || email.isBlank() || password.isBlank() || auth.submitting.value) return@launch
         if (!AuthViewModel.passwordsMatch(password, confirmation)) {
             onResult(AuthViewModel.PASSWORD_MISMATCH_MESSAGE)
             return@launch
@@ -409,382 +243,664 @@ class AppViewModel(
         onResult(auth.submitRegister(username.trim(), email.trim(), password))
     }
 
-    fun startStudy(deckId: String, reviewMode: Boolean) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            val testCards = _frontendTestCards.value[deckId].orEmpty()
-            val due = _frontendTestDecks.value.firstOrNull { it.id == deckId }?.dueCount ?: 0
-            _studyCards.value = if (reviewMode) testCards.take(due.coerceAtLeast(0)) else testCards
-            return@launch
-        }
-        when (val result = repository.loadCards(deckId, reviewMode)) {
-            is ApiResult.Success -> _studyCards.value = result.value
-            is ApiResult.Failure -> logFailure("load_study", result)
+    /** Local-first sign out and token revocation are owned by [AuthViewModel]. */
+    fun logout() = auth.logout()
+
+    fun refreshAll() {
+        refreshProfile()
+        refreshProjects()
+        refreshDecks()
+        refreshDashboard()
+        refreshTodayPlan()
+        refreshApiKeyStatus()
+        recoverPendingDeletion()
+    }
+
+    fun refreshProfile(): Job = viewModelScope.launch {
+        when (val result = v25Repository.getAuthUser()) {
+            is V25Result.Success -> _accountBootstrap.value = AccountBootstrap(
+                loaded = true,
+                account = LocalAccount(result.value.username, result.value.email),
+            )
+            is V25Result.Failure -> handleFailure("get_auth_user", result, surface = false)
         }
     }
 
-    fun refreshCards(deckId: String) = viewModelScope.launch {
-        if (!frontendTestMode.value) logFailure("list_cards", repository.refreshCards(deckId))
+    fun refreshProjects(): Job = viewModelScope.launch {
+        when (val result = v25Repository.listProjects()) {
+            is V25Result.Success -> {
+                projectsById.clear()
+                result.value.forEach { project -> projectsById[project.projectId] = project }
+                _projects.value = result.value.map(::toProjectSummary)
+            }
+            is V25Result.Failure -> handleFailure("list_projects", result)
+        }
     }
-    fun rate(cardId: String, rating: Rating) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            val reviewed = _studyCards.value.firstOrNull { it.id == cardId }
-            _studyCards.value = _studyCards.value.filterNot { it.id == cardId }
-            reviewed?.let { card ->
-                _frontendTestDecks.value = _frontendTestDecks.value.map { deck ->
-                    if (deck.id == card.deckId) deck.copy(
-                        dueCount = (deck.dueCount - 1).coerceAtLeast(0),
-                        reviewCount = deck.reviewCount + 1,
-                        masteredCards = if (rating == Rating.GOOD || rating == Rating.EASY) {
-                            (deck.masteredCards + 1).coerceAtMost(deck.cardCount)
-                        } else deck.masteredCards
-                    ) else deck
+
+    fun refreshDecks(): Job = viewModelScope.launch {
+        when (val result = v25Repository.listDecks()) {
+            is V25Result.Success -> _decks.value = result.value.map(::toDeckSummary)
+            is V25Result.Failure -> handleFailure("list_decks", result)
+        }
+    }
+
+    fun refreshDashboard(): Job = viewModelScope.launch {
+        when (val result = v25Repository.statsDashboard()) {
+            is V25Result.Success -> setDashboard(result.value)
+            is V25Result.Failure -> handleFailure("stats_dashboard", result)
+        }
+    }
+
+    fun refreshTodayPlan(): Job = viewModelScope.launch {
+        when (val result = v25Repository.todayPlan()) {
+            is V25Result.Success -> setTodayPlan(result.value)
+            is V25Result.Failure -> handleFailure("today_plan", result)
+        }
+    }
+
+    /** Project creation accepts exactly one PDF; text/Markdown are not a Release API. */
+    fun createProject(uri: Uri, name: String, onResult: (String?, String?) -> Unit) = viewModelScope.launch {
+        val resolver = getApplication<Application>().contentResolver
+        val fileName = resolver.displayName(uri)
+        val input = resolver.openInputStream(uri)
+        if (input == null) {
+            onResult(null, "无法读取所选 PDF")
+            return@launch
+        }
+        input.use { content ->
+            when (val result = v25Repository.createProject(fileName, content, name.trim().ifBlank { null })) {
+                is V25Result.Success -> {
+                    projectsById[result.value.projectId] = result.value
+                    _activePdfProject.value = result.value
+                    _pdfFile.value = result.value.toPdfFile()
+                    refreshProjects()
+                    onResult(result.value.projectId, null)
+                }
+                is V25Result.Failure -> {
+                    handleFailure("create_project", result, surface = false)
+                    onResult(null, userMessage(result))
                 }
             }
+        }
+    }
+
+    fun renameProject(projectId: String, name: String, onResult: (String?) -> Unit) = viewModelScope.launch {
+        val normalized = name.trim()
+        if (normalized.isBlank()) {
+            onResult("请填写项目名称")
             return@launch
         }
-        when (val result = repository.rate(cardId, rating)) {
-            is ApiResult.Success -> refreshDecks()
-            is ApiResult.Failure -> logFailure("submit_review", result)
-        }
-    }
-    @OptIn(ExperimentalCoroutinesApi::class)
-    fun deckProgress(deckId: String): Flow<DeckProgress> = frontendTestMode.flatMapLatest { enabled ->
-        if (enabled) _frontendTestDecks.map { decks ->
-            decks.firstOrNull { it.id == deckId }?.let { DeckProgress(it.cardCount, it.dueCount, it.masteredCards, it.reviewCount) }
-                ?: DeckProgress(0, 0, 0, 0)
-        } else repository.deckProgress(deckId)
-    }
-    @OptIn(ExperimentalCoroutinesApi::class)
-    fun cards(deckId: String): Flow<List<FlashcardEntity>> = frontendTestMode.flatMapLatest { enabled ->
-        if (enabled) _frontendTestCards.map { it[deckId].orEmpty() } else repository.cards(deckId)
-    }
-
-    fun importDeck(name: String, drafts: List<CardDraft>, onDone: (String) -> Unit) = viewModelScope.launch {
-        if (name.isBlank() || drafts.isEmpty()) return@launch
-        if (frontendTestMode.value) {
-            val validDrafts = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
-            if (validDrafts.isEmpty()) return@launch
-            val id = "frontend-test-${System.nanoTime()}"
-            _frontendTestCards.value = _frontendTestCards.value + (id to validDrafts.mapIndexed { index, draft ->
-                FlashcardEntity("$id-card-$index", id, draft.front, draft.back, position = index, source = "FRONTEND_TEST")
-            })
-            _frontendTestDecks.value = _frontendTestDecks.value + DeckSummary(
-                id = id, name = name.trim(), source = "FRONTEND_TEST", themeKey = "azure",
-                cardCount = validDrafts.size, dueCount = validDrafts.size
-            )
-            onDone(id)
-            return@launch
-        }
-        when (val result = repository.importDeck(name, drafts)) {
-            is ApiResult.Success -> onDone(result.value)
-            is ApiResult.Failure -> logFailure("import_deck", result)
-        }
-    }
-
-    fun beginTextImportFlow(name: String, drafts: List<CardDraft>) {
-        _textImportFlow.value = TextImportFlow(deckName = name, cards = drafts)
-    }
-
-    fun clearTextImportFlow() {
-        _textImportFlow.value = null
-    }
-
-    fun addCardsToDeck(deckId: String, drafts: List<CardDraft>, onDone: () -> Unit) = viewModelScope.launch {
-        if (drafts.none { it.front.isNotBlank() && it.back.isNotBlank() }) return@launch
-        if (frontendTestMode.value) {
-            val validDrafts = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
-            val existing = _frontendTestCards.value[deckId].orEmpty()
-            val appended = validDrafts.mapIndexed { index, draft ->
-                FlashcardEntity("$deckId-added-${System.nanoTime()}-$index", deckId, draft.front, draft.back, position = existing.size + index, source = "FRONTEND_TEST")
+        when (val result = v25Repository.renameProject(projectId, normalized)) {
+            is V25Result.Success -> {
+                projectsById[projectId] = result.value
+                if (_activePdfProject.value?.projectId == projectId) _activePdfProject.value = result.value
+                _pdfFile.value = _activePdfProject.value?.toPdfFile()
+                refreshProjects()
+                onResult(null)
             }
-            _frontendTestCards.value = _frontendTestCards.value + (deckId to (existing + appended))
-            _frontendTestDecks.value = _frontendTestDecks.value.map { deck ->
-                if (deck.id == deckId) deck.copy(cardCount = deck.cardCount + appended.size, dueCount = deck.dueCount + appended.size) else deck
+            is V25Result.Failure -> {
+                handleFailure("rename_project", result, surface = false)
+                onResult(userMessage(result))
             }
-            onDone()
-            return@launch
-        }
-        when (val result = repository.addCardsToDeck(deckId, drafts)) {
-            is ApiResult.Success -> onDone()
-            is ApiResult.Failure -> logFailure("add_cards", result)
         }
     }
 
-    fun deleteDeck(deckId: String, onSuccess: () -> Unit = {}, onFailure: () -> Unit = {}) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            _frontendTestDecks.value = _frontendTestDecks.value.filterNot { it.id == deckId }
-            _frontendTestCards.value = _frontendTestCards.value - deckId
-            onSuccess()
-            return@launch
-        }
-        when (val result = repository.deleteDeck(deckId)) {
-            is ApiResult.Success -> onSuccess()
-            is ApiResult.Failure -> { logFailure("delete_deck", result); onFailure() }
-        }
-    }
-    fun rewriteCard(cardId: String) = viewModelScope.launch {
-        if (!frontendTestMode.value) logFailure("rewrite_card", repository.rewriteCard(cardId))
-    }
-
-    fun refreshApiKeyStatus() = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            _apiKeyStatus.value = ApiKeyStatus("AVAILABLE", "frontend-test")
-            return@launch
-        }
-        when (val result = repository.apiKeyStatus()) {
-            is ApiResult.Success -> _apiKeyStatus.value = result.value
-            is ApiResult.Failure -> logFailure("api_key_status", result)
-        }
-    }
-
-    fun saveApiKey(key: String, onFinished: () -> Unit = {}) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            _apiKeyStatus.value = ApiKeyStatus("AVAILABLE", "frontend-test")
-            onFinished()
-            return@launch
-        }
-        when (val result = repository.saveApiKey(key)) {
-            is ApiResult.Success -> _apiKeyStatus.value = result.value
-            is ApiResult.Failure -> logFailure("save_api_key", result)
-        }
-        onFinished()
-    }
-
-    /** A task must never create a deck before the device has a usable server-side key. */
-    fun checkApiKeyForGeneration(
-        onAvailable: () -> Unit,
-        onUnavailable: (String) -> Unit,
-        onFailure: () -> Unit
-    ) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            onAvailable()
-            return@launch
-        }
-        when (val result = repository.apiKeyStatus()) {
-            is ApiResult.Success -> {
-                _apiKeyStatus.value = result.value
-                if (result.value.status.equals("AVAILABLE", ignoreCase = true)) onAvailable()
-                else onUnavailable(result.value.status)
+    fun deleteProject(projectId: String, retainDecks: Boolean, onResult: (Boolean) -> Unit = {}) = viewModelScope.launch {
+        when (val result = v25Repository.deleteProject(projectId, retainDecks)) {
+            is V25Result.Success -> {
+                projectsById.remove(projectId)
+                if (_activePdfProject.value?.projectId == projectId) clearPdfFlow()
+                refreshProjects()
+                refreshDecks()
+                refreshTodayPlan()
+                onResult(true)
             }
-            is ApiResult.Failure -> {
-                logFailure("api_key_for_generation", result)
+            is V25Result.Failure -> {
+                handleFailure("delete_project", result)
+                onResult(false)
+            }
+        }
+    }
+
+    /** Opens a real project for chapter confirmation and generation. */
+    fun openProjectForGeneration(projectId: String, onReady: (Boolean) -> Unit) = viewModelScope.launch {
+        when (val result = v25Repository.getProject(projectId)) {
+            is V25Result.Success -> {
+                projectsById[projectId] = result.value
+                _activePdfProject.value = result.value
+                _pdfFile.value = result.value.toPdfFile()
+                onReady(true)
+            }
+            is V25Result.Failure -> {
+                handleFailure("get_project", result)
+                onReady(false)
+            }
+        }
+    }
+
+    /** Refreshes active project state while parsing or after leaving a background task. */
+    fun refreshActiveProject(onUpdated: (V25LearningProject) -> Unit = {}) = viewModelScope.launch {
+        val projectId = _activePdfProject.value?.projectId ?: return@launch
+        when (val result = v25Repository.getProject(projectId)) {
+            is V25Result.Success -> {
+                projectsById[projectId] = result.value
+                _activePdfProject.value = result.value
+                _pdfFile.value = result.value.toPdfFile()
+                refreshProjects()
+                onUpdated(result.value)
+            }
+            is V25Result.Failure -> handleFailure("get_project", result)
+        }
+    }
+
+    fun confirmPdfChapters(onResult: (String?) -> Unit) = viewModelScope.launch {
+        val project = _activePdfProject.value
+        if (project == null) {
+            onResult("请先选择一个 PDF 项目")
+            return@launch
+        }
+        when (val result = v25Repository.confirmChapters(project.projectId)) {
+            is V25Result.Success -> {
+                projectsById[project.projectId] = result.value
+                _activePdfProject.value = result.value
+                _pdfFile.value = result.value.toPdfFile()
+                refreshProjects()
+                onResult(null)
+            }
+            is V25Result.Failure -> {
+                handleFailure("confirm_chapters", result, surface = false)
+                onResult(userMessage(result))
+            }
+        }
+    }
+
+    fun updatePdfChapter(chapter: PdfChapter, onFailure: () -> Unit = {}) = viewModelScope.launch {
+        val project = _activePdfProject.value ?: return@launch
+        when (val result = v25Repository.updateChapter(
+            project.projectId,
+            chapter.id,
+            com.qiuzhao.flashcards.domain.v25.V25ChapterEdit(chapter.name.trim(), chapter.startPage, chapter.endPage),
+        )) {
+            is V25Result.Success -> refreshActiveProject()
+            is V25Result.Failure -> {
+                handleFailure("update_chapter", result)
                 onFailure()
             }
         }
     }
 
-    fun uploadPdf(uri: Uri, onParsed: (List<PdfChapter>) -> Unit, onFailure: (PdfReadFailure) -> Unit) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            val file = PdfFile(
-                id = "frontend-test-pdf",
-                name = "设计心理学课件.pdf",
-                status = "PARSED",
-                chapters = FrontendTestFixtures.pdfChapters
-            )
-            _pdfFile.value = file
-            delay(750)
-            onParsed(file.chapters)
-            return@launch
-        }
-        when (val result = repository.uploadPdf(uri)) {
-            is ApiResult.Success -> { _pdfFile.value = result.value; pollPdf(result.value, onParsed, onFailure) }
-            is ApiResult.Failure -> { logFailure("upload_pdf", result); onFailure(pdfFailure(result)) }
+    fun deletePdfChapter(chapter: PdfChapter, onFailure: () -> Unit = {}) = viewModelScope.launch {
+        val project = _activePdfProject.value ?: return@launch
+        when (val result = v25Repository.deleteChapter(project.projectId, chapter.id, deleteCards = false)) {
+            is V25Result.Success -> refreshActiveProject()
+            is V25Result.Failure -> {
+                handleFailure("delete_chapter", result)
+                onFailure()
+            }
         }
     }
 
-    fun updatePdfChapter(chapter: PdfChapter) = viewModelScope.launch {
-        val file = _pdfFile.value ?: return@launch
-        when (val result = repository.updatePdfChapter(file.id, chapter)) {
-            is ApiResult.Success -> _pdfFile.value = file.copy(chapters = file.chapters.map { if (it.id == result.value.id) result.value else it })
-            is ApiResult.Failure -> logFailure("update_pdf_chapter", result)
-        }
-    }
-
+    /**
+     * Creates the destination deck (if necessary), then the task and persisted samples. No cards
+     * are visible until [startPdfTask] finishes its atomically published generation.
+     */
     fun generatePdfSamples(
-        chapterIds: List<String>,
-        config: PdfGenerationConfig,
-        onReady: () -> Unit,
-        onFailure: (String?) -> Unit = {}
-    ) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            _pdfSamples.value = FrontendTestFixtures.pdfSamples
-            onReady()
-            return@launch
-        }
-        val file = _pdfFile.value ?: run { onFailure("PDF_NOT_READY"); return@launch }
-        when (val result = repository.generateSamples(file.id, chapterIds, config.quantity, config.basic, config.understanding, config.application, config.requirement)) {
-            is ApiResult.Success -> { _pdfSamples.value = result.value; onReady() }
-            is ApiResult.Failure -> { logFailure("generate_samples", result); onFailure(result.code) }
-        }
-    }
-
-    fun createPdfTask(
         existingDeckId: String?,
         deckName: String,
         chapterIds: List<String>,
         config: PdfGenerationConfig,
-        onStarted: () -> Unit,
-        onFailure: (String?) -> Unit = {}
+        onReady: () -> Unit,
+        onFailure: (String?) -> Unit = {},
     ) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            val samples = _pdfSamples.value.ifEmpty { FrontendTestFixtures.pdfSamples }
-            val deckId = existingDeckId ?: "frontend-pdf-${System.nanoTime()}"
-            if (existingDeckId == null) {
-                _frontendTestDecks.value = _frontendTestDecks.value + DeckSummary(
-                    id = deckId,
-                    name = deckName.ifBlank { "PDF 智能制卡" },
-                    source = "FRONTEND_TEST",
-                    themeKey = "azure",
-                    cardCount = samples.size,
-                    dueCount = samples.size
-                )
-                _frontendTestCards.value = _frontendTestCards.value + (deckId to samples.mapIndexed { index, draft ->
-                    FlashcardEntity("$deckId-card-$index", deckId, draft.front, draft.back, position = index, source = "FRONTEND_TEST")
-                })
-            } else {
-                val existing = _frontendTestCards.value[deckId].orEmpty()
-                _frontendTestCards.value = _frontendTestCards.value + (deckId to (existing + samples.mapIndexed { index, draft ->
-                    FlashcardEntity("$deckId-card-${existing.size + index}", deckId, draft.front, draft.back, position = existing.size + index, source = "FRONTEND_TEST")
-                }))
-                _frontendTestDecks.value = _frontendTestDecks.value.map { deck ->
-                    if (deck.id == deckId) deck.copy(cardCount = deck.cardCount + samples.size, dueCount = deck.dueCount + samples.size) else deck
+        val project = _activePdfProject.value ?: run {
+            onFailure("PDF_NOT_READY")
+            return@launch
+        }
+        if (chapterIds.isEmpty()) {
+            onFailure("CHAPTER_NOT_FOUND")
+            return@launch
+        }
+        val deckId = existingDeckId ?: when (val created = v25Repository.createDeck(
+            deckName.trim().ifBlank { "${project.name} 卡片组" },
+            project.projectId,
+        )) {
+            is V25Result.Success -> created.value.deckId
+            is V25Result.Failure -> {
+                handleFailure("create_deck_for_task", created, surface = false)
+                onFailure(created.code)
+                return@launch
+            }
+        }
+        val generationConfig = V25GenerationConfig(coverageMode(config.quantity), difficultyRatio(config), config.requirement.trim())
+        when (val created = v25Repository.createTask(project.projectId, deckId, chapterIds, generationConfig)) {
+            is V25Result.Failure -> {
+                handleFailure("create_task", created, surface = false)
+                onFailure(created.code)
+            }
+            is V25Result.Success -> when (val samples = v25Repository.generateSamples(created.value.taskId)) {
+                is V25Result.Success -> {
+                    _pdfTask.value = created.value
+                    _pdfTaskDeckId.value = deckId
+                    _pdfSamples.value = samples.value.map { sample -> CardDraft(sample.front, sample.back) }
+                    refreshDecks()
+                    onReady()
+                }
+                is V25Result.Failure -> {
+                    _pdfTask.value = created.value
+                    _pdfTaskDeckId.value = deckId
+                    handleFailure("generate_samples", samples, surface = false)
+                    onFailure(samples.code)
                 }
             }
-            _pdfTaskDeckId.value = deckId
-            _pdfTask.value = GeneratedTask(
-                id = "frontend-pdf-task-${System.nanoTime()}",
-                status = "COMPLETED",
-                stage = "DONE",
-                generatedCardCount = samples.size
-            )
-            onStarted()
+        }
+    }
+
+    /** Starts sample-confirmed generation. Leaving the screen is safe; polling resumes on re-entry. */
+    fun startPdfTask(onStarted: () -> Unit, onFailure: (String?) -> Unit = {}) = viewModelScope.launch {
+        val task = _pdfTask.value ?: run {
+            onFailure("TASK_NOT_FOUND")
             return@launch
         }
-        val file = _pdfFile.value ?: run { onFailure("PDF_NOT_READY"); return@launch }
-        val deckId = existingDeckId ?: when (val create = repository.createDeck(deckName.ifBlank { "PDF 智能制卡" })) {
-            is ApiResult.Success -> create.value
-            is ApiResult.Failure -> { logFailure("create_deck_for_task", create); onFailure(create.code); return@launch }
-        }
-        when (val result = repository.createTask(file.id, deckId, chapterIds, config.quantity, config.basic, config.understanding, config.application, config.requirement)) {
-            is ApiResult.Success -> { _pdfTaskDeckId.value = deckId; _pdfTask.value = result.value; onStarted(); pollTask(result.value) }
-            is ApiResult.Failure -> { logFailure("create_task", result); onFailure(result.code) }
-        }
-    }
-
-    fun resumePdfTask() = viewModelScope.launch {
-        val task = _pdfTask.value ?: return@launch
-        when (val result = repository.resumeTask(task.id)) {
-            is ApiResult.Success -> { _pdfTask.value = result.value; pollTask(result.value) }
-            is ApiResult.Failure -> logFailure("resume_task", result)
-        }
-    }
-
-    /** Deck colours are project-owned; editing a deck can only rename it. */
-    fun updateDeckName(deckId: String, name: String, onFailure: () -> Unit = {}) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            _frontendTestDecks.value = _frontendTestDecks.value.map { deck ->
-                if (deck.id == deckId) deck.copy(name = name) else deck
+        when (val result = v25Repository.startTask(task.taskId)) {
+            is V25Result.Success -> {
+                _pdfTask.value = result.value
+                onStarted()
+                pollTask(result.value)
             }
-            return@launch
-        }
-        when (val result = repository.updateDeckName(deckId, name)) {
-            is ApiResult.Success -> Unit
-            is ApiResult.Failure -> { logFailure("update_deck", result); onFailure() }
+            is V25Result.Failure -> {
+                handleFailure("start_task", result, surface = false)
+                onFailure(result.code)
+            }
         }
     }
 
-    @Deprecated("Deck colours are project-owned; use updateDeckName")
-    fun updateDeckPresentation(deckId: String, name: String, @Suppress("UNUSED_PARAMETER") themeKey: String, onFailure: () -> Unit = {}) =
-        updateDeckName(deckId, name, onFailure)
+    fun refreshPdfTask() = viewModelScope.launch {
+        val task = _pdfTask.value ?: return@launch
+        when (val result = v25Repository.getTask(task.taskId)) {
+            is V25Result.Success -> {
+                _pdfTask.value = result.value
+                if (result.value.status == V25TaskStatus.COMPLETED) {
+                    refreshDecks()
+                    refreshDashboard()
+                    refreshTodayPlan()
+                }
+            }
+            is V25Result.Failure -> handleFailure("get_task", result)
+        }
+    }
+
+    fun abandonPdfTask(onDone: () -> Unit = {}) = viewModelScope.launch {
+        val task = _pdfTask.value ?: return@launch
+        when (val result = v25Repository.abandonTask(task.taskId)) {
+            is V25Result.Success -> {
+                _pdfTask.value = result.value
+                onDone()
+            }
+            is V25Result.Failure -> handleFailure("abandon_task", result)
+        }
+    }
+
+    fun retryPdfTask(onReady: () -> Unit = {}) = viewModelScope.launch {
+        val task = _pdfTask.value ?: return@launch
+        when (val result = v25Repository.retryTask(task.taskId)) {
+            is V25Result.Success -> {
+                _pdfTask.value = result.value
+                _pdfSamples.value = result.value.sampleCards.map { CardDraft(it.front, it.back) }
+                onReady()
+            }
+            is V25Result.Failure -> handleFailure("retry_task", result)
+        }
+    }
+
+    fun startStudy(deckId: String, reviewMode: Boolean) = viewModelScope.launch {
+        val result = if (reviewMode) {
+            v25Repository.deckReviewQueue(deckId).mapSuccess { queue -> queue.map { it.card } }
+        } else {
+            v25Repository.listCards(deckId, V25BrowseFilter(V25BrowseOrder.random, mastery = V25MasteryFilter.all))
+        }
+        when (result) {
+            is V25Result.Success -> _studyCards.value = result.value.map(::toFlashcard)
+            is V25Result.Failure -> handleFailure("load_study", result)
+        }
+    }
+
+    fun rate(cardId: String, rating: Rating) = viewModelScope.launch {
+        when (val result = v25Repository.rateCard(cardId, V25Rating.valueOf(rating.name))) {
+            is V25Result.Success -> {
+                _studyCards.value = _studyCards.value.filterNot { it.id == cardId }
+                refreshDecks()
+                refreshDashboard()
+                refreshTodayPlan()
+            }
+            is V25Result.Failure -> handleFailure("submit_review", result)
+        }
+    }
+
+    fun refreshCards(deckId: String): Job = viewModelScope.launch {
+        when (val result = v25Repository.listCards(deckId, V25BrowseFilter(V25BrowseOrder.position))) {
+            is V25Result.Success -> cardFlow(deckId).value = result.value.map(::toFlashcard)
+            is V25Result.Failure -> handleFailure("list_cards", result)
+        }
+    }
+
+    fun cards(deckId: String): Flow<List<FlashcardEntity>> = cardFlow(deckId).asStateFlow()
+
+    fun deckProgress(deckId: String): Flow<DeckProgress> = _decks.map { values ->
+        values.firstOrNull { it.id == deckId }?.let {
+            DeckProgress(it.cardCount, it.dueCount, it.masteredCards, it.reviewCount)
+        } ?: DeckProgress(0, 0, 0, 0)
+    }
+
+    fun importDeck(name: String, drafts: List<CardDraft>, onDone: (String) -> Unit) = viewModelScope.launch {
+        val valid = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
+        if (name.isBlank() || valid.isEmpty()) return@launch
+        when (val created = v25Repository.createDeck(name.trim())) {
+            is V25Result.Success -> when (val added = v25Repository.addCards(
+                created.value.deckId,
+                valid.map { V25CardDraft(it.front.trim(), it.back.trim()) },
+            )) {
+                is V25Result.Success -> {
+                    refreshDecks()
+                    onDone(created.value.deckId)
+                }
+                is V25Result.Failure -> handleFailure("import_cards", added)
+            }
+            is V25Result.Failure -> handleFailure("create_deck", created)
+        }
+    }
+
+    fun addCardsToDeck(deckId: String, drafts: List<CardDraft>, onDone: () -> Unit) = viewModelScope.launch {
+        val valid = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
+        if (valid.isEmpty()) return@launch
+        when (val result = v25Repository.addCards(deckId, valid.map { V25CardDraft(it.front.trim(), it.back.trim()) })) {
+            is V25Result.Success -> {
+                refreshCards(deckId)
+                refreshDecks()
+                onDone()
+            }
+            is V25Result.Failure -> handleFailure("add_cards", result)
+        }
+    }
+
+    fun updateDeckName(deckId: String, name: String, onFailure: () -> Unit = {}) = viewModelScope.launch {
+        when (val result = v25Repository.renameDeck(deckId, name.trim())) {
+            is V25Result.Success -> refreshDecks()
+            is V25Result.Failure -> {
+                handleFailure("rename_deck", result)
+                onFailure()
+            }
+        }
+    }
+
+    fun deleteDeck(deckId: String, onSuccess: () -> Unit = {}, onFailure: () -> Unit = {}) = viewModelScope.launch {
+        when (val result = v25Repository.deleteDeck(deckId)) {
+            is V25Result.Success -> {
+                cardFlows.remove(deckId)
+                refreshDecks()
+                onSuccess()
+            }
+            is V25Result.Failure -> {
+                handleFailure("delete_deck", result)
+                onFailure()
+            }
+        }
+    }
 
     fun updateCard(card: FlashcardEntity, onFailure: () -> Unit = {}) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            _frontendTestCards.value = _frontendTestCards.value.mapValues { (_, cards) ->
-                cards.map { if (it.id == card.id) card else it }
+        when (val result = v25Repository.updateCard(card.id, card.front.trim(), card.back.trim())) {
+            is V25Result.Success -> refreshCards(card.deckId)
+            is V25Result.Failure -> {
+                handleFailure("update_card", result)
+                onFailure()
             }
-            return@launch
-        }
-        when (val result = repository.updateCard(card)) {
-            is ApiResult.Success -> Unit
-            is ApiResult.Failure -> { logFailure("update_card", result); onFailure() }
         }
     }
 
     fun deleteCard(card: FlashcardEntity, onFailure: () -> Unit = {}) = viewModelScope.launch {
-        if (frontendTestMode.value) {
-            _frontendTestCards.value = _frontendTestCards.value.mapValues { (_, cards) -> cards.filterNot { it.id == card.id } }
-            _frontendTestDecks.value = _frontendTestDecks.value.map { deck ->
-                if (deck.id == card.deckId) deck.copy(cardCount = (deck.cardCount - 1).coerceAtLeast(0)) else deck
+        when (val result = v25Repository.deleteCard(card.id)) {
+            is V25Result.Success -> {
+                cardFlow(card.deckId).value = cardFlow(card.deckId).value.filterNot { it.id == card.id }
+                armDeletionUndo(result.value)
+                refreshDecks()
             }
-            return@launch
-        }
-        when (val result = repository.deleteCard(card)) {
-            is ApiResult.Success -> Unit
-            is ApiResult.Failure -> { logFailure("delete_card", result); onFailure() }
-        }
-    }
-
-    fun deletePdfChapter(chapter: PdfChapter, onFailure: () -> Unit = {}) = viewModelScope.launch {
-        val file = _pdfFile.value ?: return@launch
-        when (val result = repository.deletePdfChapter(file.id, chapter.id)) {
-            is ApiResult.Success -> _pdfFile.value = file.copy(chapters = file.chapters.filterNot { it.id == chapter.id })
-            is ApiResult.Failure -> { logFailure("delete_pdf_chapter", result); onFailure() }
-        }
-    }
-
-    fun setDarkTheme(value: Boolean?) = viewModelScope.launch {
-        getApplication<Application>().dataStore.edit { preferences ->
-            if (value == null) preferences.remove(DARK_THEME) else preferences[DARK_THEME] = value
-        }
-    }
-
-    private suspend fun pollPdf(initial: PdfFile, onParsed: (List<PdfChapter>) -> Unit, onFailure: (PdfReadFailure) -> Unit) {
-        var current = initial
-        repeat(120) {
-            when (current.status.uppercase()) {
-                "PARSED" -> { onParsed(current.chapters); return }
-                "FAILED" -> { onFailure(PdfReadFailure("PDF 解析失败", "服务端无法解析这份 PDF 的文字或目录。")); return }
-            }
-            delay(2_500)
-            when (val result = repository.getPdf(current.id)) {
-                is ApiResult.Success -> { current = result.value; _pdfFile.value = current }
-                is ApiResult.Failure -> { logFailure("get_pdf", result); onFailure(pdfFailure(result)); return }
+            is V25Result.Failure -> {
+                handleFailure("delete_card", result)
+                onFailure()
             }
         }
-        onFailure(PdfReadFailure("PDF 解析超时", "服务端长时间未返回解析结果，请稍后重试。"))
     }
 
-    private suspend fun pollTask(initial: GeneratedTask) {
+    fun undoLastDeletion(onFinished: () -> Unit = {}) = viewModelScope.launch {
+        val pending = _pendingDeletion.value ?: return@launch
+        when (val result = v25Repository.undoDeletionBatch(pending.deleteBatchId)) {
+            is V25Result.Success -> {
+                _pendingDeletion.value = null
+                cardFlows.keys.toList().forEach(::refreshCards)
+                refreshDecks()
+                onFinished()
+            }
+            is V25Result.Failure -> handleFailure("undo_deletion", result)
+        }
+    }
+
+    fun refreshApiKeyStatus(): Job = viewModelScope.launch {
+        when (val result = v25Repository.apiKeyStatus()) {
+            is V25Result.Success -> _apiKeyStatus.value = result.value.toLegacyApiKeyStatus()
+            is V25Result.Failure -> handleFailure("api_key_status", result)
+        }
+    }
+
+    fun saveApiKey(key: String, onFinished: () -> Unit = {}) = viewModelScope.launch {
+        when (val result = v25Repository.saveApiKey(key)) {
+            is V25Result.Success -> _apiKeyStatus.value = result.value.toLegacyApiKeyStatus()
+            is V25Result.Failure -> handleFailure("save_api_key", result)
+        }
+        onFinished()
+    }
+
+    fun checkApiKeyForGeneration(
+        onAvailable: () -> Unit,
+        onUnavailable: (String) -> Unit,
+        onFailure: () -> Unit,
+    ) = viewModelScope.launch {
+        when (val result = v25Repository.apiKeyStatus()) {
+            is V25Result.Success -> {
+                _apiKeyStatus.value = result.value.toLegacyApiKeyStatus()
+                if (result.value.state == V25ApiKeyState.AVAILABLE) onAvailable() else onUnavailable(result.value.state.name)
+            }
+            is V25Result.Failure -> {
+                handleFailure("api_key_for_generation", result)
+                onFailure()
+            }
+        }
+    }
+
+    private fun setDashboard(value: V25StatsDashboard) {
+        _dashboard.value = DashboardUiState(
+            hasData = value.hasData,
+            weeklyGoal = value.weeklyGoal,
+            completed = value.weeklyGoalCompleted,
+            weeklyGoalRate = value.weeklyGoalRate,
+            recallAccuracy = value.recallAccuracy,
+            firstAttemptAccuracy = value.firstAttemptAccuracy,
+            retentionRate = value.retentionRate,
+            streakDays = value.streakDays,
+            masteredCards = value.masteredCards,
+        )
+        _weeklyActivity.value = WeeklyActivityData(
+            dailyCounts = value.weeklyActivity.map { it.ratingCount }.padTo(7),
+            total = value.weeklyTotalRatings,
+            changePercent = value.weeklyChangeRate?.times(100)?.toInt(),
+        )
+    }
+
+    private fun setTodayPlan(value: V25TodayPlan) {
+        _todayPlan.value = TodayPlanUiState(
+            dailyGoal = value.dailyGoal,
+            completedCount = value.completedCount,
+            dueCount = value.dueCount,
+            remainingCount = value.planRemaining,
+        )
+    }
+
+    private fun recoverPendingDeletion() = viewModelScope.launch {
+        when (val result = v25Repository.pendingDeletionBatches()) {
+            is V25Result.Success -> result.value
+                .firstOrNull { it.undoUntil.isAfter(Instant.now()) }
+                ?.let(::armDeletionUndo)
+            is V25Result.Failure -> Unit
+        }
+    }
+
+    private fun armDeletionUndo(batch: V25CardDeletionBatch) {
+        val state = PendingDeletionUiState(batch.deleteBatchId, batch.undoUntil)
+        _pendingDeletion.value = state
+        _uiMessage.value = "已删除，可在 10 秒内撤销"
+        viewModelScope.launch {
+            val remaining = Duration.between(Instant.now(), state.undoUntil).toMillis().coerceAtLeast(0)
+            delay(remaining)
+            if (_pendingDeletion.value?.deleteBatchId == state.deleteBatchId) _pendingDeletion.value = null
+        }
+    }
+
+    private suspend fun pollTask(initial: V25GenerationTask) {
         var current = initial
         repeat(240) {
-            when (current.status.uppercase()) {
-                "COMPLETED" -> { refreshDecks(); return }
-                "FAILED", "CANCELLED", "PAUSED" -> return
+            when (current.status) {
+                V25TaskStatus.COMPLETED -> {
+                    refreshDecks()
+                    refreshDashboard()
+                    refreshTodayPlan()
+                    return
+                }
+                V25TaskStatus.FAILED, V25TaskStatus.ABANDONED -> return
+                else -> Unit
             }
             delay(2_500)
-            when (val result = repository.getTask(current.id)) {
-                is ApiResult.Success -> { current = result.value; _pdfTask.value = current }
-                is ApiResult.Failure -> { logFailure("get_task", result); return }
+            when (val result = v25Repository.getTask(current.taskId)) {
+                is V25Result.Success -> {
+                    current = result.value
+                    _pdfTask.value = current
+                }
+                is V25Result.Failure -> {
+                    handleFailure("get_task", result)
+                    return
+                }
             }
         }
-        unavailable("task_poll_timeout")
+        _uiMessage.value = "生成状态暂时无法更新，请稍后在项目中查看。"
     }
 
-    private fun pdfFailure(result: ApiResult.Failure): PdfReadFailure = when (result.code) {
-        "PDF_FILE_UNREADABLE" -> PdfReadFailure("无法访问这份 PDF", "请重新选择文件并确认应用有读取权限。")
-        "NETWORK_UNAVAILABLE" -> PdfReadFailure("PDF 上传网络异常", "上传连接被中断，请检查网络后重试。")
-        else -> PdfReadFailure("PDF 上传失败", "服务暂时无法处理上传，请稍后重试。")
+    private fun cardFlow(deckId: String): MutableStateFlow<List<FlashcardEntity>> =
+        cardFlows.getOrPut(deckId) { MutableStateFlow(emptyList()) }
+
+    private fun clearAuthenticatedState() {
+        _projects.value = emptyList()
+        projectsById.clear()
+        _decks.value = emptyList()
+        _studyCards.value = emptyList()
+        _dashboard.value = null
+        _weeklyActivity.value = WeeklyActivityData()
+        _todayPlan.value = TodayPlanUiState()
+        _apiKeyStatus.value = null
+        cardFlows.clear()
+        clearPdfFlow()
+        _pendingDeletion.value = null
     }
 
-    private fun unavailable(operation: String) {
-        if (BuildConfig.DEBUG) Log.w("ShankaNetwork", "op=$operation status=UNAVAILABLE reason=backend_route_missing")
+    private fun clearPdfFlow() {
+        _activePdfProject.value = null
+        _pdfFile.value = null
+        _pdfSamples.value = emptyList()
+        _pdfTask.value = null
+        _pdfTaskDeckId.value = null
     }
 
-    private fun <T> logFailure(operation: String, result: ApiResult<T>) {
-        if (result is ApiResult.Failure) {
-            // 受保护请求 401（AUTH_REQUIRED/AUTH_INVALID）→ 清会话回登录页；凭据/网络错误不触发。
-            auth.onBusinessFailure(result)
-            if (BuildConfig.DEBUG) Log.w("ShankaNetwork", "op=$operation status=${result.status} code=${result.code ?: "-"} localization=${result.localizationKey ?: "-"}")
+    private fun handleFailure(operation: String, result: V25Result.Failure, surface: Boolean = true) {
+        if (result.isAuthFailure) {
+            sessionStore.clear()
+            auth.checkSession()
+        }
+        if (surface) _uiMessage.value = userMessage(result)
+        if (BuildConfig.DEBUG) Log.w("ShankaNetwork", "op=$operation code=${result.code}")
+    }
+
+    private fun userMessage(result: V25Result.Failure): String =
+        if (result.code == "NETWORK_UNAVAILABLE") "网络错误，请稍后重试" else ErrorMessages.forCode(result.code)
+
+    private fun toProjectSummary(project: V25LearningProject) = com.qiuzhao.flashcards.data.remote.ProjectSummary(
+        id = project.projectId,
+        name = project.name,
+        themeKey = themeFor(project.projectId),
+        deckCount = project.deckCount,
+        materialCount = 1,
+    )
+
+    private fun toDeckSummary(deck: V25Deck) = DeckSummary(
+        id = deck.deckId,
+        name = deck.name,
+        source = "V25",
+        themeKey = themeFor(deck.projectId ?: deck.deckId),
+        cardCount = deck.cardCount,
+        dueCount = deck.dueCount,
+        masteredCards = deck.masteredCards,
+        reviewCount = deck.reviewCount,
+        masteryRatio = deck.masteryRatio,
+        projectId = deck.projectId,
+    )
+
+    private fun toFlashcard(card: V25Card) = FlashcardEntity(
+        id = card.cardId,
+        deckId = card.deckId,
+        front = card.front,
+        back = card.back,
+        position = card.position,
+        source = "V25",
+        version = card.version,
+    )
+
+    private fun V25LearningProject.toPdfFile() = PdfFile(
+        id = file.id,
+        name = file.name,
+        status = status.name,
+        chapters = file.chapters.map { PdfChapter(it.id, it.name, it.startPage, it.endPage) },
+    )
+
+    private fun com.qiuzhao.flashcards.domain.v25.V25ApiKeyStatus.toLegacyApiKeyStatus() = ApiKeyStatus(
+        status = state.name,
+        maskedKey = maskedKey.orEmpty(),
+    )
+
+    private fun coverageMode(quantity: String): V25CoverageMode = when (quantity.uppercase()) {
+        "COMPACT", "精简" -> V25CoverageMode.COMPACT
+        "EXTENSIVE", "充分" -> V25CoverageMode.EXTENSIVE
+        else -> V25CoverageMode.BALANCED
+    }
+
+    private fun difficultyRatio(config: PdfGenerationConfig): V25DifficultyRatio {
+        val basic = ((config.basic * 100).toInt().coerceIn(0, 100) / 10) * 10
+        val understanding = ((config.understanding * 100).toInt().coerceIn(0, 100) / 10) * 10
+        val deep = 100 - basic - understanding
+        return if (deep in 0..100 && deep % 10 == 0) {
+            V25DifficultyRatio(basic, understanding, deep)
+        } else {
+            V25DifficultyRatio(40, 40, 20)
         }
     }
+
+    private fun themeFor(id: String): String = projectThemes[Math.floorMod(id.hashCode(), projectThemes.size)]
+
+    private fun android.content.ContentResolver.displayName(uri: Uri): String =
+        query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+        }.orEmpty().ifBlank { uri.lastPathSegment?.substringAfterLast('/') ?: "learning-project.pdf" }
+
+    private fun <T, R> V25Result<T>.mapSuccess(transform: (T) -> R): V25Result<R> = when (this) {
+        is V25Result.Success -> V25Result.Success(transform(value))
+        is V25Result.Failure -> this
+    }
+
+    private fun List<Int>.padTo(size: Int): List<Int> =
+        if (this.size >= size) take(size) else this + List(size - this.size) { 0 }
 }

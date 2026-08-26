@@ -1,6 +1,5 @@
 package com.qiuzhao.flashcards.data.remote.v25
 
-import android.os.Build
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.remote.BackendClient
 import com.qiuzhao.flashcards.data.remote.HttpResult
@@ -145,20 +144,6 @@ class BackendV25Transport(
             headers = emptyMap(),
         )
 
-    /**
-     * Mirrors [BackendClient]'s private `defaultBaseUrl()` so the multipart transport needs no
-     * change to `RemoteFlashcards.kt`; the expression must stay in lockstep with it.
-     */
-    private fun baseUrl(): String =
-        if (BuildConfig.DEBUG && isAndroidEmulator()) "http://10.0.2.2:8000" else "https://shanka.kbzz1.top"
-
-    private fun isAndroidEmulator(): Boolean =
-        Build.FINGERPRINT.startsWith("generic") ||
-            Build.FINGERPRINT.startsWith("unknown") ||
-            Build.MODEL.contains("google_sdk", ignoreCase = true) ||
-            Build.MODEL.contains("Emulator", ignoreCase = true) ||
-            Build.MODEL.contains("Android SDK built for", ignoreCase = true) ||
-            Build.MANUFACTURER.contains("Genymotion", ignoreCase = true) ||
-            (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic")) ||
-            "google_sdk" == Build.PRODUCT
+    /** Multipart calls use the same compile-time endpoint authority as JSON calls. */
+    private fun baseUrl(): String = BuildConfig.API_BASE_URL
 }

@@ -267,7 +267,6 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
         when (stage) {
             ImportStage.CHOICE -> ImportMethodChoiceScreen(
                 onBack = nav::popBackStack,
-                onSmartImport = { nav.navigate(AppRoute.PdfMaker) },
                 onPasteText = { stage = ImportStage.PASTE }
             )
             ImportStage.PASTE -> PasteTextImportScreen(
@@ -281,13 +280,6 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
                     drafts.clear()
                     drafts.addAll(result.cards)
                     errors = result.errors
-                    if (result.cards.isNotEmpty()) {
-                        viewModel.beginTextImportFlow(
-                            name = deckName.ifBlank { "导入卡片组" },
-                            drafts = result.cards
-                        )
-                        nav.replaceTop(AppRoute.PdfMaker)
-                    }
                 }
             )
         }
@@ -347,7 +339,6 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
 @Composable
 private fun ImportMethodChoiceScreen(
     onBack: () -> Unit,
-    onSmartImport: () -> Unit,
     onPasteText: () -> Unit
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
@@ -359,16 +350,6 @@ private fun ImportMethodChoiceScreen(
                 contentPadding = PaddingValues(bottom = (NaturalScrollTail * scale).dp),
                 verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
             ) {
-                item {
-                    ImportMethodOption(
-                        icon = "picture_as_pdf",
-                        title = "选择文件智能制卡",
-                        subtitle = "从教材或课件生成闪卡",
-                        detail = "选择的文件支持（PDF/ .txt/ .md）格式。识别后可逐章修改并保存",
-                        onClick = onSmartImport,
-                        scale = scale
-                    )
-                }
                 item {
                     ImportMethodOption(
                         icon = "file_copy",

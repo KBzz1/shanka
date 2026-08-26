@@ -165,6 +165,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val projects by viewModel.projects.collectAsState()
     val dueCount by viewModel.dueCount.collectAsState()
     val dashboard by viewModel.dashboard.collectAsState()
+    val todayPlan by viewModel.todayPlan.collectAsState()
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
     val accountBootstrap by viewModel.accountBootstrap.collectAsState()
     val account = accountBootstrap.account
@@ -191,7 +192,17 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     }
 
     val typedEntryProvider = entryProvider {
-        entry<AppRoute.Home> { HomeScreen(decks, projects, dueCount, navigator) }
+        entry<AppRoute.Home> {
+            HomeScreen(
+                decks = decks,
+                projects = projects,
+                dueCount = dueCount,
+                todayPlan = todayPlan,
+                streakDays = dashboard?.streakDays ?: 0,
+                displayName = account?.nickname.orEmpty(),
+                nav = navigator,
+            )
+        }
         entry<AppRoute.Project> { ProjectScreen(projects, decks, projectSearchQuery, viewModel, navigator) }
         entry<AppRoute.ProjectCreate> { ProjectCreateScreen(viewModel, navigator) }
         entry<AppRoute.ProjectEdit> { route ->
@@ -202,18 +213,15 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                 editingProject = project
             )
         }
-        entry<AppRoute.ProjectTextEditor> { route ->
-            ProjectTextEditorScreen(route, viewModel, navigator)
-        }
         entry<AppRoute.ProjectDetail> { route ->
             val project = projects.firstOrNull { it.id == route.id }
             if (project == null) LoadingScreen() else ProjectDetailScreen(
                 project,
                 decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id },
+                viewModel,
                 navigator
             )
         }
-        entry<AppRoute.MaterialManagement> { SettingsUnbuiltScreen("资料管理", navigator) }
         entry<AppRoute.Data> { DataScreen(dueCount, dashboard, weeklyActivity, navigator) }
         entry<AppRoute.Deck> { route ->
             val deck = decks.firstOrNull { it.id == route.id }
@@ -238,8 +246,6 @@ fun FlashcardsApp(viewModel: AppViewModel) {
         entry<AppRoute.Login> { LoginScreen(viewModel, navigator, showBack = true) }
         entry<AppRoute.Register> { RegisterScreen(viewModel, navigator) }
         entry<AppRoute.Settings> { SettingsScreen(viewModel, navigator) }
-        entry<AppRoute.SettingsIdentity> { SettingsIdentityScreen(navigator) }
-        entry<AppRoute.SettingsUnbuilt> { route -> SettingsUnbuiltScreen(route.title, navigator) }
     }
     val entryProvider: (NavKey) -> NavEntry<NavKey> = { key ->
         @Suppress("UNCHECKED_CAST")

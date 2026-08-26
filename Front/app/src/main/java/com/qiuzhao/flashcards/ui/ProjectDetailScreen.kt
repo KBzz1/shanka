@@ -53,7 +53,12 @@ import kotlin.math.roundToInt
 
 /** Figma 540:3778: a project owns a statistics and deck-management view. */
 @Composable
-internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummary>, nav: ScreenNavigator) {
+internal fun ProjectDetailScreen(
+    project: ProjectSummary,
+    decks: List<DeckSummary>,
+    viewModel: AppViewModel,
+    nav: ScreenNavigator,
+) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val theme = deckTheme(project)
     var section by rememberSaveable { mutableStateOf(ProjectDetailSection.STATISTICS) }
@@ -82,8 +87,11 @@ internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummar
             ProjectDeckActions(
                 theme = deckTheme(project),
                 scale = scale,
-                onAddDeck = { },
-                onManageMaterials = { nav.navigate(AppRoute.MaterialManagement) },
+                onGenerateCards = {
+                    viewModel.openProjectForGeneration(project.id) { opened ->
+                        if (opened) nav.navigate(AppRoute.PdfMaker)
+                    }
+                },
                 modifier = Modifier.align(Alignment.BottomCenter).zIndex(1f)
             )
         }
@@ -95,8 +103,7 @@ private fun ProjectStatisticsContent(decks: List<DeckSummary>, theme: DeckTheme,
     var showToday by rememberSaveable { mutableStateOf(true) }
     val totalCards = decks.sumOf { it.cardCount }
     val mastered = decks.sumOf { it.masteredCards }
-    val due = decks.sumOf { it.dueCount }
-    val reviewed = if (showToday) due else decks.sumOf { it.reviewCount }
+    val reviewed = decks.sumOf { it.reviewCount }
     val ratio = if (totalCards == 0) 0f else mastered.toFloat() / totalCards
     LazyColumn(
         modifier = modifier.fillMaxWidth().clip(RoundedCornerShape((32 * scale).dp)),
@@ -119,14 +126,14 @@ private fun ProjectStatisticsContent(decks: List<DeckSummary>, theme: DeckTheme,
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)) {
                 StatisticsMetricCard(
-                    value = if (showToday) "12min" else "2.4h",
+                    value = "—",
                     kind = StatisticsMetricKind.LearningTime,
                     surface = StatisticsMetricSurface.White,
                     designScale = scale,
                     modifier = Modifier.weight(1f)
                 )
                 StatisticsMetricCard(
-                    value = if (showToday) mastered.coerceAtMost(2).toString() else mastered.toString(),
+                    value = mastered.toString(),
                     kind = StatisticsMetricKind.MasteredCards,
                     surface = StatisticsMetricSurface.White,
                     designScale = scale,
@@ -134,43 +141,7 @@ private fun ProjectStatisticsContent(decks: List<DeckSummary>, theme: DeckTheme,
                 )
             }
         }
-        item { ProjectProgressDistribution(scale) }
-        item { ProjectStreakMetrics(scale) }
     }
-}
-
-@Composable
-private fun ProjectProgressDistribution(scale: Float) = ReviewProgressCard(
-    entries = listOf(
-        // Project statistics are mutually exclusive and total 100%.
-        ReviewProgressEntry("熟识", AppColors.ReviewKnown, 2, 12),
-        ReviewProgressEntry("认识", AppColors.ReviewRecognised, 8, 12),
-        ReviewProgressEntry("模糊", AppColors.ReviewUncertain, 57, 68),
-        ReviewProgressEntry("陌生", AppColors.ReviewUnfamiliar, 8, 12),
-        ReviewProgressEntry("没学", AppColors.ReviewUnseen, 25, 30)
-    ),
-    designScale = scale
-)
-
-/** Figma 540:4661, the lower pair of project-only summary cards. */
-@Composable
-private fun ProjectStreakMetrics(scale: Float) = Row(
-    Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)
-) {
-    StatisticsMetricCard(
-        value = "12",
-        kind = StatisticsMetricKind.LongestStreak,
-        surface = StatisticsMetricSurface.White,
-        designScale = scale,
-        modifier = Modifier.weight(1f)
-    )
-    StatisticsMetricCard(
-        value = "4",
-        kind = StatisticsMetricKind.OpenCount,
-        surface = StatisticsMetricSurface.White,
-        designScale = scale,
-        modifier = Modifier.weight(1f)
-    )
 }
 
 @Composable
@@ -199,23 +170,16 @@ private fun ProjectDecksContent(project: ProjectSummary, decks: List<DeckSummary
 private fun ProjectDeckActions(
     theme: DeckTheme,
     scale: Float,
-    onAddDeck: () -> Unit,
-    onManageMaterials: () -> Unit,
+    onGenerateCards: () -> Unit,
     modifier: Modifier = Modifier
 ) = Row(
     modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = (16 * scale).dp, vertical = (16 * scale).dp),
     horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)
 ) {
-    Surface(onClick = onManageMaterials, color = theme.secondary, contentColor = theme.strongText, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.weight(1f).height((60 * scale).dp)) {
+    Surface(onClick = onGenerateCards, color = theme.primary, contentColor = theme.onPrimary, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth().height((60 * scale).dp)) {
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            MaterialSymbol("folder", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
-            Spacer(Modifier.width((8 * scale).dp)); AppText("文件管理", AppTextRole.Label, color = LocalContentColor.current, designScale = scale, maxLines = 1)
-        }
-    }
-    Surface(onClick = onAddDeck, color = theme.primary, contentColor = theme.onPrimary, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.weight(1f).height((60 * scale).dp)) {
-        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            MaterialSymbol("note_stack_add", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
-            Spacer(Modifier.width((8 * scale).dp)); AppText("添加卡片组", AppTextRole.Label, color = LocalContentColor.current, designScale = scale, maxLines = 1)
+            MaterialSymbol("auto_awesome", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+            Spacer(Modifier.width((8 * scale).dp)); AppText("开始智能制卡", AppTextRole.Label, color = LocalContentColor.current, designScale = scale, maxLines = 1)
         }
     }
 }
