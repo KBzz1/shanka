@@ -324,6 +324,32 @@ class AppViewModel(
         }
     }
 
+    /** Replaces the only PDF owned by a project after a parse failure. */
+    fun replaceProjectPdf(projectId: String, uri: Uri, onResult: (Boolean, String?) -> Unit) = viewModelScope.launch {
+        val resolver = getApplication<Application>().contentResolver
+        val fileName = resolver.displayName(uri)
+        val input = resolver.openInputStream(uri)
+        if (input == null) {
+            onResult(false, "无法读取所选 PDF")
+            return@launch
+        }
+        input.use { content ->
+            when (val result = v25Repository.replaceProjectPdf(projectId, fileName, content)) {
+                is V25Result.Success -> {
+                    projectsById[projectId] = result.value
+                    _activePdfProject.value = result.value
+                    _pdfFile.value = result.value.toPdfFile()
+                    refreshProjects()
+                    onResult(true, null)
+                }
+                is V25Result.Failure -> {
+                    handleFailure("replace_project_pdf", result, surface = false)
+                    onResult(false, userMessage(result))
+                }
+            }
+        }
+    }
+
     fun renameProject(projectId: String, name: String, onResult: (String?) -> Unit) = viewModelScope.launch {
         val normalized = name.trim()
         if (normalized.isBlank()) {

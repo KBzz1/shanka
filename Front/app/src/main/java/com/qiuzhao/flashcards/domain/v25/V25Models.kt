@@ -189,6 +189,10 @@ data class V25ChapterEdit(
 data class V25PdfFile(
     val id: String,
     val name: String,
+    /** Optional file metadata returned by project detail/list endpoints. */
+    val sizeBytes: Long? = null,
+    val status: String? = null,
+    val errorCode: String? = null,
     val chapters: List<V25Chapter> = emptyList(),
 )
 

@@ -101,6 +101,9 @@ internal fun requiredInt(value: JSONObject, key: String): Int {
 internal fun optionalInt(value: JSONObject, key: String): Int? =
     if (value.has(key) && !value.isNull(key)) value.getInt(key) else null
 
+internal fun optionalLong(value: JSONObject, key: String): Long? =
+    if (value.has(key) && !value.isNull(key)) value.getLong(key) else null
+
 internal fun requiredInstant(value: JSONObject, key: String): Instant =
     parseIsoInstant(requiredString(value, key), key)
 
@@ -173,6 +176,9 @@ internal fun parseChapter(value: JSONObject): V25Chapter = V25Chapter(
 internal fun parsePdfFile(value: JSONObject): V25PdfFile = V25PdfFile(
     id = requiredString(value, "file_id"),
     name = requiredString(value, "filename"),
+    sizeBytes = optionalLong(value, "size_bytes"),
+    status = optionalString(value, "status"),
+    errorCode = optionalString(value, "error_code"),
     chapters = optionalArray(value, "chapters").map(::parseChapter),
 )
 

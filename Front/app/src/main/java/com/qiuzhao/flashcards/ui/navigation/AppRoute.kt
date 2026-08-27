@@ -17,6 +17,8 @@ sealed interface AppRoute : NavKey {
     data object Project : AppRoute
     @Serializable data object Data : AppRoute
     @Serializable data class ProjectDetail(val id: String) : AppRoute
+    /** The single-PDF management surface for an existing V2.5 learning project. */
+    @Serializable data class ProjectMaterialManagement(val projectId: String) : AppRoute
     @Serializable data object ProjectCreate : AppRoute
     /** Reuses the project form with a pre-existing project as its editing target. */
     @Serializable data class ProjectEdit(val id: String) : AppRoute

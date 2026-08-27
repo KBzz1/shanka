@@ -221,6 +221,10 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                 navigator
             )
         }
+        entry<AppRoute.ProjectMaterialManagement> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else MaterialManagementScreen(project, viewModel, navigator)
+        }
         entry<AppRoute.Data> { DataScreen(dueCount, dashboard, weeklyActivity, navigator) }
         entry<AppRoute.Deck> { route ->
             val deck = decks.firstOrNull { it.id == route.id }

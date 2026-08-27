@@ -92,6 +92,7 @@ internal fun ProjectDetailScreen(
                         if (opened) nav.navigate(AppRoute.PdfMaker)
                     }
                 },
+                onManageMaterials = { nav.navigate(AppRoute.ProjectMaterialManagement(project.id)) },
                 modifier = Modifier.align(Alignment.BottomCenter).zIndex(1f)
             )
         }
@@ -171,15 +172,28 @@ private fun ProjectDeckActions(
     theme: DeckTheme,
     scale: Float,
     onGenerateCards: () -> Unit,
+    onManageMaterials: () -> Unit,
     modifier: Modifier = Modifier
 ) = Row(
     modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = (16 * scale).dp, vertical = (16 * scale).dp),
     horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)
 ) {
-    Surface(onClick = onGenerateCards, color = theme.primary, contentColor = theme.onPrimary, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth().height((60 * scale).dp)) {
+    Surface(onClick = onGenerateCards, color = theme.primary, contentColor = theme.onPrimary, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.weight(1f).height((60 * scale).dp)) {
         Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
             MaterialSymbol("auto_awesome", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
             Spacer(Modifier.width((8 * scale).dp)); AppText("开始智能制卡", AppTextRole.Label, color = LocalContentColor.current, designScale = scale, maxLines = 1)
+        }
+    }
+    Surface(
+        onClick = onManageMaterials,
+        color = theme.cardPanel,
+        contentColor = theme.text,
+        shape = RoundedCornerShape((24 * scale).dp),
+        modifier = Modifier.weight(1f).height((60 * scale).dp)
+    ) {
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            MaterialSymbol("folder_open", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+            Spacer(Modifier.width((8 * scale).dp)); AppText("资料管理", AppTextRole.Label, color = LocalContentColor.current, designScale = scale, maxLines = 1)
         }
     }
 }
