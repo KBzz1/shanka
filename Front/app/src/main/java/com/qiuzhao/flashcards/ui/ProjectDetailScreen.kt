@@ -49,7 +49,6 @@ import androidx.compose.ui.zIndex
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
-import kotlin.math.roundToInt
 
 /** Figma 540:3778: a project owns a statistics and deck-management view. */
 @Composable
@@ -92,11 +91,10 @@ internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummar
 @Composable
 private fun ProjectStatisticsContent(decks: List<DeckSummary>, theme: DeckTheme, scale: Float, modifier: Modifier) {
     var showToday by rememberSaveable { mutableStateOf(true) }
-    val totalCards = decks.sumOf { it.cardCount }
-    val mastered = decks.sumOf { it.masteredCards }
-    val due = decks.sumOf { it.dueCount }
-    val reviewed = if (showToday) due else decks.sumOf { it.reviewCount }
-    val ratio = if (totalCards == 0) 0f else mastered.toFloat() / totalCards
+    // There is no project-statistics endpoint: the only real numbers are the sums of this
+    // project's decks (all served by GET /decks). Every other slot keeps its Figma layout
+    // and shows an honest dash instead of a fabricated value.
+    val aggregate = projectDeckAggregate(decks)
     LazyColumn(
         modifier = modifier.fillMaxWidth().clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
         // Statistics has no fixed bottom action bar. A 32dp tail places the
@@ -106,9 +104,10 @@ private fun ProjectStatisticsContent(decks: List<DeckSummary>, theme: DeckTheme,
     ) {
         item {
             LearningDataProgressCard(
-                reviewedCards = reviewed,
-                totalCards = totalCards,
-                progressPercent = (ratio * 100).toInt(),
+                // Today's project review data has no server source; keep the layout, show dashes.
+                reviewedCards = null,
+                totalCards = null,
+                progressPercent = null,
                 todaySelected = showToday,
                 onTodaySelected = { showToday = it },
                 theme = theme,
@@ -118,14 +117,15 @@ private fun ProjectStatisticsContent(decks: List<DeckSummary>, theme: DeckTheme,
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)) {
                 StatisticsMetricCard(
-                    value = if (showToday) "12min" else "2.4h",
+                    // No learning-time source exists; never borrow a different metric.
+                    value = "—",
                     kind = StatisticsMetricKind.LearningTime,
                     surface = StatisticsMetricSurface.White,
                     designScale = scale,
                     modifier = Modifier.weight(1f)
                 )
                 StatisticsMetricCard(
-                    value = if (showToday) mastered.coerceAtMost(2).toString() else mastered.toString(),
+                    value = honestCount(aggregate.masteredCount),
                     kind = StatisticsMetricKind.MasteredCards,
                     surface = StatisticsMetricSurface.White,
                     designScale = scale,
@@ -141,12 +141,13 @@ private fun ProjectStatisticsContent(decks: List<DeckSummary>, theme: DeckTheme,
 @Composable
 private fun ProjectProgressDistribution(scale: Float) = ReviewProgressCard(
     entries = listOf(
-        // Project statistics are mutually exclusive and total 100%.
-        ReviewProgressEntry("熟识", AppColors.ReviewKnown, 2, 12),
-        ReviewProgressEntry("认识", AppColors.ReviewRecognised, 8, 12),
-        ReviewProgressEntry("模糊", AppColors.ReviewUncertain, 57, 68),
-        ReviewProgressEntry("陌生", AppColors.ReviewUnfamiliar, 8, 12),
-        ReviewProgressEntry("没学", AppColors.ReviewUnseen, 25, 30)
+        // The review-state bucket distribution is not served for a project either; every
+        // column keeps its Figma slot and shows the honest dash.
+        ReviewProgressEntry("熟识", AppColors.ReviewKnown, null, 0),
+        ReviewProgressEntry("认识", AppColors.ReviewRecognised, null, 0),
+        ReviewProgressEntry("模糊", AppColors.ReviewUncertain, null, 0),
+        ReviewProgressEntry("陌生", AppColors.ReviewUnfamiliar, null, 0),
+        ReviewProgressEntry("没学", AppColors.ReviewUnseen, null, 0)
     ),
     designScale = scale
 )
@@ -156,15 +157,16 @@ private fun ProjectProgressDistribution(scale: Float) = ReviewProgressCard(
 private fun ProjectStreakMetrics(scale: Float) = Row(
     Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)
 ) {
+    // No per-project streak or app-open source exists; keep the slots and show dashes.
     StatisticsMetricCard(
-        value = "12",
+        value = "—",
         kind = StatisticsMetricKind.LongestStreak,
         surface = StatisticsMetricSurface.White,
         designScale = scale,
         modifier = Modifier.weight(1f)
     )
     StatisticsMetricCard(
-        value = "4",
+        value = "—",
         kind = StatisticsMetricKind.OpenCount,
         surface = StatisticsMetricSurface.White,
         designScale = scale,

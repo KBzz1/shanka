@@ -1,5 +1,7 @@
 package com.qiuzhao.flashcards.ui
 
+import com.qiuzhao.flashcards.data.remote.DeckSummary
+
 /**
  * Honest metric projections shared by the deck/data/project pages on the JVM.
  *
@@ -12,3 +14,23 @@ internal fun honestCount(value: Int?): String = value?.toString() ?: "—"
 
 /** Renders a real ten-percent metric; a missing source stays a dash. */
 internal fun honestPercent(value: Int?): String = value?.let { "$it%" } ?: "—"
+
+/**
+ * Real project aggregates derived only from its decks. There is no project-statistics endpoint,
+ * so every project metric must be the sum of the project's decks — whose counts all come from
+ * `GET /decks`. Nothing here is invented; an empty project aggregates to zeros.
+ */
+internal data class ProjectDeckAggregate(
+    val cardCount: Int,
+    val masteredCount: Int,
+    val dueCount: Int,
+    val reviewCount: Int,
+)
+
+/** Sums the real per-deck counts of one project. */
+internal fun projectDeckAggregate(decks: List<DeckSummary>): ProjectDeckAggregate = ProjectDeckAggregate(
+    cardCount = decks.sumOf { it.cardCount },
+    masteredCount = decks.sumOf { it.masteredCards },
+    dueCount = decks.sumOf { it.dueCount },
+    reviewCount = decks.sumOf { it.reviewCount },
+)
