@@ -101,6 +101,8 @@ internal data class ProjectDraftMaterial(
     val extension: String? = null,
     val content: String = "",
     val uri: Uri? = null,
+    /** Import time shown on the material card; null for server-less drafts. */
+    val importedAt: Instant? = null,
 )
 
 private fun ProjectDraftMaterial.renamedFile(rawTitle: String): ProjectDraftMaterial {
@@ -1407,6 +1409,7 @@ class AppViewModel(
         type = ProjectDraftMaterialType.FILE,
         title = file.name,
         extension = file.name.substringAfterLast('.', "").lowercase().ifBlank { "pdf" },
+        importedAt = file.createdAt,
     )
 
     private fun toDeckSummary(deck: V25Deck) = DeckSummary(
