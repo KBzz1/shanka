@@ -143,6 +143,7 @@ import com.qiuzhao.flashcards.data.remote.FlashcardEntity
 import com.qiuzhao.flashcards.data.remote.Dashboard
 import com.qiuzhao.flashcards.data.ImportParser
 import com.qiuzhao.flashcards.data.remote.Rating
+import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.R
 import com.qiuzhao.flashcards.ui.motion.AppMotion
 import com.qiuzhao.flashcards.ui.navigation.AppNavigator
@@ -156,12 +157,12 @@ import kotlinx.coroutines.delay
 // Root list content begins with a card. A rounded top crop would remove content
 // from that card's 24dp inset, so only the lower viewport corners are rounded.
 private val BottomRoundedViewportShape = RoundedCornerShape(
-    bottomStart = AppShapeRadius.dp,
-    bottomEnd = AppShapeRadius.dp
+    bottomStart = AppScrollableContentClipRadius.dp,
+    bottomEnd = AppScrollableContentClipRadius.dp
 )
 
 private enum class PdfMakerStep { HOME, READING, READ_ERROR, CHAPTERS, SETTINGS, PREVIEW, TASK }
-internal enum class PdfTaskState { GENERATING, PAUSED, COMPLETE }
+internal enum class PdfTaskState { GENERATING, COMPLETE, FAILED, ABANDONED }
 internal data class PdfGenerationBlock(val title: String, val detail: String, val canOpenSettings: Boolean = false)
 
 private fun apiKeyGenerationBlock(status: String): PdfGenerationBlock = when (status.uppercase()) {
@@ -170,16 +171,26 @@ private fun apiKeyGenerationBlock(status: String): PdfGenerationBlock = when (st
     else -> PdfGenerationBlock("需要 API Key", "请先在设置中保存可用的 DeepSeek API Key。", canOpenSettings = true)
 }
 
+private fun apiKeyFailureBlock() = PdfGenerationBlock(
+    "API Key 不可用",
+    "当前保存的 DeepSeek API Key 无效或不可用，请到设置更新后重试。",
+    canOpenSettings = true,
+)
+
 private fun taskGenerationBlock(code: String?): PdfGenerationBlock = when (code) {
     "API_KEY_NOT_SET", "API_KEY_INVALID", "API_KEY_INSUFFICIENT_BALANCE" -> apiKeyGenerationBlock(code.removePrefix("API_KEY_"))
+    "API_KEY_UNAVAILABLE" -> apiKeyFailureBlock()
+    "SAMPLE_STALE" -> PdfGenerationBlock("样卡已失效", "请重新生成样卡并确认后开始。")
     "PDF_NOT_READY" -> PdfGenerationBlock("PDF 状态异常", "请返回上一步重新选择并解析 PDF。")
     else -> PdfGenerationBlock("暂时无法开始生成", "服务暂时无法创建任务，请稍后重试。")
 }
 
 private fun sampleGenerationBlock(code: String?): PdfGenerationBlock = when (code) {
     "API_KEY_NOT_SET", "API_KEY_INVALID", "API_KEY_INSUFFICIENT_BALANCE" -> apiKeyGenerationBlock(code.removePrefix("API_KEY_"))
+    "API_KEY_UNAVAILABLE" -> apiKeyFailureBlock()
     "PDF_NOT_READY" -> PdfGenerationBlock("PDF 状态异常", "请返回上一步重新选择并解析 PDF。")
     "VALIDATION_ERROR" -> PdfGenerationBlock("无法生成样卡", "当前生成参数未被服务端接受，请调整后重试。")
+    "SAMPLE_TIMEOUT" -> PdfGenerationBlock("样卡尚未就绪", "样卡仍在后台生成，请稍后重试。")
     else -> PdfGenerationBlock("暂时无法生成样卡", "服务暂时无法生成样卡，请稍后重试。")
 }
 
@@ -235,6 +246,37 @@ internal fun PdfSmartCardsFlow(decks: List<DeckSummary>, viewModel: AppViewModel
     var generationCheckInFlight by remember { mutableStateOf(false) }
     var generationConfig by remember { mutableStateOf(PdfGenerationConfig()) }
     var textImportDeckId by remember(textImport) { mutableStateOf<String?>(null) }
+    var textImportFailed by remember(textImport) { mutableStateOf(false) }
+    // One shared submit path for the text import: the first call and every retry run through the
+    // same AppViewModel entry points, whose coordinator resumes the stored attempt with its
+    // fixed keys instead of creating a second deck or duplicating cards.
+    val submitTextImport: () -> Unit = submit@{
+        val activeTextImport = textImport ?: return@submit
+        taskState = PdfTaskState.GENERATING
+        textImportFailed = false
+        step = PdfMakerStep.TASK
+        val completeTextImport: (String) -> Unit = { deckId ->
+            textImportDeckId = deckId
+            taskState = PdfTaskState.COMPLETE
+        }
+        val onTextImportFailure: () -> Unit = {
+            textImportFailed = true
+            taskState = PdfTaskState.FAILED
+        }
+        val existingDeckId = selectedExistingDeckId
+        if (useExistingDeck && existingDeckId != null) {
+            viewModel.addCardsToDeck(existingDeckId, activeTextImport.cards, onTextImportFailure) {
+                completeTextImport(existingDeckId)
+            }
+        } else {
+            viewModel.importDeck(
+                deckName.ifBlank { activeTextImport.deckName },
+                activeTextImport.cards,
+                onTextImportFailure,
+                onDone = completeTextImport,
+            )
+        }
+    }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         uris.forEach { uri ->
             val name = displayNameFor(uri, context)
@@ -246,10 +288,11 @@ internal fun PdfSmartCardsFlow(decks: List<DeckSummary>, viewModel: AppViewModel
     }
 
     LaunchedEffect(remoteTask?.status) {
-        when (remoteTask?.status?.uppercase()) {
-            "COMPLETED" -> taskState = PdfTaskState.COMPLETE
-            "PAUSED" -> taskState = PdfTaskState.PAUSED
-            "PENDING", "RUNNING" -> taskState = PdfTaskState.GENERATING
+        taskState = when (remoteTask?.status) {
+            V25TaskStatus.COMPLETED -> PdfTaskState.COMPLETE
+            V25TaskStatus.FAILED -> PdfTaskState.FAILED
+            V25TaskStatus.ABANDONED -> PdfTaskState.ABANDONED
+            else -> PdfTaskState.GENERATING
         }
     }
     LaunchedEffect(chapterDeleteFailed) {
@@ -357,22 +400,8 @@ internal fun PdfSmartCardsFlow(decks: List<DeckSummary>, viewModel: AppViewModel
             onBack = { step = PdfMakerStep.SETTINGS },
             onGenerate = {
                 val selected = chapters.filter { it.selected }.mapNotNull { it.remoteId }
-                val activeTextImport = textImport
-                if (activeTextImport != null) {
-                    taskState = PdfTaskState.GENERATING
-                    step = PdfMakerStep.TASK
-                    val completeTextImport: (String) -> Unit = { deckId ->
-                        textImportDeckId = deckId
-                        taskState = PdfTaskState.COMPLETE
-                    }
-                    val existingDeckId = selectedExistingDeckId
-                    if (useExistingDeck && existingDeckId != null) {
-                        viewModel.addCardsToDeck(existingDeckId, activeTextImport.cards) {
-                            completeTextImport(existingDeckId)
-                        }
-                    } else {
-                        viewModel.importDeck(deckName.ifBlank { activeTextImport.deckName }, activeTextImport.cards, completeTextImport)
-                    }
+                if (textImport != null) {
+                    submitTextImport()
                 } else if (selected.isEmpty()) {
                     generationBlocked = PdfGenerationBlock("未选择章节", "请返回上一步选择至少一个章节。")
                 } else if (!generationCheckInFlight) {
@@ -409,18 +438,27 @@ internal fun PdfSmartCardsFlow(decks: List<DeckSummary>, viewModel: AppViewModel
         )
         PdfMakerStep.TASK -> PdfTaskScreen(
             state = taskState,
-            onPause = { taskState = PdfTaskState.PAUSED },
-            onResume = {
-                taskState = PdfTaskState.GENERATING
-                if (textImport == null) viewModel.resumePdfTask()
-            },
-            onBack = { step = PdfMakerStep.PREVIEW },
+            generatedCardCount = remoteTask?.generatedCardCount ?: 0,
+            onLeave = nav::popBackStack,
             onViewDeck = {
                 (textImportDeckId ?: remoteTaskDeckId)?.let { deckId ->
                     viewModel.clearTextImportFlow()
                     nav.replaceInclusive(AppRoute.PdfMaker, AppRoute.CardList(deckId))
                 }
-            }
+            },
+            onRetry = {
+                if (textImportFailed) {
+                    submitTextImport()
+                } else {
+                    viewModel.retryPdfTask {
+                        taskState = PdfTaskState.GENERATING
+                        step = PdfMakerStep.PREVIEW
+                    }
+                }
+            },
+            onAbandon = { viewModel.abandonPdfTask { taskState = PdfTaskState.ABANDONED } },
+            errorCode = if (textImportFailed) "IMPORT_FAILED" else remoteTask?.errorCode,
+            onOpenSettings = { nav.navigate(AppRoute.Settings) },
         )
     }
 
@@ -454,7 +492,7 @@ internal fun PdfFlowLayout(title: String, onBack: () -> Unit, footer: @Composabl
         Box(Modifier.fillMaxSize()) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(start = (16 * scale).dp, top = (132 * scale).dp, end = (16 * scale).dp).clip(BottomRoundedViewportShape),
-                contentPadding = PaddingValues(bottom = if (footer == null) 36.dp else (148 * scale).dp),
+                contentPadding = PaddingValues(bottom = if (footer == null) (NaturalScrollTail * scale).dp else (fixedBottomControlScrollTail(bottomOffset = 24) * scale).dp),
                 verticalArrangement = Arrangement.spacedBy((16 * scale).dp), content = content
             )
             DeckDetailHeader(title, scale, onBack, modifier = Modifier.zIndex(1f))
@@ -482,7 +520,7 @@ private fun SmartFileImportScreen(
                 modifier = Modifier.fillMaxSize()
                     .padding(start = (16 * scale).dp, top = (132 * scale).dp, end = (16 * scale).dp)
                     .clip(BottomRoundedViewportShape),
-                contentPadding = PaddingValues(bottom = (148 * scale).dp),
+                contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail() * scale).dp),
                 verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
             ) {
                 item { SmartInfoCard("上传教材、课件或其他学习资料。\n暂不支持扫描版PDF。", scale) }
@@ -510,7 +548,7 @@ private fun SmartFileImportScreen(
 private fun SmartInfoCard(text: String, scale: Float) {
     Surface(
         color = AppColors.Blue.background,
-        shape = RoundedCornerShape((32 * scale).dp),
+        shape = RoundedCornerShape((AppNestedShapeRadius * scale).dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         AppText(
@@ -527,7 +565,7 @@ private fun SmartInfoCard(text: String, scale: Float) {
 private fun SmartSectionLabel(text: String, scale: Float) {
     AppText(
         text = text,
-        role = AppTextRole.Supporting,
+        role = AppTextRole.SectionTitle,
         modifier = Modifier.padding(start = (8 * scale).dp),
         color = AppColors.TextIconDark,
         designScale = scale
@@ -539,12 +577,10 @@ private fun SmartImportFileCard(file: SmartImportFile, scale: Float, onToggle: (
     SmartSwipeDeleteContainer(file.id, scale, "删除文件", onDelete) { cardModifier ->
         SmartSelectableCard(
             title = file.name,
-            subtitle = "26/8/11 导入",
-            badge = file.format,
+            subtitle = "${file.format.uppercase()} 26/8/11 导入",
             selected = file.selected,
             selectedIcon = "check_circle",
             unselectedIcon = "picture_as_pdf",
-            action = onToggle,
             scale = scale,
             modifier = cardModifier,
             onClick = onToggle
@@ -561,7 +597,8 @@ private fun SmartSwipeDeleteContainer(
     onDelete: () -> Unit,
     content: @Composable (Modifier) -> Unit
 ) {
-    val shape = RoundedCornerShape((32 * scale).dp)
+    val viewportShape = RoundedCornerShape((AppShapeRadius * scale).dp)
+    val deleteActionShape = RoundedCornerShape((32 * scale).dp)
     val actionWidth = (112 * scale).dp
     val revealWidthPx = with(LocalDensity.current) { ((112 - 16) * scale).dp.toPx() }
     var dragOffset by remember(key) { mutableFloatStateOf(0f) }
@@ -569,14 +606,17 @@ private fun SmartSwipeDeleteContainer(
     val dragState = rememberDraggableState { delta ->
         dragOffset = (dragOffset + delta).coerceIn(-revealWidthPx, 0f)
     }
-    Box(Modifier.fillMaxWidth().height((104 * scale).dp).clip(shape)) {
+    Box(Modifier.fillMaxWidth().height((104 * scale).dp).clip(viewportShape)) {
         // Keep the action mounted behind the card at rest. This matches the
         // deck/card-list implementation and prevents a one-frame pop-in as a
         // drag first crosses the reveal threshold.
         Surface(
             onClick = onDelete,
-            shape = shape,
-            color = AppColors.Warning,
+            shape = deleteActionShape,
+            // Figma 222:4713 uses the stronger warning tier for this
+            // full-height destructive chapter action, distinct from the
+            // ordinary material-card delete action.
+            color = AppColors.WarningStrong,
             contentColor = AppColors.TextIconLight,
             modifier = Modifier.align(Alignment.CenterEnd).width(actionWidth).fillMaxHeight()
         ) {
@@ -607,25 +647,25 @@ private fun SmartSwipeDeleteContainer(
 private fun SmartSelectableCard(
     title: String,
     subtitle: String,
-    badge: String,
     selected: Boolean,
     selectedIcon: String,
     unselectedIcon: String,
-    action: (() -> Unit)?,
     scale: Float,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    // Figma 167:9679 / 222:4713.  These two selectable components share the
-    // exact blue/green state pair; keeping it here prevents the file and
-    // chapter flows from drifting apart again.
-    val surface = if (selected) AppColors.Green.background else AppColors.Blue.background
+    // Figma 222:4713: this smart-making flow lives on the white base canvas,
+    // so its unselected card starts at brand Background. Green is reserved for
+    // the explicit selected state; icon tile and edit badge use Primary.
+    // Figma 222:4712: selection advances this base-canvas card to Green
+    // Surface, not Green Background. The latter is reserved for an inner tier.
+    val surface = if (selected) AppColors.Green.surface else AppColors.Blue.background
     val accent = if (selected) AppColors.Green.primary else AppColors.Blue.primary
     val primary = AppColors.TextIconDark
     val onAccent = if (selected) AppColors.Green.background else AppColors.Blue.background
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape((32 * scale).dp),
+        shape = RoundedCornerShape((AppShapeRadius * scale).dp),
         color = surface,
         modifier = modifier
     ) {
@@ -639,10 +679,9 @@ private fun SmartSelectableCard(
                     MaterialSymbol(if (selected) selectedIcon else unselectedIcon, null, tint = onAccent, size = fixedSp(24 * scale), filled = true)
                 }
             }
-            Column(
-                Modifier.weight(1f).height((56 * scale).dp),
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
+            // Figma 222:4713: title and page range form the complete content
+            // column. The former trailing badge/action is intentionally removed.
+            Column(Modifier.weight(1f).height((56 * scale).dp), verticalArrangement = Arrangement.SpaceBetween) {
                 AppText(
                     text = title,
                     role = AppTextRole.CardTitle,
@@ -660,16 +699,6 @@ private fun SmartSelectableCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            Surface(
-                onClick = { action?.invoke() },
-                shape = RoundedCornerShape((20 * scale).dp),
-                color = accent,
-                modifier = Modifier.height((56 * scale).dp)
-            ) {
-                Box(Modifier.padding(horizontal = (16 * scale).dp), contentAlignment = Alignment.Center) {
-                    AppText(badge, AppTextRole.Label, color = onAccent, designScale = scale, maxLines = 1)
-                }
-            }
         }
     }
 }
@@ -685,7 +714,7 @@ private fun PdfReadingScreen(onBack: () -> Unit) = PdfFlowLayout("正在识别",
 private fun PdfRecognitionProgressCard() {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     Surface(
-        shape = RoundedCornerShape((32 * scale).dp),
+        shape = RoundedCornerShape((AppShapeRadius * scale).dp),
         color = AppColors.Blue.background,
         modifier = Modifier.fillMaxWidth().height((265 * scale).dp)
     ) {
@@ -723,7 +752,7 @@ private fun PdfRecognitionRing(scale: Float) {
 @Composable
 private fun PdfReadErrorScreen(failure: PdfReadFailure?, onBack: () -> Unit, onRetry: () -> Unit) = PdfFlowLayout("PDF 智能制卡", onBack) {
     item { PdfStatusCard(failure?.title ?: "PDF 处理失败", failure?.detail ?: "请重新选择文件后再试。", icon = "error") }
-    item { Button(onClick = onRetry, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(24.dp)) { Text("重新选择") } }
+    item { Button(onClick = onRetry, modifier = Modifier.fillMaxWidth().height(56.dp), shape = RoundedCornerShape(24.dp)) { AppText("重新选择", AppTextRole.Label) } }
 }
 
 @Composable
@@ -754,7 +783,7 @@ private fun PdfChapterScreen(
                 modifier = Modifier.fillMaxSize()
                     .padding(start = (16 * scale).dp, top = (132 * scale).dp, end = (16 * scale).dp)
                     .clip(BottomRoundedViewportShape),
-                contentPadding = PaddingValues(bottom = (148 * scale).dp),
+                contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail() * scale).dp),
                 verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
             ) {
                 item { SmartInfoCard("选择要制作闪卡的章节。", scale) }
@@ -765,11 +794,9 @@ private fun PdfChapterScreen(
                         SmartSelectableCard(
                             title = chapter.title,
                             subtitle = "${chapter.start}-${chapter.end} 页",
-                            badge = "编辑",
                             selected = chapter.selected,
                             selectedIcon = "check_circle",
                             unselectedIcon = "book_ribbon",
-                            action = { onEdit(index) },
                             scale = scale,
                             modifier = cardModifier,
                             onClick = { onToggle(index) }
@@ -815,5 +842,5 @@ private fun PdfChapterEditDialog(chapter: PdfChapter, onSave: (PdfChapter) -> Un
                 OutlinedTextField(end, { end = it.filter(Char::isDigit) }, label = { AppText("结束页", AppTextRole.Label) }, modifier = Modifier.weight(1f), textStyle = appInputTextStyle(AppTextRole.MetricXSmall), visualTransformation = rememberBilingualInputTransformation(AppTextRole.MetricXSmall))
             }
         }
-    }, confirmButton = { TextButton(onClick = { onSave(chapter.copy(title = title.ifBlank { chapter.title }, start = start.toIntOrNull() ?: chapter.start, end = end.toIntOrNull() ?: chapter.end)) }) { Text("保存") } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+    }, confirmButton = { TextButton(onClick = { onSave(chapter.copy(title = title.ifBlank { chapter.title }, start = start.toIntOrNull() ?: chapter.start, end = end.toIntOrNull() ?: chapter.end)) }) { AppText("保存", AppTextRole.Label) } }, dismissButton = { TextButton(onClick = onDismiss) { AppText("取消", AppTextRole.Label) } })
 }

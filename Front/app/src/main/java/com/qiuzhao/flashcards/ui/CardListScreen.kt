@@ -166,6 +166,7 @@ internal fun CardListScreen(
     LaunchedEffect(deckId) { viewModel.refreshCards(deckId) }
     val cards by viewModel.cards(deckId).collectAsState(initial = emptyList())
     val decks by viewModel.decks.collectAsState()
+    val projects by viewModel.projects.collectAsState()
     val deck = decks.firstOrNull { it.id == deckId }
     var optimisticDeck by remember(deckId) { mutableStateOf<DeckSummary?>(null) }
     var optimisticCards by remember(deckId) { mutableStateOf<Map<String, FlashcardEntity>>(emptyMap()) }
@@ -177,7 +178,7 @@ internal fun CardListScreen(
         .filterNot { it.id in pendingDeletedCards }
         .map { optimisticCards[it.id] ?: it }
         .toList()
-    val theme = displayDeck?.let(::deckTheme) ?: DeckThemes.first()
+    val theme = displayDeck?.let { deckTheme(it, projects) } ?: DeckThemes.first()
     var editingCard by remember { mutableStateOf<FlashcardEntity?>(null) }
     var deletingCard by remember { mutableStateOf<FlashcardEntity?>(null) }
     var editingDeckPresentation by remember { mutableStateOf(false) }
@@ -198,20 +199,28 @@ internal fun CardListScreen(
         pendingDeletedCards = pendingDeletedCards.intersect(cards.map { it.id }.toSet())
     }
 
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+    Surface(Modifier.fillMaxSize(), color = theme.surface) {
         Box(Modifier.fillMaxSize()) {
             Box(
                 Modifier.fillMaxSize()
-                    // Figma 118:2389: cards begin 194dp from the design canvas top.
-                    .padding(start = (16 * designScale).dp, top = (194 * designScale).dp, end = (16 * designScale).dp)
+                    // Figma 373:1691: the hint box and the cards scroll together.
+                    .padding(start = (16 * designScale).dp, top = (136 * designScale).dp, end = (16 * designScale).dp)
                     .height((693 * designScale).dp)
-                    .clip(RoundedCornerShape((AppShapeRadius * designScale).dp))
+                    .clip(RoundedCornerShape((AppScrollableContentClipRadius * designScale).dp))
             ) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = (144 * designScale).dp),
+                    contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail(bottomOffset = 16) * designScale).dp),
                     verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)
                 ) {
+                    item {
+                        HintBox(
+                            text = "点击卡片可以查看答案。\n卡片左滑可进行编辑与删除。",
+                            parentIsWhite = true,
+                            theme = theme,
+                            designScale = designScale
+                        )
+                    }
                     items(visibleCards, key = { it.id }) { card ->
                         CardListItem(
                             card = card,
@@ -224,37 +233,26 @@ internal fun CardListScreen(
                     }
                 }
             }
-            Text(
-                "点击卡片可以查看答案。\n卡片左滑可进行编辑与删除。",
-                modifier = Modifier.fillMaxWidth()
-                    .padding(start = (26 * designScale).dp, top = (136 * designScale).dp, end = (26 * designScale).dp),
-                color = theme.text,
-                fontFamily = AppFonts.MiSansMedium,
-                fontWeight = FontWeight.Normal,
-                fontSize = fixedSp(16 * designScale),
-                lineHeight = fixedSp(20 * designScale),
-                textAlign = TextAlign.Center
-            )
             DeckDetailHeader(
                 // Figma 118:2389 intentionally leaves the centre of this edit
                 // list header empty: this is a back-only secondary information bar.
                 title = if (mode == CardListMode.EDIT) "" else "卡片列表",
                 designScale = designScale,
                 onBack = nav::popBackStack,
-                theme = if (mode == CardListMode.EDIT) theme else null,
+                theme = theme,
                 subtitle = if (mode == CardListMode.GENERATED) "${visibleCards.size} cards" else null,
                 modifier = Modifier.zIndex(1f)
             )
             BottomContentFade(designScale, Modifier.align(Alignment.BottomCenter))
             Row(
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                    .padding(start = (16 * designScale).dp, end = (16 * designScale).dp, bottom = (40 * designScale).dp)
+                    .padding(horizontal = (16 * designScale).dp, vertical = (16 * designScale).dp)
                     .fillMaxWidth().height((60 * designScale).dp).zIndex(1f),
                 horizontalArrangement = Arrangement.spacedBy(((if (mode == CardListMode.EDIT) 16 else 12) * designScale).dp)
             ) {
                 if (mode == CardListMode.EDIT) {
                     CardListActionButton(
-                        label = "名称与主题色",
+                        label = "编辑名称",
                         icon = "edit",
                         primary = false,
                         // Figma 121:2630 keeps this label button at its natural
@@ -281,6 +279,7 @@ internal fun CardListScreen(
                         primary = false,
                         modifier = Modifier.weight(1f),
                         designScale = designScale,
+                        theme = theme,
                         onClick = nav::popBackStack
                     )
                     CardListActionButton(
@@ -289,6 +288,7 @@ internal fun CardListScreen(
                         primary = true,
                         modifier = Modifier.weight(1f),
                         designScale = designScale,
+                        theme = theme,
                         onClick = { nav.replaceInclusive(AppRoute.CardList(deckId), AppRoute.Deck(deckId)) }
                     )
                 }
@@ -317,7 +317,7 @@ internal fun CardListScreen(
         AlertDialog(
             onDismissRequest = { deletingCard = null },
             title = { Text("删除该卡？", fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal) },
-            text = { Text("删除后无法恢复。", fontFamily = AppFonts.MiSansMedium, fontWeight = FontWeight.Normal) },
+            text = { AppText("删除后无法恢复。", AppTextRole.Supporting) },
             confirmButton = {
                 TextButton(onClick = {
                     pendingDeletedCards = pendingDeletedCards + card.id
@@ -326,19 +326,21 @@ internal fun CardListScreen(
                         deleteFailed = true
                     }
                     deletingCard = null
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }) { AppText("删除", AppTextRole.Label, color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { deletingCard = null }) { Text("取消") } }
+            dismissButton = { TextButton(onClick = { deletingCard = null }) { AppText("取消", AppTextRole.Label) } }
         )
     }
     if (editingDeckPresentation && displayDeck != null) {
         DeckPresentationDialog(
             deck = displayDeck,
+            theme = theme,
             onDismiss = { editingDeckPresentation = false },
-            onSave = { name, themeKey ->
-                val updated = displayDeck.copy(name = name, themeKey = themeKey)
+            onSave = { name ->
+                // The project's theme is intentionally not editable here.
+                val updated = displayDeck.copy(name = name)
                 optimisticDeck = updated
-                viewModel.updateDeckPresentation(displayDeck.id, name, themeKey) {
+                viewModel.updateDeckName(displayDeck.id, name) {
                     optimisticDeck = null
                 }
                 editingDeckPresentation = false
@@ -371,7 +373,7 @@ internal fun CardListActionButton(label: String, icon: String, primary: Boolean,
 
 @Composable
 private fun CardListItem(card: FlashcardEntity, number: Int, designScale: Float, theme: DeckTheme, onEdit: () -> Unit, onDelete: () -> Unit) {
-    val shape = RoundedCornerShape((32 * designScale).dp)
+    val shape = RoundedCornerShape((AppShapeRadius * designScale).dp)
     val actionWidth = (112 * designScale).dp
     // The panel remains 112dp wide. The front card stops 16dp into it, exactly
     // matching Figma 143:3526, so the exposed panel measures 96dp.
@@ -438,7 +440,7 @@ private fun CardListItem(card: FlashcardEntity, number: Int, designScale: Float,
 private fun CardListSwipeAction(label: String, icon: String, color: Color, contentColor: Color, modifier: Modifier, designScale: Float, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape((32 * designScale).dp),
+        shape = RoundedCornerShape((36 * designScale).dp),
         color = color,
         modifier = modifier.fillMaxWidth()
     ) {
@@ -451,13 +453,13 @@ private fun CardListSwipeAction(label: String, icon: String, color: Color, conte
         ) {
             MaterialSymbol(icon, label, tint = contentColor, size = fixedSp(24 * designScale), filled = true)
             Spacer(Modifier.height((4 * designScale).dp))
-            Text(label, color = contentColor, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(20 * designScale), maxLines = 1)
+            AppText(label, AppTextRole.Label, color = contentColor, designScale = designScale, maxLines = 1)
         }
     }
 }
 
 /** Figma 118:2389 cycles the card-type pill independently from the deck theme. */
-private data class CardListTagStyle(val label: String, val container: Color, val content: Color)
+internal data class CardListTagStyle(val label: String, val container: Color, val content: Color)
 
 private val CardListTagStyles = listOf(
     CardListTagStyle("基础记忆", AppColors.Blue.primarySecondary, AppColors.Blue.ink),
@@ -465,15 +467,19 @@ private val CardListTagStyles = listOf(
     CardListTagStyle("综合应用", AppColors.Pink.primarySecondary, AppColors.Pink.ink)
 )
 
-private fun cardListTagStyle(number: Int): CardListTagStyle =
+internal fun cardListTagStyle(number: Int): CardListTagStyle =
     CardListTagStyles[(number - 1).mod(CardListTagStyles.size)]
 
 @Composable
 private fun CardListFace(card: FlashcardEntity, number: Int, answer: Boolean, rotation: Float, alpha: Float, shape: RoundedCornerShape, designScale: Float, theme: DeckTheme) {
     val density = LocalDensity.current.density
     val tagStyle = cardListTagStyle(number)
+    // Figma 118:2389: the question face is the ink surface, the answer face is
+    // one family step deeper than the page (page background -> surface).
+    val faceColor = if (answer) theme.cardPanel else theme.strongText
+    val faceContent = if (answer) theme.strongText else AppColors.TextIconLight
     Surface(
-        color = theme.surface,
+        color = faceColor,
         shape = shape,
         modifier = Modifier.fillMaxSize().graphicsLayer {
             rotationY = if (answer) rotation - 180f else rotation
@@ -491,17 +497,15 @@ private fun CardListFace(card: FlashcardEntity, number: Int, answer: Boolean, ro
                     MaterialSymbol(
                         if (answer) "wb_incandescent" else "book_5",
                         null,
-                        tint = theme.text,
+                        tint = faceContent,
                         size = fixedSp(24 * designScale),
                         filled = true
                     )
-                    Text(
+                    AppText(
                         if (answer) "答案" else "问题",
-                        color = theme.text,
-                        fontFamily = AppFonts.MiSansSemibold,
-                        fontWeight = FontWeight.Normal,
-                        fontSize = fixedSp(24 * designScale),
-                        lineHeight = fixedSp(28 * designScale)
+                        AppTextRole.SectionTitle,
+                        color = faceContent,
+                        designScale = designScale
                     )
                 }
                 Surface(shape = RoundedCornerShape(999.dp), color = tagStyle.container) {
@@ -519,7 +523,7 @@ private fun CardListFace(card: FlashcardEntity, number: Int, answer: Boolean, ro
             }
             Text(
                 if (answer) card.back else card.front,
-                color = theme.text,
+                color = faceContent,
                 fontFamily = AppFonts.MiSansMedium,
                 fontWeight = FontWeight.Normal,
                 fontSize = fixedSp(20 * designScale),
@@ -546,33 +550,32 @@ internal fun CardEditDialog(card: FlashcardEntity, onSave: (FlashcardEntity) -> 
             }
         },
         confirmButton = {
-            TextButton(onClick = { if (front.isNotBlank() && back.isNotBlank()) onSave(card.copy(front = front.trim(), back = back.trim())) }) { Text("保存") }
+            TextButton(onClick = { if (front.isNotBlank() && back.isNotBlank()) onSave(card.copy(front = front.trim(), back = back.trim())) }) { AppText("保存", AppTextRole.Label) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+        dismissButton = { TextButton(onClick = onDismiss) { AppText("取消", AppTextRole.Label) } }
     )
 }
 
 @Composable
 private fun DeckPresentationDialog(
     deck: DeckSummary,
+    theme: DeckTheme,
     onDismiss: () -> Unit,
-    onSave: (name: String, themeKey: String) -> Unit
+    onSave: (name: String) -> Unit
 ) {
     var name by remember(deck.id, deck.name) { mutableStateOf(displayDeckTitle(deck)) }
-    var selectedThemeKey by remember(deck.id, deck.themeKey) { mutableStateOf(deckTheme(deck).key) }
-    val selectedTheme = DeckThemes.first { it.key == selectedThemeKey }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                "名称与主题色",
-                color = selectedTheme.strongText,
+                "编辑卡组名称",
+                color = theme.strongText,
                 fontFamily = AppFonts.MiSansSemibold,
                 fontWeight = FontWeight.Normal
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -582,41 +585,21 @@ private fun DeckPresentationDialog(
                     textStyle = appInputTextStyle(AppTextRole.CardSubtitle),
                     visualTransformation = rememberBilingualInputTransformation(AppTextRole.CardSubtitle)
                 )
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "主色调 · ${selectedTheme.label}",
-                        color = selectedTheme.text,
-                        fontFamily = AppFonts.MiSansSemibold,
-                        fontWeight = FontWeight.Normal,
-                        fontSize = fixedSp(16f)
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        DeckThemes.forEach { option ->
-                            val selected = option.key == selectedThemeKey
-                            Surface(
-                                onClick = { selectedThemeKey = option.key },
-                                color = option.primary,
-                                contentColor = option.onPrimary,
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier.weight(1f).height(48.dp)
-                                    .semantics { contentDescription = "${option.label}主题色" }
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    if (selected) {
-                                        MaterialSymbol("check", "已选择${option.label}", tint = option.onPrimary, size = fixedSp(24f), filled = true)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                Text(
+                    "主题色继承自所属项目 · ${theme.label}",
+                    color = theme.strongText,
+                    fontFamily = AppFonts.MiSansSemibold,
+                    fontWeight = FontWeight.Normal,
+                    fontSize = fixedSp(16f),
+                    lineHeight = fixedSp(21f)
+                )
             }
         },
         confirmButton = {
-            TextButton(onClick = { if (name.isNotBlank()) onSave(name.trim(), selectedThemeKey) }) {
-                Text("保存", color = selectedTheme.primary, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal)
+            TextButton(onClick = { if (name.isNotBlank()) onSave(name.trim()) }) {
+                AppText("保存", AppTextRole.Label, color = theme.primary)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+        dismissButton = { TextButton(onClick = onDismiss) { AppText("取消", AppTextRole.Label) } }
     )
 }

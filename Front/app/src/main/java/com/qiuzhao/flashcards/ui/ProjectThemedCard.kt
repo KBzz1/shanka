@@ -49,7 +49,7 @@ internal fun ProjectThemedCard(
         onClick = onClick,
         color = palette.background,
         contentColor = theme.text,
-        shape = RoundedCornerShape((32 * designScale).dp),
+        shape = RoundedCornerShape((AppShapeRadius * designScale).dp),
         modifier = modifier.fillMaxWidth()
     ) {
         Column(
@@ -85,12 +85,10 @@ internal fun ProjectThemedCard(
                         horizontalArrangement = Arrangement.spacedBy((6 * designScale).dp, Alignment.CenterHorizontally),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
+                        AppText(
                             actionLabel,
-                            fontFamily = AppFonts.MiSansBold,
-                            fontSize = fixedSp(20 * designScale),
-                            lineHeight = fixedSp(27 * designScale),
-                            style = figmaCardTextStyle()
+                            AppTextRole.Label,
+                            designScale = designScale
                         )
                         MaterialSymbol("arrow_forward", null, tint = LocalContentColor.current, size = fixedSp(24 * designScale), filled = true)
                     }
@@ -101,7 +99,7 @@ internal fun ProjectThemedCard(
 }
 
 @Composable
-private fun ProjectThemedCardHeader(
+internal fun ProjectThemedCardHeader(
     title: String,
     count: Int,
     countLabel: String,
@@ -121,7 +119,10 @@ private fun ProjectThemedCardHeader(
     ) {
         Surface(
             color = theme.primary,
-            shape = RoundedCornerShape((16 * designScale).dp),
+            // Figma 257:6634 uses the same 24dp corner on every colour
+            // variant. A per-theme 16dp fallback made the blue/green icons
+            // visibly too square in both the project list and Home card.
+            shape = RoundedCornerShape((24 * designScale).dp),
             modifier = Modifier.size((56 * designScale).dp)
         ) {
             Box(contentAlignment = Alignment.Center) {
@@ -132,30 +133,25 @@ private fun ProjectThemedCardHeader(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy((4 * designScale).dp)
         ) {
-            MixedLanguageText(
+            AppText(
                 title,
+                AppTextRole.CardTitle,
                 modifier = Modifier.fillMaxWidth(),
                 color = theme.text,
-                chineseFont = AppFonts.MiSansBold,
-                latinFont = AppFonts.GoogleSansFlexBold,
-                fontSize = fixedSp(20 * designScale),
-                lineHeight = fixedSp(27 * designScale),
+                designScale = designScale,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                includeFontPadding = false
+                overflow = TextOverflow.Ellipsis
             )
             Row(
                 horizontalArrangement = Arrangement.spacedBy((4 * designScale).dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 MaterialSymbol("brightness_alert", null, tint = AppColors.WarningStrong, size = fixedSp(18 * designScale), filled = true)
-                Text(
+                AppText(
                     "高优先级",
+                    AppTextRole.CardSubtitle,
                     color = AppColors.WarningStrong,
-                    fontFamily = AppFonts.MiSansSemibold,
-                    fontSize = fixedSp(16 * designScale),
-                    lineHeight = fixedSp(21 * designScale),
-                    style = figmaCardTextStyle()
+                    designScale = designScale
                 )
             }
         }
@@ -186,7 +182,7 @@ internal fun FigmaDeckProgressPanel(
         modifier = modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding((12 * designScale).dp),
+            modifier = Modifier.padding((theme.cardProgressPanelPadding * designScale).dp),
             verticalArrangement = Arrangement.spacedBy((8 * designScale).dp)
         ) {
             Row(
@@ -194,7 +190,7 @@ internal fun FigmaDeckProgressPanel(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("进度", color = theme.strongText, fontFamily = AppFonts.MiSansSemibold, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(21 * designScale), style = figmaCardTextStyle())
+                AppText("进度", AppTextRole.CardSubtitle, color = theme.strongText, designScale = designScale)
                 Text("$percent%", color = theme.progress, fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(20 * designScale), lineHeight = fixedSp(20 * designScale), style = figmaCardTextStyle())
             }
             Row(

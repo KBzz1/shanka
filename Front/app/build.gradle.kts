@@ -1,9 +1,19 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.kapt")
     id("org.jetbrains.kotlin.plugin.serialization")
+}
+
+// Release 签名凭据从本地 keystore.properties 读取（git 忽略、600 权限），
+// 文件缺失时不影响 debug 构建。
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) load(FileInputStream(keystorePropsFile))
 }
 
 android {
@@ -15,8 +25,31 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0.0"
+        versionName = "2.5.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (keystorePropsFile.exists()) {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Debug-only 显式本地环境覆盖（模拟器 loopback）；Release 编译期不可达。
+            buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:8000\"")
+        }
+        release {
+            // Release 编译期固定正式 base URL；无服务器编辑、测试模式或演示数据开关。
+            buildConfigField("String", "API_BASE_URL", "\"https://shanka.kbzz1.top\"")
+            signingConfig = signingConfigs.getByName("release")
+        }
     }
 
     buildFeatures { compose = true; buildConfig = true }
@@ -47,7 +80,7 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
-    // Android's bundled org.json is a JVM test stub; parser contract tests need an implementation.
+    // Real org.json for JVM tests: android.jar only ships throwing stubs.
     testImplementation("org.json:json:20240303")
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.02.01"))
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

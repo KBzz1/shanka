@@ -174,6 +174,8 @@ internal data class StudyDeckVisual(
 internal data class DeckTheme(
     val key: String,
     val label: String,
+    /** Figma family background; this is the project-page canvas, never plain white. */
+    val background: Color,
     val primary: Color,
     val action: Color,
     val progress: Color,
@@ -185,7 +187,11 @@ internal data class DeckTheme(
     val strongText: Color,
     val text: Color,
     val mutedText: Color,
-    val progressTrack: Color
+    val progressTrack: Color,
+    /** Figma 257:6634 gives the purple icon a deliberately softer 24dp corner. */
+    val cardIconCornerRadius: Int,
+    /** Purple's compact progress panel uses 16dp inset; the other families use 12dp. */
+    val cardProgressPanelPadding: Int
 )
 
 internal val DeckThemes = listOf(
@@ -200,6 +206,7 @@ internal val DeckThemes = listOf(
 private fun deckTheme(key: String, label: String, colors: AppColorFamily) = DeckTheme(
     key = key,
     label = label,
+    background = colors.background,
     primary = colors.primary,
     action = colors.primary,
     progress = colors.primaryStrong,
@@ -211,7 +218,11 @@ private fun deckTheme(key: String, label: String, colors: AppColorFamily) = Deck
     strongText = colors.ink,
     text = AppColors.TextIconDark,
     mutedText = colors.ink,
-    progressTrack = colors.primarySecondary
+    // Figma 258:6804 / 645:2168: the unfinished segment is the family's
+    // Primary-Secondary step; Background belongs to the enclosing panel.
+    progressTrack = colors.primarySecondary,
+    cardIconCornerRadius = if (key == "violet") 24 else 16,
+    cardProgressPanelPadding = if (key == "violet") 16 else 12
 )
 
 internal fun deckTheme(deck: DeckSummary): DeckTheme = DeckThemes.firstOrNull { it.key == deck.themeKey } ?: DeckThemes.first()
@@ -230,11 +241,12 @@ internal fun deckTheme(deck: DeckSummary, projects: List<ProjectSummary>): DeckT
 internal fun deckTheme(project: ProjectSummary): DeckTheme =
     DeckThemes.firstOrNull { it.key == project.themeKey } ?: DeckThemes.first()
 
-/** The project detail deliberately alternates quiet and tinted card surfaces. */
-internal enum class ProjectThemedCardVariant { TINTED, WHITE }
-
-internal fun projectThemedCardVariant(index: Int): ProjectThemedCardVariant =
-    if (index % 2 == 0) ProjectThemedCardVariant.TINTED else ProjectThemedCardVariant.WHITE
+/**
+ * A card group's outer level is derived from the canvas behind it, rather than
+ * from its position in a list. This keeps every project-owned deck consistent
+ * across the three root pages and a project's coloured detail page.
+ */
+internal enum class ProjectThemedCardVariant { BASE_PAGE, THEME_BACKGROUND }
 
 internal data class ProjectThemedCardPalette(
     val background: Color,
@@ -243,22 +255,26 @@ internal data class ProjectThemedCardPalette(
     val progressTrack: Color
 )
 
-/** Nested surfaces retain their project colour even when the outer card is white. */
+/**
+ * Figma 184:616 / 494:1447 / 19:621: a card on the neutral white canvas uses
+ * the family's Background step; the same card on a family Background canvas
+ * uses Surface. Its nested panel always supplies the next visible level.
+ */
 internal fun projectThemedCardPalette(
     theme: DeckTheme,
     variant: ProjectThemedCardVariant
 ): ProjectThemedCardPalette = when (variant) {
-    ProjectThemedCardVariant.TINTED -> ProjectThemedCardPalette(
-        background = theme.surface,
+    ProjectThemedCardVariant.BASE_PAGE -> ProjectThemedCardPalette(
+        background = theme.background,
         panel = theme.cardPanel,
         badge = theme.cardPanel,
-        progressTrack = theme.surface
+        progressTrack = theme.secondary
     )
-    ProjectThemedCardVariant.WHITE -> ProjectThemedCardPalette(
-        background = AppColors.Card,
-        panel = theme.surface,
-        badge = theme.surface,
-        progressTrack = theme.cardPanel
+    ProjectThemedCardVariant.THEME_BACKGROUND -> ProjectThemedCardPalette(
+        background = theme.cardPanel,
+        panel = theme.background,
+        badge = theme.background,
+        progressTrack = theme.secondary
     )
 }
 
@@ -323,7 +339,7 @@ internal fun DeckDetailHeader(title: String, designScale: Float, onBack: () -> U
         title = title,
         subtitle = subtitle,
         onBack = onBack,
-        backContainer = theme?.surface,
+        backContainer = theme?.cardPanel,
         titleColor = theme?.text,
         modifier = modifier
     )

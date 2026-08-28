@@ -140,16 +140,7 @@ data class ReviewCard(val card: FlashcardEntity, val reviewState: ReviewState?)
 data class ApiKeyStatus(val status: String, val maskedKey: String)
 data class PdfChapter(val id: String, val name: String, val startPage: Int, val endPage: Int)
 data class PdfFile(val id: String, val name: String, val status: String, val errorCode: String? = null, val chapters: List<PdfChapter> = emptyList())
-data class GeneratedTask(
-    val id: String,
-    val status: String,
-    val stage: String? = null,
-    val generatedCardCount: Int = 0,
-    val skippedPlanningGroupCount: Int = 0,
-    val completionReason: String? = null,
-    val resumable: Boolean = false,
-    val errorCode: String? = null
-)
+data class GeneratedTask(val id: String, val status: String, val stage: String? = null, val generatedCardCount: Int = 0, val resumable: Boolean = false, val errorCode: String? = null)
 data class Dashboard(val hasData: Boolean, val weeklyGoal: Int?, val completed: Int, val masteryRatio: Float?, val raw: JSONObject)
 
 sealed interface ApiResult<out T> {
@@ -185,10 +176,14 @@ class BackendClient(
         contentType: String = "application/json",
         idempotent: Boolean = method in setOf("POST", "PUT", "PATCH", "DELETE") && path != "/samples",
         authenticate: Boolean = true,
-        token: String? = null
+        token: String? = null,
+        idempotencyKey: String? = null
     ): HttpResult = withContext(Dispatchers.IO) {
         val trace = UUID.randomUUID().toString().take(8)
-        val key = if (idempotent) UUID.randomUUID().toString() else null
+        // A caller-provided key always wins: one user operation fixes its UUID so a retry after
+        // a lost response replays the same key instead of writing twice. Otherwise the
+        // `idempotent` flag decides whether a fresh key is attached.
+        val key = idempotencyKey ?: if (idempotent) UUID.randomUUID().toString() else null
         var attempt = 0
         var last: HttpResult
         do {
@@ -352,10 +347,11 @@ class BackendClient(
         const val MAX_DEBUG_LOG_BYTES = 256 * 1024L
         val debugLogLock = Any()
 
+        /** Build variants are authoritative; debug emulators use the host loopback address. */
         fun defaultBaseUrl(): String =
-            if (BuildConfig.DEBUG && isAndroidEmulator()) "http://10.0.2.2:8000" else "https://shanka.kbzz1.top"
+            if (BuildConfig.DEBUG && isAndroidEmulator()) "http://10.0.2.2:8000" else BuildConfig.API_BASE_URL
 
-        fun isAndroidEmulator(): Boolean =
+        private fun isAndroidEmulator(): Boolean =
             Build.FINGERPRINT.startsWith("generic") ||
                 Build.FINGERPRINT.startsWith("unknown") ||
                 Build.MODEL.contains("google_sdk", ignoreCase = true) ||
@@ -399,7 +395,7 @@ open class RemoteFlashcardRepository(
     private val sessionStore: SessionStore = KeystoreSessionStore(context),
     private val client: BackendClient = BackendClient(context, sessionStore = sessionStore)
 ) : AuthRepository {
-    /** Compatibility overload retained for existing instrumented transport tests. */
+    /** Compatibility overload retained for transport tests that inject a custom client. */
     constructor(context: Context, client: BackendClient) : this(context, KeystoreSessionStore(context), client)
 
     private val _decks = MutableStateFlow<List<DeckSummary>>(emptyList())
@@ -412,7 +408,7 @@ open class RemoteFlashcardRepository(
             ?: DeckProgress(0, 0, 0, 0)
     }
 
-    suspend fun refreshDecks(): ApiResult<List<DeckSummary>> = client.request("list_decks", "GET", "/decks").decode { value ->
+    open suspend fun refreshDecks(): ApiResult<List<DeckSummary>> = client.request("list_decks", "GET", "/decks").decode { value ->
         values(value, "decks").mapNotNull(::deck).also { _decks.value = it }
     }
 
@@ -422,35 +418,28 @@ open class RemoteFlashcardRepository(
     override suspend fun login(email: String, password: String): ApiResult<Session> =
         sessionResult(client.login(email, password))
 
+    /** A storage failure must never crash or surface as a login error: the session stays usable in memory. */
     private fun sessionResult(result: HttpResult): ApiResult<Session> {
         val parsed = result.decode { parseSession(it) ?: error("Auth session response missing user or token") }
         if (parsed is ApiResult.Success) runCatching { sessionStore.save(parsed.value.token, parsed.value.user) }
         return parsed
     }
 
+    /** Revokes the explicit token; an auth 401 still means the token is dead and clears the store. */
+    override suspend fun logout(token: String): ApiResult<Unit> {
+        val result = client.logout(token).decode { Unit }
+        if (result is ApiResult.Success || (result as? ApiResult.Failure)?.isAuthFailure() == true) runCatching { sessionStore.clear() }
+        return result
+    }
+
+    /** 401 AUTH_REQUIRED/AUTH_INVALID means the stored session is dead; credential and network failures never clear it. */
     override suspend fun refreshMe(): ApiResult<SessionUser> {
-        val result = client.me().decode {
-            parseSessionUser(it.optJSONObject("user")) ?: error("Me response missing user")
+        val result = client.me().decode { value ->
+            parseSessionUser(value.optJSONObject("user")) ?: error("Me response missing user")
         }
         if (result is ApiResult.Failure && result.isAuthFailure()) runCatching { sessionStore.clear() }
         return result
     }
-
-    override suspend fun logout(token: String): ApiResult<Unit> = client.logout(token).decode { Unit }
-
-    suspend fun listProjects(): ApiResult<List<ProjectSummary>> =
-        client.request("list_projects", "GET", "/projects").decode { values(it, "items").mapNotNull(::project) }
-
-    suspend fun createProject(name: String, themeKey: String): ApiResult<ProjectSummary> =
-        client.request("create_project", "POST", "/projects", JSONObject().put("name", name.trim()).put("theme_key", themeKey).toString())
-            .decode { project(it) ?: error("Project response missing id") }
-
-    suspend fun projectDetail(projectId: String): ApiResult<ProjectDetail> =
-        client.request("get_project", "GET", "/projects/$projectId").decode(::projectDetail)
-
-    suspend fun projectStatistics(projectId: String, range: ProjectStatisticsRange, timezone: String): ApiResult<ProjectStatistics> =
-        client.request("project_statistics", "GET", "/projects/$projectId/statistics?range=${range.name}&timezone=${java.net.URLEncoder.encode(timezone, "UTF-8")}")
-            .decode { projectStatistics(it, range) }
 
     fun cards(deckId: String): Flow<List<FlashcardEntity>> = cardFlows.getOrPut(deckId) { MutableStateFlow(emptyList()) }
 
@@ -467,13 +456,12 @@ open class RemoteFlashcardRepository(
         }
     }
 
-    suspend fun rate(cardId: String, rating: Rating, activeDurationMs: Long = 0L): ApiResult<ReviewState> {
+    suspend fun rate(cardId: String, rating: Rating): ApiResult<ReviewState> {
         val body = JSONObject()
             .put("card_id", cardId)
             .put("rating", rating.name)
             .put("client_event_id", UUID.randomUUID().toString())
             .put("device_timezone", java.util.TimeZone.getDefault().id)
-            .put("active_duration_ms", activeDurationMs.coerceIn(0L, 300_000L))
             .toString()
         return client.request("submit_review", "POST", "/review-events", body).decode { value ->
             ReviewState(value.optString("state", ""), value.optString("due").ifBlank { null })
@@ -499,14 +487,20 @@ open class RemoteFlashcardRepository(
     suspend fun deleteDeck(deckId: String): ApiResult<Unit> = client.request("delete_deck", "DELETE", "/decks/$deckId").decode { Unit }
         .also { if (it is ApiResult.Success) refreshDecks() }
 
-    suspend fun updateDeckPresentation(deckId: String, name: String, themeKey: String): ApiResult<DeckSummary> {
+    suspend fun updateDeckName(deckId: String, name: String): ApiResult<DeckSummary> {
         val result = client.request("update_deck", "PATCH", "/decks/$deckId", JSONObject().put("name", name.trim()).toString()).decode(::deckOrThrow)
         if (result is ApiResult.Success) {
-            val updated = result.value.copy(themeKey = themeKey)
-            _decks.value = _decks.value.map { if (it.id == deckId) updated else it }
+            _decks.value = _decks.value.map { existing ->
+                if (existing.id == deckId) result.value.copy(themeKey = existing.themeKey) else existing
+            }
         }
         return result
     }
+
+    /** Kept for protocol callers compiled before deck colours became project-owned. */
+    @Deprecated("Deck colours are project-owned; use updateDeckName")
+    suspend fun updateDeckPresentation(deckId: String, name: String, @Suppress("UNUSED_PARAMETER") themeKey: String): ApiResult<DeckSummary> =
+        updateDeckName(deckId, name)
 
     suspend fun updateCard(card: FlashcardEntity): ApiResult<FlashcardEntity> {
         val body = JSONObject().put("front", card.front.trim()).put("back", card.back.trim()).toString()
@@ -539,7 +533,7 @@ open class RemoteFlashcardRepository(
         // is the sole source of truth for whether this device now has a usable key.
         return if (saved is ApiResult.Success) apiKeyStatus() else saved
     }
-    suspend fun dashboard(weeklyGoal: Int? = null): ApiResult<Dashboard> {
+    open suspend fun dashboard(weeklyGoal: Int? = null): ApiResult<Dashboard> {
         val timezone = java.net.URLEncoder.encode(java.util.TimeZone.getDefault().id, "UTF-8")
         val path = buildString {
             append("/stats/dashboard?timezone=").append(timezone)
@@ -582,8 +576,6 @@ open class RemoteFlashcardRepository(
     }
 
     suspend fun getTask(taskId: String): ApiResult<GeneratedTask> = client.request("get_task", "GET", "/tasks/$taskId").decode(::task)
-    suspend fun pauseTask(taskId: String): ApiResult<GeneratedTask> = client.request("pause_task", "POST", "/tasks/$taskId/pause", JSONObject().toString()).decode(::task)
-    suspend fun resumeTask(taskId: String): ApiResult<GeneratedTask> = client.request("resume_task", "POST", "/tasks/$taskId/resume", JSONObject().toString()).decode(::task)
 
     private fun <T> ApiResult<String>.asFailure(): ApiResult<T> = when (this) {
         is ApiResult.Failure -> this
@@ -596,6 +588,7 @@ internal fun <T> HttpResult.decode(mapper: (JSONObject) -> T): ApiResult<T> {
     return runCatching { mapper(objectValue(body)) }.fold({ ApiResult.Success(it) }, { ApiResult.Failure(status, "INVALID_RESPONSE", null, it.message) })
 }
 
+/** register/login body: {"user": {...}, "access_token": ..., "token_type": ..., "expires_at": ...}. */
 internal fun parseSession(value: JSONObject): Session? {
     val user = parseSessionUser(value.optJSONObject("user")) ?: return null
     val token = value.optString("access_token")
@@ -774,8 +767,6 @@ private fun task(value: JSONObject): GeneratedTask = GeneratedTask(
     status = value.optString("status", "PENDING"),
     stage = value.optString("stage").ifBlank { null },
     generatedCardCount = value.optInt("generated_card_count", 0),
-    skippedPlanningGroupCount = value.optInt("skipped_planning_group_count", 0),
-    completionReason = value.optString("completion_reason").ifBlank { null },
     resumable = value.optBoolean("resumable", false),
     errorCode = value.optString("error_code").ifBlank { null }
 )

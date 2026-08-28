@@ -3,7 +3,6 @@ package com.qiuzhao.flashcards.ui
 import android.app.Activity
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -89,7 +88,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -100,7 +98,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -151,8 +148,6 @@ import com.qiuzhao.flashcards.ui.motion.AppMotion
 import com.qiuzhao.flashcards.ui.navigation.AppNavigator
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 import com.qiuzhao.flashcards.ui.navigation.rememberAppNavigationState
-import com.qiuzhao.flashcards.ui.navigation.RootNavigationRoutes
-import com.qiuzhao.flashcards.ui.auth.AuthState
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -169,30 +164,13 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val dueCount by viewModel.dueCount.collectAsState()
     val dashboard by viewModel.dashboard.collectAsState()
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
-    val authState by viewModel.authState.collectAsState()
-    val account = (authState as? AuthState.LoggedIn)?.user?.let { user ->
-        LocalAccount(user.username, viewModel.accountBootstrap.value.account?.email.orEmpty())
-    }
+    val todayPlan by viewModel.todayPlan.collectAsState()
+    val accountBootstrap by viewModel.accountBootstrap.collectAsState()
+    val account = accountBootstrap.account
     var projectSearchQuery by remember { mutableStateOf("") }
-    val toastContext = LocalContext.current
-    LaunchedEffect(authState) {
-        when (val state = authState) {
-            AuthState.CheckingSession -> Unit
-            is AuthState.LoggedOut -> {
-                if (navigationState.currentRoute in RootNavigationRoutes) navigator.navigate(AppRoute.FirstLogin)
-            }
-            is AuthState.LoggedIn -> {
-                state.error?.let { message ->
-                    Toast.makeText(toastContext, message, Toast.LENGTH_SHORT).show()
-                    viewModel.clearAuthError()
-                }
-                while (navigationState.currentRoute !in RootNavigationRoutes) navigator.goBack()
-            }
-        }
-    }
-    // The existing GitHub login/register Composables remain the sole visual source.
-    if (authState is AuthState.CheckingSession || (authState is AuthState.LoggedOut && navigationState.currentRoute in RootNavigationRoutes)) {
-        Box(Modifier.fillMaxSize().background(AppColors.Blue.background))
+    // Do not briefly render Home while the local account record is loading.
+    if (!accountBootstrap.loaded) {
+        Box(Modifier.fillMaxSize().background(AppColors.BaseBackground))
         return
     }
     val selectedRootTab = when (navigationState.selectedTopLevel) {
@@ -203,19 +181,55 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     }
 
     val typedEntryProvider = entryProvider {
-        entry<AppRoute.Home> { HomeScreen(decks, projects, dueCount, navigator) }
-        entry<AppRoute.Project> { ProjectScreen(projects, decks, projectSearchQuery, navigator) }
+        entry<AppRoute.Home> { HomeScreen(decks, projects, dueCount, account?.nickname, todayPlan, dashboard?.streakDays, navigator) }
+        entry<AppRoute.Project> { ProjectScreen(projects, decks, projectSearchQuery, viewModel, navigator) }
         entry<AppRoute.ProjectCreate> { ProjectCreateScreen(viewModel, navigator) }
+        entry<AppRoute.ProjectEdit> { route ->
+            val project = projects.firstOrNull { it.id == route.id }
+            if (project == null) LoadingScreen() else ProjectCreateScreen(
+                viewModel = viewModel,
+                nav = navigator,
+                editingProject = project
+            )
+        }
+        entry<AppRoute.ProjectTextEditor> { route ->
+            ProjectTextEditorScreen(route, viewModel, navigator)
+        }
         entry<AppRoute.ProjectDetail> { route ->
             val project = projects.firstOrNull { it.id == route.id }
             if (project == null) LoadingScreen() else ProjectDetailScreen(
                 project,
                 decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id },
                 navigator,
-                viewModel
+                onDeleteDeck = { viewModel.deleteDeck(it) },
+                onDeleteProject = { retainDecks, onResult ->
+                    viewModel.deleteProject(project.id, retainDecks, onResult)
+                }
             )
         }
-        entry<AppRoute.MaterialManagement> { SettingsUnbuiltScreen("资料管理", navigator) }
+        entry<AppRoute.DeckGeneration> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else DeckGenerationScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.SmartCardChapter> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else SmartCardChapterScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.SmartCardPreview> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else SmartCardPreviewScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.SmartCardGenerating> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else SmartCardGeneratingScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.MaterialManagement> { MaterialManagementScreen(project = null, viewModel, navigator) }
+        entry<AppRoute.ProjectMaterialManagement> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else MaterialManagementScreen(project, viewModel, navigator)
+        }
+        entry<AppRoute.MaterialImport> { route -> MaterialImportScreen(route, viewModel, navigator) }
+        entry<AppRoute.ProjectMaterialPicker> { route -> ProjectMaterialPickerScreen(route, viewModel, navigator) }
         entry<AppRoute.Data> { DataScreen(dueCount, dashboard, weeklyActivity, navigator) }
         entry<AppRoute.Deck> { route ->
             val deck = decks.firstOrNull { it.id == route.id }
@@ -234,30 +248,20 @@ fun FlashcardsApp(viewModel: AppViewModel) {
             ImportScreen(viewModel, navigator, existingDeckId = route.deckId)
         }
         entry<AppRoute.PdfMaker> { PdfSmartCardsFlow(decks, viewModel, navigator) }
-        entry<AppRoute.FirstLogin> {
-            LoginScreen(viewModel, navigator, showBack = false, firstLaunch = true)
-        }
         entry<AppRoute.Login> { LoginScreen(viewModel, navigator, showBack = true) }
         entry<AppRoute.Register> { RegisterScreen(viewModel, navigator) }
         entry<AppRoute.Settings> { SettingsScreen(viewModel, navigator) }
-        entry<AppRoute.SettingsIdentity> { SettingsIdentityScreen(navigator) }
-        entry<AppRoute.SettingsUnbuilt> { route -> SettingsUnbuiltScreen(route.title, navigator) }
     }
     val entryProvider: (NavKey) -> NavEntry<NavKey> = { key ->
         @Suppress("UNCHECKED_CAST")
         (typedEntryProvider(key as AppRoute) as NavEntry<NavKey>)
     }
 
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+    Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
         NavDisplay(
             entries = navigationState.decoratedEntries(entryProvider),
             onBack = {
-                // The first-login gate must never reveal Home through Back. Put
-                // the task in the background instead; returning to it restores
-                // the same gate until the user enters directly or logs in.
-                if (navigationState.currentRoute == AppRoute.FirstLogin) {
-                    activity?.moveTaskToBack(true)
-                } else if (navigator.isAtExitRoot) {
+                if (navigator.isAtExitRoot) {
                     activity?.finish()
                 } else {
                     navigator.goBack()
@@ -281,7 +285,6 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                     selected = selectedRootTab,
                     onSettings = { navigator.navigate(AppRoute.Settings) },
                     account = account,
-                    onAvatar = { navigator.navigate(AppRoute.Login) },
                     projectSearchQuery = projectSearchQuery,
                     onProjectSearchChange = { projectSearchQuery = it }
                 )
@@ -310,7 +313,6 @@ private fun RootPersistentHeader(
     selected: RootTab,
     onSettings: () -> Unit,
     account: LocalAccount?,
-    onAvatar: () -> Unit,
     projectSearchQuery: String,
     onProjectSearchChange: (String) -> Unit
 ) {
@@ -322,12 +324,12 @@ private fun RootPersistentHeader(
         ) {
             SettingsHeaderButton(onSettings, (56 * scale).dp)
             StudySearchField(projectSearchQuery, onProjectSearchChange, Modifier.weight(1f), scale)
-            ImageAvatar((56 * scale).dp, account, onAvatar)
+            ImageAvatar((56 * scale).dp, account)
         }
     } else {
         ScreenTopInformationBar(
             title = null, subtitle = null, onBack = null, onSettings = onSettings,
-            account = account, onAvatar = onAvatar, modifier = Modifier.zIndex(2f)
+            account = account, modifier = Modifier.zIndex(2f)
         )
     }
 }
@@ -351,6 +353,11 @@ internal fun ScreenTopInformationBar(
     trailingActionSymbol: String = "edit",
     trailingActionDescription: String = "编辑",
     trailingActionContainer: Color? = null,
+    onSecondaryTrailingAction: (() -> Unit)? = null,
+    secondaryTrailingActionSymbol: String = "delete",
+    secondaryTrailingActionDescription: String = "删除",
+    secondaryTrailingActionContainer: Color = AppColors.WarningStrong,
+    secondaryTrailingActionColor: Color = AppColors.TextIconLight,
     modifier: Modifier = Modifier
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
@@ -367,6 +374,11 @@ internal fun ScreenTopInformationBar(
         trailingActionSymbol = trailingActionSymbol,
         trailingActionDescription = trailingActionDescription,
         trailingActionContainer = trailingActionContainer,
+        onSecondaryTrailingAction = onSecondaryTrailingAction,
+        secondaryTrailingActionSymbol = secondaryTrailingActionSymbol,
+        secondaryTrailingActionDescription = secondaryTrailingActionDescription,
+        secondaryTrailingActionContainer = secondaryTrailingActionContainer,
+        secondaryTrailingActionColor = secondaryTrailingActionColor,
         modifier = modifier.fillMaxWidth().statusBarsPadding()
             .padding(start = (16 * scale).dp, top = (16 * scale).dp, end = (16 * scale).dp)
     )
@@ -386,13 +398,18 @@ private fun TopInformationBarContent(
     trailingActionSymbol: String,
     trailingActionDescription: String,
     trailingActionContainer: Color?,
+    onSecondaryTrailingAction: (() -> Unit)?,
+    secondaryTrailingActionSymbol: String,
+    secondaryTrailingActionDescription: String,
+    secondaryTrailingActionContainer: Color,
+    secondaryTrailingActionColor: Color,
     modifier: Modifier = Modifier
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     Box(modifier.height((56 * scale).dp)) {
         if (onBack == null) {
             SettingsHeaderButton(onSettings ?: {}, (56 * scale).dp)
-            Box(Modifier.align(Alignment.CenterEnd)) { ImageAvatar((56 * scale).dp, account, onAvatar ?: {}) }
+            Box(Modifier.align(Alignment.CenterEnd)) { ImageAvatar((56 * scale).dp, account, onAvatar) }
         } else {
             Surface(
                 onClick = onBack,
@@ -406,7 +423,10 @@ private fun TopInformationBarContent(
                 }
             }
             Row(
-                modifier = Modifier.align(Alignment.Center).padding(horizontal = (60 * scale).dp),
+                modifier = Modifier.align(Alignment.Center).padding(
+                    start = (60 * scale).dp,
+                    end = (if (onSecondaryTrailingAction == null) 60 * scale else 124 * scale).dp
+                ),
                 horizontalArrangement = Arrangement.spacedBy((16 * scale).dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -431,6 +451,27 @@ private fun TopInformationBarContent(
                         MaterialSymbol(
                             trailingActionSymbol,
                             trailingActionDescription,
+                            tint = LocalContentColor.current,
+                            size = fixedSp(24 * scale),
+                            filled = true
+                        )
+                    }
+                }
+            }
+            onSecondaryTrailingAction?.let { action ->
+                Surface(
+                    onClick = action,
+                    color = secondaryTrailingActionContainer,
+                    contentColor = secondaryTrailingActionColor,
+                    shape = RoundedCornerShape(999.dp),
+                    modifier = Modifier.align(Alignment.CenterEnd)
+                        .padding(end = (64 * scale).dp)
+                        .size((56 * scale).dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        MaterialSymbol(
+                            secondaryTrailingActionSymbol,
+                            secondaryTrailingActionDescription,
                             tint = LocalContentColor.current,
                             size = fixedSp(24 * scale),
                             filled = true
@@ -475,17 +516,19 @@ private fun SettingsHeaderButton(onClick: () -> Unit, size: androidx.compose.ui.
 private fun ImageAvatar(
     size: androidx.compose.ui.unit.Dp = 56.dp,
     account: LocalAccount? = null,
-    onClick: () -> Unit = {}
+    onClick: (() -> Unit)? = null,
 ) {
-    Box(
-        modifier = Modifier.size(size).clip(RoundedCornerShape(999.dp))
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(AppColors.Blue.primarySecondary, AppColors.Blue.primary)
-                )
+    val avatarModifier = Modifier.size(size).clip(RoundedCornerShape(999.dp))
+        .background(
+            Brush.linearGradient(
+                colors = listOf(AppColors.Blue.primarySecondary, AppColors.Blue.primary)
             )
-            .padding((4f / 56f * size.value).dp)
-            .clickable(onClick = onClick)
+        )
+        .padding((4f / 56f * size.value).dp)
+    // The avatar is interactive only when the caller wires a click handler: the
+    // root header opens the login dialog, secondary headers keep it display-only.
+    Box(
+        modifier = if (onClick == null) avatarModifier else avatarModifier.clickable(onClick = onClick)
     ) {
         if (account == null) {
             Surface(
@@ -537,4 +580,4 @@ private fun StudySearchField(
     }
 }
 
-@Composable private fun LoadingScreen() = Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("正在加载卡组…") }
+@Composable private fun LoadingScreen() = Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { AppText("正在加载卡组…", AppTextRole.Body) }

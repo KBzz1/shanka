@@ -157,6 +157,7 @@ import kotlinx.coroutines.delay
 @Composable
 internal fun AddCardScreen(deckId: String, viewModel: AppViewModel, nav: ScreenNavigator) {
     val designScale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(0.75f, 1f)
+    val submitting by viewModel.importSubmitting.collectAsState()
     var front by remember { mutableStateOf("") }
     var back by remember { mutableStateOf("") }
 
@@ -167,11 +168,11 @@ internal fun AddCardScreen(deckId: String, viewModel: AppViewModel, nav: ScreenN
             Box(
                 Modifier.fillMaxSize()
                     .padding(start = (16 * designScale).dp, top = (148 * designScale).dp, end = (16 * designScale).dp)
-                    .clip(RoundedCornerShape(AppShapeRadius.dp))
+                    .clip(RoundedCornerShape(AppScrollableContentClipRadius.dp))
             ) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = (164 * designScale).dp),
+                    contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail(controlCount = 2, gapBetweenControls = 12) * designScale).dp),
                     verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)
                 ) {
                     item {
@@ -198,10 +199,16 @@ internal fun AddCardScreen(deckId: String, viewModel: AppViewModel, nav: ScreenN
                     .padding(start = (16 * designScale).dp, end = (16 * designScale).dp, bottom = (32 * designScale).dp).zIndex(1f),
                 verticalArrangement = Arrangement.spacedBy((12 * designScale).dp)
             ) {
-                DetailPrimaryButton("添加单个卡片", "add_circle", true, designScale) {
+                DetailPrimaryButton(
+                    if (submitting) "正在添加…" else "添加单个卡片",
+                    if (submitting) "hourglass_top" else "add_circle",
+                    true,
+                    designScale,
+                    enabled = !submitting,
+                ) {
                     viewModel.addCardsToDeck(deckId, listOf(CardDraft(front = front, back = back))) { nav.goBack() }
                 }
-                DetailPrimaryButton("批量导入", "note_stack_add", false, designScale) { nav.navigate(AppRoute.ImportToDeck(deckId)) }
+                DetailPrimaryButton("批量导入", "note_stack_add", false, designScale, enabled = !submitting) { nav.navigate(AppRoute.ImportToDeck(deckId)) }
             }
         }
     }
@@ -262,12 +269,14 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
     val drafts = remember { mutableStateListOf<CardDraft>() }
     var errors by remember { mutableStateOf(emptyList<String>()) }
     var stage by remember(existingDeckId) { mutableStateOf(if (existingDeckId == null) ImportStage.CHOICE else ImportStage.PASTE) }
+    // The submit coordinator's in-flight flag gates the save button: no double submits, and a
+    // failed batch keeps the drafts on screen so the retry replays only the failed step.
+    val submitting by viewModel.importSubmitting.collectAsState()
 
     if (drafts.isEmpty()) {
         when (stage) {
             ImportStage.CHOICE -> ImportMethodChoiceScreen(
                 onBack = nav::popBackStack,
-                onSmartImport = { nav.navigate(AppRoute.PdfMaker) },
                 onPasteText = { stage = ImportStage.PASTE }
             )
             ImportStage.PASTE -> PasteTextImportScreen(
@@ -281,19 +290,17 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
                     drafts.clear()
                     drafts.addAll(result.cards)
                     errors = result.errors
-                    if (result.cards.isNotEmpty()) {
-                        viewModel.beginTextImportFlow(
-                            name = deckName.ifBlank { "导入卡片组" },
-                            drafts = result.cards
-                        )
-                        nav.replaceTop(AppRoute.PdfMaker)
-                    }
                 }
             )
         }
     } else {
         Scaffold(topBar = { AppBar(if (existingDeckId == null) "导入卡片组" else "批量导入", nav::popBackStack) }) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(padding).padding(20.dp)
+                .clip(RoundedCornerShape(AppScrollableContentClipRadius.dp)),
+            contentPadding = PaddingValues(bottom = NaturalScrollTail.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
             if (errors.isNotEmpty()) item { Text(errors.joinToString("\n"), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             item {
                 MixedLanguageText(
@@ -302,8 +309,7 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
                     chineseFont = AppFonts.MiSansSemibold,
                     latinFont = AppFonts.GoogleSansFlexSemibold,
                     fontSize = 16.sp,
-                    lineHeight = 24.sp,
-                    style = MaterialTheme.typography.titleMedium
+                    lineHeight = 24.sp
                 )
             }
             items(drafts.indices.toList()) { itemIndex ->
@@ -323,10 +329,15 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
                             viewModel.addCardsToDeck(existingDeckId, drafts.toList()) { nav.goBack() }
                         }
                     },
+                    enabled = !submitting,
                     modifier = Modifier.fillMaxWidth().height(54.dp)
                 ) {
                     MixedLanguageText(
-                        text = if (existingDeckId == null) "保存 ${drafts.size} 张卡" else "加入当前卡组（${drafts.size} 张）",
+                        text = when {
+                            submitting -> "正在保存…"
+                            existingDeckId == null -> "保存 ${drafts.size} 张卡"
+                            else -> "加入当前卡组（${drafts.size} 张）"
+                        },
                         color = LocalContentColor.current,
                         chineseFont = AppFonts.MiSansBold,
                         latinFont = AppFonts.GoogleSansFlexBold,
@@ -343,7 +354,6 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
 @Composable
 private fun ImportMethodChoiceScreen(
     onBack: () -> Unit,
-    onSmartImport: () -> Unit,
     onPasteText: () -> Unit
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
@@ -351,20 +361,10 @@ private fun ImportMethodChoiceScreen(
         Box(Modifier.fillMaxSize()) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(start = (16 * scale).dp, top = (136 * scale).dp, end = (16 * scale).dp)
-                    .clip(RoundedCornerShape((32 * scale).dp)),
-                contentPadding = PaddingValues(bottom = (140 * scale).dp),
+                    .clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
+                contentPadding = PaddingValues(bottom = (NaturalScrollTail * scale).dp),
                 verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
             ) {
-                item {
-                    ImportMethodOption(
-                        icon = "picture_as_pdf",
-                        title = "选择文件智能制卡",
-                        subtitle = "从教材或课件生成闪卡",
-                        detail = "选择的文件支持（PDF/ .txt/ .md）格式。识别后可逐章修改并保存",
-                        onClick = onSmartImport,
-                        scale = scale
-                    )
-                }
                 item {
                     ImportMethodOption(
                         icon = "file_copy",
@@ -393,7 +393,7 @@ private fun ImportMethodOption(
     Surface(
         onClick = onClick,
         color = AppColors.Blue.surface,
-        shape = RoundedCornerShape((32 * scale).dp),
+        shape = RoundedCornerShape((AppShapeRadius * scale).dp),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -411,7 +411,7 @@ private fun ImportMethodOption(
             MaterialSymbol("arrow_forward", null, tint = AppColors.Blue.ink, size = fixedSp(24 * scale))
         }
     }
-    Surface(color = AppColors.Blue.background, shape = RoundedCornerShape((32 * scale).dp), modifier = Modifier.fillMaxWidth()) {
+    Surface(color = AppColors.Blue.background, shape = RoundedCornerShape((AppNestedShapeRadius * scale).dp), modifier = Modifier.fillMaxWidth()) {
         AppText(detail, AppTextRole.Supporting, modifier = Modifier.padding((24 * scale).dp), color = AppColors.TextIconDark, designScale = scale)
     }
 }
@@ -431,11 +431,11 @@ private fun PasteTextImportScreen(
             Box(
                 Modifier.fillMaxSize()
                     .padding(start = (16 * designScale).dp, top = (136 * designScale).dp, end = (16 * designScale).dp)
-                    .clip(RoundedCornerShape((16 * designScale).dp))
+                    .clip(RoundedCornerShape((AppScrollableContentClipRadius * designScale).dp))
             ) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = (140 * designScale).dp),
+                    contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail() * designScale).dp),
                     verticalArrangement = Arrangement.spacedBy((12 * designScale).dp)
                 ) {
                     item {

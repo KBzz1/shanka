@@ -14,3 +14,10 @@ Thumbs.db
 
 # Claude local settings (machine-specific permissions)
 .claude/settings.local.json
+
+# Python bytecode cache (tools/ 脚本运行时产物)
+__pycache__/
+
+# Release signing (local secrets, do not commit)
+keystore.properties
+release.keystore

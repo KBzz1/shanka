@@ -190,6 +190,34 @@ internal fun SecondaryHeaderActionBackgroundColor(theme: DeckTheme? = null): Col
 @Composable
 internal fun fixedSp(value: Float) = with(LocalDensity.current) { value.dp.toSp() }
 
+/**
+ * The root navigation occupies 125dp at the device bottom (85dp bar, 16dp
+ * outside inset and the system navigation inset). A 148dp scroll tail leaves
+ * the Figma 16–24dp visual gap above it when a list reaches its final item.
+ */
+internal const val RootNavigationScrollTail = 148
+
+/**
+ * Bottom spacing for a scrolling page which has no overlaying bottom control.
+ * This is the natural visual tail from the final item to the system area.
+ */
+internal const val NaturalScrollTail = 32
+
+/**
+ * Returns the scroll tail needed to clear a control fixed over the page bottom.
+ *
+ * The fixed control itself is lifted by [bottomOffset] and
+ * `navigationBarsPadding()`. The list needs to clear those two areas plus the
+ * 16dp Figma breathing room. Keeping that arithmetic here prevents individual
+ * screens from accumulating unrelated 140–188dp padding values.
+ */
+internal fun fixedBottomControlScrollTail(
+    controlHeight: Int = 60,
+    bottomOffset: Int = 32,
+    controlCount: Int = 1,
+    gapBetweenControls: Int = 0
+): Int = controlHeight * controlCount + gapBetweenControls + bottomOffset + 24 + 16
+
 /** Figma text frames have no Android ascent/descent padding around their line box. */
 internal fun figmaCardTextStyle() = TextStyle(
     platformStyle = PlatformTextStyle(includeFontPadding = false)
@@ -333,16 +361,26 @@ private fun bilingualAnnotatedString(
     }
 }
 
-/** Figma node 19:1446: a visual, non-interactive finish above the floating nav. */
+/**
+ * Figma 720:2251: a visual, non-interactive bottom mask for pages with a
+ * fixed bottom action or the root navigation. It deliberately stays out of
+ * pages without a bottom control so their content reaches the system area
+ * without an artificial white fade.
+ */
 @Composable
-internal fun BottomContentFade(designScale: Float, modifier: Modifier = Modifier) {
+internal fun BottomContentFade(designScale: Float, modifier: Modifier = Modifier, color: Color = Color.White) {
     Box(
         modifier.fillMaxWidth()
-            .height((97 * designScale).dp)
+            .height((163 * designScale).dp)
             .background(
                 Brush.verticalGradient(
                     0f to Color.Transparent,
-                    1f to MaterialTheme.colorScheme.background.copy(alpha = .75f)
+                    // Figma's `to-[64.825%]` is the gradient end position:
+                    // the page background reaches 90% opacity here and remains
+                    // solid below. The colour must match the page canvas so a
+                    // themed page fades into its own background, not white.
+                    .64825f to color.copy(alpha = .9f),
+                    1f to color.copy(alpha = .9f)
                 )
             )
             .zIndex(.5f)
@@ -389,8 +427,69 @@ internal fun RoundIconButton(symbol: String, description: String, color: Color, 
     }
 }
 
+/**
+ * Figma 856:6605 / 849:6541 generation progress ring. Uses the official
+ * Material 3 [CircularProgressIndicator] with a rounded cap and a visible
+ * track (the Material 3 expressive look); the shared component is fixed at
+ * 80 x 80dp. The fully expressive drawStopIndicator/trackStrokeWidth arrive
+ * only in material3 1.4.0-alpha, so this stays on the stable ring API.
+ */
 @Composable
-internal fun MaterialSymbol(name: String, description: String?, modifier: Modifier = Modifier, tint: Color = LocalContentColor.current, size: androidx.compose.ui.unit.TextUnit = 24.sp, filled: Boolean = true) {
+internal fun GenerationProgressRing(
+    color: Color,
+    trackColor: Color? = null,
+    designScale: Float = 1f,
+    strokeWidth: Float = 8f,
+    modifier: Modifier = Modifier
+) {
+    CircularProgressIndicator(
+        color = color,
+        modifier = modifier.size((80 * designScale).dp),
+        strokeWidth = (strokeWidth * designScale).dp,
+        trackColor = trackColor ?: color.copy(alpha = .2f),
+        strokeCap = StrokeCap.Round
+    )
+}
+
+/**
+ * Figma 373:1691 shared hint/notice box. Radius 24dp; the box lifts to the
+ * family Surface when its container is white, otherwise it returns to white.
+ * Supporting copy, centred, in the 80% neutral ink.
+ */
+@Composable
+internal fun HintBox(
+    text: String,
+    parentIsWhite: Boolean,
+    theme: DeckTheme,
+    designScale: Float,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = if (parentIsWhite) theme.cardPanel else AppColors.Card,
+        shape = RoundedCornerShape((AppNestedShapeRadius * designScale).dp),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        AppText(
+            text,
+            AppTextRole.Supporting,
+            modifier = Modifier.fillMaxWidth().padding((24 * designScale).dp),
+            color = AppColors.TextIconDark,
+            designScale = designScale,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+internal fun MaterialSymbol(
+    name: String,
+    description: String?,
+    modifier: Modifier = Modifier,
+    tint: Color = LocalContentColor.current,
+    size: androidx.compose.ui.unit.TextUnit = 24.sp,
+    filled: Boolean = true,
+    includeFontPadding: Boolean = true
+) {
     val accessibleModifier = if (description == null) modifier.clearAndSetSemantics { }
     else modifier.semantics { contentDescription = description }
     Text(
@@ -400,7 +499,10 @@ internal fun MaterialSymbol(name: String, description: String?, modifier: Modifi
         color = tint,
         fontFamily = if (filled) AppFonts.MaterialSymbolsRounded else AppFonts.MaterialSymbolsRoundedOff,
         fontSize = size, lineHeight = size,
-        style = TextStyle(fontFeatureSettings = "liga"),
+        style = TextStyle(
+            fontFeatureSettings = "liga",
+            platformStyle = PlatformTextStyle(includeFontPadding = includeFontPadding)
+        ),
         maxLines = 1
     )
 }
@@ -449,7 +551,7 @@ internal fun MixedLanguageText(
 @Composable
 internal fun DescriptionInfoCard(text: String, scale: Float) {
     Surface(
-        shape = RoundedCornerShape((32 * scale).dp),
+        shape = RoundedCornerShape((AppNestedShapeRadius * scale).dp),
         color = AppColors.Purple.background,
         modifier = Modifier.fillMaxWidth().heightIn(min = (102 * scale).dp)
     ) {

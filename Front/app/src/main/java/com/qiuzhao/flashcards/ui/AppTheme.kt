@@ -1,7 +1,6 @@
 package com.qiuzhao.flashcards.ui
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Typography
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -10,7 +9,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.ExperimentalTextApi
-import androidx.compose.ui.unit.sp
 import com.qiuzhao.flashcards.R
 
 /** The only font files used by product copy. Do not create a fallback family. */
@@ -116,7 +114,7 @@ internal object AppTypographyTokens {
         // Figma 427:4182: first-launch login headline has an explicit 32/32 override.
         AppTextRole.AuthHeroTitle to FigmaTextSpec(32f, 32f, 0f, 520),
         AppTextRole.SectionTitle to FigmaTextSpec(20f, 27f, 0f, 630),
-        AppTextRole.CardTitle to FigmaTextSpec(20f, 27f, 0f, 630),
+        AppTextRole.CardTitle to FigmaTextSpec(18f, 24f, 0f, 630),
         AppTextRole.CardSubtitle to FigmaTextSpec(16f, 21f, 0f, 520),
         AppTextRole.Body to FigmaTextSpec(20f, 27f, 0f, 380),
         AppTextRole.Supporting to FigmaTextSpec(18f, 24f, 0f, 380),
@@ -130,7 +128,7 @@ internal object AppTypographyTokens {
         AppTextRole.PageTitle to FigmaTextSpec(24f, 30f, 0f, 700),
         AppTextRole.AuthHeroTitle to FigmaTextSpec(32f, 32f, 0f, 700),
         AppTextRole.SectionTitle to FigmaTextSpec(20f, 20f, 0f, 700),
-        AppTextRole.CardTitle to FigmaTextSpec(20f, 20f, 0f, 700),
+        AppTextRole.CardTitle to FigmaTextSpec(18f, 18f, 0f, 700),
         AppTextRole.CardSubtitle to FigmaTextSpec(16f, 16f, 0f, 600),
         // Figma 379:2014 latest variables: the former 24/30 English body token
         // is now 20/27, matching the compact body control without synthetic scaling.
@@ -174,7 +172,15 @@ internal object AppTypographyTokens {
     }
 }
 
-val AppShapeRadius = 32
+/** Figma shared geometry: main cards, root switchers and navigation containers. */
+val AppShapeRadius = 36
+
+/** Figma shared geometry: card internals, control containers and all buttons. */
+val AppNestedShapeRadius = 24
+val AppButtonShapeRadius = 24
+
+/** Fixed clipping boundary for every full-page scrollable content viewport. */
+val AppScrollableContentClipRadius = 24
 
 /** One six-step Figma colour family. */
 internal data class AppColorFamily(
@@ -204,24 +210,24 @@ internal object AppColors {
     val NavigationBar = Color(0xFF425161)
 
     val Blue = AppColorFamily(
-        background = Color(0xFFF1F9FF), surface = Color(0xFFD9EBFF), primarySecondary = Color(0xFFB0D7FF),
-        primary = Color(0xFF489FFF), primaryStrong = Color(0xFF006EE0), ink = Color(0xFF003C7A)
+        background = Color(0xFFEEF4FA), surface = Color(0xFFCCE6FF), primarySecondary = Color(0xFFB0D7FF),
+        primary = Color(0xFF389DFF), primaryStrong = Color(0xFF0063C4), ink = Color(0xFF003C7A)
     )
     val Purple = AppColorFamily(
         background = Color(0xFFF3F3FF), surface = Color(0xFFE4E4FF), primarySecondary = Color(0xFFC8C8FF),
         primary = Color(0xFF716FDD), primaryStrong = Color(0xFF3836B7), ink = Color(0xFF38387A)
     )
     val Green = AppColorFamily(
-        background = Color(0xFFEAFBEB), surface = Color(0xFFCDEFD1), primarySecondary = Color(0xFFA3DFAA),
-        primary = Color(0xFF7AC583), primaryStrong = Color(0xFF138120), ink = Color(0xFF1F5225)
+        background = Color(0xFFEAF4E5), surface = Color(0xFFD6EEC9), primarySecondary = Color(0xFFB6DCA6),
+        primary = Color(0xFF65AA56), primaryStrong = Color(0xFF278B00), ink = Color(0xFF1F5225)
     )
     val Pink = AppColorFamily(
-        background = Color(0xFFFFF5F9), surface = Color(0xFFFFE2EE), primarySecondary = Color(0xFFF9C6DB),
-        primary = Color(0xFFEF9BBE), primaryStrong = Color(0xFFAA0047), ink = Color(0xFF4E1B30)
+        background = Color(0xFFF9EFF3), surface = Color(0xFFF8DBE3), primarySecondary = Color(0xFFFFBFD3),
+        primary = Color(0xFFF16692), primaryStrong = Color(0xFFAA0047), ink = Color(0xFF730022)
     )
     val Orange = AppColorFamily(
-        background = Color(0xFFFFFAEF), surface = Color(0xFFFBEBD2), primarySecondary = Color(0xFFFFE2B6),
-        primary = Color(0xFFE1975E), primaryStrong = Color(0xFFEF6800), ink = Color(0xFF733200)
+        background = Color(0xFFFAF2EB), surface = Color(0xFFFBE7C8), primarySecondary = Color(0xFFF4DDBA),
+        primary = Color(0xFFE48A4A), primaryStrong = Color(0xFFD15700), ink = Color(0xFF642A00)
     )
 
     /** Warning / Primary. */
@@ -229,6 +235,23 @@ internal object AppColors {
 
     /** Warning / Primary-Strong. */
     val WarningStrong = Color(0xFFD23535)
+
+    /** Figma 654:3950 — warning-secondary is used for semantic warning surfaces. */
+    val WarningSecondary = Color(0xFFE87F77)
+
+    /** Figma 654:3950 — readable warning copy and icon tint. */
+    val WarningInk = Color(0xFF670700)
+
+    // Figma 604:2732 review-status semantic colours.
+    val ReviewKnown = Color(0xFF579B00)
+    val ReviewRecognised = Color(0xFFAFCD82)
+    val ReviewUncertain = Color(0xFFFFC000)
+    val ReviewUnfamiliar = Color(0xFFFF3D00)
+    val ReviewUnseen = Color(0xFFDDDDDD)
+    val StudyTime = Color(0xFFB7AC4A)
+    val StudyTimeInk = Color(0xFF484100)
+    val StudyMastered = Color(0xFF2C913C)
+    val StudyMasteredInk = Color(0xFF00590D)
 }
 
 internal val LightColors = lightColorScheme(
@@ -248,17 +271,7 @@ internal val LightColors = lightColorScheme(
     onError = AppColors.TextIconLight
 )
 
-private val AppTypography = Typography(
-    displayLarge = androidx.compose.ui.text.TextStyle(fontFamily = AppFonts.GoogleSansFlexBold, fontSize = 48.sp, lineHeight = 48.sp),
-    headlineSmall = androidx.compose.ui.text.TextStyle(fontFamily = AppFonts.MiSansSemibold, fontSize = 24.sp, lineHeight = 32.sp),
-    titleLarge = androidx.compose.ui.text.TextStyle(fontFamily = AppFonts.MiSansBold, fontSize = 20.sp, lineHeight = 27.sp),
-    titleMedium = androidx.compose.ui.text.TextStyle(fontFamily = AppFonts.MiSansSemibold, fontSize = 16.sp, lineHeight = 21.sp),
-    bodyLarge = androidx.compose.ui.text.TextStyle(fontFamily = AppFonts.MiSansMedium, fontSize = 20.sp, lineHeight = 27.sp),
-    bodyMedium = androidx.compose.ui.text.TextStyle(fontFamily = AppFonts.MiSansMedium, fontSize = 18.sp, lineHeight = 24.sp),
-    labelLarge = androidx.compose.ui.text.TextStyle(fontFamily = AppFonts.MiSansBold, fontSize = 16.sp, lineHeight = 21.sp, letterSpacing = .6.sp)
-)
-
 @Composable
 fun AutumnFlashcardsTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = LightColors, typography = AppTypography, content = content)
+    MaterialTheme(colorScheme = LightColors, content = content)
 }

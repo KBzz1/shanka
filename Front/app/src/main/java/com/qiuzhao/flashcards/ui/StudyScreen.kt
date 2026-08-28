@@ -2,7 +2,6 @@ package com.qiuzhao.flashcards.ui
 
 import android.app.Activity
 import android.net.Uri
-import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -159,6 +158,12 @@ import kotlinx.coroutines.delay
 @Composable
 internal fun StudyScreen(viewModel: AppViewModel, nav: ScreenNavigator, deckId: String, reviewMode: Boolean) {
     val cards by viewModel.studyCards.collectAsState()
+    val decks by viewModel.decks.collectAsState()
+    val projects by viewModel.projects.collectAsState()
+    val reviewSubmitting by viewModel.reviewSubmitting.collectAsState()
+    // The flip/free-practice theme follows the owning project (per the user's
+    // colour semantics), falling back to the deck's stored family.
+    val theme = decks.firstOrNull { it.id == deckId }?.let { deck -> deckTheme(deck, projects) } ?: DeckThemes.first()
     // Keep a local queue for this session. A card disappears from it immediately
     // after it is rated, so the previous/next controls can never reopen a card
     // that has already been swiped away.
@@ -180,32 +185,36 @@ internal fun StudyScreen(viewModel: AppViewModel, nav: ScreenNavigator, deckId: 
     if (reviewMode && remainingCards.isNotEmpty()) {
         val safeIndex = currentIndex.coerceIn(0, remainingCards.lastIndex)
         val card = remainingCards[safeIndex]
-        val cardShownAt = remember(card.id) { SystemClock.elapsedRealtime() }
         ReviewStudy(
             card = card,
             position = initialCardIds.orEmpty().indexOf(card.id) + 1,
             total = initialCardIds.orEmpty().size,
+            theme = theme,
             canGoPrevious = safeIndex > 0,
             canGoNext = safeIndex < remainingCards.lastIndex,
             rememberedCount = rememberedCount,
             forgottenCount = forgottenCount,
+            submitting = reviewSubmitting,
             modifier = Modifier.fillMaxSize(),
             onBack = nav::popBackStack,
+            onEdit = viewModel::updateCard,
             onPrevious = { currentIndex = (safeIndex - 1).coerceAtLeast(0) },
             onNext = { currentIndex = (safeIndex + 1).coerceAtMost(remainingCards.lastIndex) },
             onRate = { rating ->
-                val activeDurationMs = (SystemClock.elapsedRealtime() - cardShownAt).coerceIn(0L, 300_000L)
-                viewModel.rate(card.id, rating, activeDurationMs)
-                if (rating == Rating.GOOD) rememberedCount++ else forgottenCount++
-                val updatedIds = initialCardIds.orEmpty().filterNot { it == card.id }
-                remainingCardIds = updatedIds
-                currentIndex = safeIndex.coerceAtMost((updatedIds.size - 1).coerceAtLeast(0))
+                // The card leaves the queue only after the server committed the event; a failure
+                // keeps the card on screen and the retry replays the same event identifiers.
+                viewModel.rate(card.id, rating) {
+                    if (rating == Rating.GOOD) rememberedCount++ else forgottenCount++
+                    val updatedIds = initialCardIds.orEmpty().filterNot { it == card.id }
+                    remainingCardIds = updatedIds
+                    currentIndex = safeIndex.coerceAtMost((updatedIds.size - 1).coerceAtLeast(0))
+                }
             }
         )
         return
     }
     if (!reviewMode && cards.isNotEmpty()) {
-        FreeStudy(cards = cards, onBack = nav::popBackStack, onUpdateCard = viewModel::updateCard)
+        FreeStudy(cards = cards, theme = theme, onBack = nav::popBackStack, onUpdateCard = viewModel::updateCard)
         return
     }
     Scaffold(topBar = { AppBar(if (reviewMode) "间隔复习" else "自由刷题", nav::popBackStack) }) { padding ->
@@ -222,9 +231,9 @@ private fun EmptyStudy(modifier: Modifier, reviewMode: Boolean, nav: ScreenNavig
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             MaterialSymbol("star", null, modifier = Modifier.size(44.dp), tint = MaterialTheme.colorScheme.primary, size = 44.sp)
-            Text(if (reviewMode) "没有到期卡片" else "这个卡组还是空的", style = MaterialTheme.typography.headlineSmall, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal)
-            Text(if (reviewMode) "休息一下，或者自由刷题巩固印象。" else "先导入几张问答卡吧。", textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Button(onClick = nav::popBackStack) { Text("返回") }
+            AppText(if (reviewMode) "没有到期卡片" else "这个卡组还是空的", AppTextRole.PageTitle)
+            AppText(if (reviewMode) "休息一下，或者自由刷题巩固印象。" else "先导入几张问答卡吧。", AppTextRole.Body, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Button(onClick = nav::popBackStack) { AppText("返回", AppTextRole.Label) }
         }
     }
 }
@@ -234,9 +243,9 @@ private fun CompleteStudy(modifier: Modifier, nav: ScreenNavigator) {
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
             MaterialSymbol("star", null, modifier = Modifier.size(52.dp), tint = MaterialTheme.colorScheme.primary, size = 52.sp)
-            Text("本轮完成", style = MaterialTheme.typography.headlineSmall, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal)
-            Text("做得好，下一次复习会按你的记忆情况自动安排。", textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Button(onClick = nav::popBackStack) { Text("回到卡组") }
+            AppText("本轮完成", AppTextRole.PageTitle)
+            AppText("做得好，下一次复习会按你的记忆情况自动安排。", AppTextRole.Body, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Button(onClick = nav::popBackStack) { AppText("回到卡组", AppTextRole.Label) }
         }
     }
 }
@@ -246,57 +255,78 @@ private fun ReviewStudy(
     card: FlashcardEntity,
     position: Int,
     total: Int,
+    theme: DeckTheme,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
     rememberedCount: Int,
     forgottenCount: Int,
+    submitting: Boolean,
     modifier: Modifier,
     onBack: () -> Unit,
+    onEdit: (FlashcardEntity) -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onRate: (Rating) -> Unit
 ) {
     var flipped by remember(card.id) { mutableStateOf(false) }
+    var editingCard by remember(card.id) { mutableStateOf<FlashcardEntity?>(null) }
     val designScale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(0.75f, 1f)
     Box(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         ScreenTopInformationBar(
             title = "间隔复习", subtitle = "$position/$total", onBack = onBack,
+            backContainer = theme.cardPanel, titleColor = theme.text,
             modifier = Modifier.zIndex(1f)
         )
         LinearProgressIndicator(
             progress = { position.toFloat() / total },
-            color = AppColors.Blue.primary, trackColor = AppColors.Blue.primarySecondary,
+            color = theme.primary, trackColor = theme.secondary,
             modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = (16 * designScale).dp)
                 .padding(top = (88 * designScale).dp).height((4 * designScale).dp)
         )
         Column(
             modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = (16 * designScale).dp)
-                .padding(top = (132 * designScale).dp).height((600 * designScale).dp),
-            verticalArrangement = Arrangement.spacedBy((16 * designScale).dp),
+                .padding(top = (132 * designScale).dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            FigmaReviewCard(
-                card = card,
-                flipped = flipped,
-                onFlip = { flipped = !flipped },
-                onRate = onRate,
-                modifier = Modifier.fillMaxWidth().weight(1f),
-                designScale = designScale
-            )
-            if (flipped) ReviewAnswerControls(canGoPrevious, canGoNext, onPrevious, onNext) { onRate(Rating.HARD) }
-            else ReviewQuestionControls(canGoPrevious, canGoNext, rememberedCount, forgottenCount, onPrevious, onNext)
+            // Figma 41:1853 / 44:2464: the big flip card is a fixed 370x524 frame.
+            Box(Modifier.fillMaxWidth().height((524 * designScale).dp)) {
+                FigmaReviewCard(
+                    card = card,
+                    flipped = flipped,
+                    onFlip = { flipped = !flipped },
+                    onRate = onRate,
+                    canRate = !submitting,
+                    modifier = Modifier.fillMaxSize(),
+                    designScale = designScale,
+                    theme = theme
+                )
+            }
+            Spacer(Modifier.height((16 * designScale).dp))
+            if (flipped) ReviewAnswerControls(theme, canGoPrevious, canGoNext, onPrevious, onNext, enabled = !submitting) { onRate(Rating.HARD) }
+            else ReviewQuestionControls(theme, canGoPrevious, canGoNext, rememberedCount, forgottenCount, onPrevious, onNext)
         }
         if (flipped) ReviewSwipeHint(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = (756 * designScale).dp), designScale) else Text(
             "点击卡片查看答案",
             modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = (769 * designScale).dp),
             color = PageForegroundColor(), fontFamily = AppFonts.MiSansMedium, fontWeight = FontWeight.Normal,
-            fontSize = fixedSp(20 * designScale), lineHeight = fixedSp(28 * designScale), textAlign = TextAlign.Center
+            fontSize = fixedSp(18 * designScale), lineHeight = fixedSp(24 * designScale), textAlign = TextAlign.Center
+        )
+    }
+    editingCard?.let { editableCard ->
+        CardEditDialog(
+            card = editableCard,
+            onSave = {
+                onEdit(it)
+                editingCard = null
+            },
+            onDismiss = { editingCard = null }
         )
     }
 }
 
 @Composable
 private fun ReviewQuestionControls(
+    theme: DeckTheme,
     canGoPrevious: Boolean,
     canGoNext: Boolean,
     rememberedCount: Int,
@@ -305,44 +335,47 @@ private fun ReviewQuestionControls(
     onNext: () -> Unit
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
-    Row(Modifier.fillMaxWidth().height((60 * scale).dp), horizontalArrangement = Arrangement.spacedBy((15 * scale).dp)) {
-        ReviewNavigationButton("arrow_back", canGoPrevious, Modifier.weight(1f), scale, onPrevious)
-        ReviewCountBadge("check", rememberedCount, AppColors.Green.background, AppColors.Green.primaryStrong, Modifier.weight(1f), scale)
-        ReviewCountBadge("close", forgottenCount, AppColors.Pink.background, AppColors.Warning, Modifier.weight(1f), scale)
-        ReviewNavigationButton("arrow_forward", canGoNext, Modifier.weight(1f), scale, onNext)
+    Row(Modifier.fillMaxWidth().height((72 * scale).dp), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
+        ReviewNavigationButton("arrow_back", canGoPrevious, Modifier.width((93 * scale).dp).fillMaxHeight(), scale, theme, onPrevious)
+        Row(horizontalArrangement = Arrangement.spacedBy((8 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
+            ReviewCountBadge("check", rememberedCount, AppColors.Green.background, AppColors.Green.primaryStrong, Modifier.width((72 * scale).dp).fillMaxHeight(), scale)
+            ReviewCountBadge("close", forgottenCount, Color(0xFFF4D1CE), AppColors.Warning, Modifier.width((72 * scale).dp).fillMaxHeight(), scale)
+        }
+        ReviewNavigationButton("arrow_forward", canGoNext, Modifier.width((93 * scale).dp).fillMaxHeight(), scale, theme, onNext)
     }
 }
 
 @Composable
-private fun ReviewAnswerControls(canGoPrevious: Boolean, canGoNext: Boolean, onPrevious: () -> Unit, onNext: () -> Unit, onHard: () -> Unit) {
+private fun ReviewAnswerControls(theme: DeckTheme, canGoPrevious: Boolean, canGoNext: Boolean, onPrevious: () -> Unit, onNext: () -> Unit, enabled: Boolean, onHard: () -> Unit) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
-    Row(Modifier.fillMaxWidth().height((60 * scale).dp), horizontalArrangement = Arrangement.spacedBy((15 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
-        ReviewNavigationButton("arrow_back", enabled = canGoPrevious, Modifier.weight(1f), scale, onPrevious)
+    Row(Modifier.fillMaxWidth().height((72 * scale).dp), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
+        ReviewNavigationButton("arrow_back", enabled = canGoPrevious, Modifier.width((96 * scale).dp).fillMaxHeight(), scale, theme, onPrevious)
         Surface(
             onClick = onHard,
-            color = AppColors.Blue.background,
-            contentColor = AppColors.Blue.ink,
-            border = androidx.compose.foundation.BorderStroke((2 * scale).dp, AppColors.Blue.ink),
-            shape = RoundedCornerShape((24 * scale).dp),
-            modifier = Modifier.height((59 * scale).dp)
+            enabled = enabled,
+            // Figma 44:2464 uses the semantic amber surface without an outline.
+            color = AppColors.Orange.surface,
+            contentColor = AppColors.Orange.ink,
+            shape = RoundedCornerShape((32 * scale).dp),
+            modifier = Modifier.width((146 * scale).dp).fillMaxHeight()
         ) {
             Row(Modifier.padding(horizontal = (24 * scale).dp), horizontalArrangement = Arrangement.spacedBy((8 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
-                MaterialSymbol("comedy_mask", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
-                Text("印象模糊，明天再刷", fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * scale), lineHeight = fixedSp(16 * scale), letterSpacing = fixedSp(.6f * scale))
+                MaterialSymbol("comedy_mask", null, tint = AppColors.Orange.ink, size = fixedSp(24 * scale), filled = true)
+                Text("印象模糊", fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * scale), lineHeight = fixedSp(21 * scale), letterSpacing = fixedSp(.6f * scale), maxLines = 1)
             }
         }
-        ReviewNavigationButton("arrow_forward", enabled = canGoNext, Modifier.weight(1f), scale, onNext)
+        ReviewNavigationButton("arrow_forward", enabled = canGoNext, Modifier.width((96 * scale).dp).fillMaxHeight(), scale, theme, onNext)
     }
 }
 
 @Composable
-private fun ReviewNavigationButton(symbol: String, enabled: Boolean, modifier: Modifier, scale: Float, onClick: () -> Unit) {
+private fun ReviewNavigationButton(symbol: String, enabled: Boolean, modifier: Modifier, scale: Float, theme: DeckTheme, onClick: () -> Unit) {
     Surface(
         onClick = onClick,
         enabled = enabled,
-        color = AppColors.Blue.primary,
-        contentColor = AppColors.TextIconLight,
-        shape = RoundedCornerShape((24 * scale).dp),
+        color = theme.cardPanel,
+        contentColor = theme.strongText,
+        shape = RoundedCornerShape((32 * scale).dp),
         modifier = modifier.fillMaxHeight()
     ) {
         Box(contentAlignment = Alignment.Center) {
@@ -357,13 +390,13 @@ private fun ReviewCountBadge(symbol: String, count: Int, color: Color, contentCo
         color = color,
         contentColor = contentColor,
         border = androidx.compose.foundation.BorderStroke((2 * scale).dp, contentColor),
-        shape = RoundedCornerShape((24 * scale).dp),
+        shape = RoundedCornerShape((32 * scale).dp),
         modifier = modifier.fillMaxHeight()
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy((8 * scale).dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxSize(),) {
             Spacer(Modifier.weight(1f))
             MaterialSymbol(symbol, null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
-            Text("$count", fontFamily = AppFonts.GoogleSansFlexBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * scale), lineHeight = fixedSp(16 * scale), letterSpacing = fixedSp(.6f * scale))
+            Text("$count", fontFamily = AppFonts.GoogleSansFlexExtraBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * scale), lineHeight = fixedSp(20 * scale), letterSpacing = fixedSp(.4f * scale))
             Spacer(Modifier.weight(1f))
         }
     }
@@ -373,15 +406,33 @@ private fun ReviewCountBadge(symbol: String, count: Int, color: Color, contentCo
 private fun ReviewSwipeHint(modifier: Modifier, scale: Float) {
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy((4 * scale).dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        MaterialSymbol("swipe_left", null, tint = PageForegroundColor(), size = fixedSp(24 * scale), filled = true)
-        Text("左滑是记得，", color = PageForegroundColor(), fontFamily = AppFonts.MiSansMedium, fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * scale), lineHeight = fixedSp(28 * scale))
-        MaterialSymbol("swipe_right", null, tint = PageForegroundColor(), size = fixedSp(24 * scale), filled = true)
-        Text("右滑是不记得", color = PageForegroundColor(), fontFamily = AppFonts.MiSansMedium, fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * scale), lineHeight = fixedSp(28 * scale))
+        ReviewSwipeHintGroup("swipe_left", "左滑是记得，", scale)
+        ReviewSwipeHintGroup("swipe_right", "右滑是不记得", scale)
     }
 }
+
+@Composable
+private fun ReviewSwipeHintGroup(symbol: String, text: String, scale: Float) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy((8 * scale).dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        MaterialSymbol(symbol, null, tint = PageForegroundColor(), size = fixedSp(24 * scale), filled = true)
+        Text(text, color = PageForegroundColor(), fontFamily = AppFonts.MiSansMedium, fontWeight = FontWeight.Normal, fontSize = fixedSp(18 * scale), lineHeight = fixedSp(24 * scale))
+    }
+}
+
+/**
+ * Figma 41:1853, 755:4354 and 44:2464 use the card-type semantic blue even
+ * when the surrounding learning screen inherits a non-blue project theme.
+ */
+private fun reviewCardTagStyle() = CardListTagStyle(
+    label = "基础记忆",
+    container = AppColors.Blue.primary,
+    content = AppColors.Blue.ink
+)
 
 @Composable
 private fun FigmaReviewCard(
@@ -389,8 +440,10 @@ private fun FigmaReviewCard(
     flipped: Boolean,
     onFlip: () -> Unit,
     onRate: (Rating) -> Unit,
+    canRate: Boolean,
     modifier: Modifier,
-    designScale: Float
+    designScale: Float,
+    theme: DeckTheme
 ) {
     var offsetX by remember(card.id) { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
@@ -402,7 +455,12 @@ private fun FigmaReviewCard(
     )
     val frontAlpha = if (rotation <= 90f) 1f else 0f
     val backAlpha = if (rotation > 90f) 1f else 0f
-    val faceShape = RoundedCornerShape((32 * designScale).dp)
+    val faceShape = RoundedCornerShape((AppShapeRadius * designScale).dp)
+    // A swipe that triggered a rating leaves the card shifted; snap it back while the
+    // submission is in flight so a failure shows the card centred and ready to retry.
+    LaunchedEffect(canRate) {
+        if (!canRate) offsetX = 0f
+    }
     Box(
         modifier = modifier
             .offset { IntOffset(offsetX.roundToInt(), 0) }
@@ -414,7 +472,7 @@ private fun FigmaReviewCard(
             .draggable(
                 state = draggable,
                 orientation = Orientation.Horizontal,
-                enabled = flipped,
+                enabled = flipped && canRate,
                 onDragStopped = {
                     when {
                         // Figma 44:2464: left = remembered; right = forgot.
@@ -427,11 +485,11 @@ private fun FigmaReviewCard(
     ) {
         ReviewCardFace(
             title = "问题", content = card.front, symbol = "book_5", visible = frontAlpha,
-            rotation = rotation, shape = faceShape, designScale = designScale, backFace = false
+            tag = reviewCardTagStyle(), rotation = rotation, shape = faceShape, designScale = designScale, backFace = false, theme = theme
         )
         ReviewCardFace(
             title = "答案", content = card.back, symbol = "wb_incandescent", visible = backAlpha,
-            rotation = rotation, shape = faceShape, designScale = designScale, backFace = true
+            tag = reviewCardTagStyle(), rotation = rotation, shape = faceShape, designScale = designScale, backFace = true, theme = theme
         )
     }
 }
@@ -441,15 +499,20 @@ private fun ReviewCardFace(
     title: String,
     content: String,
     symbol: String,
+    tag: CardListTagStyle,
     visible: Float,
     rotation: Float,
     shape: RoundedCornerShape,
     designScale: Float,
-    backFace: Boolean
+    backFace: Boolean,
+    theme: DeckTheme,
+    questionInk: Boolean = true
 ) {
-    val faceGradient = if (backFace) {
-        Brush.verticalGradient(listOf(AppColors.Blue.primarySecondary, AppColors.Blue.primary))
-    } else Brush.verticalGradient(listOf(AppColors.Blue.background, AppColors.Blue.primarySecondary))
+    // Figma 203:2594 big flip card: question face = ink, answer face = surface
+    // (one step deeper than the Background page).
+    val questionColor = if (questionInk) theme.strongText else theme.cardPanel
+    val faceColor = if (backFace) theme.cardPanel else questionColor
+    val faceContent = if (backFace) theme.strongText else if (questionInk) AppColors.TextIconLight else theme.strongText
     Box(
         // The layer must wrap both the gradient and its text. Keeping it before
         // background prevents the invisible reverse face from painting over the
@@ -459,37 +522,56 @@ private fun ReviewCardFace(
             transformOrigin = TransformOrigin.Center
             cameraDistance = 20f * density
             alpha = visible
-        }.background(faceGradient)
+        }.background(faceColor)
     ) {
         Column(
             modifier = Modifier.fillMaxSize().padding((24 * designScale).dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            MaterialSymbol(symbol, null, tint = AppColors.Blue.ink, size = fixedSp(44 * designScale), filled = true)
-            Spacer(Modifier.height((16 * designScale).dp))
-            // Figma 44:2446 / 44:2452 / 48:4553: heading is the project's MiSans
-            // Semibold token (520) and body is its Medium token (380). Use fixed faces rather
-            // than a requested system weight so every phone renders identically.
-            Text(title, color = AppColors.Blue.ink, fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(24 * designScale), lineHeight = fixedSp(32 * designScale), textAlign = TextAlign.Center)
-            Spacer(Modifier.height((8 * designScale).dp))
-            MixedLanguageText(
-                text = content,
-                color = AppColors.Blue.ink,
-                chineseFont = AppFonts.MiSansMedium,
-                latinFont = AppFonts.GoogleSansFlex,
-                fontSize = fixedSp(24 * designScale),
-                lineHeight = fixedSp(32 * designScale),
-                textAlign = TextAlign.Center,
-                overflow = TextOverflow.Clip
-            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Surface(color = tag.container, shape = RoundedCornerShape(999.dp)) {
+                    Text(
+                        tag.label,
+                        modifier = Modifier.padding(horizontal = (16 * designScale).dp, vertical = (8 * designScale).dp),
+                        color = tag.content,
+                        fontFamily = AppFonts.MiSansBold,
+                        fontWeight = FontWeight.Normal,
+                        fontSize = fixedSp(16 * designScale),
+                        lineHeight = fixedSp(21 * designScale),
+                        maxLines = 1
+                    )
+                }
+            }
+            Column(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                MaterialSymbol(symbol, null, tint = faceContent, size = fixedSp(44 * designScale), filled = true)
+                Spacer(Modifier.height((16 * designScale).dp))
+                AppText(title, AppTextRole.PageTitle, color = faceContent, designScale = designScale, textAlign = TextAlign.Center)
+                Spacer(Modifier.height((8 * designScale).dp))
+                MixedLanguageText(
+                    text = content,
+                    color = faceContent,
+                    chineseFont = AppFonts.MiSansMedium,
+                    latinFont = AppFonts.GoogleSansFlex,
+                    fontSize = fixedSp(20 * designScale),
+                    lineHeight = fixedSp(27 * designScale),
+                    textAlign = TextAlign.Center,
+                    overflow = TextOverflow.Clip
+                )
+            }
+            // Figma 41:1853 / 44:2464 reserve a symmetric 37dp lower spacer
+            // under the centred prompt/answer group.
+            Spacer(Modifier.height((37 * designScale).dp))
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FreeStudy(cards: List<FlashcardEntity>, onBack: () -> Unit, onUpdateCard: (FlashcardEntity) -> Unit) {
+private fun FreeStudy(cards: List<FlashcardEntity>, theme: DeckTheme, onBack: () -> Unit, onUpdateCard: (FlashcardEntity) -> Unit) {
     var displayedCards by remember(cards) { mutableStateOf(cards) }
     var editingCard by remember { mutableStateOf<FlashcardEntity?>(null) }
     val pager = rememberPagerState(pageCount = { displayedCards.size })
@@ -498,12 +580,13 @@ private fun FreeStudy(cards: List<FlashcardEntity>, onBack: () -> Unit, onUpdate
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         ScreenTopInformationBar(
             title = "自由刷题", subtitle = "${pager.currentPage + 1}/${displayedCards.size}", onBack = onBack,
+            backContainer = theme.cardPanel, titleColor = theme.text,
             modifier = Modifier.zIndex(1f)
         )
         LinearProgressIndicator(
             progress = { (pager.currentPage + 1).toFloat() / displayedCards.size },
-            color = AppColors.Blue.primary,
-            trackColor = AppColors.Blue.primarySecondary,
+            color = theme.primary,
+            trackColor = theme.secondary,
             modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = (16 * designScale).dp)
                 .padding(top = (88 * designScale).dp).height((4 * designScale).dp)
         )
@@ -523,7 +606,7 @@ private fun FreeStudy(cards: List<FlashcardEntity>, onBack: () -> Unit, onUpdate
                 modifier = Modifier.fillMaxWidth().weight(1f)
             ) { page ->
                 var flipped by remember(displayedCards[page].id) { mutableStateOf(false) }
-                FreeStudyCard(displayedCards[page], flipped, { flipped = !flipped }, designScale, Modifier.fillMaxSize())
+                FreeStudyCard(displayedCards[page], flipped, { flipped = !flipped }, designScale, theme, Modifier.fillMaxSize())
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = (16 * designScale).dp).height((60 * designScale).dp),
@@ -531,15 +614,15 @@ private fun FreeStudy(cards: List<FlashcardEntity>, onBack: () -> Unit, onUpdate
             ) {
                 Surface(
                     onClick = { editingCard = displayedCards.getOrNull(pager.currentPage) },
-                    color = AppColors.Blue.surface,
-                    contentColor = AppColors.Blue.ink,
+                    color = theme.cardPanel,
+                    contentColor = theme.strongText,
                     shape = RoundedCornerShape((24 * designScale).dp),
                     modifier = Modifier.weight(1f).fillMaxHeight()
                 ) {
                     Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                        MaterialSymbol("edit", null, tint = LocalContentColor.current, size = fixedSp(24 * designScale), filled = true)
+                        MaterialSymbol("edit", null, tint = theme.strongText, size = fixedSp(24 * designScale), filled = true)
                         Spacer(Modifier.width((8 * designScale).dp))
-                        Text("编辑该卡", fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(16 * designScale), letterSpacing = fixedSp(.6f * designScale))
+                        AppText("编辑该卡", AppTextRole.Label, designScale = designScale)
                     }
                 }
                 Surface(
@@ -554,7 +637,7 @@ private fun FreeStudy(cards: List<FlashcardEntity>, onBack: () -> Unit, onUpdate
                         }
                         scope.launch { pager.scrollToPage(0) }
                     },
-                    color = AppColors.Blue.primary,
+                    color = theme.primary,
                     contentColor = AppColors.TextIconLight,
                     shape = RoundedCornerShape((24 * designScale).dp),
                     modifier = Modifier.weight(1f).fillMaxHeight()
@@ -562,7 +645,7 @@ private fun FreeStudy(cards: List<FlashcardEntity>, onBack: () -> Unit, onUpdate
                     Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                         MaterialSymbol("shuffle", null, tint = LocalContentColor.current, size = fixedSp(24 * designScale), filled = true)
                         Spacer(Modifier.width((8 * designScale).dp))
-                        Text("打乱顺序", fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(16 * designScale), letterSpacing = fixedSp(.6f * designScale))
+                        AppText("打乱顺序", AppTextRole.Label, designScale = designScale)
                     }
                 }
             }
@@ -592,33 +675,38 @@ private fun FreeStudy(cards: List<FlashcardEntity>, onBack: () -> Unit, onUpdate
 }
 
 @Composable
-private fun FreeStudyCard(card: FlashcardEntity, flipped: Boolean, onFlip: () -> Unit, designScale: Float, modifier: Modifier) {
+private fun FreeStudyCard(card: FlashcardEntity, flipped: Boolean, onFlip: () -> Unit, designScale: Float, theme: DeckTheme, modifier: Modifier) {
     val rotation by animateFloatAsState(
         targetValue = if (flipped) 180f else 0f,
         animationSpec = AppMotion.emphasisSpring(),
         label = "free study flip"
     )
-    val shape = RoundedCornerShape((32 * designScale).dp)
+    val shape = RoundedCornerShape((AppShapeRadius * designScale).dp)
     Box(modifier = modifier.clip(shape).clickable(onClick = onFlip)) {
         ReviewCardFace(
             title = "问题",
             content = card.front,
             symbol = "book_5",
+            tag = cardListTagStyle(card.position),
             visible = if (rotation <= 90f) 1f else 0f,
             rotation = rotation,
             shape = shape,
             designScale = designScale,
-            backFace = false
+            backFace = false,
+            theme = theme,
+            questionInk = false
         )
         ReviewCardFace(
             title = "答案",
             content = listOfNotNull(card.back, card.code?.takeIf { it.isNotBlank() }).joinToString("\n\n"),
             symbol = "wb_incandescent",
+            tag = cardListTagStyle(card.position),
             visible = if (rotation > 90f) 1f else 0f,
             rotation = rotation,
             shape = shape,
             designScale = designScale,
-            backFace = true
+            backFace = true,
+            theme = theme
         )
     }
 }

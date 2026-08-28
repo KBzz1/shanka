@@ -3,6 +3,8 @@ package com.qiuzhao.flashcards.data.remote
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import android.net.Uri
+import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
+import com.qiuzhao.flashcards.data.session.SessionUser
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import okhttp3.mockwebserver.MockResponse
@@ -33,22 +35,31 @@ class BackendClientInstrumentedTest {
         debugLog.delete()
     }
 
-    private fun client() = BackendClient(context, server.url("").toString().trimEnd('/'))
+    /**
+     * The auth contract sends `Authorization: Bearer <token>` on authenticated requests, so the
+     * client is always built with a stored fake session (P6-2 dropped the device identity header).
+     */
+    private fun client(): BackendClient {
+        val sessionStore = KeystoreSessionStore(context).apply {
+            save("test-token", SessionUser(userId = "user-1", username = "alice", createdAt = "2026-08-14T00:00:00Z"))
+        }
+        return BackendClient(context, server.url("").toString().trimEnd('/'), sessionStore = sessionStore)
+    }
 
-    @Test fun addsDeviceIdentityAndIdempotencyOnlyForWrites() = runBlocking {
+    @Test fun addsBearerAuthAndIdempotencyOnlyForWrites() = runBlocking {
         val client = client()
         server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
         client.request("list_decks", "GET", "/decks")
         val read = server.takeRequest()
         assertEquals("/decks", read.path)
-        assertNotNull(read.getHeader("X-Device-ID"))
+        assertEquals("Bearer test-token", read.getHeader("Authorization"))
         assertEquals(null, read.getHeader("Idempotency-Key"))
 
         server.enqueue(MockResponse().setResponseCode(201).setBody("{}"))
         client.request("create_deck", "POST", "/decks", "{\"name\":\"test\"}")
         val write = server.takeRequest()
         assertEquals("POST", write.method)
-        assertNotNull(write.getHeader("X-Device-ID"))
+        assertEquals("Bearer test-token", write.getHeader("Authorization"))
         assertNotNull(write.getHeader("Idempotency-Key"))
     }
 
@@ -59,7 +70,7 @@ class BackendClientInstrumentedTest {
         val request = server.takeRequest()
         assertEquals("/samples", request.path)
         assertEquals(null, request.getHeader("Idempotency-Key"))
-        assertNotNull(request.getHeader("X-Device-ID"))
+        assertEquals("Bearer test-token", request.getHeader("Authorization"))
     }
 
     @Test fun retries429OnceUsingTheSameIdempotencyKey() = runBlocking {
@@ -74,6 +85,19 @@ class BackendClientInstrumentedTest {
         assertEquals(first.getHeader("Idempotency-Key"), second.getHeader("Idempotency-Key"))
         assertNotNull(first.getHeader("Idempotency-Key"))
         assertEquals(2, server.requestCount)
+    }
+
+    @Test fun explicitIdempotencyKeyIsSentVerbatimAndSurvivesThe429Retry() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(429).addHeader("Retry-After", "1").setBody("{\"error\":{\"code\":\"RATE_LIMITED\"}}"))
+        server.enqueue(MockResponse().setResponseCode(201).setBody("{}"))
+
+        val result = client().request("create_deck", "POST", "/decks", "{\"name\":\"fixed\"}", idempotencyKey = "fixed-operation-key")
+
+        assertEquals(201, result.status)
+        val first = server.takeRequest()
+        val second = server.takeRequest()
+        assertEquals("fixed-operation-key", first.getHeader("Idempotency-Key"))
+        assertEquals("fixed-operation-key", second.getHeader("Idempotency-Key"))
     }
 
     @Test fun doesNotRetryValidationFailure() = runBlocking {
@@ -96,7 +120,7 @@ class BackendClientInstrumentedTest {
             val request = server.takeRequest()
             assertEquals("POST", request.method)
             assertEquals("/pdfs", request.path)
-            assertNotNull(request.getHeader("X-Device-ID"))
+            assertEquals("Bearer test-token", request.getHeader("Authorization"))
             assertNotNull(request.getHeader("Idempotency-Key"))
             assertTrue(request.body.readUtf8().contains("name=\"file\""))
         } finally {
@@ -117,7 +141,7 @@ class BackendClientInstrumentedTest {
         assertTrue(saved.contains("status=201"))
         assertTrue(saved.contains("request_id=request-evidence"))
         assertFalse(saved.contains(requestBody))
-        assertFalse(saved.contains(sent.getHeader("X-Device-ID")!!))
+        assertFalse(saved.contains(sent.getHeader("Authorization")!!))
         assertFalse(saved.contains(sent.getHeader("Idempotency-Key")!!))
     }
 
@@ -132,7 +156,7 @@ class BackendClientInstrumentedTest {
                 """{"period":{"start":"2026-08-10T16:00:00Z","end":"2026-08-17T16:00:00Z","week_ordinal":33},"timezone":"Asia/Shanghai","weekly_activity":[0,1,0,2,0,0,0],"weekly_total":3,"week_change_rate":0.5,"weekly_goal":60,"weekly_goal_progress":0.05,"recall_accuracy":0.8,"first_answer_accuracy":0.7,"retention_rate":0.9,"streak_days":2,"mastered_card_count":5,"updated_at":"2026-08-11T00:00:00Z","has_data":true}"""
             )
         )
-        val repository = RemoteFlashcardRepository(context, client())
+        val repository = RemoteFlashcardRepository(context, client = client())
 
         val decks = repository.refreshDecks()
         val dashboard = repository.dashboard(60)
@@ -159,7 +183,7 @@ class BackendClientInstrumentedTest {
         server.enqueue(MockResponse().setResponseCode(204))
         server.enqueue(MockResponse().setResponseCode(204))
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"items\":[]}"))
-        val repository = RemoteFlashcardRepository(context, client())
+        val repository = RemoteFlashcardRepository(context, client = client())
         val card = FlashcardEntity("card-uuid", "deck-uuid", "新问题", "新答案")
 
         assertTrue(repository.updateDeckPresentation("deck-uuid", "已改名", "azure") is ApiResult.Success)
@@ -190,7 +214,7 @@ class BackendClientInstrumentedTest {
         assertEquals("/decks", server.takeRequest().path)
         listOf(rename, edit, deleteCard, deleteChapter, deleteDeck).forEach { request ->
             assertNotNull(request.getHeader("Idempotency-Key"))
-            assertNotNull(request.getHeader("X-Device-ID"))
+            assertEquals("Bearer test-token", request.getHeader("Authorization"))
         }
     }
 
@@ -199,7 +223,7 @@ class BackendClientInstrumentedTest {
             """{"sample_cards":[{"card_id":"sample-1","front":"样卡问题","back":"样卡答案","card_type":"QUESTION","question":null,"answer":null}]}"""
         ))
 
-        val result = RemoteFlashcardRepository(context, client()).generateSamples(
+        val result = RemoteFlashcardRepository(context, client = client()).generateSamples(
             fileId = "pdf-uuid",
             chapterIds = listOf("chapter-uuid"),
             quantity = "BALANCED",
@@ -226,7 +250,7 @@ class BackendClientInstrumentedTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"status\":\"INVALID\",\"masked_key\":\"\"}"))
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"status\":\"AVAILABLE\",\"masked_key\":\"sk-****1234\"}"))
 
-        val result = RemoteFlashcardRepository(context, client()).saveApiKey("candidate-key")
+        val result = RemoteFlashcardRepository(context, client = client()).saveApiKey("candidate-key")
 
         assertTrue(result is ApiResult.Success)
         assertEquals("AVAILABLE", (result as ApiResult.Success).value.status)
@@ -239,7 +263,7 @@ class BackendClientInstrumentedTest {
             """{"error":{"code":"API_KEY_NOT_SET","localization_key":"error.api_key_not_set"}}"""
         ))
 
-        val result = RemoteFlashcardRepository(context, client()).createTask(
+        val result = RemoteFlashcardRepository(context, client = client()).createTask(
             fileId = "pdf-uuid",
             deckId = "deck-uuid",
             chapterIds = listOf("chapter-uuid"),
@@ -262,7 +286,7 @@ class BackendClientInstrumentedTest {
             """{"error":{"code":"VALIDATION_ERROR","localization_key":"error.validation"}}"""
         ))
 
-        val result = RemoteFlashcardRepository(context, client()).generateSamples(
+        val result = RemoteFlashcardRepository(context, client = client()).generateSamples(
             fileId = "pdf-uuid",
             chapterIds = listOf("chapter-uuid"),
             quantity = "BALANCED",

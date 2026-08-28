@@ -184,13 +184,13 @@ internal fun LegacyProjectDeckList(decks: List<DeckSummary>, viewModel: AppViewM
                     // This viewport fills all space down to the navigation safe area. Only
                     // its own deck flow scrolls; the fixed header and add button do not.
                     modifier = Modifier.weight(1f).fillMaxWidth()
-                        .clip(RoundedCornerShape(AppShapeRadius.dp))
+                        .clip(RoundedCornerShape(AppScrollableContentClipRadius.dp))
                 ) {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        // The navigation bar overlays this clipped viewport. This tail lets
-                        // the last card travel fully above the fade/navigation area.
-                        contentPadding = PaddingValues(bottom = (180 * designScale).dp),
+                        // Match the three root pages: the final card ends just above the
+                        // shared floating navigation rather than below a long empty tail.
+                        contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * designScale).dp),
                         verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)
                     ) {
                         items(visibleDecks, key = { it.id }) { deck ->
@@ -241,10 +241,10 @@ internal fun LegacyProjectDeckList(decks: List<DeckSummary>, viewModel: AppViewM
                     })
                     deckPendingDeletion = null
                 }) {
-                    Text("删除", color = MaterialTheme.colorScheme.error)
+                    AppText("删除", AppTextRole.Label, color = MaterialTheme.colorScheme.error)
                 }
             },
-            dismissButton = { TextButton(onClick = { deckPendingDeletion = null }) { Text("取消") } }
+            dismissButton = { TextButton(onClick = { deckPendingDeletion = null }) { AppText("取消", AppTextRole.Label) } }
         )
     }
 }
@@ -261,7 +261,7 @@ private fun StudyAddDeckButton(designScale: Float, onClick: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy((8 * designScale).dp), verticalAlignment = Alignment.CenterVertically
         ) {
             MaterialSymbol("note_stack_add", "添加卡片组", tint = LocalContentColor.current, size = fixedSp(24 * designScale), filled = true)
-            Text("添加卡片组", fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), letterSpacing = fixedSp(.6f * designScale))
+            AppText("添加卡片组", AppTextRole.Label, designScale = designScale)
         }
     }
 }
@@ -269,7 +269,7 @@ private fun StudyAddDeckButton(designScale: Float, onClick: () -> Unit) {
 @Composable
 private fun StudyDeckCard(deck: DeckSummary, progress: DeckProgress, visual: StudyDeckVisual, designScale: Float, onClick: () -> Unit, onDelete: () -> Unit) {
     val masteryRatio = if (progress.cardCount == 0) 0f else progress.masteredCards.toFloat() / progress.cardCount
-    val progressPercent = (masteryRatio * 100).roundToInt()
+    val theme = deckTheme(deck)
     val deleteWidth = (112 * designScale).dp
     // Figma 143:3526 defines a shared 16dp overlap between the swiped card and
     // its action panel. Keeping the action anchored in the clipped viewport
@@ -282,11 +282,11 @@ private fun StudyDeckCard(deck: DeckSummary, progress: DeckProgress, visual: Stu
     val dragState = rememberDraggableState { delta ->
         dragOffset = (dragOffset + delta).coerceIn(-revealWidthPx, 0f)
     }
-    val containerShape = RoundedCornerShape(AppShapeRadius.dp)
+    // Figma 257:6634 is the shared card-group component used by the project,
+    // home and library lists.  Keep its 32dp outer corner and 199dp geometry.
+    val containerShape = RoundedCornerShape((AppShapeRadius * designScale).dp)
     Box(
-        // The updated 287:8214 text stack is allowed its full line box; the
-        // no-action card keeps the resulting 206dp total height.
-        modifier = Modifier.fillMaxWidth().height((206 * designScale).dp).clip(containerShape)
+        modifier = Modifier.fillMaxWidth().height((199 * designScale).dp).clip(containerShape)
     ) {
         Surface(
             onClick = onDelete,
@@ -301,14 +301,14 @@ private fun StudyDeckCard(deck: DeckSummary, progress: DeckProgress, visual: Stu
             ) {
                 MaterialSymbol("delete", "删除卡组", tint = AppColors.TextIconLight, size = fixedSp(24 * designScale), filled = true)
                 Spacer(Modifier.height((4 * designScale).dp))
-                Text("删除卡组", color = AppColors.TextIconLight, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(20 * designScale))
+                AppText("删除卡组", AppTextRole.Label, color = AppColors.TextIconLight, designScale = designScale)
             }
         }
     Card(
         onClick = onClick,
-        shape = RoundedCornerShape(AppShapeRadius.dp),
+        shape = containerShape,
         colors = CardDefaults.cardColors(containerColor = visual.background),
-        modifier = Modifier.fillMaxWidth().height((206 * designScale).dp)
+        modifier = Modifier.fillMaxWidth().height((199 * designScale).dp)
             .offset { IntOffset(animatedOffset.roundToInt(), 0) }
             .draggable(
                 state = dragState,
@@ -317,49 +317,25 @@ private fun StudyDeckCard(deck: DeckSummary, progress: DeckProgress, visual: Stu
             )
     ) {
         Column(
-            modifier = Modifier.fillMaxSize().padding((24 * designScale).dp),
+            modifier = Modifier.fillMaxSize().padding((20 * designScale).dp),
             verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)
         ) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((12 * designScale).dp), verticalAlignment = Alignment.Top) {
-                Row(
-                    modifier = Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy((8 * designScale).dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(shape = RoundedCornerShape((16 * designScale).dp), color = visual.iconBackground, modifier = Modifier.size((56 * designScale).dp)) {
-                        Box(contentAlignment = Alignment.Center) { MaterialSymbol(visual.icon, null, tint = visual.iconTint, size = fixedSp(24 * designScale), filled = true) }
-                    }
-                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy((4 * designScale).dp)) {
-                        MixedLanguageText(displayDeckTitle(deck), modifier = Modifier.fillMaxWidth(), color = visual.titleColor, chineseFont = AppFonts.MiSansBold, latinFont = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(20 * designScale), lineHeight = fixedSp(24 * designScale), maxLines = 1, overflow = TextOverflow.Ellipsis, includeFontPadding = false)
-                        Row(horizontalArrangement = Arrangement.spacedBy((4 * designScale).dp), verticalAlignment = Alignment.CenterVertically) {
-                            MaterialSymbol("brightness_alert", null, tint = AppColors.WarningStrong, size = fixedSp(18 * designScale), filled = true)
-                            Text("高优先级", color = AppColors.WarningStrong, fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(20 * designScale), style = figmaCardTextStyle())
-                        }
-                    }
-                }
-                ReviewCountBadge(
-                    count = deck.cardCount,
-                    background = visual.panel,
-                    contentColor = visual.badgeText,
-                    compactScale = designScale
-                )
-            }
-            Surface(shape = RoundedCornerShape((20 * designScale).dp), color = visual.panel, modifier = Modifier.fillMaxWidth().weight(1f)) {
-                Column(
-                    modifier = Modifier.fillMaxSize().padding((12 * designScale).dp),
-                    verticalArrangement = Arrangement.spacedBy((8 * designScale).dp)
-                ) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Text("进度", color = visual.progressLabel, fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(20 * designScale), style = figmaCardTextStyle())
-                        Text("${progressPercent}%", color = visual.progress, fontFamily = AppFonts.GoogleSansFlexBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(24 * designScale), lineHeight = fixedSp(28 * designScale), style = figmaCardTextStyle())
-                    }
-                    Box(Modifier.fillMaxWidth().height((20 * designScale).dp).clip(RoundedCornerShape(999.dp)).background(AppColors.Card.copy(alpha = .5f))) {
-                        if (masteryRatio > 0f) {
-                            Box(Modifier.fillMaxHeight().fillMaxWidth(masteryRatio).background(visual.progressFill))
-                        }
-                    }
-                }
-            }
+            ProjectThemedCardHeader(
+                title = displayDeckTitle(deck),
+                count = deck.cardCount,
+                countLabel = "cards",
+                theme = theme,
+                badgeColor = visual.panel,
+                icon = visual.icon,
+                designScale = designScale
+            )
+            FigmaDeckProgressPanel(
+                progress = masteryRatio,
+                theme = theme,
+                panelColor = visual.panel,
+                remainingColor = visual.progressTrack,
+                designScale = designScale
+            )
         }
     }
     }
