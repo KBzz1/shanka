@@ -175,10 +175,14 @@ class BackendClient(
         contentType: String = "application/json",
         idempotent: Boolean = method in setOf("POST", "PUT", "PATCH", "DELETE") && path != "/samples",
         authenticate: Boolean = true,
-        token: String? = null
+        token: String? = null,
+        idempotencyKey: String? = null
     ): HttpResult = withContext(Dispatchers.IO) {
         val trace = UUID.randomUUID().toString().take(8)
-        val key = if (idempotent) UUID.randomUUID().toString() else null
+        // A caller-provided key always wins: one user operation fixes its UUID so a retry after
+        // a lost response replays the same key instead of writing twice. Otherwise the
+        // `idempotent` flag decides whether a fresh key is attached.
+        val key = idempotencyKey ?: if (idempotent) UUID.randomUUID().toString() else null
         var attempt = 0
         var last: HttpResult
         do {

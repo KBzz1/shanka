@@ -28,7 +28,12 @@ import org.json.JSONObject
  * (deferred work item, tracked for the terminal review).
  */
 interface V25Transport {
-    /** A JSON request. `idempotent` asks the transport to attach an Idempotency-Key header. */
+    /**
+     * A JSON request. `idempotent` asks the transport to attach an Idempotency-Key header;
+     * `idempotencyKey` supplies the caller's own key so one user operation can retry with the
+     * exact same key after a lost response. An explicit key is always attached and takes
+     * precedence over the `idempotent` flag.
+     */
     suspend fun request(
         operation: String,
         method: String,
@@ -38,15 +43,20 @@ interface V25Transport {
         idempotent: Boolean = true,
         authenticate: Boolean = true,
         token: String? = null,
+        idempotencyKey: String? = null,
     ): HttpResult
 
-    /** A multipart POST carrying a PDF part and an optional `name` form field. */
+    /**
+     * A multipart POST carrying a PDF part and an optional `name` form field. `idempotencyKey`
+     * fixes the caller's key for a retried upload; without one a fresh key is generated.
+     */
     suspend fun upload(
         operation: String,
         path: String,
         fileName: String,
         content: InputStream,
         name: String? = null,
+        idempotencyKey: String? = null,
     ): HttpResult
 }
 
@@ -78,7 +88,11 @@ class BackendV25Transport(
         idempotent: Boolean,
         authenticate: Boolean,
         token: String?,
-    ): HttpResult = client.request(operation, method, path, body, contentType, idempotent, authenticate, token)
+        idempotencyKey: String?,
+    ): HttpResult = client.request(
+        operation, method, path, body, contentType, idempotent, authenticate, token,
+        idempotencyKey = idempotencyKey,
+    )
 
     override suspend fun upload(
         operation: String,
@@ -86,10 +100,12 @@ class BackendV25Transport(
         fileName: String,
         content: InputStream,
         name: String?,
+        idempotencyKey: String?,
     ): HttpResult = withContext(Dispatchers.IO) {
-        // Same mechanism as BackendClient.executeMultipart: a fresh UUID v4 key per upload,
-        // the stored session's bearer token, and a 60s read timeout for the large payload.
-        val key = UUID.randomUUID().toString()
+        // Same mechanism as BackendClient.executeMultipart: a UUID v4 key per upload (or the
+        // caller's fixed key for a retried upload), the stored session's bearer token, and a
+        // 60s read timeout for the large payload.
+        val key = idempotencyKey ?: UUID.randomUUID().toString()
         val authToken = requestAuthToken(authenticate = true, tokenOverride = null, session = sessionStore.loadQuietly())
         runCatching { executeMultipart(path, fileName, content, name, key, authToken) }
             .getOrElse { unavailableResult(it) }

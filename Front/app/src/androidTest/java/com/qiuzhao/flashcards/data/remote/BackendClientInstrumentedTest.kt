@@ -87,6 +87,19 @@ class BackendClientInstrumentedTest {
         assertEquals(2, server.requestCount)
     }
 
+    @Test fun explicitIdempotencyKeyIsSentVerbatimAndSurvivesThe429Retry() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(429).addHeader("Retry-After", "1").setBody("{\"error\":{\"code\":\"RATE_LIMITED\"}}"))
+        server.enqueue(MockResponse().setResponseCode(201).setBody("{}"))
+
+        val result = client().request("create_deck", "POST", "/decks", "{\"name\":\"fixed\"}", idempotencyKey = "fixed-operation-key")
+
+        assertEquals(201, result.status)
+        val first = server.takeRequest()
+        val second = server.takeRequest()
+        assertEquals("fixed-operation-key", first.getHeader("Idempotency-Key"))
+        assertEquals("fixed-operation-key", second.getHeader("Idempotency-Key"))
+    }
+
     @Test fun doesNotRetryValidationFailure() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(422).setBody("{\"error\":{\"code\":\"VALIDATION_ERROR\"}}"))
 

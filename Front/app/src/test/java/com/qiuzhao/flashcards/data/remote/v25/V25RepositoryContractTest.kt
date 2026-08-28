@@ -64,6 +64,7 @@ class V25RepositoryContractTest {
         val idempotent: Boolean,
         val authenticate: Boolean,
         val token: String?,
+        val idempotencyKey: String? = null,
         val fileName: String? = null,
         val name: String? = null,
     )
@@ -81,8 +82,9 @@ class V25RepositoryContractTest {
             idempotent: Boolean,
             authenticate: Boolean,
             token: String?,
+            idempotencyKey: String?,
         ): HttpResult {
-            val call = RecordedCall(operation, method, path, body, idempotent, authenticate, token)
+            val call = RecordedCall(operation, method, path, body, idempotent, authenticate, token, idempotencyKey = idempotencyKey)
             calls += call
             return handler(call)
         }
@@ -93,8 +95,9 @@ class V25RepositoryContractTest {
             fileName: String,
             content: java.io.InputStream,
             name: String?,
+            idempotencyKey: String?,
         ): HttpResult {
-            val call = RecordedCall(operation, "POST", path, null, idempotent = true, authenticate = true, token = null, fileName = fileName, name = name)
+            val call = RecordedCall(operation, "POST", path, null, idempotent = true, authenticate = true, token = null, idempotencyKey = idempotencyKey, fileName = fileName, name = name)
             calls += call
             return handler(call)
         }
@@ -135,6 +138,21 @@ class V25RepositoryContractTest {
 
         assertEquals(3, transport.calls.size)
         transport.calls.forEach { assertEquals(true, it.idempotent) }
+    }
+
+    @Test
+    fun `default writes pass no caller key so the client keeps generating fresh ones`() = runBlocking {
+        val transport = FakeTransport()
+        val repo = repository(FakeSessionStore(session), transport)
+
+        repo.createDeck("线性代数")
+        repo.updatePreferences(V25PreferencesPatch(dailyLearningGoal = 60))
+
+        assertEquals(2, transport.calls.size)
+        transport.calls.forEach {
+            assertEquals(true, it.idempotent)
+            assertNull("no caller key: the client auto-generates one per request", it.idempotencyKey)
+        }
     }
 
     @Test
