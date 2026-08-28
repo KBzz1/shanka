@@ -14,6 +14,8 @@ import java.io.InputStream
  * - Timestamps cross the boundary as ISO-8601 `Instant`; dates as `LocalDate`.
  * - Difficulty ratios are integer ten-percent steps summing to 100.
  * - Write calls are idempotent; the implementation owns the Idempotency-Key and bearer session.
+ *   A caller retrying one user operation after a lost response supplies its own explicit
+ *   `idempotencyKey` so the replay carries the identical key instead of writing twice.
  * - `saveApiKey` must never log, persist or echo the plaintext key.
  *
  * Every method maps to an endpoint of the target Architecture HTTP contract (section 4); the
@@ -53,6 +55,7 @@ interface V25Repository {
         fileName: String,
         content: InputStream,
         name: String? = null,
+        idempotencyKey: String? = null,
     ): V25Result<V25LearningProject>
 
     /** GET /projects — the user's projects; empty list is the true empty state. */
@@ -72,6 +75,7 @@ interface V25Repository {
         projectId: String,
         fileName: String,
         content: InputStream,
+        idempotencyKey: String? = null,
     ): V25Result<V25LearningProject>
 
     /** PATCH /projects/{project_id}/chapters/{chapter_id} — edit chapter name and page span. */
@@ -146,7 +150,7 @@ interface V25Repository {
     suspend fun listDecks(projectId: String? = null): V25Result<List<V25Deck>>
 
     /** POST /decks — create a deck; `projectId == null` creates an independent deck. */
-    suspend fun createDeck(name: String, projectId: String? = null): V25Result<V25Deck>
+    suspend fun createDeck(name: String, projectId: String? = null, idempotencyKey: String? = null): V25Result<V25Deck>
 
     /** GET /decks/{deck_id} — deck detail with counts. */
     suspend fun getDeck(deckId: String): V25Result<V25Deck>
@@ -160,8 +164,12 @@ interface V25Repository {
     /** GET /decks/{deck_id}/cards — cards with free-browse order/difficulty/mastery filters. */
     suspend fun listCards(deckId: String, filter: V25BrowseFilter): V25Result<List<V25Card>>
 
-    /** POST /decks/{deck_id}/cards — manual add / text import; created cards come back. */
-    suspend fun addCards(deckId: String, drafts: List<V25CardDraft>): V25Result<List<V25Card>>
+    /**
+     * POST /decks/{deck_id}/cards/import — atomic bulk import for manual add / text import. One
+     * request carries every draft, so a retry with the same Idempotency-Key can never create a
+     * second copy of some cards. Returns the per-index [V25ImportResult]s.
+     */
+    suspend fun importCards(deckId: String, drafts: List<V25CardDraft>, idempotencyKey: String? = null): V25Result<List<V25ImportResult>>
 
     /** PATCH /cards/{card_id} — edit front/back (both non-empty); review state resets. */
     suspend fun updateCard(cardId: String, front: String, back: String): V25Result<V25Card>
@@ -199,8 +207,18 @@ interface V25Repository {
     /** GET /decks/{deck_id}/review — due review for an independent deck or a specific deck. */
     suspend fun deckReviewQueue(deckId: String): V25Result<List<V25ReviewCard>>
 
-    /** POST /review-events — submit AGAIN/HARD/GOOD/EASY; returns the updated state and study date. */
-    suspend fun rateCard(cardId: String, rating: V25Rating): V25Result<V25RatingResult>
+    /**
+     * POST /review-events — submit AGAIN/HARD/GOOD/EASY; returns the updated state and study
+     * date. A retry of one rating must reuse the same `clientEventId` (the server's fallback
+     * dedupe key) and the same `idempotencyKey`; both default to fresh values for a first
+     * submission.
+     */
+    suspend fun rateCard(
+        cardId: String,
+        rating: V25Rating,
+        clientEventId: String? = null,
+        idempotencyKey: String? = null,
+    ): V25Result<V25RatingResult>
 
     // --- statistics (Architecture 4.5) ------------------------------------------------------------
 

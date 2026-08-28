@@ -1058,7 +1058,7 @@ class AppViewModel(
         val valid = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
         if (name.isBlank() || valid.isEmpty()) return@launch
         when (val created = v25Repository.createDeck(name.trim())) {
-            is V25Result.Success -> when (val added = v25Repository.addCards(
+            is V25Result.Success -> when (val added = v25Repository.importCards(
                 created.value.deckId,
                 valid.map { V25CardDraft(it.front.trim(), it.back.trim()) },
             )) {
@@ -1083,7 +1083,7 @@ class AppViewModel(
     fun addCardsToDeck(deckId: String, drafts: List<CardDraft>, onDone: () -> Unit) = viewModelScope.launch {
         val valid = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
         if (valid.isEmpty()) return@launch
-        when (val result = v25Repository.addCards(deckId, valid.map { V25CardDraft(it.front.trim(), it.back.trim()) })) {
+        when (val result = v25Repository.importCards(deckId, valid.map { V25CardDraft(it.front.trim(), it.back.trim()) })) {
             is V25Result.Success -> {
                 refreshCards(deckId)
                 refreshDecks()

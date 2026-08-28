@@ -257,7 +257,8 @@ class V25ContractTest {
                 "deck-1",
                 V25BrowseFilter(V25BrowseOrder.random, V25ContentDifficulty.UNLABELED, V25MasteryFilter.unmastered),
             ),
-            repository.addCards("deck-1", listOf(V25CardDraft("新卡正面", "新卡背面"))),
+            repository.importCards("deck-1", listOf(V25CardDraft("新卡正面", "新卡背面"))),
+            repository.importCards("deck-1", listOf(V25CardDraft("重试卡", "重试答案")), idempotencyKey = "retry-key"),
             repository.updateCard("card-1", "新正面", "新背面"),
             repository.deleteCard("card-1"),
             repository.pendingDeletionBatches(),
@@ -448,6 +449,7 @@ private class StubV25Repository : V25Repository {
         fileName: String,
         content: java.io.InputStream,
         name: String?,
+        idempotencyKey: String?,
     ): V25Result<V25LearningProject> =
         V25Result.Success(project.copy(name = name ?: fileName.substringBeforeLast('.'), version = 1))
 
@@ -465,6 +467,7 @@ private class StubV25Repository : V25Repository {
         projectId: String,
         fileName: String,
         content: java.io.InputStream,
+        idempotencyKey: String?,
     ): V25Result<V25LearningProject> =
         V25Result.Success(project.copy(status = V25ProjectStatus.PARSING, version = project.version + 1))
 
@@ -537,7 +540,7 @@ private class StubV25Repository : V25Repository {
 
     override suspend fun listDecks(projectId: String?): V25Result<List<V25Deck>> = V25Result.Success(listOf(deck))
 
-    override suspend fun createDeck(name: String, projectId: String?): V25Result<V25Deck> =
+    override suspend fun createDeck(name: String, projectId: String?, idempotencyKey: String?): V25Result<V25Deck> =
         V25Result.Success(deck.copy(deckId = "deck-new", name = name, projectId = projectId))
 
     override suspend fun getDeck(deckId: String): V25Result<V25Deck> = V25Result.Success(deck)
@@ -554,16 +557,10 @@ private class StubV25Repository : V25Repository {
         return V25Result.Success(listOf(card).filter { difficulty == null || it.targetDifficulty == difficulty })
     }
 
-    override suspend fun addCards(deckId: String, drafts: List<V25CardDraft>): V25Result<List<V25Card>> =
+    override suspend fun importCards(deckId: String, drafts: List<V25CardDraft>, idempotencyKey: String?): V25Result<List<V25ImportResult>> =
         V25Result.Success(
-            drafts.mapIndexed { index, draft ->
-                card.copy(
-                    cardId = "card-new-$index",
-                    front = draft.front,
-                    back = draft.back,
-                    sourceTaskId = null,
-                    version = 1,
-                )
+            drafts.mapIndexed { index, _ ->
+                V25ImportResult(index = index, status = V25ImportStatus.CREATED, cardId = "card-new-$index")
             },
         )
 
@@ -627,7 +624,12 @@ private class StubV25Repository : V25Repository {
     override suspend fun deckReviewQueue(deckId: String): V25Result<List<V25ReviewCard>> =
         V25Result.Success(emptyList())
 
-    override suspend fun rateCard(cardId: String, rating: V25Rating): V25Result<V25RatingResult> =
+    override suspend fun rateCard(
+        cardId: String,
+        rating: V25Rating,
+        clientEventId: String?,
+        idempotencyKey: String?,
+    ): V25Result<V25RatingResult> =
         V25Result.Failure(V25ErrorCodes.NETWORK_UNAVAILABLE, "network.unavailable", null)
 
     override suspend fun statsDashboard(): V25Result<V25StatsDashboard> = V25Result.Success(stats)

@@ -7,6 +7,7 @@ import com.qiuzhao.flashcards.domain.v25.V25AvatarKey
 import com.qiuzhao.flashcards.domain.v25.V25BrowseFilter
 import com.qiuzhao.flashcards.domain.v25.V25Card
 import com.qiuzhao.flashcards.domain.v25.V25CardDeletionBatch
+import com.qiuzhao.flashcards.domain.v25.V25CardDraft
 import com.qiuzhao.flashcards.domain.v25.V25CardRewritePreview
 import com.qiuzhao.flashcards.domain.v25.V25CardType
 import com.qiuzhao.flashcards.domain.v25.V25Chapter
@@ -20,6 +21,8 @@ import com.qiuzhao.flashcards.domain.v25.V25Difficulty
 import com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
 import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
+import com.qiuzhao.flashcards.domain.v25.V25ImportResult
+import com.qiuzhao.flashcards.domain.v25.V25ImportStatus
 import com.qiuzhao.flashcards.domain.v25.V25InternalStage
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25PdfFile
@@ -261,6 +264,17 @@ internal fun parseCard(value: JSONObject): V25Card = V25Card(
     version = parseVersion(optionalString(value, "version")),
 )
 
+/** One row of `ImportResponse.results`; `card_id` is present only for a CREATED card. */
+internal fun parseImportResult(value: JSONObject): V25ImportResult = V25ImportResult(
+    index = requiredInt(value, "index"),
+    status = requiredEnum<V25ImportStatus>(value, "status"),
+    cardId = optionalString(value, "card_id"),
+)
+
+/** `POST /decks/{deck_id}/cards/import` response: `results` is required. */
+internal fun parseImportResponse(value: JSONObject): List<V25ImportResult> =
+    requiredArray(value, "results").map(::parseImportResult)
+
 internal fun parseReviewState(value: JSONObject): V25ReviewState = V25ReviewState(
     state = requiredString(value, "state"),
     due = optionalInstant(value, "due"),
@@ -458,11 +472,25 @@ internal fun renameBody(name: String): String = JSONObject().put("name", name).t
 internal fun cardDraftBody(front: String, back: String): String =
     JSONObject().put("front", front).put("back", back).toString()
 
-/** ReviewEventRequest: client_event_id is the device-unique offline-retry idempotency key. */
-internal fun rateCardBody(cardId: String, rating: V25Rating): String = JSONObject()
+/** Bulk import body: `{"cards": [{"front", "back"}...]}` — the backend imports atomically. */
+internal fun cardsImportBody(drafts: List<V25CardDraft>): String = JSONObject()
+    .put(
+        "cards",
+        JSONArray().apply {
+            drafts.forEach { draft -> put(JSONObject().put("front", draft.front).put("back", draft.back)) }
+        },
+    )
+    .toString()
+
+/**
+ * ReviewEventRequest: client_event_id is the device-unique offline-retry idempotency key. A
+ * retrying submission reuses its original `clientEventId` so the server's fallback dedupe sees
+ * the same event; a fresh submission generates one.
+ */
+internal fun rateCardBody(cardId: String, rating: V25Rating, clientEventId: String? = null): String = JSONObject()
     .put("card_id", cardId)
     .put("rating", rating.name)
-    .put("client_event_id", UUID.randomUUID().toString())
+    .put("client_event_id", clientEventId ?: UUID.randomUUID().toString())
     .toString()
 
 internal fun apiKeyBody(apiKey: String): String = JSONObject().put("api_key", apiKey).toString()

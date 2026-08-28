@@ -13,6 +13,7 @@ import com.qiuzhao.flashcards.domain.v25.V25CoverageMode
 import com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio
 import com.qiuzhao.flashcards.domain.v25.V25ErrorCodes
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
+import com.qiuzhao.flashcards.domain.v25.V25ImportStatus
 import com.qiuzhao.flashcards.domain.v25.V25MasteryFilter
 import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
 import com.qiuzhao.flashcards.domain.v25.V25Rating
@@ -476,29 +477,66 @@ class V25RepositoryContractTest {
     }
 
     @Test
-    fun `addCards posts each draft and returns the created cards`() = runBlocking {
+    fun `importCards sends one atomic bulk request and maps the per-index results`() = runBlocking {
         val transport = FakeTransport().apply {
             handler = { call ->
-                if (call.path == "/decks/d-1/cards") HttpResult(201, cardBody(call.body!!), emptyMap())
+                if (call.path == "/decks/d-1/cards/import") HttpResult(201, importResponseBody(), emptyMap())
                 else error("unexpected path ${call.path}")
             }
         }
         val repo = repository(FakeSessionStore(session), transport)
 
-        val result = repo.addCards(
+        val result = repo.importCards(
             "d-1",
             listOf(V25CardDraft("什么是矩阵？", "数表"), V25CardDraft("什么是秩？", "最大无关组")),
         )
 
         assertTrue(result is V25Result.Success)
-        assertEquals(2, (result as V25Result.Success).value.size)
-        assertEquals(2, transport.calls.size)
-        transport.calls.forEachIndexed { index, call ->
-            assertEquals("/decks/d-1/cards", call.path)
-            assertEquals(true, call.idempotent)
-            val drafts = listOf("什么是矩阵？", "什么是秩？")
-            assertEquals(drafts[index], org.json.JSONObject(call.body!!).getString("front"))
+        val results = (result as V25Result.Success).value
+        assertEquals(1, transport.calls.size)
+        assertEquals("/decks/d-1/cards/import", transport.calls.single().path)
+        assertEquals(true, transport.calls.single().idempotent)
+        assertEquals(2, results.size)
+        assertEquals(0, results[0].index)
+        assertEquals(V25ImportStatus.CREATED, results[0].status)
+        assertEquals("c-1", results[0].cardId)
+        // 一次原子请求：请求体携带全部草稿，而不是逐张 POST。
+        val cards = org.json.JSONObject(transport.calls.single().body!!).getJSONArray("cards")
+        assertEquals(2, cards.length())
+        assertEquals("什么是矩阵？", cards.getJSONObject(0).getString("front"))
+    }
+
+    @Test
+    fun `importCards carries the caller idempotency key for a retried batch`() = runBlocking {
+        val transport = FakeTransport().apply {
+            handler = { HttpResult(201, importResponseBody(), emptyMap()) }
         }
+        val repo = repository(FakeSessionStore(session), transport)
+
+        repo.importCards("d-1", listOf(V25CardDraft("正面", "背面")), idempotencyKey = "batch-key-1")
+
+        assertEquals("batch-key-1", transport.calls.single().idempotencyKey)
+    }
+
+    @Test
+    fun `importCards maps a FAILED row without throwing`() = runBlocking {
+        val transport = FakeTransport().apply {
+            handler = {
+                HttpResult(
+                    201,
+                    """{"results":[{"index":0,"status":"FAILED","error":{"field":"front"}}]}""",
+                    emptyMap(),
+                )
+            }
+        }
+        val repo = repository(FakeSessionStore(session), transport)
+
+        val result = repo.importCards("d-1", listOf(V25CardDraft("", "")))
+
+        assertTrue(result is V25Result.Success)
+        val row = (result as V25Result.Success).value.single()
+        assertEquals(V25ImportStatus.FAILED, row.status)
+        assertNull(row.cardId)
     }
 
     @Test
@@ -590,17 +628,12 @@ class V25RepositoryContractTest {
          "version": "2026-08-14T10:00:00Z"}
     """.trimIndent()
 
-    private fun cardBody(body: String): String {
-        val draft = org.json.JSONObject(body)
-        return """
-            {"card_id": "c-${draft.getString("front").hashCode()}", "deck_id": "d-1", "source": "MANUAL", "position": 1,
-             "front": "${draft.getString("front")}", "back": "${draft.getString("back")}",
-             "card_type": "QUESTION", "target_difficulty": null,
-             "chapter_id": null, "source_task_id": null,
-             "publication_state": "PUBLISHED", "version": "v1",
-             "created_at": "2026-08-14T09:00:00Z", "updated_at": "2026-08-14T09:00:00Z"}
-        """.trimIndent()
-    }
+    private fun importResponseBody(): String = """
+        {"results":[
+          {"index":0,"status":"CREATED","card_id":"c-1"},
+          {"index":1,"status":"CREATED","card_id":"c-2"}
+        ]}
+    """.trimIndent()
 
     private fun taskBody(): String = """
         {"task_id": "t-1", "project_id": "p-1", "file_id": "f-1", "deck_id": "d-1", "retry_of_task_id": null,

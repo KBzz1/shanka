@@ -319,6 +319,16 @@ data class V25CardDraft(
     val back: String,
 )
 
+/** Per-card outcome of the atomic bulk import (`POST /decks/{deck_id}/cards/import`). */
+enum class V25ImportStatus { CREATED, FAILED }
+
+/** One import result row; `cardId` is present only for a created card. */
+data class V25ImportResult(
+    val index: Int,
+    val status: V25ImportStatus,
+    val cardId: String?,
+)
+
 /** Free-browse filters (Architecture 4.4): order, content difficulty, mastery. */
 data class V25BrowseFilter(
     val order: V25BrowseOrder,

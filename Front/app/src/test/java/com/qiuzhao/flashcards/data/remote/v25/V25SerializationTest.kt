@@ -3,15 +3,18 @@ package com.qiuzhao.flashcards.data.remote.v25
 import com.qiuzhao.flashcards.domain.v25.V25ApiKeyState
 import com.qiuzhao.flashcards.domain.v25.V25AvatarKey
 import com.qiuzhao.flashcards.domain.v25.V25BrowseOrder
+import com.qiuzhao.flashcards.domain.v25.V25CardDraft
 import com.qiuzhao.flashcards.domain.v25.V25CardType
 import com.qiuzhao.flashcards.domain.v25.V25ContentDifficulty
 import com.qiuzhao.flashcards.domain.v25.V25CoverageMode
 import com.qiuzhao.flashcards.domain.v25.V25DeletionBatchStatus
 import com.qiuzhao.flashcards.domain.v25.V25Difficulty
+import com.qiuzhao.flashcards.domain.v25.V25ImportStatus
 import com.qiuzhao.flashcards.domain.v25.V25InternalStage
 import com.qiuzhao.flashcards.domain.v25.V25MasteryFilter
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
 import com.qiuzhao.flashcards.domain.v25.V25PublicationState
+import com.qiuzhao.flashcards.domain.v25.V25Rating
 import com.qiuzhao.flashcards.domain.v25.V25RewriteStatus
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import java.time.Instant
@@ -202,6 +205,50 @@ class V25SerializationTest {
             parseVersion("2026-08-14T10:00:00Z"),
         )
         assertEquals(0, parseVersion("garbage"))
+    }
+
+    @Test
+    fun `import response maps per-index results with status and nullable card id`() {
+        val results = parseImportResponse(JSONObject(importResponseBody()))
+        assertEquals(2, results.size)
+        assertEquals(0, results[0].index)
+        assertEquals(V25ImportStatus.CREATED, results[0].status)
+        assertEquals("c-1", results[0].cardId)
+        assertEquals(1, results[1].index)
+        assertEquals(V25ImportStatus.FAILED, results[1].status)
+        assertNull(results[1].cardId)
+    }
+
+    @Test
+    fun `import response rejects a missing results array`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            parseImportResponse(JSONObject("""{"unexpected": true}"""))
+        }
+    }
+
+    @Test
+    fun `cards import body serializes every draft front and back`() {
+        val body = JSONObject(
+            cardsImportBody(
+                listOf(V25CardDraft("正面一", "背面一"), V25CardDraft("正面二", "背面二")),
+            ),
+        )
+        val cards = body.getJSONArray("cards")
+        assertEquals(2, cards.length())
+        assertEquals("正面一", cards.getJSONObject(0).getString("front"))
+        assertEquals("背面一", cards.getJSONObject(0).getString("back"))
+        assertEquals("正面二", cards.getJSONObject(1).getString("front"))
+    }
+
+    @Test
+    fun `rating body reuses the caller client event id on retry`() {
+        val first = JSONObject(rateCardBody("c-1", V25Rating.GOOD))
+        assertEquals("c-1", first.getString("card_id"))
+        assertEquals("GOOD", first.getString("rating"))
+        assertTrue(first.getString("client_event_id").isNotBlank())
+
+        val retry = JSONObject(rateCardBody("c-1", V25Rating.GOOD, clientEventId = "event-1"))
+        assertEquals("event-1", retry.getString("client_event_id"))
     }
 
     @Test
@@ -482,6 +529,13 @@ class V25SerializationTest {
          "chapter_id": "ch-1", "source_task_id": "t-1",
          "publication_state": "PUBLISHED", "version": "v3",
          "created_at": "2026-08-14T09:00:00Z", "updated_at": "2026-08-14T10:00:00Z"}
+    """.trimIndent()
+
+    private fun importResponseBody(): String = """
+        {"results":[
+          {"index":0,"status":"CREATED","card_id":"c-1"},
+          {"index":1,"status":"FAILED","error":{"field":"back"}}
+        ]}
     """.trimIndent()
 
     private fun validationErrorBody(): String =

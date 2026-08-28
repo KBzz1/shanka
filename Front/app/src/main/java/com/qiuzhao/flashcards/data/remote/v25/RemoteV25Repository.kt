@@ -21,6 +21,7 @@ import com.qiuzhao.flashcards.domain.v25.V25Deck
 import com.qiuzhao.flashcards.domain.v25.V25ErrorCodes
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
 import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
+import com.qiuzhao.flashcards.domain.v25.V25ImportResult
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStudySettings
@@ -124,8 +125,9 @@ class RemoteV25Repository(
         fileName: String,
         content: InputStream,
         name: String?,
+        idempotencyKey: String?,
     ): V25Result<V25LearningProject> =
-        upload("create_project", "/projects", fileName, content, name, map = ::parseLearningProject)
+        upload("create_project", "/projects", fileName, content, name, idempotencyKey, map = ::parseLearningProject)
 
     override suspend fun listProjects(): V25Result<List<V25LearningProject>> =
         call("list_projects", "GET", "/projects", idempotent = false) { value ->
@@ -145,8 +147,9 @@ class RemoteV25Repository(
         projectId: String,
         fileName: String,
         content: InputStream,
+        idempotencyKey: String?,
     ): V25Result<V25LearningProject> =
-        upload("replace_project_pdf", "/projects/$projectId/replace-pdf", fileName, content, name = null, map = ::parseLearningProject)
+        upload("replace_project_pdf", "/projects/$projectId/replace-pdf", fileName, content, name = null, idempotencyKey = idempotencyKey, map = ::parseLearningProject)
 
     override suspend fun updateChapter(
         projectId: String,
@@ -229,8 +232,8 @@ class RemoteV25Repository(
             requiredArray(value, "items").map(::parseDeck)
         }
 
-    override suspend fun createDeck(name: String, projectId: String?): V25Result<V25Deck> =
-        call("create_deck", "POST", "/decks", createDeckBody(name, projectId), map = ::parseDeck)
+    override suspend fun createDeck(name: String, projectId: String?, idempotencyKey: String?): V25Result<V25Deck> =
+        call("create_deck", "POST", "/decks", createDeckBody(name, projectId), idempotencyKey = idempotencyKey, map = ::parseDeck)
 
     override suspend fun getDeck(deckId: String): V25Result<V25Deck> =
         call("get_deck", "GET", "/decks/$deckId", idempotent = false, map = ::parseDeck)
@@ -247,21 +250,13 @@ class RemoteV25Repository(
         }
 
     /**
-     * One POST per draft to the single-card endpoint: the interface promises the created
-     * cards come back, and only that endpoint returns full [V25Card] payloads (the bulk
-     * import endpoint returns per-index ids only). Stops at the first failure; each request
-     * carries its own Idempotency-Key, so a retried call never duplicates a card.
+     * The atomic bulk import: one POST carries every draft, so either the whole batch lands or
+     * none of it does. A retried call reuses the caller's Idempotency-Key, which the server
+     * replays as the original result — a network retry can never create a second copy of a
+     * partial batch (the legacy per-card loop could).
      */
-    override suspend fun addCards(deckId: String, drafts: List<V25CardDraft>): V25Result<List<V25Card>> {
-        val created = mutableListOf<V25Card>()
-        for (draft in drafts) {
-            when (val result = call("create_card", "POST", "/decks/$deckId/cards", cardDraftBody(draft.front, draft.back), map = ::parseCard)) {
-                is V25Result.Success -> created += result.value
-                is V25Result.Failure -> return result
-            }
-        }
-        return V25Result.Success(created)
-    }
+    override suspend fun importCards(deckId: String, drafts: List<V25CardDraft>, idempotencyKey: String?): V25Result<List<V25ImportResult>> =
+        call("import_cards", "POST", "/decks/$deckId/cards/import", cardsImportBody(drafts), idempotencyKey = idempotencyKey, map = ::parseImportResponse)
 
     override suspend fun updateCard(cardId: String, front: String, back: String): V25Result<V25Card> =
         call("update_card", "PATCH", "/cards/$cardId", cardDraftBody(front, back), map = ::parseCard)
@@ -312,8 +307,13 @@ class RemoteV25Repository(
             requiredArray(value, "items").map(::parseReviewCard)
         }
 
-    override suspend fun rateCard(cardId: String, rating: V25Rating): V25Result<V25RatingResult> =
-        call("submit_review", "POST", "/review-events", rateCardBody(cardId, rating), map = ::parseRatingResult)
+    override suspend fun rateCard(
+        cardId: String,
+        rating: V25Rating,
+        clientEventId: String?,
+        idempotencyKey: String?,
+    ): V25Result<V25RatingResult> =
+        call("submit_review", "POST", "/review-events", rateCardBody(cardId, rating, clientEventId), idempotencyKey = idempotencyKey, map = ::parseRatingResult)
 
     // --- statistics (Architecture 4.5) ------------------------------------------------------------
 
@@ -355,9 +355,10 @@ class RemoteV25Repository(
         path: String,
         body: String? = null,
         idempotent: Boolean = true,
+        idempotencyKey: String? = null,
         map: (JSONObject) -> T,
     ): V25Result<T> {
-        val result = transport.request(operation, method, path, body, idempotent = idempotent)
+        val result = transport.request(operation, method, path, body, idempotent = idempotent, idempotencyKey = idempotencyKey)
         if (result.status !in 200..299) return result.toFailure()
         return runCatching { V25Result.Success(map(jsonObject(result.body))) }
             .getOrElse { V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, it.message) }
@@ -369,9 +370,10 @@ class RemoteV25Repository(
         fileName: String,
         content: InputStream,
         name: String?,
+        idempotencyKey: String? = null,
         map: (JSONObject) -> T,
     ): V25Result<T> {
-        val result = transport.upload(operation, path, fileName, content, name)
+        val result = transport.upload(operation, path, fileName, content, name, idempotencyKey)
         if (result.status !in 200..299) return result.toFailure()
         return runCatching { V25Result.Success(map(jsonObject(result.body))) }
             .getOrElse { V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, it.message) }
