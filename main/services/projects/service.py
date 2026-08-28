@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from domain.task import ACTIVE_TASK_STATUSES as _ACTIVE_TASK_STATUSES
+from infra.clock import SystemClock
 from infra.db.models import (
     Card,
     Chapter,
@@ -31,6 +32,12 @@ from infra.db.models import (
     PdfFile,
     ProjectStudySettings,
     Task,
+)
+from infra.db.session import format_utc
+from services.deletion.service import (
+    abandon_pre_generation,
+    preflight_payload,
+    resource_tasks,
 )
 from services.pdf.service import chapter_view, delete_chapter, pdf_view, update_chapter, upload_pdf
 
@@ -94,7 +101,7 @@ def project_view(
             select(Chapter).where(Chapter.file_id == pdf.file_id).order_by(Chapter.start_page)
         ).all()
         chapters = [chapter_view(ch) for ch in rows]
-    return {
+    view: dict[str, Any] = {
         "project_id": project.project_id,
         "name": project.name,
         "file": pdf_view(pdf, chapters),
@@ -106,6 +113,18 @@ def project_view(
         "updated_at": project.updated_at,
         "version": project.version,
     }
+    # Lists stay lightweight; detail includes the persisted task snapshot so a restarted app can
+    # render every draft/sample/generation state without relying on an in-memory _pdfTask.
+    if with_chapters:
+        from services.tasks.service import task_view
+
+        tasks = session.scalars(
+            select(Task)
+            .where(Task.project_id == project.project_id, Task.user_id == project.user_id)
+            .order_by(Task.created_at.desc(), Task.task_id.desc())
+        ).all()
+        view["tasks"] = [task_view(task) for task in tasks]
+    return view
 
 
 def create_project(
@@ -235,7 +254,14 @@ def replace_pdf(
 
 
 def delete_project(
-    session: Session, *, user_id: str, project_id: str, retain_decks: bool, storage: Any
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    retain_decks: bool,
+    storage: Any,
+    abandon_pre_generation_tasks: bool = False,
+    now: str | None = None,
 ) -> None:
     """删除项目聚合（两决策，PRD V25-GEN-FR-09）。存储清理失败 → 抛错回滚元数据。
 
@@ -248,11 +274,35 @@ def delete_project(
     pdf = _require_pdf(session, project)
     if pdf.status in ("PENDING", "PARSING"):
         raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "项目解析中，暂时无法删除")
-    if _active_task_count(session, project_id) > 0:
-        raise AppError(
-            ErrorCode.PROJECT_HAS_ACTIVE_TASK,
-            "存在进行中的制卡任务，请先等待完成或放弃",
-        )
+    active_tasks = resource_tasks(session, user_id=user_id, project_id=project_id)
+    if active_tasks:
+        if abandon_pre_generation_tasks:
+            abandon_pre_generation(
+                session,
+                user_id=user_id,
+                tasks=active_tasks,
+                now=now or format_utc(SystemClock().now_utc()),
+                resource_type="PROJECT",
+                resource_id=project_id,
+            )
+        else:
+            can_abandon = [task.task_id for task in active_tasks if task.status != "GENERATING"]
+            actions = (
+                ("ABANDON_AND_RETRY", "VIEW_TASKS")
+                if can_abandon
+                else ("WAIT_FOR_TERMINAL", "VIEW_TASKS")
+            )
+            raise AppError(
+                ErrorCode.PROJECT_HAS_ACTIVE_TASK,
+                "存在进行中的制卡任务，请先放弃可放弃任务或等待正式生成完成",
+                actions=actions,
+                details={
+                    "resource_type": "PROJECT",
+                    "resource_id": project_id,
+                    "task_ids": [task.task_id for task in active_tasks],
+                    "abandonable_task_ids": can_abandon,
+                },
+            )
     if not retain_decks:
         # 牌组删除 → 卡片 → review_states/review_events 经 FK CASCADE 级联（PRAGMA ON）
         for deck in session.scalars(select(Deck).where(Deck.project_id == project_id)).all():
@@ -281,6 +331,44 @@ def _active_task_count(session: Session, project_id: str) -> int:
         )
         or 0
     )
+
+
+def project_deletion_preflight(
+    session: Session, *, user_id: str, project_id: str, retain_decks: bool
+) -> dict[str, object]:
+    """Read-only deletion preview; the DELETE endpoint repeats all checks atomically."""
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    pdf = _require_pdf(session, project)
+    decks = session.scalars(select(Deck).where(Deck.project_id == project_id)).all()
+    deck_ids = [deck.deck_id for deck in decks]
+    card_count = (
+        _count(session, Card, Card.deck_id.in_(deck_ids)) if deck_ids and not retain_decks else 0
+    )
+    blockers = resource_tasks(session, user_id=user_id, project_id=project_id)
+    payload = preflight_payload(
+        session,
+        user_id=user_id,
+        resource_type="PROJECT",
+        resource_id=project_id,
+        project_id=project_id,
+        impact={
+            "retain_decks": retain_decks,
+            "deck_count": len(decks),
+            "card_count": card_count,
+            "task_count": _count(session, Task, Task.project_id == project_id),
+            "project_status": _project_status(pdf, project.chapters_confirmed_at),
+        },
+    )
+    if pdf.status in ("PENDING", "PARSING"):
+        payload["can_delete"] = False
+        payload["actions"] = ["WAIT_FOR_TERMINAL", "VIEW_TASKS"]
+        payload["project_state_blocked"] = True
+    else:
+        payload["project_state_blocked"] = False
+    # Keep this explicit local read so a future implementation cannot accidentally compute
+    # `can_delete` from a second, differently-filtered query.
+    payload["blocking_task_count"] = len(blockers)
+    return payload
 
 
 def update_project_chapter(

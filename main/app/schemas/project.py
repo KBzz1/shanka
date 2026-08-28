@@ -8,6 +8,7 @@ structure-contract 3.16/3.17，V2.5 新增）。
 from pydantic import BaseModel
 
 from app.schemas.pdfs import PdfFile
+from app.schemas.tasks import Task
 
 
 class LearningProject(BaseModel):
@@ -18,6 +19,7 @@ class LearningProject(BaseModel):
     chapter_count: int
     deck_count: int
     task_count: int
+    tasks: list[Task] | None = None
     created_at: str
     updated_at: str
     version: str  # 缓存刷新与并发检查

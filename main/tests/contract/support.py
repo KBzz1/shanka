@@ -86,6 +86,11 @@ def check_schema_consistency(
         resolved = resolve_ref(prop, openapi)
         prop_type: Any = resolved.get("type")
         if prop_type == "object":
+            # Free-form JSON maps (e.g. error details / deletion impact) have no
+            # nested Pydantic model to recurse into; their value shape is intentionally
+            # open and governed by the owning use-case contract.
+            if "properties" not in resolved and resolved.get("additionalProperties") is True:
+                continue
             violations.extend(
                 check_schema_consistency(annotation, resolved, openapi, f"{path}.{name}")
             )

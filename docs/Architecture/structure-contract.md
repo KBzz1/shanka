@@ -48,7 +48,9 @@
   "error": {
     "code": "DECK_NOT_FOUND",
     "message": "人类可读的补充信息",
-    "localization_key": "error.deck_not_found"
+    "localization_key": "error.deck_not_found",
+    "actions": ["VIEW_TASKS"],
+    "details": {"task_ids": []}
   }
 }
 ```
@@ -56,6 +58,8 @@
 - 错误码为稳定字符串,客户端按 `localization_key` 映射文案;不随消息文本变化。
 - 受保护接口的 401(`AUTH_REQUIRED` / `AUTH_INVALID`)携带 `WWW-Authenticate: Bearer` 响应头(1.1);登录失败的 `INVALID_CREDENTIALS` 不要求该头。
 - `message` 仅面向用户展示,不得包含堆栈、内部路径、SQL 或他人数据;内部细节进服务端日志(以 `request_id` 关联)。
+- `actions` 与 `details` 为可选字段;资源删除冲突时服务端返回可执行动作(`ABANDON_AND_RETRY`、
+  `WAIT_FOR_TERMINAL`、`VIEW_TASKS`)及非敏感任务 ID,客户端据此引导用户,不得把预检当作资源锁。
 - **生成链路重试分类**:适配层向上区分可重试性(错误码与 HTTP 见第 7 章)——chat 401(Key 错误)不可重试 → 任务 `FAILED` 不重试;429/5xx/网络/超时可重试(429/5xx 记 `API_KEY_UNAVAILABLE`,网络/超时与响应解析失败内部记 `GENERATION_FAILED`)→ 账本预算内重试(每操作 2 次重试 = 3 次尝试);输出非法走业务重试,预算同上。
 - 完整错误码表见第 7 章。
 
@@ -389,9 +393,25 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | `chapter_count` | int | ✓ | 派生 |
 | `deck_count` | int | ✓ | 派生 |
 | `task_count` | int | ✓ | 派生 |
+| `tasks` | Task[] | ✗ | 仅项目详情可选返回;列表可省略,用于恢复草稿/样卡/生成中任务 |
 | `created_at` / `updated_at` / `version` | - | ✓ | 缓存刷新与并发检查 |
 
-规则:一个项目恰好对应一份当前 PDF;解析失败时允许 `replace-pdf` 原子替换该 PDF。`status` 由 PDF 状态与 `chapters_confirmed_at` 确定,不建立可漂移的第二套状态列。删除保护见 6.2;项目删除时 `user_preferences.current_project_id` 置空。
+规则:一个项目恰好对应一份当前 PDF;解析失败时允许 `replace-pdf` 原子替换该 PDF。`status` 由 PDF 状态与 `chapters_confirmed_at` 确定,不建立可漂移的第二套状态列。删除保护见 6.2;项目删除时 `user_preferences.current_project_id` 置空。`tasks` 仅为详情的服务端任务快照,权威状态仍来自任务表/任务列表。
+
+### 3.21 DeletionPreflight(删除预检,V2.5 工程化增量)
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `resource_type` | enum | ✓ | `PROJECT` / `DECK` |
+| `resource_id` | uuid | ✓ | 待删除资源 |
+| `can_delete` | bool | ✓ | 当前快照下是否无阻塞 |
+| `blockers` | DeletionTaskBlocker[] | ✓ | 活跃任务摘要与允许动作 |
+| `abandonable_task_ids` | uuid[] | ✓ | `DRAFT`/样卡阶段可在删除事务内放弃的任务 |
+| `has_uncancellable_tasks` | bool | ✓ | 是否存在正式 `GENERATING` 任务 |
+| `actions` | string[] | ✓ | `ABANDON_AND_RETRY` / `WAIT_FOR_TERMINAL` / `VIEW_TASKS` |
+| `impact` | object | ✓ | 资源数量与当前项目状态;仅展示用途,不作为删除授权 |
+
+预检是只读建议;实际删除必须在同一写事务内重新检查并用 CAS 放弃可放弃任务。正式生成中不可强制终止。
 
 ### 3.17 ProjectStudySettings(项目学习设置,V2.5 新增)
 
@@ -582,8 +602,9 @@ Scheduler(
 | POST | `/v1/projects` | multipart PDF + 可选 name;上传成功即建立项目(PDF 异步解析) | ✓ |
 | GET | `/v1/projects` | 当前用户项目列表,支持真实空态 | - |
 | GET | `/v1/projects/{project_id}` | 项目详情(含 file/chapters 摘要与派生计数) | - |
+| GET | `/v1/projects/{project_id}/deletion-preflight?retain_decks=true\|false` | 删除预检:影响范围、阻塞任务与可执行动作 | - |
 | PATCH | `/v1/projects/{project_id}` | 重命名(1~60 字符,去首尾空白) | ✓ |
-| DELETE | `/v1/projects/{project_id}?retain_decks=true\|false` | 活跃任务保护;按选择保留或删除全部项目牌组 | ✓ |
+| DELETE | `/v1/projects/{project_id}?retain_decks=true\|false&abandon_pre_generation_tasks=true\|false` | 可原子放弃正式生成前任务;正式生成中仍保护 | ✓ |
 | POST | `/v1/projects/{project_id}/replace-pdf` | 仅解析失败项目可替换并重新解析(原子替换 PDF) | ✓ |
 | PATCH | `/v1/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页 | ✓ |
 | DELETE | `/v1/projects/{project_id}/chapters/{chapter_id}?delete_cards=false` | 活跃任务保护;保留卡时 `chapter_id` 置空 | ✓ |
@@ -626,7 +647,8 @@ Scheduler(
 | POST | `/v1/decks` | 新建牌组 `{ name, project_id? }`;手动独立牌组 project_id=null | ✓ |
 | PATCH | `/v1/decks/{deck_id}` | 牌组改名;`version` 递增供缓存刷新;返回含真实进度 | ✓ |
 | GET | `/v1/decks/{deck_id}` | 详情 + 进度(card_count / due_count / mastered / review_count / mastery_ratio) | - |
-| DELETE | `/v1/decks/{deck_id}` | 删除牌组及其卡片、复习状态与统计;活跃任务引用时返回 `409 PROJECT_HAS_ACTIVE_TASK` | ✓ |
+| GET | `/v1/decks/{deck_id}/deletion-preflight` | 删除预检:影响范围、阻塞任务与可执行动作 | - |
+| DELETE | `/v1/decks/{deck_id}?abandon_pre_generation_tasks=true\|false` | 可原子放弃正式生成前任务;正式生成中仍保护 | ✓ |
 | GET | `/v1/decks/{deck_id}/cards` | 自由刷题:支持 order、content_difficulty、mastery 过滤 | - |
 | POST | `/v1/decks/{deck_id}/cards` | 手动新增卡片 `{ front, back }`,分配 position | ✓ |
 | POST | `/v1/decks/{deck_id}/cards/import` | 批量导入 `{ cards: [{ front, back }] }`,原子写入,返回逐张结果 | ✓ |

@@ -302,15 +302,23 @@ paths:
           $ref: '#/components/responses/RateLimited'
     delete:
       tags: [projects]
-      summary: 删除项目(活跃任务保护;retain_decks 选择保留或删除全部项目牌组)
+      summary: 删除项目(可原子放弃正式生成前任务;retain_decks 选择保留或删除全部项目牌组)
       operationId: deleteProject
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
         - name: retain_decks
           in: query
-          required: true
+          required: false
           schema:
             type: boolean
+            default: true
+        - name: abandon_pre_generation_tasks
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: 同一事务内放弃 DRAFT/样卡阶段任务;GENERATING 仍返回冲突
       responses:
         '204':
           description: 已删除
@@ -322,6 +330,32 @@ paths:
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
+
+  /projects/{project_id}/deletion-preflight:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      summary: 删除项目预检(只读;返回影响范围与活跃任务可执行动作)
+      operationId: projectDeletionPreflight
+      parameters:
+        - name: retain_decks
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: 当前删除影响与阻塞任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionPreflight'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /projects/{project_id}/replace-pdf:
     parameters:
@@ -564,6 +598,13 @@ paths:
       operationId: deletePdf
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
+        - name: abandon_pre_generation_tasks
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: 同一事务内放弃 DRAFT/样卡阶段任务;GENERATING 仍返回冲突
       responses:
         '204':
           description: 已删除
@@ -1046,10 +1087,17 @@ paths:
           $ref: '#/components/responses/RateLimited'
     delete:
       tags: [decks]
-      summary: 删除牌组及其卡片、复习状态与统计(重复提交安全返回;存在非终态任务引用时 409 TASK_IN_PROGRESS)
+      summary: 删除牌组及其卡片、复习状态与统计(可原子放弃正式生成前任务)
       operationId: deleteDeck
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
+        - name: abandon_pre_generation_tasks
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: 同一事务内放弃 DRAFT/样卡阶段任务;GENERATING 仍返回冲突
       responses:
         '204':
           description: 已删除
@@ -1061,6 +1109,25 @@ paths:
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
+
+  /decks/{deck_id}/deletion-preflight:
+    parameters:
+      - $ref: '#/components/parameters/DeckId'
+    get:
+      tags: [decks]
+      summary: 删除牌组预检(只读;返回影响范围与活跃任务可执行动作)
+      operationId: deckDeletionPreflight
+      responses:
+        '200':
+          description: 当前删除影响与阻塞任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionPreflight'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /decks/{deck_id}/cards:
     parameters:
@@ -1729,6 +1796,14 @@ components:
               description: 面向用户的补充信息,不含内部细节
             localization_key:
               type: string
+            actions:
+              type: [array, 'null']
+              items:
+                type: string
+              description: 可执行动作提示,如 ABANDON_AND_RETRY / VIEW_TASKS / WAIT_FOR_TERMINAL
+            details:
+              type: [object, 'null']
+              additionalProperties: true
 
     ApiKey:
       type: object
@@ -2661,6 +2736,11 @@ components:
           type: integer
         task_count:
           type: integer
+        tasks:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Task'
+          description: 项目详情返回的任务快照;列表响应可省略
         created_at:
           type: string
           format: date-time
@@ -2698,6 +2778,64 @@ components:
             format: uuid
         include_unassigned:
           type: boolean
+
+    DeletionTaskBlocker:
+      type: object
+      required: [task_id, status, can_abandon, allowed_actions]
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        internal_stage:
+          type: [string, 'null']
+          enum: [PLANNING, GENERATING, SCORING, PUBLISHING, null]
+        project_id:
+          type: [string, 'null']
+          format: uuid
+        deck_id:
+          type: [string, 'null']
+          format: uuid
+        can_abandon:
+          type: boolean
+        allowed_actions:
+          type: array
+          items:
+            type: string
+            enum: [ABANDON_AND_RETRY, WAIT_FOR_TERMINAL, VIEW_TASKS]
+
+    DeletionPreflight:
+      type: object
+      required: [resource_type, resource_id, can_delete, blockers, abandonable_task_ids, has_uncancellable_tasks, actions, impact]
+      properties:
+        resource_type:
+          type: string
+          enum: [PROJECT, DECK]
+        resource_id:
+          type: string
+          format: uuid
+        can_delete:
+          type: boolean
+        blockers:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeletionTaskBlocker'
+        abandonable_task_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        has_uncancellable_tasks:
+          type: boolean
+        actions:
+          type: array
+          items:
+            type: string
+            enum: [ABANDON_AND_RETRY, WAIT_FOR_TERMINAL, VIEW_TASKS]
+        impact:
+          type: object
+          additionalProperties: true
 
     DeletionBatchStatus:
       type: string

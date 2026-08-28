@@ -433,6 +433,110 @@ def test_delete_project_active_task_conflict_nothing_deleted(
     assert _scalar(db, "SELECT COUNT(*) FROM tasks") == 1
 
 
+def test_project_deletion_preflight_exposes_blockers_and_detail_tasks(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """预检列出每个阻塞任务；项目详情同时返回持久化任务快照。"""
+    user = _user(client)
+    db = tmp_path / "project_del.db"
+    project = _seed_project(db, _user_id(db))
+    draft_id = _seed_task(
+        db,
+        _user_id(db),
+        str(project["project_id"]),
+        str(project["file_id"]),
+        status="DRAFT",
+    )
+    generating_id = _seed_task(
+        db,
+        _user_id(db),
+        str(project["project_id"]),
+        str(project["file_id"]),
+        status="GENERATING",
+    )
+
+    preflight = client.get(
+        f"/projects/{project['project_id']}/deletion-preflight?retain_decks=false",
+        headers=user,
+    )
+    assert preflight.status_code == 200, preflight.text
+    body = preflight.json()
+    assert body["resource_type"] == "PROJECT"
+    assert body["resource_id"] == project["project_id"]
+    assert body["can_delete"] is False
+    assert body["abandonable_task_ids"] == [draft_id]
+    assert body["has_uncancellable_tasks"] is True
+    assert set(body["actions"]) == {"ABANDON_AND_RETRY", "WAIT_FOR_TERMINAL", "VIEW_TASKS"}
+    assert {item["task_id"] for item in body["blockers"]} == {draft_id, generating_id}
+    assert {item["task_id"] for item in body["blockers"] if item["can_abandon"]} == {draft_id}
+
+    detail = client.get(f"/projects/{project['project_id']}", headers=user)
+    assert detail.status_code == 200, detail.text
+    assert {task["task_id"]: task["status"] for task in detail.json()["tasks"]} == {
+        draft_id: "DRAFT",
+        generating_id: "GENERATING",
+    }
+
+
+def test_delete_project_abandons_pre_generation_tasks_atomically(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """确认放弃后：可放弃任务转 ABANDONED，再按 retain_decks 语义完成删除。"""
+    user = _user(client)
+    db = tmp_path / "project_del.db"
+    user_id = _user_id(db)
+    project = _seed_project(db, user_id)
+    deck_id, _ = _seed_deck_with_card(db, user_id, str(project["project_id"]))
+    task_id = _seed_task(
+        db,
+        user_id,
+        str(project["project_id"]),
+        str(project["file_id"]),
+        status="AWAITING_SAMPLE_CONFIRMATION",
+    )
+
+    resp = client.delete(
+        f"/projects/{project['project_id']}?retain_decks=true&abandon_pre_generation_tasks=true",
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 204, resp.text
+    assert _scalar(db, "SELECT COUNT(*) FROM learning_projects") == 0
+    assert _scalar(db, "SELECT COUNT(*) FROM tasks") == 0
+    # retain_decks=true preserves the published deck but detaches it from the deleted project.
+    assert _scalar(db, "SELECT COUNT(*) FROM decks WHERE deck_id = :d", d=deck_id) == 1
+    assert _scalar(db, "SELECT project_id FROM decks WHERE deck_id = :d", d=deck_id) is None
+    # The task was transitioned in the same transaction before its project aggregate was removed.
+    assert _scalar(db, "SELECT COUNT(*) FROM tasks WHERE task_id = :t", t=task_id) == 0
+
+
+def test_delete_project_abandon_flag_still_blocks_formal_generation(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """abandon_pre_generation_tasks 不得强杀 GENERATING，且返回可执行动作。"""
+    user = _user(client)
+    db = tmp_path / "project_del.db"
+    project = _seed_project(db, _user_id(db))
+    task_id = _seed_task(
+        db,
+        _user_id(db),
+        str(project["project_id"]),
+        str(project["file_id"]),
+        status="GENERATING",
+    )
+
+    resp = client.delete(
+        f"/projects/{project['project_id']}?retain_decks=true&abandon_pre_generation_tasks=true",
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 409
+    assert _error_code(resp) == "PROJECT_HAS_ACTIVE_TASK"
+    error = resp.json()["error"]
+    assert set(error["actions"]) == {"WAIT_FOR_TERMINAL", "VIEW_TASKS"}
+    assert error["details"]["task_ids"] == [task_id]
+    assert _scalar(db, "SELECT status FROM tasks WHERE task_id = :t", t=task_id) == "GENERATING"
+    assert _scalar(db, "SELECT COUNT(*) FROM learning_projects") == 1
+
+
 def test_delete_project_parsing_conflict(client: TestClient, tmp_path: Path) -> None:
     """解析中（PENDING）项目不可删除 → 409 PROJECT_STATE_CONFLICT。"""
     user = _user(client)

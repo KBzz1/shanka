@@ -21,6 +21,7 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
+from app.schemas.deletion import DeletionPreflight
 from app.schemas.pdfs import ChapterUpdateRequest
 from app.schemas.project import ProjectStudySettingsUpdateRequest
 from app.schemas.projects import ProjectRenameRequest
@@ -38,6 +39,7 @@ from services.projects.service import (
     get_project,
     get_study_settings,
     list_projects,
+    project_deletion_preflight,
     rename_project,
     replace_pdf,
     update_project_chapter,
@@ -127,6 +129,27 @@ def get_project_endpoint(
     return JSONResponse(status_code=200, content=body)
 
 
+@router.get("/{project_id}/deletion-preflight", response_model=DeletionPreflight)
+def project_deletion_preflight_endpoint(
+    request: Request,
+    project_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+    retain_decks: Annotated[bool, Query()] = True,
+) -> JSONResponse:
+    """Return the current deletion impact and task blockers without changing state.
+
+    The DELETE request repeats this check in its own write transaction; clients must not treat a
+    preflight as a reservation.
+    """
+    body = project_deletion_preflight(
+        session,
+        user_id=request.state.principal.user_id,
+        project_id=project_id,
+        retain_decks=retain_decks,
+    )
+    return JSONResponse(status_code=200, content=body)
+
+
 @router.patch("/{project_id}", status_code=200)
 def rename_project_endpoint(
     request: Request,
@@ -162,12 +185,18 @@ def delete_project_endpoint(
     request: Request,
     project_id: str,
     session: Annotated[Session, Depends(get_db_session)],
-    retain_decks: Annotated[bool, Query()],
+    retain_decks: Annotated[bool, Query()] = True,
+    abandon_pre_generation_tasks: Annotated[bool, Query()] = False,
 ) -> Response:
-    """删除项目（活跃任务/解析中保护；retain_decks 选择保留或删除全部项目牌组）。"""
+    """删除项目；可显式放弃正式生成前任务后继续删除，正式生成中仍需等待。"""
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
-    path = f"/projects/{project_id}"
+    # Query choices are part of the idempotent operation.  A reused key must never replay a
+    # retain-decks decision with different destructive semantics.
+    path = (
+        f"/projects/{project_id}?retain_decks={str(retain_decks).lower()}"
+        f"&abandon_pre_generation_tasks={str(abandon_pre_generation_tasks).lower()}"
+    )
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
@@ -177,6 +206,8 @@ def delete_project_endpoint(
             project_id=project_id,
             retain_decks=retain_decks,
             storage=request.app.state.storage,
+            abandon_pre_generation_tasks=abandon_pre_generation_tasks,
+            now=_now(),
         )
         return 204, {}
 

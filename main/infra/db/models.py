@@ -90,6 +90,12 @@ class Task(Base):
     __table_args__ = (
         Index("ix_tasks_user_created", "user_id", "created_at"),
         Index("ix_tasks_project_id", "project_id"),
+        # Worker scans and deletion preflight both filter active status by resource.  Keep the
+        # status/stage/heartbeat access path explicit so queue growth does not turn every poll
+        # into a full tasks-table scan.
+        Index("ix_tasks_status_stage_updated", "status", "stage", "updated_at"),
+        Index("ix_tasks_project_status_updated", "project_id", "status", "updated_at"),
+        Index("ix_tasks_deck_status_updated", "deck_id", "status", "updated_at"),
     )
 
     task_id: Mapped[str] = mapped_column(String, primary_key=True)

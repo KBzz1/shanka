@@ -11,8 +11,10 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from domain.card import VISIBLE_PREDICATE_SQL
-from domain.task import ACTIVE_TASK_STATUSES
+from infra.clock import SystemClock
 from infra.db.models import Card, Deck, LearningProject, ReviewEvent, ReviewState, Task
+from infra.db.session import format_utc
+from services.deletion.service import abandon_pre_generation, preflight_payload, resource_tasks
 
 
 def _deck_id() -> str:
@@ -173,23 +175,75 @@ def get_deck(session: Session, *, user_id: str, deck_id: str, now: str) -> dict[
     return _to_deck_view(deck, deck_progress(session, user_id=user_id, deck_id=deck_id, now=now))
 
 
-def delete_deck(session: Session, *, user_id: str, deck_id: str) -> None:
+def delete_deck(
+    session: Session,
+    *,
+    user_id: str,
+    deck_id: str,
+    abandon_pre_generation_tasks: bool = False,
+    now: str | None = None,
+) -> None:
     deck = _owned(session, user_id=user_id, deck_id=deck_id)
-    blocking = (
-        session.scalar(
-            select(func.count(Task.task_id)).where(
-                Task.deck_id == deck_id,
-                Task.user_id == user_id,  # 一致性守卫（DESIGN §5.1）：只计本用户任务
-                Task.status.in_(ACTIVE_TASK_STATUSES),
+    active_tasks = resource_tasks(session, user_id=user_id, deck_id=deck_id)
+    if active_tasks:
+        if abandon_pre_generation_tasks:
+            abandon_pre_generation(
+                session,
+                user_id=user_id,
+                tasks=active_tasks,
+                now=now or format_utc(SystemClock().now_utc()),
+                resource_type="DECK",
+                resource_id=deck_id,
+                error_code=ErrorCode.TASK_IN_PROGRESS,
             )
-        )
-        or 0
-    )
-    if blocking:
-        raise AppError(ErrorCode.TASK_IN_PROGRESS, "存在进行中的任务引用该牌组")
+        else:
+            can_abandon = [task.task_id for task in active_tasks if task.status != "GENERATING"]
+            actions = (
+                ("ABANDON_AND_RETRY", "VIEW_TASKS")
+                if can_abandon
+                else ("WAIT_FOR_TERMINAL", "VIEW_TASKS")
+            )
+            raise AppError(
+                ErrorCode.TASK_IN_PROGRESS,
+                "存在进行中的任务引用该牌组，请先放弃可放弃任务或等待正式生成完成",
+                actions=actions,
+                details={
+                    "resource_type": "DECK",
+                    "resource_id": deck_id,
+                    "task_ids": [task.task_id for task in active_tasks],
+                    "abandonable_task_ids": can_abandon,
+                },
+            )
     # tasks.deck_id SET NULL（database-design §3）；cards 级联由 FK ON DELETE CASCADE 处理
     for task in session.scalars(
         select(Task).where(Task.deck_id == deck_id, Task.user_id == user_id)
     ).all():
         task.deck_id = None
     session.delete(deck)
+
+
+def deck_deletion_preflight(session: Session, *, user_id: str, deck_id: str) -> dict[str, object]:
+    """Read-only deck deletion preview; DELETE repeats it inside its write transaction."""
+    deck = _owned(session, user_id=user_id, deck_id=deck_id)
+    payload = preflight_payload(
+        session,
+        user_id=user_id,
+        resource_type="DECK",
+        resource_id=deck_id,
+        deck_id=deck_id,
+        impact={
+            "deck_count": 1,
+            "card_count": session.scalar(
+                select(func.count(Card.card_id)).where(Card.deck_id == deck_id)
+            )
+            or 0,
+            "task_count": session.scalar(
+                select(func.count(Task.task_id)).where(
+                    Task.deck_id == deck_id, Task.user_id == user_id
+                )
+            )
+            or 0,
+            "deck_name": deck.name,
+        },
+    )
+    return payload

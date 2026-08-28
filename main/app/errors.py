@@ -8,6 +8,7 @@ R-01 解决（唯一位置与派生规则）：
 """
 
 from enum import StrEnum
+from typing import Any
 
 
 class ErrorCode(StrEnum):
@@ -151,16 +152,28 @@ def localization_key(code: ErrorCode) -> str:
 class AppError(Exception):
     """统一业务错误：handler 层映射为 1.4 错误响应；message 仅面向用户，内部细节只进日志。"""
 
-    def __init__(self, code: ErrorCode, message: str) -> None:
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        actions: tuple[str, ...] = (),
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.actions = actions
+        self.details = details
 
-    def to_response(self) -> dict[str, dict[str, str]]:
-        return {
-            "error": {
-                "code": self.code.value,
-                "message": self.message,
-                "localization_key": localization_key(self.code),
-            }
+    def to_response(self) -> dict[str, dict[str, Any]]:
+        error: dict[str, Any] = {
+            "code": self.code.value,
+            "message": self.message,
+            "localization_key": localization_key(self.code),
         }
+        if self.actions:
+            error["actions"] = list(self.actions)
+        if self.details is not None:
+            error["details"] = self.details
+        return {"error": error}

@@ -228,6 +228,133 @@ def test_decks_api_delete_blocked_by_running_task(client: TestClient, tmp_path: 
     assert resp.json()["error"]["code"] == "TASK_IN_PROGRESS"
 
 
+def test_decks_api_deletion_preflight_lists_task_actions(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """牌组预检返回影响范围、任务状态和可执行动作。"""
+    user = _user(client)
+    deck_id = _create_deck(client, user)
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
+    task_id = str(uuid.uuid4())
+    with engine.begin() as conn:
+        owner_id = conn.execute(text("SELECT user_id FROM users WHERE username = 'alice'")).scalar()
+        assert owner_id is not None
+        conn.execute(
+            text(
+                "INSERT INTO tasks (task_id, user_id, status, selected_chapters,"
+                " generation_config, deck_id, generated_card_count, resumable,"
+                " created_at, updated_at)"
+                " VALUES (:task_id, :user_id, 'DRAFT', '[]', '{}', :deck_id,"
+                " 0, 0, :now, :now)"
+            ),
+            {
+                "task_id": task_id,
+                "user_id": str(owner_id),
+                "deck_id": deck_id,
+                "now": "2026-08-11T00:00:00.000Z",
+            },
+        )
+    engine.dispose()
+
+    resp = client.get(f"/decks/{deck_id}/deletion-preflight", headers=user)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["resource_type"] == "DECK"
+    assert body["resource_id"] == deck_id
+    assert body["can_delete"] is False
+    assert body["abandonable_task_ids"] == [task_id]
+    assert body["has_uncancellable_tasks"] is False
+    assert body["actions"] == ["ABANDON_AND_RETRY"]
+    assert body["impact"]["deck_name"] == "D"
+    assert body["impact"]["task_count"] == 1
+
+
+def test_decks_api_delete_abandons_pre_generation_task_and_keeps_history(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """确认放弃正式生成前任务后删除牌组，任务历史保留且脱离牌组。"""
+    user = _user(client)
+    deck_id = _create_deck(client, user)
+    task_id = str(uuid.uuid4())
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
+    with engine.begin() as conn:
+        owner_id = conn.execute(text("SELECT user_id FROM users WHERE username = 'alice'")).scalar()
+        assert owner_id is not None
+        conn.execute(
+            text(
+                "INSERT INTO tasks (task_id, user_id, status, selected_chapters,"
+                " generation_config, deck_id, generated_card_count, resumable,"
+                " created_at, updated_at)"
+                " VALUES (:task_id, :user_id, 'SAMPLE_GENERATING', '[]', '{}', :deck_id,"
+                " 0, 0, :now, :now)"
+            ),
+            {
+                "task_id": task_id,
+                "user_id": str(owner_id),
+                "deck_id": deck_id,
+                "now": "2026-08-11T00:00:00.000Z",
+            },
+        )
+    engine.dispose()
+
+    resp = client.delete(
+        f"/decks/{deck_id}?abandon_pre_generation_tasks=true",
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 204, resp.text
+    assert client.get(f"/decks/{deck_id}", headers=user).status_code == 404
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT status, deck_id, ended_at, resumable FROM tasks WHERE task_id = :task_id"),
+            {"task_id": task_id},
+        ).one()
+    engine.dispose()
+    assert row.status == "ABANDONED"
+    assert row.deck_id is None
+    assert row.ended_at is not None
+    assert row.resumable == 0
+
+
+def test_decks_api_delete_abandon_flag_does_not_kill_generating_task(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """正式生成中即使带 abandon 标志也保持 409，不能被强制终止。"""
+    user = _user(client)
+    deck_id = _create_deck(client, user)
+    task_id = str(uuid.uuid4())
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
+    with engine.begin() as conn:
+        owner_id = conn.execute(text("SELECT user_id FROM users WHERE username = 'alice'")).scalar()
+        assert owner_id is not None
+        conn.execute(
+            text(
+                "INSERT INTO tasks (task_id, user_id, status, selected_chapters,"
+                " generation_config, deck_id, generated_card_count, resumable,"
+                " created_at, updated_at)"
+                " VALUES (:task_id, :user_id, 'GENERATING', '[]', '{}', :deck_id,"
+                " 0, 0, :now, :now)"
+            ),
+            {
+                "task_id": task_id,
+                "user_id": str(owner_id),
+                "deck_id": deck_id,
+                "now": "2026-08-11T00:00:00.000Z",
+            },
+        )
+    engine.dispose()
+
+    resp = client.delete(
+        f"/decks/{deck_id}?abandon_pre_generation_tasks=true",
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 409
+    error = resp.json()["error"]
+    assert error["code"] == "TASK_IN_PROGRESS"
+    assert set(error["actions"]) == {"WAIT_FOR_TERMINAL", "VIEW_TASKS"}
+    assert error["details"]["task_ids"] == [task_id]
+
+
 def test_decks_api_create_requires_idempotency_key(client: TestClient) -> None:
     """写接口强制 Idempotency-Key（契约 1.3）：缺失 → 400 VALIDATION_ERROR。"""
     resp = client.post("/decks", json={"name": "D"}, headers=_user(client))

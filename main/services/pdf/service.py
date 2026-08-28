@@ -84,7 +84,15 @@ def get_pdf(session: Session, *, user_id: str, file_id: str) -> PdfFile:
     return _owned_pdf(session, user_id=user_id, file_id=file_id)
 
 
-def delete_pdf(session: Session, *, user_id: str, file_id: str, storage: LocalStorage) -> None:
+def delete_pdf(
+    session: Session,
+    *,
+    user_id: str,
+    file_id: str,
+    storage: LocalStorage,
+    abandon_pre_generation_tasks: bool = False,
+    now: str | None = None,
+) -> None:
     """兼容 /pdfs 删除入口：委托项目删除（retain_decks=true，6.2 同一业务语义）；
     无项目行（迁移前孤儿 PDF）→ 旧语义（保留终态任务、file_id SET NULL）。"""
     from services.projects.service import (
@@ -99,7 +107,13 @@ def delete_pdf(session: Session, *, user_id: str, file_id: str, storage: LocalSt
     )
     if project_id is not None:
         delete_project(
-            session, user_id=user_id, project_id=project_id, retain_decks=True, storage=storage
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            retain_decks=True,
+            storage=storage,
+            abandon_pre_generation_tasks=abandon_pre_generation_tasks,
+            now=now,
         )
         return
     pdf = _owned_pdf(session, user_id=user_id, file_id=file_id)

@@ -106,7 +106,8 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | error_code | TEXT | NULL | |
 | created_at / started_at / ended_at / updated_at | TEXT | 按需 | |
 
-索引:`(user_id, created_at DESC)`、`(project_id)`。
+索引:`(user_id, created_at DESC)`、`(project_id)`、`(status, stage, updated_at)`、
+`(project_id, status, updated_at)`、`(deck_id, status, updated_at)`。
 
 ### 2.6 knowledge_points
 

@@ -17,9 +17,17 @@ from app.middleware.idempotency import (
     request_body_hash,
 )
 from app.schemas.decks import Deck, DeckCreate, DeckUpdateRequest
+from app.schemas.deletion import DeletionPreflight
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
-from services.decks.service import create_deck, delete_deck, get_deck, list_decks, rename_deck
+from services.decks.service import (
+    create_deck,
+    deck_deletion_preflight,
+    delete_deck,
+    get_deck,
+    list_decks,
+    rename_deck,
+)
 
 router = APIRouter(prefix="/decks", tags=["decks"])
 
@@ -89,6 +97,21 @@ def get_deck_endpoint(
     return JSONResponse(content=data)
 
 
+@router.get("/{deck_id}/deletion-preflight", response_model=DeletionPreflight)
+def deck_deletion_preflight_endpoint(
+    request: Request,
+    deck_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """Return deck impact and active task blockers; this does not reserve the deck."""
+    body = deck_deletion_preflight(
+        session,
+        user_id=request.state.principal.user_id,
+        deck_id=deck_id,
+    )
+    return JSONResponse(content=body)
+
+
 @router.patch("/{deck_id}", response_model=Deck)
 def rename_deck_endpoint(
     request: Request,
@@ -123,14 +146,23 @@ def delete_deck_endpoint(
     request: Request,
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
+    abandon_pre_generation_tasks: Annotated[bool, Query()] = False,
 ) -> Response:
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
-    path = f"/decks/{deck_id}"
+    path = (
+        f"/decks/{deck_id}?abandon_pre_generation_tasks={str(abandon_pre_generation_tasks).lower()}"
+    )
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        delete_deck(session, user_id=user_id, deck_id=deck_id)
+        delete_deck(
+            session,
+            user_id=user_id,
+            deck_id=deck_id,
+            abandon_pre_generation_tasks=abandon_pre_generation_tasks,
+            now=_now(),
+        )
         return 204, {}
 
     _replayed, status, _body = execute_idempotent(
