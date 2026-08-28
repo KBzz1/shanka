@@ -148,8 +148,14 @@ def create_project(
 
 
 def list_projects(session: Session, *, user_id: str) -> list[dict[str, Any]]:
+    # Historical SQLite files can contain pre-V2.5 project shells without a
+    # current PDF row.  They cannot satisfy the one-project/one-PDF response
+    # contract, so omit them from the list instead of making every valid project
+    # unreadable with an INTERNAL_ERROR.  The rows and any learning data remain
+    # untouched for explicit recovery.
     projects = session.scalars(
         select(LearningProject)
+        .join(PdfFile, PdfFile.file_id == LearningProject.file_id)
         .where(LearningProject.user_id == user_id)
         .order_by(LearningProject.updated_at.desc())
     ).all()

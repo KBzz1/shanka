@@ -102,11 +102,13 @@ def renew_session_if_due(
     调用前提：resolve_principal 已确认会话未撤销未过期。
     """
     threshold = format_utc(now + timedelta(days=ttl_days - 1))
-    session.execute(
-        update(AuthSession)
-        .where(AuthSession.session_id == session_id, AuthSession.expires_at < threshold)
-        .values(expires_at=format_utc(now + timedelta(days=ttl_days)))
-    )
+    # resolve_principal 已把该行放入当前 request session 的 identity map。
+    # 对仍新鲜的 session 绝不执行条件 UPDATE：SQLite 即便更新零行也会申请写锁，
+    # 导致所有已认证的读取请求与后台写任务竞争并最终返回 500。
+    auth_session = session.get(AuthSession, session_id)
+    if auth_session is None or auth_session.expires_at >= threshold:
+        return
+    auth_session.expires_at = format_utc(now + timedelta(days=ttl_days))
 
 
 def register_user(

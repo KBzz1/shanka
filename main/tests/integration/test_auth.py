@@ -6,6 +6,9 @@ V2.4：登录键为 email（服务端转小写）；username 降为展示名（1
 可重名，不再强制小写）。
 """
 
+import sqlite3
+import threading
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -324,6 +327,38 @@ def test_fresh_session_not_renewed(client: TestClient, tmp_path: Path) -> None:
     with engine.connect() as conn:
         expires_after = conn.execute(text("SELECT expires_at FROM auth_sessions")).scalar()
     assert expires_before == expires_after
+
+
+def test_fresh_session_read_does_not_contend_for_writer_lock(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """新鲜会话读取不应因另一写者持锁而等待或 500。"""
+    headers = _auth_headers(client, email="read-lock@example.com")
+    db_path = tmp_path / "auth.db"
+    writer_ready = threading.Event()
+    writer_release = threading.Event()
+
+    def hold_write_lock() -> None:
+        raw = sqlite3.connect(db_path, timeout=5)
+        raw.execute("BEGIN IMMEDIATE")
+        writer_ready.set()
+        writer_release.wait(timeout=5)
+        raw.execute("COMMIT")
+        raw.close()
+
+    thread = threading.Thread(target=hold_write_lock)
+    thread.start()
+    assert writer_ready.wait(timeout=2), "写者未能在预期时间内拿到写锁"
+
+    start = time.monotonic()
+    response = client.get("/auth/me", headers=headers)
+    elapsed = time.monotonic() - start
+
+    writer_release.set()
+    thread.join(timeout=5)
+
+    assert response.status_code == 200
+    assert elapsed < 1.0, f"新鲜会话读取抢写锁并等待了 {elapsed:.2f}s"
 
 
 def test_revoked_session_never_renewed(client: TestClient, tmp_path: Path) -> None:

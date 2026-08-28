@@ -6,6 +6,7 @@
 """
 
 import json
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any, cast
@@ -309,6 +310,36 @@ def test_projects_list_empty_state_and_cross_user_isolation(client: TestClient) 
     assert len(items_a) == 1
     assert items_a[0]["name"] == "a"
     assert client.get("/projects", headers=user_b).json() == {"items": []}
+
+
+def test_projects_list_skips_legacy_project_without_pdf_record(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """损坏历史项目不能令同用户所有有效项目列表 500。"""
+    user = _user(client)
+    db_path = tmp_path / "projects_api.db"
+    with sqlite3.connect(db_path) as connection:
+        # Raw legacy SQLite data may predate FK/NOT NULL enforcement.
+        connection.execute(
+            "INSERT INTO learning_projects "
+            "(project_id, user_id, file_id, name, chapters_confirmed_at, version, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, NULL, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                _user_id(db_path),
+                "missing-pdf-record",
+                "legacy shell",
+                "2026-08-28T00:00:00.000Z",
+                "2026-08-28T00:00:00.000Z",
+                "2026-08-28T00:00:00.000Z",
+            ),
+        )
+
+    response = client.get("/projects", headers=user)
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
 
 
 def test_projects_list_ordered_by_updated_desc(client: TestClient) -> None:

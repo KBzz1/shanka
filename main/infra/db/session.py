@@ -27,13 +27,18 @@ def _configure_connection(dbapi_connection: Any, connection_record: Any) -> None
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL;")
     cursor.execute("PRAGMA foreign_keys=ON;")
+    # SQLite permits one writer at a time; wait briefly for an active writer instead
+    # of surfacing an immediate \"database is locked\" response.
+    cursor.execute("PRAGMA busy_timeout=5000;")
     cursor.close()
 
 
 def create_db_engine(database_url: str) -> Engine:
     engine = create_engine(
         database_url,
-        connect_args={"check_same_thread": False} if database_url.startswith("sqlite") else {},
+        connect_args={"check_same_thread": False, "timeout": 5.0}
+        if database_url.startswith("sqlite")
+        else {},
         pool_pre_ping=True,
     )
     if database_url.startswith("sqlite"):
