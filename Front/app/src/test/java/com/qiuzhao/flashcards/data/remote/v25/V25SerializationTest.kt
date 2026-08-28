@@ -154,6 +154,29 @@ class V25SerializationTest {
     }
 
     @Test
+    fun `deletion preflight maps blockers actions and impact`() {
+        val preflight = parseDeletionPreflight(JSONObject(deletionPreflightBody()))
+        assertEquals("PROJECT", preflight.resourceType)
+        assertEquals("p-1", preflight.resourceId)
+        assertFalse(preflight.canDelete)
+        assertEquals(listOf("t-draft"), preflight.abandonableTaskIds)
+        assertTrue(preflight.hasUncancellableTasks)
+        assertEquals(
+            listOf("ABANDON_AND_RETRY", "WAIT_FOR_TERMINAL", "VIEW_TASKS"),
+            preflight.actions,
+        )
+        assertEquals(2, preflight.blockers.size)
+        assertEquals(V25TaskStatus.DRAFT, preflight.blockers[0].status)
+        assertTrue(preflight.blockers[0].canAbandon)
+        assertEquals(V25TaskStatus.GENERATING, preflight.blockers[1].status)
+        assertFalse(preflight.blockers[1].canAbandon)
+        assertEquals(true, preflight.impact.retainDecks)
+        assertEquals(2, preflight.impact.deckCount)
+        assertEquals(3, preflight.impact.cardCount)
+        assertEquals(V25ProjectStatus.READY, preflight.impact.projectStatus)
+    }
+
+    @Test
     fun `deck payload maps counts and mastery ratio`() {
         val deck = parseDeck(JSONObject(deckBody()))
         assertEquals("d-1", deck.deckId)
@@ -510,6 +533,24 @@ class V25SerializationTest {
          "status": "READY", "chapter_count": 1, "deck_count": 2, "task_count": 3,
          "created_at": "2026-08-14T09:00:00Z", "updated_at": "2026-08-14T10:00:00Z",
          "version": "2026-08-14T10:00:00Z"}
+    """.trimIndent()
+
+    private fun deletionPreflightBody(): String = """
+        {"resource_type": "PROJECT", "resource_id": "p-1", "can_delete": false,
+         "blockers": [
+           {"task_id": "t-draft", "status": "DRAFT", "internal_stage": null,
+            "project_id": "p-1", "deck_id": "d-1", "can_abandon": true,
+            "allowed_actions": ["ABANDON_AND_RETRY"]},
+           {"task_id": "t-generating", "status": "GENERATING", "internal_stage": "PLANNING",
+            "project_id": "p-1", "deck_id": "d-2", "can_abandon": false,
+            "allowed_actions": ["WAIT_FOR_TERMINAL", "VIEW_TASKS"]}
+         ],
+         "abandonable_task_ids": ["t-draft"],
+         "has_uncancellable_tasks": true,
+         "actions": ["ABANDON_AND_RETRY", "WAIT_FOR_TERMINAL", "VIEW_TASKS"],
+         "impact": {"retain_decks": true, "deck_count": 2, "card_count": 3,
+                    "task_count": 4, "project_status": "READY"}
+        }
     """.trimIndent()
 
     private fun taskBody(): String = """

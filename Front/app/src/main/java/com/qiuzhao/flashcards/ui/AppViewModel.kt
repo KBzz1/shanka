@@ -32,6 +32,7 @@ import com.qiuzhao.flashcards.domain.v25.V25CardDeletionBatch
 import com.qiuzhao.flashcards.domain.v25.V25CardDraft
 import com.qiuzhao.flashcards.domain.v25.V25CoverageMode
 import com.qiuzhao.flashcards.domain.v25.V25Deck
+import com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight
 import com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio
 import com.qiuzhao.flashcards.domain.v25.V25ErrorCodes
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
@@ -52,6 +53,7 @@ import com.qiuzhao.flashcards.ui.auth.AuthViewModel
 import com.qiuzhao.flashcards.ui.auth.ErrorMessages
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -195,6 +197,17 @@ class AppViewModel(
     private val _projects = MutableStateFlow<List<com.qiuzhao.flashcards.data.remote.ProjectSummary>>(emptyList())
     val projects: StateFlow<List<com.qiuzhao.flashcards.data.remote.ProjectSummary>> = _projects.asStateFlow()
     private val projectsById = mutableMapOf<String, V25LearningProject>()
+    private val _projectTasks = MutableStateFlow<Map<String, List<V25GenerationTask>>>(emptyMap())
+    /** Persisted task snapshots keyed by project; populated on project-detail entry. */
+    val projectTasks: StateFlow<Map<String, List<V25GenerationTask>>> = _projectTasks.asStateFlow()
+    private val _deletionPreflights = MutableStateFlow<Map<String, V25DeletionPreflight>>(emptyMap())
+    val deletionPreflights: StateFlow<Map<String, V25DeletionPreflight>> =
+        _deletionPreflights.asStateFlow()
+    private val inFlightWrites = mutableSetOf<String>()
+    private val writeKeys = mutableMapOf<String, String>()
+    private val taskRefreshGeneration = mutableMapOf<String, Long>()
+    private val _deletionInFlight = MutableStateFlow<Set<String>>(emptySet())
+    val deletionInFlight: StateFlow<Set<String>> = _deletionInFlight.asStateFlow()
 
     private val _decks = MutableStateFlow<List<DeckSummary>>(emptyList())
     val decks: StateFlow<List<DeckSummary>> = _decks.asStateFlow()
@@ -357,6 +370,63 @@ class AppViewModel(
             is V25Result.Failure -> handleFailure("list_projects", result)
         }
     }
+
+    /** Loads every persisted task for a project; unlike [_pdfTask], this survives app restarts. */
+    fun refreshProjectTasks(projectId: String): Job = viewModelScope.launch {
+        val requestGeneration = (taskRefreshGeneration[projectId] ?: 0L) + 1L
+        taskRefreshGeneration[projectId] = requestGeneration
+        when (val result = v25Repository.listTasks(projectId = projectId)) {
+            is V25Result.Success -> {
+                if (taskRefreshGeneration[projectId] == requestGeneration) {
+                    _projectTasks.value = _projectTasks.value + (projectId to result.value)
+                }
+            }
+            is V25Result.Failure -> handleFailure("list_project_tasks", result)
+        }
+    }
+
+    /** Refreshes the advisory deletion preview used by the confirmation dialog. */
+    fun refreshProjectDeletionPreflight(
+        projectId: String,
+        retainDecks: Boolean,
+        onResult: (V25DeletionPreflight?) -> Unit = {},
+    ): Job = viewModelScope.launch {
+        when (val result = v25Repository.getProjectDeletionPreflight(projectId, retainDecks)) {
+            is V25Result.Success -> {
+                val key = projectDeletionKey(projectId, retainDecks)
+                _deletionPreflights.value = _deletionPreflights.value + (key to result.value)
+                onResult(result.value)
+            }
+            is V25Result.Failure -> {
+                handleFailure("project_deletion_preflight", result, surface = false)
+                onResult(null)
+            }
+        }
+    }
+
+    /** Refreshes the advisory deletion preview used by deck confirmation affordances. */
+    fun refreshDeckDeletionPreflight(
+        deckId: String,
+        onResult: (V25DeletionPreflight?) -> Unit = {},
+    ): Job = viewModelScope.launch {
+        when (val result = v25Repository.getDeckDeletionPreflight(deckId)) {
+            is V25Result.Success -> {
+                _deletionPreflights.value = _deletionPreflights.value + (deckDeletionKey(deckId) to result.value)
+                onResult(result.value)
+            }
+            is V25Result.Failure -> {
+                handleFailure("deck_deletion_preflight", result, surface = false)
+                onResult(null)
+            }
+        }
+    }
+
+    /** Compose-facing lookup keeps map-key conventions out of screens. */
+    fun projectDeletionPreflightKey(projectId: String, retainDecks: Boolean): String =
+        projectDeletionKey(projectId, retainDecks)
+
+    /** Compose-facing lookup for a deck preview kept in the shared deletion map. */
+    fun deckDeletionPreflightKey(deckId: String): String = deckDeletionKey(deckId)
 
     fun refreshDecks(): Job = viewModelScope.launch {
         when (val result = v25Repository.listDecks()) {
@@ -749,20 +819,63 @@ class AppViewModel(
         }
     }
 
-    fun deleteProject(projectId: String, retainDecks: Boolean, onResult: (Boolean) -> Unit = {}) = viewModelScope.launch {
-        when (val result = v25Repository.deleteProject(projectId, retainDecks)) {
-            is V25Result.Success -> {
-                projectsById.remove(projectId)
-                if (_activePdfProject.value?.projectId == projectId) clearPdfFlow()
-                refreshProjects()
-                refreshDecks()
-                refreshTodayPlan()
-                onResult(true)
+    fun deleteProject(
+        projectId: String,
+        retainDecks: Boolean,
+        onResult: (Boolean) -> Unit = {},
+    ) = deleteProjectInternal(projectId, retainDecks, false, onResult)
+
+    fun deleteProject(
+        projectId: String,
+        retainDecks: Boolean,
+        abandonPreGenerationTasks: Boolean,
+        onResult: (Boolean) -> Unit = {},
+    ) = deleteProjectInternal(projectId, retainDecks, abandonPreGenerationTasks, onResult)
+
+    private fun deleteProjectInternal(
+        projectId: String,
+        retainDecks: Boolean,
+        abandonPreGenerationTasks: Boolean,
+        onResult: (Boolean) -> Unit,
+    ) = viewModelScope.launch {
+        val operation = projectDeletionKey(projectId, null)
+        val idempotencyKey = beginWrite(operation)
+        if (idempotencyKey == null) {
+            onResult(false)
+            return@launch
+        }
+        var succeeded = false
+        try {
+            when (
+                val result = v25Repository.deleteProject(
+                    projectId,
+                    retainDecks,
+                    abandonPreGenerationTasks,
+                    idempotencyKey,
+                )
+            ) {
+                is V25Result.Success -> {
+                    succeeded = true
+                    projectsById.remove(projectId)
+                    _projectTasks.value = _projectTasks.value - projectId
+                    _deletionPreflights.value = _deletionPreflights.value
+                        .filterKeys { !it.startsWith("project:$projectId:") }
+                    if (_activePdfProject.value?.projectId == projectId) clearPdfFlow()
+                    refreshProjects()
+                    refreshDecks()
+                    refreshTodayPlan()
+                    onResult(true)
+                }
+                is V25Result.Failure -> {
+                    if (result.code == V25ErrorCodes.PROJECT_HAS_ACTIVE_TASK) {
+                        refreshProjectDeletionPreflight(projectId, retainDecks)
+                    }
+                    handleFailure("delete_project", result)
+                    onResult(false)
+                }
             }
-            is V25Result.Failure -> {
-                handleFailure("delete_project", result)
-                onResult(false)
-            }
+        } finally {
+            finishWrite(operation, succeeded)
         }
     }
 
@@ -1180,17 +1293,50 @@ class AppViewModel(
         }
     }
 
-    fun deleteDeck(deckId: String, onSuccess: () -> Unit = {}, onFailure: () -> Unit = {}) = viewModelScope.launch {
-        when (val result = v25Repository.deleteDeck(deckId)) {
-            is V25Result.Success -> {
-                cardFlows.remove(deckId)
-                refreshDecks()
-                onSuccess()
+    fun deleteDeck(
+        deckId: String,
+        onSuccess: () -> Unit = {},
+        onFailure: () -> Unit = {},
+        abandonPreGenerationTasks: Boolean = false,
+    ) = viewModelScope.launch {
+        val operation = deckDeletionKey(deckId)
+        val idempotencyKey = beginWrite(operation)
+        if (idempotencyKey == null) {
+            onFailure()
+            return@launch
+        }
+        val previousDecks = _decks.value
+        _decks.value = previousDecks.filterNot { it.id == deckId }
+        var succeeded = false
+        try {
+            when (
+                val result = v25Repository.deleteDeck(
+                    deckId,
+                    abandonPreGenerationTasks,
+                    idempotencyKey,
+                )
+            ) {
+                is V25Result.Success -> {
+                    succeeded = true
+                    cardFlows.remove(deckId)
+                    _deletionPreflights.value = _deletionPreflights.value
+                        .filterKeys { it != operation }
+                    refreshDecks()
+                    onSuccess()
+                }
+                is V25Result.Failure -> {
+                    if (result.code == "TASK_IN_PROGRESS") {
+                        refreshDeckDeletionPreflight(deckId)
+                    }
+                    // Roll back only when no refresh has already observed the deck.  This keeps
+                    // a late failure from resurrecting a deck that another action removed.
+                    if (_decks.value.none { it.id == deckId }) _decks.value = previousDecks
+                    handleFailure("delete_deck", result)
+                    onFailure()
+                }
             }
-            is V25Result.Failure -> {
-                handleFailure("delete_deck", result)
-                onFailure()
-            }
+        } finally {
+            finishWrite(operation, succeeded)
         }
     }
 
@@ -1342,9 +1488,35 @@ class AppViewModel(
     private fun cardFlow(deckId: String): MutableStateFlow<List<FlashcardEntity>> =
         cardFlows.getOrPut(deckId) { MutableStateFlow(emptyList()) }
 
+    private fun projectDeletionKey(projectId: String, retainDecks: Boolean?): String =
+        if (retainDecks == null) "delete_project:$projectId"
+        else "project:$projectId:retain=$retainDecks"
+
+    private fun deckDeletionKey(deckId: String): String = "delete_deck:$deckId"
+
+    /** One semantic destructive action gets one stable idempotency key and one in-flight gate. */
+    private fun beginWrite(operation: String): String? {
+        if (!inFlightWrites.add(operation)) return null
+        val key = writeKeys.getOrPut(operation) { UUID.randomUUID().toString() }
+        _deletionInFlight.value = inFlightWrites.toSet()
+        return key
+    }
+
+    private fun finishWrite(operation: String, succeeded: Boolean) {
+        inFlightWrites.remove(operation)
+        if (succeeded) writeKeys.remove(operation)
+        _deletionInFlight.value = inFlightWrites.toSet()
+    }
+
     private fun clearAuthenticatedState() {
         _projects.value = emptyList()
         projectsById.clear()
+        _projectTasks.value = emptyMap()
+        _deletionPreflights.value = emptyMap()
+        taskRefreshGeneration.clear()
+        inFlightWrites.clear()
+        writeKeys.clear()
+        _deletionInFlight.value = emptySet()
         _decks.value = emptyList()
         _studyCards.value = emptyList()
         _dashboard.value = null

@@ -17,6 +17,9 @@ import com.qiuzhao.flashcards.domain.v25.V25CurrentProject
 import com.qiuzhao.flashcards.domain.v25.V25DailyActivity
 import com.qiuzhao.flashcards.domain.v25.V25Deck
 import com.qiuzhao.flashcards.domain.v25.V25DeletionBatchStatus
+import com.qiuzhao.flashcards.domain.v25.V25DeletionImpact
+import com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight
+import com.qiuzhao.flashcards.domain.v25.V25DeletionTaskBlocker
 import com.qiuzhao.flashcards.domain.v25.V25Difficulty
 import com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
@@ -200,6 +203,7 @@ internal fun parseLearningProject(value: JSONObject): V25LearningProject = V25Le
     createdAt = requiredInstant(value, "created_at"),
     updatedAt = requiredInstant(value, "updated_at"),
     version = parseVersion(optionalString(value, "version")),
+    tasks = optionalArray(value, "tasks").map(::parseGenerationTask),
 )
 
 internal fun parseStudySettings(projectId: String, value: JSONObject): V25ProjectStudySettings =
@@ -239,6 +243,38 @@ internal fun parseGenerationTask(value: JSONObject): V25GenerationTask = V25Gene
     endedAt = optionalInstant(value, "ended_at"),
     updatedAt = requiredInstant(value, "updated_at"),
 )
+
+internal fun parseDeletionTaskBlocker(value: JSONObject): V25DeletionTaskBlocker =
+    V25DeletionTaskBlocker(
+        taskId = requiredString(value, "task_id"),
+        status = requiredEnum<V25TaskStatus>(value, "status"),
+        internalStage = optionalEnum<V25InternalStage>(value, "internal_stage"),
+        projectId = optionalString(value, "project_id"),
+        deckId = optionalString(value, "deck_id"),
+        canAbandon = requiredBoolean(value, "can_abandon"),
+        allowedActions = stringList(value, "allowed_actions"),
+    )
+
+internal fun parseDeletionPreflight(value: JSONObject): V25DeletionPreflight {
+    val impact = requiredObject(value, "impact")
+    return V25DeletionPreflight(
+        resourceType = requiredString(value, "resource_type"),
+        resourceId = requiredString(value, "resource_id"),
+        canDelete = requiredBoolean(value, "can_delete"),
+        blockers = requiredArray(value, "blockers").map(::parseDeletionTaskBlocker),
+        abandonableTaskIds = stringList(value, "abandonable_task_ids"),
+        hasUncancellableTasks = requiredBoolean(value, "has_uncancellable_tasks"),
+        actions = stringList(value, "actions"),
+        impact = V25DeletionImpact(
+            retainDecks = optionalBoolean(impact, "retain_decks"),
+            deckCount = optionalInt(impact, "deck_count") ?: 0,
+            cardCount = optionalInt(impact, "card_count") ?: 0,
+            taskCount = optionalInt(impact, "task_count") ?: 0,
+            projectStatus = optionalEnum<V25ProjectStatus>(impact, "project_status"),
+            deckName = optionalString(impact, "deck_name"),
+        ),
+    )
+}
 
 internal fun parseDeck(value: JSONObject): V25Deck = V25Deck(
     deckId = requiredString(value, "deck_id"),
@@ -392,6 +428,7 @@ internal data class V25ErrorEnvelope(
     val code: String?,
     val localizationKey: String?,
     val message: String?,
+    val actions: List<String>,
 )
 
 internal fun parseError(body: String): V25ErrorEnvelope? = runCatching {
@@ -400,6 +437,7 @@ internal fun parseError(body: String): V25ErrorEnvelope? = runCatching {
         code = error.optString("code").takeIf { it.isNotBlank() },
         localizationKey = error.optString("localization_key").takeIf { it.isNotBlank() },
         message = error.optString("message").takeIf { it.isNotBlank() },
+        actions = optionalStringList(error, "actions"),
     )
 }.getOrNull()
 
@@ -516,6 +554,11 @@ internal fun stringList(value: JSONObject, key: String): List<String> {
     return List(array.length()) { index -> array.getString(index) }
 }
 
+internal fun optionalStringList(value: JSONObject, key: String): List<String> {
+    val array = value.optJSONArray(key) ?: return emptyList()
+    return List(array.length()) { index -> array.getString(index) }
+}
+
 internal fun requiredObject(value: JSONObject, key: String): JSONObject =
     value.optJSONObject(key) ?: throw IllegalArgumentException("missing object '$key'")
 
@@ -523,6 +566,9 @@ internal fun requiredBoolean(value: JSONObject, key: String): Boolean {
     if (!value.has(key) || value.isNull(key)) throw IllegalArgumentException("missing boolean '$key'")
     return value.getBoolean(key)
 }
+
+internal fun optionalBoolean(value: JSONObject, key: String): Boolean? =
+    if (!value.has(key) || value.isNull(key)) null else value.getBoolean(key)
 
 internal fun optionalFloat(value: JSONObject, key: String): Float? {
     if (!value.has(key) || value.isNull(key)) return null

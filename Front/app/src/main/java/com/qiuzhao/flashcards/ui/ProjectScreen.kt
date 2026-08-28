@@ -70,6 +70,7 @@ import kotlin.math.roundToInt
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.LEGACY_UNASSIGNED_PROJECT_ID
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
+import com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 
 /** Figma 494:1447 project root. Project data is derived from the contract layer. */
@@ -173,6 +174,7 @@ internal fun ProjectCreateScreen(
     val materials by viewModel.projectCreationMaterials.collectAsState()
     val pdfUploading by viewModel.pdfUploading.collectAsState()
     val projectId = editingProject?.id
+    val deletionPreflights by viewModel.deletionPreflights.collectAsState()
     var name by rememberSaveable(projectId) { mutableStateOf(editingProject?.name.orEmpty()) }
     var selectedTheme by rememberSaveable(projectId) { mutableStateOf(editingProject?.themeKey ?: "violet") }
     var message by remember { mutableStateOf<String?>(null) }
@@ -183,6 +185,10 @@ internal fun ProjectCreateScreen(
     val context = LocalContext.current
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { viewModel.addProjectDraftFile(it, projectDocumentName(context, it)) }
+    }
+
+    LaunchedEffect(projectId) {
+        projectId?.let { viewModel.refreshProjectDeletionPreflight(it, retainDecks = true) }
     }
 
     // Figma 588:1922 uses a white page canvas.  The project family begins at
@@ -356,6 +362,18 @@ internal fun ProjectCreateScreen(
                     }
                 }
             },
+            preflight = projectId?.let { deletionPreflights[viewModel.projectDeletionPreflightKey(it, true)] },
+            onConfirmWithAbandon = { retainDecks, abandon ->
+                if (projectDeletionInFlight) return@ProjectDeletionDialog
+                projectDeletionInFlight = true
+                viewModel.deleteProject(editingProject.id, retainDecks, abandonPreGenerationTasks = abandon) { succeeded ->
+                    projectDeletionInFlight = false
+                    if (succeeded) {
+                        showProjectDeletionConfirmation = false
+                        nav.returnToTopLevel()
+                    }
+                }
+            },
             onDismiss = { if (!projectDeletionInFlight) showProjectDeletionConfirmation = false }
         )
     }
@@ -418,7 +436,9 @@ internal fun ProjectDeletionDialog(
     projectName: String,
     theme: DeckTheme,
     deleting: Boolean = false,
+    preflight: V25DeletionPreflight? = null,
     onConfirm: (retainDecks: Boolean) -> Unit,
+    onConfirmWithAbandon: ((retainDecks: Boolean, abandonPreGenerationTasks: Boolean) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     var retainDecks by rememberSaveable(projectName) { mutableStateOf(true) }
@@ -455,6 +475,21 @@ internal fun ProjectDeletionDialog(
                     AppTextRole.CardSubtitle,
                     color = theme.text
                 )
+                preflight?.let { preview ->
+                    val abandonable = preview.blockers.count { it.canAbandon }
+                    val generating = preview.blockers.count { !it.canAbandon }
+                    val previewText = when {
+                        generating > 0 -> "有 $generating 个正式生成任务正在进行，请等待任务结束后再删除。"
+                        abandonable > 0 -> "检测到 $abandonable 个准备阶段任务；确认后会先标记为已放弃，再执行删除。"
+                        !preview.canDelete -> "项目当前仍在解析，请等待解析完成后再删除。"
+                        else -> "当前没有进行中的任务。"
+                    }
+                    AppText(
+                        previewText,
+                        AppTextRole.CardSubtitle,
+                        color = if (generating > 0 || !preview.canDelete && abandonable == 0) AppColors.WarningInk else theme.text.copy(alpha = .75f),
+                    )
+                }
                 ProjectDeletionChoice(
                     selected = retainDecks,
                     title = "保留卡组和卡片",
@@ -489,8 +524,18 @@ internal fun ProjectDeletionDialog(
                         }
                     }
                     Surface(
-                        onClick = { onConfirm(retainDecks) },
-                        enabled = !deleting,
+                        onClick = {
+                            val abandon = preflight?.let { preview ->
+                                preview.blockers.isNotEmpty() && preview.blockers.all { it.canAbandon }
+                            } ?: false
+                            if (onConfirmWithAbandon != null) onConfirmWithAbandon(retainDecks, abandon)
+                            else onConfirm(retainDecks)
+                        },
+                        enabled = !deleting && (
+                            preflight == null ||
+                                (!preflight.hasUncancellableTasks &&
+                                    (preflight.canDelete || preflight.abandonableTaskIds.isNotEmpty()))
+                            ),
                         color = AppColors.WarningStrong,
                         contentColor = AppColors.TextIconLight,
                         shape = RoundedCornerShape(AppButtonShapeRadius.dp),

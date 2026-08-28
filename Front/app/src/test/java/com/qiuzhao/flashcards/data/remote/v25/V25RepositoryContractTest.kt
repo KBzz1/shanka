@@ -195,6 +195,31 @@ class V25RepositoryContractTest {
         assertEquals("/tasks/t-1", transport.calls[1].path)
     }
 
+    @Test
+    fun `deletion operations carry the explicit decision and stable retry key`() = runBlocking {
+        val transport = FakeTransport()
+        val repo = repository(FakeSessionStore(session), transport)
+
+        repo.deleteProject(
+            "p-1",
+            retainDecks = false,
+            abandonPreGenerationTasks = true,
+            idempotencyKey = "project-key",
+        )
+        repo.getProjectDeletionPreflight("p-1", retainDecks = false)
+        repo.deleteDeck("d-1", abandonPreGenerationTasks = true, idempotencyKey = "deck-key")
+        repo.getDeckDeletionPreflight("d-1")
+
+        assertEquals("/projects/p-1?retain_decks=false&abandon_pre_generation_tasks=true", transport.calls[0].path)
+        assertEquals("project-key", transport.calls[0].idempotencyKey)
+        assertEquals("/projects/p-1/deletion-preflight?retain_decks=false", transport.calls[1].path)
+        assertFalse(transport.calls[1].idempotent)
+        assertEquals("/decks/d-1?abandon_pre_generation_tasks=true", transport.calls[2].path)
+        assertEquals("deck-key", transport.calls[2].idempotencyKey)
+        assertEquals("/decks/d-1/deletion-preflight", transport.calls[3].path)
+        assertFalse(transport.calls[3].idempotent)
+    }
+
     // --- logout ----------------------------------------------------------------------------
 
     @Test

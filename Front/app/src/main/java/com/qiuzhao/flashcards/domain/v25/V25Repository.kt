@@ -70,6 +70,25 @@ interface V25Repository {
     /** DELETE /projects/{project_id}?retain_decks= — protect active states; keep or delete decks. */
     suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit>
 
+    /**
+     * DELETE with an explicit decision to atomically abandon DRAFT/sample-stage tasks first.
+     * The default delegates to the legacy two-argument method so existing fakes remain source
+     * compatible while the remote implementation can carry the new query and idempotency key.
+     */
+    suspend fun deleteProject(
+        projectId: String,
+        retainDecks: Boolean,
+        abandonPreGenerationTasks: Boolean = false,
+        idempotencyKey: String? = null,
+    ): V25Result<Unit> = deleteProject(projectId, retainDecks)
+
+    /** GET /projects/{project_id}/deletion-preflight — read-only impact and task blockers. */
+    suspend fun getProjectDeletionPreflight(
+        projectId: String,
+        retainDecks: Boolean = true,
+    ): V25Result<V25DeletionPreflight> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "删除预检暂不可用")
+
     /** POST /projects/{project_id}/replace-pdf — replace and re-parse a failed PDF. */
     suspend fun replaceProjectPdf(
         projectId: String,
@@ -160,6 +179,17 @@ interface V25Repository {
 
     /** DELETE /decks/{deck_id} — protected while an active task references the deck. */
     suspend fun deleteDeck(deckId: String): V25Result<Unit>
+
+    /** DELETE with an explicit decision to atomically abandon DRAFT/sample-stage tasks first. */
+    suspend fun deleteDeck(
+        deckId: String,
+        abandonPreGenerationTasks: Boolean = false,
+        idempotencyKey: String? = null,
+    ): V25Result<Unit> = deleteDeck(deckId)
+
+    /** GET /decks/{deck_id}/deletion-preflight — read-only impact and task blockers. */
+    suspend fun getDeckDeletionPreflight(deckId: String): V25Result<V25DeletionPreflight> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "删除预检暂不可用")
 
     /** GET /decks/{deck_id}/cards — cards with free-browse order/difficulty/mastery filters. */
     suspend fun listCards(deckId: String, filter: V25BrowseFilter): V25Result<List<V25Card>>

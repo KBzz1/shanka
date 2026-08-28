@@ -18,6 +18,7 @@ import com.qiuzhao.flashcards.domain.v25.V25CardRewritePreview
 import com.qiuzhao.flashcards.domain.v25.V25Chapter
 import com.qiuzhao.flashcards.domain.v25.V25ChapterEdit
 import com.qiuzhao.flashcards.domain.v25.V25Deck
+import com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight
 import com.qiuzhao.flashcards.domain.v25.V25ErrorCodes
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
 import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
@@ -143,6 +144,32 @@ class RemoteV25Repository(
     override suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit> =
         call("delete_project", "DELETE", "/projects/$projectId?retain_decks=$retainDecks") { Unit }
 
+    override suspend fun deleteProject(
+        projectId: String,
+        retainDecks: Boolean,
+        abandonPreGenerationTasks: Boolean,
+        idempotencyKey: String?,
+    ): V25Result<Unit> = call(
+        "delete_project",
+        "DELETE",
+        deletionQueryPath("/projects/$projectId", retainDecks, abandonPreGenerationTasks),
+        idempotencyKey = idempotencyKey,
+    ) { Unit }
+
+    override suspend fun getProjectDeletionPreflight(
+        projectId: String,
+        retainDecks: Boolean,
+    ): V25Result<V25DeletionPreflight> = call(
+        "project_deletion_preflight",
+        "GET",
+        queryPath(
+            "/projects/$projectId/deletion-preflight",
+            "retain_decks" to if (retainDecks) null else "false",
+        ),
+        idempotent = false,
+        map = ::parseDeletionPreflight,
+    )
+
     override suspend fun replaceProjectPdf(
         projectId: String,
         fileName: String,
@@ -243,6 +270,26 @@ class RemoteV25Repository(
 
     override suspend fun deleteDeck(deckId: String): V25Result<Unit> =
         call("delete_deck", "DELETE", "/decks/$deckId") { Unit }
+
+    override suspend fun deleteDeck(
+        deckId: String,
+        abandonPreGenerationTasks: Boolean,
+        idempotencyKey: String?,
+    ): V25Result<Unit> = call(
+        "delete_deck",
+        "DELETE",
+        deletionQueryPath("/decks/$deckId", null, abandonPreGenerationTasks),
+        idempotencyKey = idempotencyKey,
+    ) { Unit }
+
+    override suspend fun getDeckDeletionPreflight(deckId: String): V25Result<V25DeletionPreflight> =
+        call(
+            "deck_deletion_preflight",
+            "GET",
+            "/decks/$deckId/deletion-preflight",
+            idempotent = false,
+            map = ::parseDeletionPreflight,
+        )
 
     override suspend fun listCards(deckId: String, filter: V25BrowseFilter): V25Result<List<V25Card>> =
         call("list_cards", "GET", "/decks/$deckId/cards" + browseCardsQuery(filter), idempotent = false) { value ->
@@ -385,6 +432,7 @@ class RemoteV25Repository(
             code = envelope?.code ?: "HTTP_$status",
             localizationKey = envelope?.localizationKey,
             message = envelope?.message,
+            actions = envelope?.actions.orEmpty(),
         )
     }
 
@@ -394,6 +442,7 @@ class RemoteV25Repository(
             code = code.replace(key, REDACTED),
             localizationKey = localizationKey?.replace(key, REDACTED),
             message = message?.replace(key, REDACTED),
+            actions = actions,
         )
 
     private fun <T, R> V25Result<T>.mapSuccess(transform: (T) -> R): V25Result<R> = when (this) {
@@ -410,5 +459,19 @@ class RemoteV25Repository(
             first = false
             append(key).append("=").append(value)
         }
+    }
+
+    private fun deletionQueryPath(
+        base: String,
+        retainDecks: Boolean?,
+        abandonPreGenerationTasks: Boolean,
+    ): String = buildString {
+        append(base)
+        if (retainDecks != null || abandonPreGenerationTasks) append("?")
+        if (retainDecks != null) {
+            append("retain_decks=").append(retainDecks)
+            if (abandonPreGenerationTasks) append("&")
+        }
+        if (abandonPreGenerationTasks) append("abandon_pre_generation_tasks=true")
     }
 }

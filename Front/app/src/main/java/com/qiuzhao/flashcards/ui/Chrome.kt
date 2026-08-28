@@ -88,6 +88,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -161,6 +162,8 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val activity = LocalContext.current as? Activity
     val decks by viewModel.decks.collectAsState()
     val projects by viewModel.projects.collectAsState()
+    val projectTasks by viewModel.projectTasks.collectAsState()
+    val deletionPreflights by viewModel.deletionPreflights.collectAsState()
     val dueCount by viewModel.dueCount.collectAsState()
     val dashboard by viewModel.dashboard.collectAsState()
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
@@ -196,6 +199,10 @@ fun FlashcardsApp(viewModel: AppViewModel) {
             ProjectTextEditorScreen(route, viewModel, navigator)
         }
         entry<AppRoute.ProjectDetail> { route ->
+            LaunchedEffect(route.id) {
+                viewModel.refreshProjectTasks(route.id)
+                viewModel.refreshProjectDeletionPreflight(route.id, retainDecks = true)
+            }
             val project = projects.firstOrNull { it.id == route.id }
             if (project == null) LoadingScreen() else ProjectDetailScreen(
                 project,
@@ -204,7 +211,31 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                 onDeleteDeck = { viewModel.deleteDeck(it) },
                 onDeleteProject = { retainDecks, onResult ->
                     viewModel.deleteProject(project.id, retainDecks, onResult)
-                }
+                },
+                tasks = projectTasks[route.id].orEmpty(),
+                deletionPreflight = deletionPreflights[viewModel.projectDeletionPreflightKey(route.id, true)],
+                onDeleteProjectWithAbandon = { retainDecks, abandon, onResult ->
+                    viewModel.deleteProject(
+                        project.id,
+                        retainDecks,
+                        abandon,
+                        onResult,
+                    )
+                },
+                deckDeletionPreflight = { deckId ->
+                    deletionPreflights[viewModel.deckDeletionPreflightKey(deckId)]
+                },
+                onRefreshDeckDeletionPreflight = { deckId ->
+                    viewModel.refreshDeckDeletionPreflight(deckId)
+                },
+                onDeleteDeckWithAbandon = { deckId, abandon, onResult ->
+                    viewModel.deleteDeck(
+                        deckId,
+                        onSuccess = { onResult(true) },
+                        onFailure = { onResult(false) },
+                        abandonPreGenerationTasks = abandon,
+                    )
+                },
             )
         }
         entry<AppRoute.DeckGeneration> { route ->

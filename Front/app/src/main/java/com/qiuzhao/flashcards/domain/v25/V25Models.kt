@@ -83,6 +83,8 @@ sealed interface V25Result<out T> {
         val code: String,
         val localizationKey: String? = null,
         val message: String? = null,
+        /** Server-provided next actions for conflicts (e.g. VIEW_TASKS or WAIT_FOR_TERMINAL). */
+        val actions: List<String> = emptyList(),
     ) : V25Result<Nothing>
 }
 
@@ -211,6 +213,8 @@ data class V25LearningProject(
     val createdAt: Instant,
     val updatedAt: Instant,
     val version: Int,
+    /** Project detail may include the persisted task snapshot; list responses may omit it. */
+    val tasks: List<V25GenerationTask> = emptyList(),
 )
 
 /** New-card chapter scope for a project (Architecture 3.3). */
@@ -271,6 +275,39 @@ data class V25GenerationTask(
     val startedAt: Instant?,
     val endedAt: Instant?,
     val updatedAt: Instant,
+)
+
+/** One active task that currently blocks a project/deck deletion. */
+data class V25DeletionTaskBlocker(
+    val taskId: String,
+    val status: V25TaskStatus,
+    val internalStage: V25InternalStage?,
+    val projectId: String?,
+    val deckId: String?,
+    val canAbandon: Boolean,
+    val allowedActions: List<String>,
+)
+
+/** Stable, typed impact summary returned by the deletion preflight endpoints. */
+data class V25DeletionImpact(
+    val retainDecks: Boolean? = null,
+    val deckCount: Int = 0,
+    val cardCount: Int = 0,
+    val taskCount: Int = 0,
+    val projectStatus: V25ProjectStatus? = null,
+    val deckName: String? = null,
+)
+
+/** Read-only deletion preview; it is advisory and never reserves the resource. */
+data class V25DeletionPreflight(
+    val resourceType: String,
+    val resourceId: String,
+    val canDelete: Boolean,
+    val blockers: List<V25DeletionTaskBlocker>,
+    val abandonableTaskIds: List<String>,
+    val hasUncancellableTasks: Boolean,
+    val actions: List<String>,
+    val impact: V25DeletionImpact,
 )
 
 /** Partial task-config update (PATCH /tasks/{task_id}); at least one field is required. */
