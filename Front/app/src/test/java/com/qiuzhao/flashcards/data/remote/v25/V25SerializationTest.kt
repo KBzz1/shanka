@@ -87,8 +87,19 @@ class V25SerializationTest {
         assertEquals("第一章 矩阵", project.file.chapters[0].name)
         assertEquals(1, project.file.chapters[0].startPage)
         assertEquals(20, project.file.chapters[0].endPage)
+        assertEquals(null, project.file.createdAt)
         assertEquals(Instant.parse("2026-08-14T09:00:00Z"), project.createdAt)
         assertEquals(Instant.parse("2026-08-14T10:00:00Z"), project.updatedAt)
+    }
+
+    @Test
+    fun `pdf file payload maps created_at as the import time`() {
+        val project = parseLearningProject(JSONObject(projectBody()
+            .replace(
+                "\"size_bytes\": 1048576, \"status\": \"PARSED\"",
+                "\"size_bytes\": 1048576, \"status\": \"PARSED\", \"created_at\": \"2026-08-14T08:30:00Z\""
+            )))
+        assertEquals(Instant.parse("2026-08-14T08:30:00Z"), project.file.createdAt)
     }
 
     @Test
