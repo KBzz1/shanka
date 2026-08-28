@@ -178,12 +178,15 @@ internal fun DeckScreen(deck: DeckSummary, viewModel: AppViewModel, nav: ScreenN
                     contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail() * designScale).dp),
                     verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)
                 ) {
-                    item { DeckLearningDataCard(reviewedToday = progress.dueCount, dailyGoal = 50, theme = theme, designScale = designScale) }
-                    item { DeckQuestionTypesCard(progress.cardCount, 0, 0, theme, designScale) }
+                    // Today's reviewed count and a deck-level daily goal are not exposed by the
+                    // server; the card keeps its Figma layout and shows honest dashes.
+                    item { DeckLearningDataCard(reviewedToday = null, dailyGoal = null, theme = theme, designScale = designScale) }
+                    // The server exposes no per-deck question-type distribution; keep the slots.
+                    item { DeckQuestionTypesCard(null, null, null, theme, designScale) }
                     item {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * designScale).dp)) {
-                            StatisticsMetricCard("${progress.dueCount}min", StatisticsMetricKind.LearningTime, StatisticsMetricSurface.White, designScale, Modifier.weight(1f))
-                            StatisticsMetricCard("${progress.masteredCards / 1000}.${(progress.masteredCards % 1000).toString().padStart(3, '0')}k", StatisticsMetricKind.MasteredCards, StatisticsMetricSurface.White, designScale, Modifier.weight(1f))
+                            StatisticsMetricCard("—", StatisticsMetricKind.LearningTime, StatisticsMetricSurface.White, designScale, Modifier.weight(1f))
+                            StatisticsMetricCard(honestCount(progress.masteredCards), StatisticsMetricKind.MasteredCards, StatisticsMetricSurface.White, designScale, Modifier.weight(1f))
                         }
                     }
                     item { DeckWeeklyReviewCard(designScale) }

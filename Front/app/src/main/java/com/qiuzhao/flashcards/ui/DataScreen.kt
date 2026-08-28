@@ -402,16 +402,11 @@ private fun DataLearningCards(designScale: Float, dashboard: DashboardUiState?) 
         )
         StatisticsMetricCard(
             modifier = Modifier.weight(1f),
-            value = masteredCount?.let(::formatMasteredCount) ?: "—",
+            // Real counts are always integers; a `0.042k`-style abbreviation misreads 42 as 42k.
+            value = honestCount(masteredCount),
             kind = StatisticsMetricKind.MasteredCards,
             surface = StatisticsMetricSurface.Tinted,
             designScale = designScale
         )
     }
-}
-
-/** Figma 19:621 presents small mastered counts as a three-decimal k value. */
-private fun formatMasteredCount(count: Int): String {
-    val safeCount = count.coerceAtLeast(0)
-    return if (safeCount < 1_000) "%.3fk".format(java.util.Locale.US, safeCount / 1_000.0) else "${safeCount / 1_000}k"
 }
