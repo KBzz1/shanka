@@ -63,8 +63,10 @@ def _scan_pdfs(client: TestClient) -> None:
     scan_pdfs(app.state.session_factory, storage=app.state.storage)
 
 
-def _create_task_before_executor(client: TestClient, user: dict[str, str]) -> tuple[str, str]:
-    """E2E 建任务前半程（Key/PDF/牌组/任务创建），返回 (task_id, deck_id)。"""
+def _create_task_before_executor(
+    client: TestClient, user: dict[str, str], db_path: Path
+) -> tuple[str, str]:
+    """E2E 建任务前半程（Key/建项目/牌组/任务创建/样卡确认，V2.5 项目归属入口），返回 (task_id, deck_id)。"""
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
     resp = client.put(
@@ -73,17 +75,20 @@ def _create_task_before_executor(client: TestClient, user: dict[str, str]) -> tu
     assert resp.status_code == 200
     with SAMPLE.open("rb") as f:
         resp = client.post(
-            "/pdfs", files={"file": ("book.pdf", f, "application/pdf")}, headers={**user, **_idem()}
+            "/projects",
+            files={"file": ("book.pdf", f, "application/pdf")},
+            headers={**user, **_idem()},
         )
     assert resp.status_code == 201
-    file_id = resp.json()["file_id"]
+    project_id = resp.json()["project_id"]
     _scan_pdfs(client)
-    chapters = client.get(f"/pdfs/{file_id}", headers=user).json()["chapters"]
-    deck_resp = client.post("/decks", json={"name": "D"}, headers={**user, **_idem()})
+    chapters = client.get(f"/projects/{project_id}", headers=user).json()["file"]["chapters"]
+    deck_resp = client.post(
+        "/decks", json={"name": "D", "project_id": project_id}, headers={**user, **_idem()}
+    )
     assert deck_resp.status_code == 201
     resp = client.post(
-        "/tasks",
-        params={"file_id": file_id},  # V2.5 过渡：file_id 经 query 参数传入
+        f"/projects/{project_id}/tasks",
         json={
             "deck_id": deck_resp.json()["deck_id"],
             "chapter_ids": [c["chapter_id"] for c in chapters[:2]],
@@ -95,7 +100,13 @@ def _create_task_before_executor(client: TestClient, user: dict[str, str]) -> tu
         headers={**user, **_idem()},
     )
     assert resp.status_code == 201
-    return resp.json()["task_id"], deck_resp.json()["deck_id"]
+    task_id = resp.json()["task_id"]
+    # 样卡阶段（V2.5 确认式启动）：触发持久化生成（DRAFT → SAMPLE_GENERATING）→
+    # 样卡 worker 扫描 → AWAITING_SAMPLE_CONFIRMATION → start 确认进入 GENERATING
+    assert client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
+    _run_executor_until_done(db_path)
+    assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
+    return task_id, deck_resp.json()["deck_id"]
 
 
 def _run_executor_until_done(db_path: Path) -> None:
@@ -120,7 +131,7 @@ def test_task_continues_after_logout_and_new_session_reads(ctx: tuple[TestClient
     """logout 不中断后台执行；重新登录后任务与卡片可读。"""
     client, db_path = ctx
     user = auth_headers(client)
-    task_id, _deck_id = _create_task_before_executor(client, user)
+    task_id, _deck_id = _create_task_before_executor(client, user, db_path)
 
     # logout 撤销当前 session（204）
     assert client.post("/auth/logout", headers={**user, **_idem()}).status_code == 204
@@ -145,7 +156,7 @@ def test_task_continues_after_session_expiry(ctx: tuple[TestClient, Path]) -> No
     """session 过期（DB 直改 expires_at）不中断后台；新登录可读。"""
     client, db_path = ctx
     user = auth_headers(client)
-    task_id, _deck_id = _create_task_before_executor(client, user)
+    task_id, _deck_id = _create_task_before_executor(client, user, db_path)
 
     # 模拟 30 天绝对有效期到期：直接回拨 expires_at
     _db_exec(
@@ -185,7 +196,7 @@ def test_operation_key_task_domain_and_ledger_idempotent(ctx: tuple[TestClient, 
     """operation_key 纯任务域（不含 user/session 维度）；重复扫描账本行数守恒（CAS 不依赖 session）。"""
     client, db_path = ctx
     user = auth_headers(client)
-    _task_id, _deck_id = _create_task_before_executor(client, user)
+    _task_id, _deck_id = _create_task_before_executor(client, user, db_path)
 
     _run_executor_until_done(db_path)
     rows = _db_exec(db_path, "SELECT operation_key, user_id FROM llm_call_attempts")
@@ -211,7 +222,7 @@ def test_cross_user_task_404_and_observability_isolated(ctx: tuple[TestClient, P
     """跨用户 ledger/task 404；quality-summary 只含本用户数据。"""
     client, db_path = ctx
     user1 = auth_headers(client)
-    task_id, _deck_id = _create_task_before_executor(client, user1)
+    task_id, _deck_id = _create_task_before_executor(client, user1, db_path)
     _run_executor_until_done(db_path)
 
     user2 = auth_headers(client, username="bob2", password="secret-pass-2")

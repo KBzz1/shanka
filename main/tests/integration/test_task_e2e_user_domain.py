@@ -1,9 +1,10 @@
 """任务生成 E2E 判别测试（P4-5 跟进④）：API 全链路建任务端到端生成成功（user 域无断裂）。
 
-链路：register（Bearer）→ PUT /api-key（mock transport 假 Key，加密落库）→ 上传样书
-PDF（HTTP 201）→ pdf scanner 显式扫描（PARSED + 章节 + 页文本）→ POST /decks（HTTP）
-→ POST /tasks（HTTP 201，Key 校验按 user_id）→ tasks executor 显式扫描（mock transport
-全管线）→ 任务 COMPLETED 且卡片 user_id 非空（归属切 user 域判别）。
+链路：register（Bearer）→ PUT /api-key（mock transport 假 Key，加密落库）→ 建学习项目
+（上传样书 PDF，HTTP 201）→ pdf scanner 显式扫描（PARSED + 章节 + 页文本）→ POST /decks
+（HTTP，归属项目）→ POST /projects/{project_id}/tasks（HTTP 201，Key 校验按 user_id）
+→ tasks executor 显式扫描（mock transport 全管线）→ 任务 COMPLETED 且卡片 user_id 非空
+（归属切 user 域判别）。
 
 与 test_tasks_api.py 的差异：本文件零种子直写——PDF/章节/页文本/牌组/Key 全部经 HTTP
 与真实解析链落地；T4 已修 executor Key 查找切 user 域，本链路若已绿则作为回归守卫。
@@ -71,6 +72,7 @@ def _client_factory(api_key: str) -> DeepSeekClient:
                             "learning_objective": f"知识点{len(units)}",
                             "target_difficulty": difficulty,
                             "card_type": "QUESTION",
+                            "coverage_tier": "CORE",  # V2.5 资产 v3：语义单元 tier 必填
                         }
                     )
             content = json.dumps({"units": units}, ensure_ascii=False)
@@ -155,30 +157,31 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
     assert resp.status_code == 200
     assert resp.json()["status"] == "AVAILABLE"
 
-    # 2. 上传样书 → 201；pdf scanner 显式扫描 → PARSED + 章节 + 页文本
+    # 2. 建学习项目（上传样书 → 201）；pdf scanner 显式扫描 → PARSED + 章节
     with SAMPLE.open("rb") as f:
         resp = client.post(
-            "/pdfs",
+            "/projects",
             files={"file": ("book.pdf", f, "application/pdf")},
             headers={**user, **_idem()},
         )
     assert resp.status_code == 201
-    file_id = resp.json()["file_id"]
+    project_id = resp.json()["project_id"]
     _scan_pdfs(client)
-    pdf = client.get(f"/pdfs/{file_id}", headers=user).json()
-    assert pdf["status"] == "PARSED"
-    chapters = pdf["chapters"]
+    project = client.get(f"/projects/{project_id}", headers=user).json()
+    assert project["file"]["status"] == "PARSED"
+    chapters = project["file"]["chapters"]
     assert len(chapters) >= 3
 
-    # 3. 建牌组（HTTP，user 域归属）
-    deck_resp = client.post("/decks", json={"name": "D"}, headers={**user, **_idem()})
+    # 3. 建牌组（HTTP，归属项目——V2.5 6.4 同项目校验）
+    deck_resp = client.post(
+        "/decks", json={"name": "D", "project_id": project_id}, headers={**user, **_idem()}
+    )
     assert deck_resp.status_code == 201
     deck_id = deck_resp.json()["deck_id"]
 
-    # 4. 建任务（前 2 章 COMPACT；Key 校验按 user_id）
+    # 4. 建任务（前 2 章 COMPACT；V2.5 项目归属入口；Key 校验按 user_id）
     resp = client.post(
-        "/tasks",
-        params={"file_id": file_id},  # V2.5 过渡：file_id 经 query 参数传入
+        f"/projects/{project_id}/tasks",
         json={
             "deck_id": deck_id,
             "chapter_ids": [c["chapter_id"] for c in chapters[:2]],
@@ -192,8 +195,16 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
     assert resp.status_code == 201
     task_id = resp.json()["task_id"]
 
-    # 5. executor 显式扫描 → COMPLETED（COMPACT 2 章 = 6 单元 → 6 卡）
+    # 4b. 样卡阶段（V2.5 确认式启动）：触发持久化生成（DRAFT → SAMPLE_GENERATING）→
+    #     样卡 worker 扫描 → AWAITING_SAMPLE_CONFIRMATION → start 确认进入 GENERATING
     task_factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+    resp = client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()})
+    assert resp.status_code == 200
+    scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
+    resp = client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()})
+    assert resp.status_code == 200
+
+    # 5. executor 显式扫描 → COMPLETED（COMPACT 2 章 = 6 单元 → 6 卡）
     final: dict[str, object] = {}
     for _ in range(10):
         scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
