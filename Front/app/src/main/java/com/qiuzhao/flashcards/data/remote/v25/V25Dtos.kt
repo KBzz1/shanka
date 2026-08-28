@@ -91,7 +91,10 @@ internal fun requiredString(value: JSONObject, key: String): String =
         ?: throw IllegalArgumentException("missing or blank '$key'")
 
 internal fun optionalString(value: JSONObject, key: String): String? =
-    value.optString(key).takeIf { it.isNotBlank() }
+    // Android's org.json renders a JSON null as the literal "null" through optString.
+    // Check the token first so nullable V2.5 fields remain nullable on real devices.
+    if (!value.has(key) || value.isNull(key)) null
+    else value.optString(key).takeIf { it.isNotBlank() }
 
 internal fun requiredInt(value: JSONObject, key: String): Int {
     if (!value.has(key) || value.isNull(key)) throw IllegalArgumentException("missing int '$key'")

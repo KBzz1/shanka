@@ -203,16 +203,24 @@ internal fun CardListScreen(
         Box(Modifier.fillMaxSize()) {
             Box(
                 Modifier.fillMaxSize()
-                    // Figma 118:2389: cards begin 194dp from the design canvas top.
-                    .padding(start = (16 * designScale).dp, top = (194 * designScale).dp, end = (16 * designScale).dp)
+                    // Figma 373:1691: the hint box and the cards scroll together.
+                    .padding(start = (16 * designScale).dp, top = (136 * designScale).dp, end = (16 * designScale).dp)
                     .height((693 * designScale).dp)
                     .clip(RoundedCornerShape((AppScrollableContentClipRadius * designScale).dp))
             ) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail(bottomOffset = 40) * designScale).dp),
+                    contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail(bottomOffset = 16) * designScale).dp),
                     verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)
                 ) {
+                    item {
+                        HintBox(
+                            text = "点击卡片可以查看答案。\n卡片左滑可进行编辑与删除。",
+                            parentIsWhite = true,
+                            theme = theme,
+                            designScale = designScale
+                        )
+                    }
                     items(visibleCards, key = { it.id }) { card ->
                         CardListItem(
                             card = card,
@@ -225,31 +233,20 @@ internal fun CardListScreen(
                     }
                 }
             }
-            Text(
-                "点击卡片可以查看答案。\n卡片左滑可进行编辑与删除。",
-                modifier = Modifier.fillMaxWidth()
-                    .padding(start = (26 * designScale).dp, top = (136 * designScale).dp, end = (26 * designScale).dp),
-                color = theme.text,
-                fontFamily = AppFonts.MiSansMedium,
-                fontWeight = FontWeight.Normal,
-                fontSize = fixedSp(16 * designScale),
-                lineHeight = fixedSp(20 * designScale),
-                textAlign = TextAlign.Center
-            )
             DeckDetailHeader(
                 // Figma 118:2389 intentionally leaves the centre of this edit
                 // list header empty: this is a back-only secondary information bar.
                 title = if (mode == CardListMode.EDIT) "" else "卡片列表",
                 designScale = designScale,
                 onBack = nav::popBackStack,
-                theme = if (mode == CardListMode.EDIT) theme else null,
+                theme = theme,
                 subtitle = if (mode == CardListMode.GENERATED) "${visibleCards.size} cards" else null,
                 modifier = Modifier.zIndex(1f)
             )
             BottomContentFade(designScale, Modifier.align(Alignment.BottomCenter))
             Row(
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                    .padding(start = (16 * designScale).dp, end = (16 * designScale).dp, bottom = (40 * designScale).dp)
+                    .padding(horizontal = (16 * designScale).dp, vertical = (16 * designScale).dp)
                     .fillMaxWidth().height((60 * designScale).dp).zIndex(1f),
                 horizontalArrangement = Arrangement.spacedBy(((if (mode == CardListMode.EDIT) 16 else 12) * designScale).dp)
             ) {
@@ -282,6 +279,7 @@ internal fun CardListScreen(
                         primary = false,
                         modifier = Modifier.weight(1f),
                         designScale = designScale,
+                        theme = theme,
                         onClick = nav::popBackStack
                     )
                     CardListActionButton(
@@ -290,6 +288,7 @@ internal fun CardListScreen(
                         primary = true,
                         modifier = Modifier.weight(1f),
                         designScale = designScale,
+                        theme = theme,
                         onClick = { nav.replaceInclusive(AppRoute.CardList(deckId), AppRoute.Deck(deckId)) }
                     )
                 }
@@ -318,7 +317,7 @@ internal fun CardListScreen(
         AlertDialog(
             onDismissRequest = { deletingCard = null },
             title = { Text("删除该卡？", fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal) },
-            text = { Text("删除后无法恢复。", fontFamily = AppFonts.MiSansMedium, fontWeight = FontWeight.Normal) },
+            text = { AppText("删除后无法恢复。", AppTextRole.Supporting) },
             confirmButton = {
                 TextButton(onClick = {
                     pendingDeletedCards = pendingDeletedCards + card.id
@@ -327,9 +326,9 @@ internal fun CardListScreen(
                         deleteFailed = true
                     }
                     deletingCard = null
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }) { AppText("删除", AppTextRole.Label, color = MaterialTheme.colorScheme.error) }
             },
-            dismissButton = { TextButton(onClick = { deletingCard = null }) { Text("取消") } }
+            dismissButton = { TextButton(onClick = { deletingCard = null }) { AppText("取消", AppTextRole.Label) } }
         )
     }
     if (editingDeckPresentation && displayDeck != null) {
@@ -454,7 +453,7 @@ private fun CardListSwipeAction(label: String, icon: String, color: Color, conte
         ) {
             MaterialSymbol(icon, label, tint = contentColor, size = fixedSp(24 * designScale), filled = true)
             Spacer(Modifier.height((4 * designScale).dp))
-            Text(label, color = contentColor, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(20 * designScale), maxLines = 1)
+            AppText(label, AppTextRole.Label, color = contentColor, designScale = designScale, maxLines = 1)
         }
     }
 }
@@ -502,13 +501,11 @@ private fun CardListFace(card: FlashcardEntity, number: Int, answer: Boolean, ro
                         size = fixedSp(24 * designScale),
                         filled = true
                     )
-                    Text(
+                    AppText(
                         if (answer) "答案" else "问题",
+                        AppTextRole.SectionTitle,
                         color = faceContent,
-                        fontFamily = AppFonts.MiSansSemibold,
-                        fontWeight = FontWeight.Normal,
-                        fontSize = fixedSp(24 * designScale),
-                        lineHeight = fixedSp(28 * designScale)
+                        designScale = designScale
                     )
                 }
                 Surface(shape = RoundedCornerShape(999.dp), color = tagStyle.container) {
@@ -553,9 +550,9 @@ internal fun CardEditDialog(card: FlashcardEntity, onSave: (FlashcardEntity) -> 
             }
         },
         confirmButton = {
-            TextButton(onClick = { if (front.isNotBlank() && back.isNotBlank()) onSave(card.copy(front = front.trim(), back = back.trim())) }) { Text("保存") }
+            TextButton(onClick = { if (front.isNotBlank() && back.isNotBlank()) onSave(card.copy(front = front.trim(), back = back.trim())) }) { AppText("保存", AppTextRole.Label) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+        dismissButton = { TextButton(onClick = onDismiss) { AppText("取消", AppTextRole.Label) } }
     )
 }
 
@@ -600,9 +597,9 @@ private fun DeckPresentationDialog(
         },
         confirmButton = {
             TextButton(onClick = { if (name.isNotBlank()) onSave(name.trim()) }) {
-                Text("保存", color = theme.primary, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal)
+                AppText("保存", AppTextRole.Label, color = theme.primary)
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+        dismissButton = { TextButton(onClick = onDismiss) { AppText("取消", AppTextRole.Label) } }
     )
 }

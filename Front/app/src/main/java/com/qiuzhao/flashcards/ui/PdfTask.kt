@@ -42,6 +42,8 @@ internal fun PdfTaskScreen(
     onViewDeck: () -> Unit,
     onRetry: () -> Unit,
     onAbandon: () -> Unit,
+    errorCode: String? = null,
+    onOpenSettings: (() -> Unit)? = null,
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -56,13 +58,18 @@ internal fun PdfTaskScreen(
                     designScale = scale,
                     modifier = Modifier.padding(start = (16 * scale).dp, top = (132 * scale).dp, end = (16 * scale).dp),
                 )
-                PdfTaskState.FAILED -> TaskTerminalCard(
-                    title = "生成失败",
-                    detail = "原有卡片不会部分发布。你可以重试，或主动放弃这次任务。",
-                    icon = "error",
-                    designScale = scale,
-                    modifier = Modifier.padding(start = (16 * scale).dp, top = (132 * scale).dp, end = (16 * scale).dp),
-                )
+                PdfTaskState.FAILED -> {
+                    val block = failedTaskBlock(errorCode)
+                    TaskTerminalCard(
+                        title = block.title,
+                        detail = block.detail,
+                        icon = "error",
+                        designScale = scale,
+                        modifier = Modifier.padding(start = (16 * scale).dp, top = (132 * scale).dp, end = (16 * scale).dp),
+                        actionLabel = if (block.canOpenSettings && onOpenSettings != null) "去设置更新 API Key" else null,
+                        onAction = onOpenSettings,
+                    )
+                }
                 PdfTaskState.ABANDONED -> TaskTerminalCard(
                     title = "任务已放弃",
                     detail = "这次生成不会继续；你可以从项目中重新创建任务。",
@@ -141,7 +148,15 @@ private fun TaskCompletedCard(generatedCardCount: Int, designScale: Float, modif
 }
 
 @Composable
-private fun TaskTerminalCard(title: String, detail: String, icon: String, designScale: Float, modifier: Modifier = Modifier) = Surface(
+private fun TaskTerminalCard(
+    title: String,
+    detail: String,
+    icon: String,
+    designScale: Float,
+    modifier: Modifier = Modifier,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) = Surface(
     shape = RoundedCornerShape((AppShapeRadius * designScale).dp),
     color = AppColors.Blue.background,
     modifier = modifier.fillMaxWidth(),
@@ -154,7 +169,26 @@ private fun TaskTerminalCard(title: String, detail: String, icon: String, design
         MaterialSymbol(icon, null, tint = AppColors.WarningStrong, size = fixedSp(72 * designScale), filled = true)
         AppText(title, AppTextRole.PageTitle, color = AppColors.TextIconDark, designScale = designScale)
         AppText(detail, AppTextRole.CardSubtitle, color = AppColors.TextIconDark.copy(alpha = .65f), designScale = designScale, textAlign = TextAlign.Center)
+        if (actionLabel != null && onAction != null) {
+            CardListActionButton(actionLabel, "settings", false, Modifier.fillMaxWidth(), designScale, onClick = onAction)
+        }
     }
+}
+
+private data class TaskFailureBlock(val title: String, val detail: String, val canOpenSettings: Boolean = false)
+
+private fun failedTaskBlock(code: String?): TaskFailureBlock = when (code) {
+    "API_KEY_UNAVAILABLE", "API_KEY_INVALID" -> TaskFailureBlock(
+        "API Key 不可用",
+        "当前保存的 DeepSeek API Key 无效或不可用，请更新有效 Key 后再重试。",
+        canOpenSettings = true,
+    )
+    "API_KEY_NOT_SET" -> TaskFailureBlock(
+        "未配置 API Key",
+        "请先到设置保存 DeepSeek API Key 后再重试。",
+        canOpenSettings = true,
+    )
+    else -> TaskFailureBlock("生成失败", "原有卡片不会部分发布。你可以重试，或主动放弃这次任务。")
 }
 
 @Composable

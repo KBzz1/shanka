@@ -25,6 +25,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.draggable
@@ -164,7 +165,6 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val projects by viewModel.projects.collectAsState()
     val dueCount by viewModel.dueCount.collectAsState()
     val dashboard by viewModel.dashboard.collectAsState()
-    val todayPlan by viewModel.todayPlan.collectAsState()
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
     val accountBootstrap by viewModel.accountBootstrap.collectAsState()
     val account = accountBootstrap.account
@@ -191,17 +191,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     }
 
     val typedEntryProvider = entryProvider {
-        entry<AppRoute.Home> {
-            HomeScreen(
-                decks = decks,
-                projects = projects,
-                dueCount = dueCount,
-                todayPlan = todayPlan,
-                streakDays = dashboard?.streakDays ?: 0,
-                displayName = account?.nickname.orEmpty(),
-                nav = navigator,
-            )
-        }
+        entry<AppRoute.Home> { HomeScreen(decks, projects, dueCount, navigator) }
         entry<AppRoute.Project> { ProjectScreen(projects, decks, projectSearchQuery, viewModel, navigator) }
         entry<AppRoute.ProjectCreate> { ProjectCreateScreen(viewModel, navigator) }
         entry<AppRoute.ProjectEdit> { route ->
@@ -212,19 +202,41 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                 editingProject = project
             )
         }
+        entry<AppRoute.ProjectTextEditor> { route ->
+            ProjectTextEditorScreen(route, viewModel, navigator)
+        }
         entry<AppRoute.ProjectDetail> { route ->
             val project = projects.firstOrNull { it.id == route.id }
             if (project == null) LoadingScreen() else ProjectDetailScreen(
                 project,
                 decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id },
-                viewModel,
-                navigator
+                navigator,
+                onDeleteDeck = { viewModel.deleteDeck(it) }
             )
         }
+        entry<AppRoute.DeckGeneration> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else DeckGenerationScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.SmartCardChapter> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else SmartCardChapterScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.SmartCardPreview> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else SmartCardPreviewScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.SmartCardGenerating> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else SmartCardGeneratingScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.MaterialManagement> { MaterialManagementScreen(project = null, viewModel, navigator) }
         entry<AppRoute.ProjectMaterialManagement> { route ->
             val project = projects.firstOrNull { it.id == route.projectId }
             if (project == null) LoadingScreen() else MaterialManagementScreen(project, viewModel, navigator)
         }
+        entry<AppRoute.MaterialImport> { route -> MaterialImportScreen(route, viewModel, navigator) }
+        entry<AppRoute.ProjectMaterialPicker> { route -> ProjectMaterialPickerScreen(route, viewModel, navigator) }
         entry<AppRoute.Data> { DataScreen(dueCount, dashboard, weeklyActivity, navigator) }
         entry<AppRoute.Deck> { route ->
             val deck = decks.firstOrNull { it.id == route.id }
@@ -288,6 +300,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                     selected = selectedRootTab,
                     onSettings = { navigator.navigate(AppRoute.Settings) },
                     account = account,
+                    onAvatar = { navigator.navigate(AppRoute.Login) },
                     projectSearchQuery = projectSearchQuery,
                     onProjectSearchChange = { projectSearchQuery = it }
                 )
@@ -316,6 +329,7 @@ private fun RootPersistentHeader(
     selected: RootTab,
     onSettings: () -> Unit,
     account: LocalAccount?,
+    onAvatar: () -> Unit,
     projectSearchQuery: String,
     onProjectSearchChange: (String) -> Unit
 ) {
@@ -327,12 +341,12 @@ private fun RootPersistentHeader(
         ) {
             SettingsHeaderButton(onSettings, (56 * scale).dp)
             StudySearchField(projectSearchQuery, onProjectSearchChange, Modifier.weight(1f), scale)
-            ImageAvatar((56 * scale).dp, account)
+            ImageAvatar((56 * scale).dp, account, onAvatar)
         }
     } else {
         ScreenTopInformationBar(
             title = null, subtitle = null, onBack = null, onSettings = onSettings,
-            account = account, modifier = Modifier.zIndex(2f)
+            account = account, onAvatar = onAvatar, modifier = Modifier.zIndex(2f)
         )
     }
 }
@@ -349,6 +363,7 @@ internal fun ScreenTopInformationBar(
     onBack: (() -> Unit)?,
     onSettings: (() -> Unit)? = null,
     account: LocalAccount? = null,
+    onAvatar: (() -> Unit)? = null,
     backContainer: Color? = null,
     titleColor: Color? = null,
     onTrailingAction: (() -> Unit)? = null,
@@ -364,6 +379,7 @@ internal fun ScreenTopInformationBar(
         onBack = onBack,
         onSettings = onSettings,
         account = account,
+        onAvatar = onAvatar,
         backContainer = backContainer,
         titleColor = titleColor,
         onTrailingAction = onTrailingAction,
@@ -382,6 +398,7 @@ private fun TopInformationBarContent(
     onBack: (() -> Unit)?,
     onSettings: (() -> Unit)?,
     account: LocalAccount?,
+    onAvatar: (() -> Unit)?,
     backContainer: Color?,
     titleColor: Color?,
     onTrailingAction: (() -> Unit)?,
@@ -394,7 +411,7 @@ private fun TopInformationBarContent(
     Box(modifier.height((56 * scale).dp)) {
         if (onBack == null) {
             SettingsHeaderButton(onSettings ?: {}, (56 * scale).dp)
-            Box(Modifier.align(Alignment.CenterEnd)) { ImageAvatar((56 * scale).dp, account) }
+            Box(Modifier.align(Alignment.CenterEnd)) { ImageAvatar((56 * scale).dp, account, onAvatar ?: {}) }
         } else {
             Surface(
                 onClick = onBack,
@@ -477,6 +494,7 @@ private fun SettingsHeaderButton(onClick: () -> Unit, size: androidx.compose.ui.
 private fun ImageAvatar(
     size: androidx.compose.ui.unit.Dp = 56.dp,
     account: LocalAccount? = null,
+    onClick: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier.size(size).clip(RoundedCornerShape(999.dp))
@@ -486,6 +504,7 @@ private fun ImageAvatar(
                 )
             )
             .padding((4f / 56f * size.value).dp)
+            .clickable(onClick = onClick)
     ) {
         if (account == null) {
             Surface(
@@ -537,4 +556,4 @@ private fun StudySearchField(
     }
 }
 
-@Composable private fun LoadingScreen() = Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("正在加载卡组…") }
+@Composable private fun LoadingScreen() = Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { AppText("正在加载卡组…", AppTextRole.Body) }

@@ -1,10 +1,17 @@
 package com.qiuzhao.flashcards.ui
 
-import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,10 +19,12 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -26,62 +35,77 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.zIndex
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogWindowProvider
+import kotlin.math.roundToInt
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.LEGACY_UNASSIGNED_PROJECT_ID
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 
-/** b944790 project root, bound only to server-backed V2.5 PDF projects. */
+/** Figma 494:1447 project root. Project data is derived from the contract layer. */
 @Composable
 internal fun ProjectScreen(
     projects: List<ProjectSummary>,
     decks: List<DeckSummary>,
     searchQuery: String,
     viewModel: AppViewModel,
-    nav: ScreenNavigator,
+    nav: ScreenNavigator
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val visibleProjects = projects.filter { it.name.contains(searchQuery.trim(), ignoreCase = true) }
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground).statusBarsPadding()) {
         Column(
-            modifier = Modifier.fillMaxSize()
-                .padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp),
-            verticalArrangement = Arrangement.spacedBy((16 * scale).dp),
+            modifier = Modifier.fillMaxSize().padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp),
+            verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
         ) {
-            ProjectRootAction(
-                modifier = Modifier.fillMaxWidth(),
-                icon = "create_new_folder",
-                label = "添加 PDF 项目",
-                background = AppColors.Blue.primary,
-                content = AppColors.TextIconLight,
-                scale = scale,
-            ) { nav.navigate(AppRoute.ProjectCreate) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)) {
+                ProjectRootAction(
+                    modifier = Modifier.weight(1f), icon = "create_new_folder", label = "添加项目",
+                    background = AppColors.Blue.primary, content = AppColors.TextIconLight, scale = scale
+                ) {
+                    viewModel.resetProjectCreationDraft()
+                    nav.navigate(AppRoute.ProjectCreate)
+                }
+                ProjectRootAction(
+                    modifier = Modifier.weight(1f), icon = "edit_document", label = "资料管理",
+                    background = AppColors.Blue.background, content = AppColors.TextIconDark, scale = scale
+                ) { nav.navigate(AppRoute.MaterialManagement) }
+            }
             LazyColumn(
                 modifier = Modifier.weight(1f).fillMaxWidth()
                     .clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
                 verticalArrangement = Arrangement.spacedBy((16 * scale).dp),
-                contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * scale).dp),
+                contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * scale).dp)
             ) {
-                if (visibleProjects.isEmpty()) item { EmptyProjectCard(scale) }
                 items(visibleProjects, key = { it.id }) { project ->
-                    ProjectSummaryCard(
-                        project,
-                        decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id },
-                        scale,
-                    ) { nav.navigate(AppRoute.ProjectDetail(project.id)) }
+                    ProjectSummaryCard(project, decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id }, scale) {
+                        // Project detail is introduced as the next project work item.
+                        nav.navigate(AppRoute.ProjectDetail(project.id))
+                    }
                 }
             }
         }
@@ -94,45 +118,22 @@ private fun ProjectRootAction(
     modifier: Modifier,
     icon: String,
     label: String,
-    background: androidx.compose.ui.graphics.Color,
-    content: androidx.compose.ui.graphics.Color,
+    background: Color,
+    content: Color,
     scale: Float,
-    onClick: () -> Unit,
+    onClick: () -> Unit
 ) = Surface(
-    onClick = onClick,
-    color = background,
-    contentColor = content,
-    shape = RoundedCornerShape((24 * scale).dp),
-    modifier = modifier.height((60 * scale).dp),
+    onClick = onClick, color = background, contentColor = content,
+    shape = RoundedCornerShape((24 * scale).dp), modifier = modifier.height((60 * scale).dp)
 ) {
     Row(
+        // Figma 494:1449 / 506:1896: both actions share a 24dp horizontal inset.
         modifier = Modifier.fillMaxSize().padding(horizontal = (24 * scale).dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically
     ) {
         MaterialSymbol(icon, label, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
         Spacer(Modifier.width((8 * scale).dp))
         AppText(label, AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
-    }
-}
-
-@Composable
-private fun EmptyProjectCard(scale: Float) = Surface(
-    color = AppColors.Blue.background,
-    shape = RoundedCornerShape((AppShapeRadius * scale).dp),
-    modifier = Modifier.fillMaxWidth(),
-) {
-    Column(
-        modifier = Modifier.padding((24 * scale).dp),
-        verticalArrangement = Arrangement.spacedBy((8 * scale).dp),
-    ) {
-        AppText("还没有学习项目", AppTextRole.CardTitle, color = AppColors.Blue.ink, designScale = scale)
-        AppText(
-            "上传一份 PDF 后可确认章节并开始生成闪卡。",
-            AppTextRole.CardSubtitle,
-            color = AppColors.Blue.ink.copy(alpha = .7f),
-            designScale = scale,
-        )
     }
 }
 
@@ -151,180 +152,681 @@ private fun ProjectSummaryCard(project: ProjectSummary, decks: List<DeckSummary>
         icon = "heap_snapshot_multiple",
         variant = ProjectThemedCardVariant.BASE_PAGE,
         designScale = scale,
-        onClick = onClick,
+        onClick = onClick
     )
 }
 
-/** The upstream form now accepts one PDF only; no material draft can claim a fake success. */
+/** Figma 588:1922. The same visual form is used for creating and editing a project. */
 @Composable
 internal fun ProjectCreateScreen(
     viewModel: AppViewModel,
     nav: ScreenNavigator,
-    editingProject: ProjectSummary? = null,
+    editingProject: ProjectSummary? = null
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
+    val materials by viewModel.projectCreationMaterials.collectAsState()
     val projectId = editingProject?.id
     var name by rememberSaveable(projectId) { mutableStateOf(editingProject?.name.orEmpty()) }
-    var selectedPdf by remember { mutableStateOf<Uri?>(null) }
-    var selectedPdfName by remember { mutableStateOf<String?>(null) }
+    var selectedTheme by rememberSaveable(projectId) { mutableStateOf(editingProject?.themeKey ?: "violet") }
     var message by remember { mutableStateOf<String?>(null) }
+    var editingFile by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
+    val theme = DeckThemes.firstOrNull { it.key == selectedTheme } ?: DeckThemes.first()
     val context = LocalContext.current
-    val theme = deckTheme(editingProject ?: ProjectSummary("new-project", "新项目"))
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let {
-            selectedPdf = it
-            selectedPdfName = projectDocumentName(context, it)
-            message = null
-        }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.addProjectDraftFile(it, projectDocumentName(context, it)) }
     }
 
+    // Figma 588:1922 uses a white page canvas.  The project family begins at
+    // the 36dp section cards, which keeps each nested radius visually legible.
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
         ScreenTopInformationBar(
-            title = if (editingProject == null) "添加 PDF 项目" else "编辑项目",
-            subtitle = null,
-            onBack = nav::goBack,
-            backContainer = theme.secondary,
-            titleColor = theme.text,
+            title = if (editingProject == null) "添加项目" else "编辑项目", subtitle = null, onBack = nav::goBack,
+            backContainer = theme.cardPanel, titleColor = theme.text
         )
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().statusBarsPadding()
-                .padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp)
-                .clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
-            contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail(bottomOffset = 16) * scale).dp),
-            verticalArrangement = Arrangement.spacedBy((16 * scale).dp),
+        Box(
+            Modifier.fillMaxSize().statusBarsPadding()
+                .padding(top = (88 * scale).dp, start = (16 * scale).dp, end = (16 * scale).dp)
+                .clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp))
         ) {
-            item {
-                ProjectCreationPanel(theme, scale) {
-                    ProjectSectionLabel("stylus_note", "项目名称", theme, scale)
-                    ProjectNameField(name, { name = it }, theme, scale)
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy((16 * scale).dp),
+                contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail(bottomOffset = 16) * scale).dp)
+            ) {
+                item {
+                    Surface(color = theme.cardPanel, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth()) {
+                        Box(Modifier.padding((24 * scale).dp), contentAlignment = Alignment.CenterStart) {
+                            AppText("可编辑主题色、名称，以及添加文件", AppTextRole.CardSubtitle, color = theme.text, designScale = scale)
+                        }
+                    }
                 }
-            }
-            item {
-                ProjectCreationPanel(theme, scale) {
-                    ProjectSectionLabel("picture_as_pdf", if (editingProject == null) "PDF 学习资料" else "当前资料", theme, scale)
-                    if (editingProject == null) {
-                        ProjectPdfAction(selectedPdfName, theme, scale) { picker.launch(arrayOf("application/pdf")) }
-                        AppText(
-                            "每个学习项目仅包含一份 PDF。文本和 Markdown 资料不在本次 Release 中创建。",
-                            AppTextRole.CardSubtitle,
-                            color = theme.text.copy(alpha = .65f),
-                            designScale = scale,
-                        )
-                    } else {
-                        Surface(color = theme.cardPanel, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth()) {
-                            AppText(
-                                "项目名称可修改；PDF 内容与章节由服务端管理。",
-                                AppTextRole.CardSubtitle,
-                                modifier = Modifier.padding((20 * scale).dp),
-                                color = theme.text,
-                                designScale = scale,
+                item {
+                    ProjectCreationPanel(theme, scale) {
+                        ProjectSectionLabel("stylus_note", "项目名称", theme, scale)
+                        Surface(color = theme.cardPanel, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth().height((59 * scale).dp)) {
+                            androidx.compose.foundation.text.BasicTextField(
+                                value = name, onValueChange = { name = it }, singleLine = true,
+                                textStyle = appInputTextStyle(AppTextRole.Body, scale, theme.text),
+                                visualTransformation = rememberBilingualInputTransformation(AppTextRole.Body, scale),
+                                modifier = Modifier.fillMaxSize().padding(horizontal = (24 * scale).dp),
+                                decorationBox = { input -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                                    if (name.isBlank()) AppText("此处输入名称", AppTextRole.Body, color = theme.text.copy(alpha = .5f), designScale = scale)
+                                    input()
+                                } }
                             )
                         }
                     }
                 }
-            }
-            message?.let { error ->
-                item { AppText(error, AppTextRole.CardSubtitle, color = AppColors.WarningStrong, designScale = scale) }
-            }
-        }
-        BottomContentFade(scale, Modifier.align(Alignment.BottomCenter))
-        Surface(
-            onClick = {
-                if (editingProject != null) {
-                    viewModel.renameProject(editingProject.id, name) { error ->
-                        message = error
-                        if (error == null) nav.goBack()
-                    }
-                } else {
-                    val pdf = selectedPdf
-                    if (pdf == null) {
-                        message = "请选择一份 PDF"
-                    } else {
-                        viewModel.createProject(pdf, name) { id, error ->
-                            message = error
-                            if (id != null) nav.replaceTop(AppRoute.ProjectDetail(id))
+                item {
+                    ProjectCreationPanel(theme, scale) {
+                        ProjectSectionLabel("colors", "项目主题色", theme, scale)
+                        Surface(color = AppColors.Card, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth().height((84 * scale).dp)) {
+                            Row(Modifier.fillMaxSize().padding((12 * scale).dp), horizontalArrangement = Arrangement.spacedBy((12 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
+                                DeckThemes.forEach { choice ->
+                                    val selected = selectedTheme == choice.key
+                                    val choiceWidth by animateDpAsState(if (selected) (121 * scale).dp else 0.dp, tween(500, easing = FastOutSlowInEasing), label = "${choice.key} color width")
+                                    val border = if (selected) 6.dp else 4.dp
+                                    Surface(
+                                        onClick = { selectedTheme = choice.key }, color = choice.primary,
+                                        shape = RoundedCornerShape(if (selected) (24 * scale).dp else 999.dp),
+                                        modifier = (if (selected) Modifier.width(choiceWidth) else Modifier.weight(1f)).height((60 * scale).dp),
+                                        border = androidx.compose.foundation.BorderStroke(border, AppColors.Card.copy(alpha = .5f))
+                                    ) {
+                                        if (selected) Box(contentAlignment = Alignment.Center) {
+                                            MaterialSymbol("check", "已选择${choice.label}", tint = choice.onPrimary, size = fixedSp(24 * scale), filled = true)
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-            },
-            color = theme.primary,
-            contentColor = theme.onPrimary,
-            shape = RoundedCornerShape((24 * scale).dp),
-            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                .padding(horizontal = (16 * scale).dp, vertical = (16 * scale).dp)
-                .fillMaxWidth().height((60 * scale).dp).zIndex(1f),
-        ) {
-            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                MaterialSymbol("list_alt_check", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
-                Spacer(Modifier.width((8 * scale).dp))
-                AppText(if (editingProject == null) "创建项目" else "保存名称", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
+                item {
+                    ProjectCreationMaterialsPanel(
+                        title = "管理添加的文件资料", icon = "files", theme = theme, scale = scale,
+                        materials = materials.filter { it.type == ProjectDraftMaterialType.FILE },
+                        onEditFile = { editingFile = it }, onEditText = {},
+                        onDelete = { viewModel.deleteProjectDraftMaterial(it.id) }
+                    )
+                }
+                item {
+                    ProjectCreationMaterialsPanel(
+                        title = "管理添加的文本资料", icon = "description", theme = theme, scale = scale,
+                        materials = materials.filter { it.type == ProjectDraftMaterialType.TEXT },
+                        onEditFile = { editingFile = it },
+                        onEditText = { material -> nav.navigate(AppRoute.ProjectTextEditor(material.id, selectedTheme, editorTitle = "编辑文本资料")) },
+                        onDelete = { viewModel.deleteProjectDraftMaterial(it.id) }
+                    )
+                }
+                message?.let { error -> item { AppText(error, AppTextRole.CardSubtitle, color = AppColors.WarningStrong, designScale = scale) } }
             }
         }
+        BottomContentFade(scale, Modifier.align(Alignment.BottomCenter), color = AppColors.BaseBackground)
+        Row(
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+                .padding(horizontal = (16 * scale).dp, vertical = (16 * scale).dp)
+                .fillMaxWidth().zIndex(1f),
+            horizontalArrangement = Arrangement.spacedBy((12 * scale).dp)
+        ) {
+            Surface(
+                onClick = {
+                    if (editingProject == null) {
+                        nav.navigate(AppRoute.ProjectMaterialPicker(selectedTheme))
+                    } else {
+                        nav.navigate(AppRoute.ProjectMaterialManagement(editingProject.id))
+                    }
+                },
+                color = theme.secondary, contentColor = theme.text,
+                shape = RoundedCornerShape((24 * scale).dp),
+                modifier = Modifier.weight(1f).height((60 * scale).dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize()) {
+                    MaterialSymbol("folder_open", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+                    Spacer(Modifier.width((8 * scale).dp))
+                    AppText("导入资料", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
+                }
+            }
+            Surface(
+            onClick = {
+                val onResult: (String?) -> Unit = { error ->
+                    message = error
+                    if (error == null) nav.goBack()
+                }
+                if (editingProject == null) {
+                    viewModel.createProjectFromDraft(name, selectedTheme, onResult)
+                } else {
+                    viewModel.renameProjectFromEditor(editingProject.id, name, selectedTheme, onResult)
+                }
+            }, color = theme.primary, contentColor = theme.onPrimary,
+            shape = RoundedCornerShape((24 * scale).dp),
+            modifier = Modifier.weight(1f).height((60 * scale).dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize()) {
+                MaterialSymbol("list_alt_check", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+                Spacer(Modifier.width((8 * scale).dp))
+                AppText("完成设置", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
+            }
+        }
+        }
+    }
+    editingFile?.let { material ->
+        FileNameEditorDialog(
+            theme = theme, initialTitle = material.title,
+            onConfirm = { updatedTitle ->
+                viewModel.renameProjectDraftFile(material.id, updatedTitle)
+                editingFile = null
+            },
+            onDismiss = { editingFile = null }
+        )
     }
 }
 
 @Composable
 private fun ProjectCreationPanel(theme: DeckTheme, scale: Float, content: @Composable ColumnScope.() -> Unit) = Surface(
-    color = theme.surface,
-    shape = RoundedCornerShape((AppShapeRadius * scale).dp),
-    modifier = Modifier.fillMaxWidth(),
+    // Figma 588:1922: group is the family Background; the nested fields lift
+    // to Surface.  Keeping this inversion prevents the lost card hierarchy.
+    color = theme.background, shape = RoundedCornerShape((36 * scale).dp), modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape((36 * scale).dp))
 ) { Column(Modifier.padding((20 * scale).dp), verticalArrangement = Arrangement.spacedBy((16 * scale).dp), content = content) }
 
 @Composable
 private fun ProjectSectionLabel(icon: String, label: String, theme: DeckTheme, scale: Float) = Row(
-    modifier = Modifier.fillMaxWidth(),
-    horizontalArrangement = Arrangement.spacedBy((12 * scale).dp),
-    verticalAlignment = Alignment.CenterVertically,
+    modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((12 * scale).dp), verticalAlignment = Alignment.CenterVertically
 ) {
-    MaterialSymbol(icon, null, tint = theme.text, size = fixedSp(28 * scale), filled = true)
+    MaterialSymbol(icon, null, tint = theme.text, size = fixedSp(24 * scale), filled = true)
     AppText(label, AppTextRole.SectionTitle, color = theme.text, designScale = scale)
 }
 
 @Composable
-private fun ProjectNameField(value: String, onChange: (String) -> Unit, theme: DeckTheme, scale: Float) = Surface(
-    color = theme.cardPanel,
-    shape = RoundedCornerShape((24 * scale).dp),
-    modifier = Modifier.fillMaxWidth().height((59 * scale).dp),
+private fun ProjectMaterialActionCard(icon: String, title: String, subtitle: String, theme: DeckTheme, scale: Float, onClick: () -> Unit) = Surface(
+    onClick = onClick, color = theme.primary, contentColor = theme.onPrimary,
+    shape = RoundedCornerShape((AppButtonShapeRadius * scale).dp), modifier = Modifier.fillMaxWidth().height((80 * scale).dp)
 ) {
-    androidx.compose.foundation.text.BasicTextField(
-        value = value,
-        onValueChange = onChange,
-        singleLine = true,
-        textStyle = appInputTextStyle(AppTextRole.Body, scale, theme.text),
-        visualTransformation = rememberBilingualInputTransformation(AppTextRole.Body, scale),
-        modifier = Modifier.fillMaxSize().padding(horizontal = (24 * scale).dp),
-        decorationBox = { input ->
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
-                if (value.isBlank()) AppText("此处输入名称", AppTextRole.Body, color = theme.text.copy(alpha = .5f), designScale = scale)
-                input()
+    Row(Modifier.fillMaxSize().padding((12 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
+        Surface(color = theme.cardPanel, shape = RoundedCornerShape(999.dp), modifier = Modifier.size((56 * scale).dp)) {
+            Box(contentAlignment = Alignment.Center) { MaterialSymbol(icon, null, tint = theme.strongText, size = fixedSp(24 * scale), filled = true) }
+        }
+        Spacer(Modifier.width((16 * scale).dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy((4 * scale).dp)) {
+            AppText(title, AppTextRole.CardTitle, color = LocalContentColor.current, designScale = scale)
+            AppText(subtitle, AppTextRole.CardSubtitle, color = theme.cardPanel, designScale = scale)
+        }
+        // Match the import action-card's 56dp trailing alignment container.
+        Box(Modifier.size((56 * scale).dp), contentAlignment = Alignment.Center) {
+            MaterialSymbol("arrow_forward", title, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+        }
+    }
+}
+
+@Composable
+private fun ProjectCreationMaterialsPanel(
+    title: String,
+    icon: String,
+    theme: DeckTheme,
+    scale: Float,
+    materials: List<ProjectDraftMaterial>,
+    onEditFile: (ProjectDraftMaterial) -> Unit,
+    onEditText: (ProjectDraftMaterial) -> Unit,
+    onDelete: (ProjectDraftMaterial) -> Unit
+) = ProjectCreationPanel(theme, scale) {
+    Row(Modifier.padding(horizontal = (8 * scale).dp), horizontalArrangement = Arrangement.spacedBy((10 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
+        MaterialSymbol(icon, null, tint = theme.text, size = fixedSp(24 * scale), filled = true)
+        AppText(title, AppTextRole.SectionTitle, color = theme.text, designScale = scale)
+    }
+    Surface(color = AppColors.Card, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth()) {
+        AppText(
+            if (materials.isEmpty()) "暂无资料。点击下方“导入资料”按钮来添加资料" else "右滑卡片可编辑文件名称/删除文件",
+            AppTextRole.Supporting,
+            modifier = Modifier.padding((24 * scale).dp), color = theme.text, designScale = scale
+        )
+    }
+    materials.forEach { material ->
+        if (material.type == ProjectDraftMaterialType.FILE) {
+            ProjectDraftFileCard(material, theme, scale, onEdit = { onEditFile(material) }, onDelete = { onDelete(material) })
+        } else {
+            ProjectDraftTextCard(material, theme, scale, onEdit = { onEditText(material) }, onDelete = { onDelete(material) })
+        }
+    }
+}
+
+@Composable
+internal fun ProjectDraftFileCard(
+    material: ProjectDraftMaterial,
+    theme: DeckTheme,
+    scale: Float,
+    onEdit: () -> Unit = {},
+    selected: Boolean = false,
+    onSelect: (() -> Unit)? = null,
+    parentSurface: ProjectMaterialCardParentSurface = ProjectMaterialCardParentSurface.THEME_BACKGROUND,
+    onDelete: () -> Unit
+) = ProjectSwipeFileContainer(
+    scale = scale,
+    // The edit reveal is the family's Primary-Secondary semantic, distinct
+    // from both the exposed record and the destructive Warning action.
+    editBackground = theme.secondary,
+    onEdit = onEdit,
+    onDelete = onDelete
+) {
+    val palette = projectMaterialCardPalette(theme, parentSurface, selected)
+    // Figma 167:9679: the visible card is a 370 x 88 family-Surface. The
+    // parent swipe viewport owns the 36dp clip so both revealed actions remain
+    // inside that same silhouette.
+    Surface(
+        color = palette.card,
+        shape = RoundedCornerShape((36 * scale).dp),
+        onClick = onSelect ?: {},
+        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape((36 * scale).dp))
+    ) {
+        Row(Modifier.fillMaxSize().padding((16 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
+            val accent = if (selected) AppColors.Green.primary else theme.primary
+            val accentOn = if (selected) AppColors.Green.background else theme.background
+            Surface(color = accent, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.size((56 * scale).dp)) {
+                Box(contentAlignment = Alignment.Center) {
+                    MaterialSymbol(if (selected) "check_circle" else "picture_as_pdf", null, tint = accentOn, size = fixedSp(24 * scale), filled = true)
+                }
             }
-        },
+            Spacer(Modifier.width((16 * scale).dp))
+            // Figma 167:9679 puts the type and import date below the filename;
+            // there is no trailing file-type pill in this card variant.
+            Column(
+                modifier = Modifier.weight(1f).height((56 * scale).dp),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                AppText(material.title, AppTextRole.CardTitle, color = theme.text, designScale = scale, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy((4 * scale).dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AppText(
+                        material.extension.orEmpty().trimStart('.').uppercase(),
+                        AppTextRole.CardSubtitle,
+                        color = theme.text,
+                        designScale = scale
+                    )
+                    AppText("26/8/11", AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
+                    AppText("导入", AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The two Figma text cards use the same geometry but intentionally different
+ * colour hierarchy. Management is a white record card; the picker is already
+ * inside a family-Background section and therefore starts at family-Surface.
+ */
+internal enum class ProjectMaterialTextCardKind { MANAGEMENT, SELECTABLE }
+
+/** What directly surrounds a reusable material card. */
+internal enum class ProjectMaterialCardParentSurface { BASE, THEME_BACKGROUND }
+
+/**
+ * Figma 775:3940 / 786:4657 / 796:6785 semantic material-card tiers.
+ *
+ * On a white canvas the visible card starts at family Background and its body
+ * returns to white. Inside a family-Background section, the card lifts to
+ * Surface and its body returns to Background. Green selection always uses the
+ * equivalent Surface / Primary-Secondary / Background sequence.
+ */
+internal data class ProjectMaterialCardPalette(
+    val card: Color,
+    val title: Color,
+    val body: Color
+)
+
+internal fun projectMaterialCardPalette(
+    theme: DeckTheme,
+    parentSurface: ProjectMaterialCardParentSurface,
+    selected: Boolean
+): ProjectMaterialCardPalette = if (selected) {
+    ProjectMaterialCardPalette(
+        card = AppColors.Green.surface,
+        title = AppColors.Green.primarySecondary,
+        body = AppColors.Green.background
+    )
+} else when (parentSurface) {
+    ProjectMaterialCardParentSurface.BASE -> ProjectMaterialCardPalette(
+        card = theme.background,
+        title = theme.secondary,
+        body = AppColors.Card
+    )
+    ProjectMaterialCardParentSurface.THEME_BACKGROUND -> ProjectMaterialCardPalette(
+        card = theme.cardPanel,
+        title = theme.secondary,
+        body = theme.background
     )
 }
 
 @Composable
-private fun ProjectPdfAction(selectedName: String?, theme: DeckTheme, scale: Float, onClick: () -> Unit) = Surface(
-    onClick = onClick,
-    color = theme.primary,
-    contentColor = theme.onPrimary,
-    shape = RoundedCornerShape((AppButtonShapeRadius * scale).dp),
-    modifier = Modifier.fillMaxWidth().height((80 * scale).dp),
+internal fun ProjectDraftTextCard(
+    material: ProjectDraftMaterial,
+    theme: DeckTheme,
+    scale: Float,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    selected: Boolean = false,
+    onSelect: (() -> Unit)? = null,
+    kind: ProjectMaterialTextCardKind = ProjectMaterialTextCardKind.MANAGEMENT,
+    parentSurface: ProjectMaterialCardParentSurface = ProjectMaterialCardParentSurface.THEME_BACKGROUND
+) = ProjectSwipeContainer(
+    // Figma 648:2818 = 238dp management preview; Figma 796:6786 = 211dp
+    // selectable preview. The viewport stays 36dp while its content is 32dp.
+    height = if (kind == ProjectMaterialTextCardKind.MANAGEMENT) 238f else 211f,
+    actions = listOf(
+        // Delete is Warning Primary; every edit action uses Primary-Secondary.
+        ProjectSwipeAction("delete", "删除该卡", AppColors.Warning, theme.onPrimary, onDelete),
+        ProjectSwipeAction(
+            "edit", "编辑卡片",
+            theme.secondary,
+            theme.strongText,
+            onEdit
+        )
+    ),
+    scale = scale
 ) {
-    Row(Modifier.fillMaxSize().padding((12 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
-        Surface(color = theme.cardPanel, shape = RoundedCornerShape(999.dp), modifier = Modifier.size((56 * scale).dp)) {
-            Box(contentAlignment = Alignment.Center) { MaterialSymbol("picture_as_pdf", null, tint = theme.strongText, size = fixedSp(24 * scale), filled = true) }
+    val isSelectable = kind == ProjectMaterialTextCardKind.SELECTABLE
+    val palette = projectMaterialCardPalette(theme, parentSurface, selected)
+    Surface(
+        color = palette.card,
+        shape = RoundedCornerShape((32 * scale).dp),
+        onClick = onSelect ?: {},
+        modifier = Modifier.fillMaxSize().clip(RoundedCornerShape((32 * scale).dp))
+    ) {
+        Column(Modifier.fillMaxSize().padding((12 * scale).dp), verticalArrangement = Arrangement.spacedBy((10 * scale).dp)) {
+            if (isSelectable) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((10 * scale).dp)) {
+                    Surface(
+                        color = if (selected) AppColors.Green.primary else theme.primary,
+                        shape = RoundedCornerShape((24 * scale).dp),
+                        // Figma 796:6784 / 796:6785: this is not the compact
+                        // 56dp file-icon tile. It self-stretches to the title
+                        // panel's 24 + 27 + 24 = 75dp height and stays square.
+                        modifier = Modifier.size((75 * scale).dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            MaterialSymbol(if (selected) "check_circle" else "file_copy", null, tint = if (selected) AppColors.Green.background else theme.background, size = fixedSp(24 * scale), filled = true)
+                        }
+                    }
+                    Surface(
+                        color = palette.title,
+                        shape = RoundedCornerShape((32 * scale).dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        AppText(material.title, AppTextRole.Body, modifier = Modifier.padding((24 * scale).dp), color = theme.text, designScale = scale, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            } else {
+                Surface(
+                    color = palette.title,
+                    shape = RoundedCornerShape((32 * scale).dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    AppText(material.title, AppTextRole.Body, modifier = Modifier.padding((24 * scale).dp), color = theme.text, designScale = scale, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            Surface(color = palette.body, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth().weight(1f)) {
+                AppText(material.content.ifBlank { "此处最多显示两行可以吗。此处最多显示两行。超出省略号" }, AppTextRole.Body, modifier = Modifier.padding((24 * scale).dp), color = theme.text.copy(alpha = .5f), designScale = scale, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
-        Spacer(Modifier.width((16 * scale).dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy((4 * scale).dp)) {
-            AppText(selectedName ?: "选择 PDF 文件", AppTextRole.CardTitle, color = LocalContentColor.current, designScale = scale, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            AppText("仅支持 PDF", AppTextRole.CardSubtitle, color = theme.cardPanel, designScale = scale)
-        }
-        MaterialSymbol("arrow_forward", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
     }
 }
 
-private fun projectDocumentName(context: android.content.Context, uri: Uri): String =
-    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-        val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-        if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
-    }.orEmpty().ifBlank { uri.lastPathSegment?.substringAfterLast('/') ?: "未命名 PDF" }
+/** Figma 167:9679 exposes edit and delete beside a compact 88dp file card. */
+@Composable
+private fun ProjectSwipeFileContainer(
+    scale: Float,
+    editBackground: Color,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    val actionWidth = (88 * scale).dp
+    val revealPx = with(LocalDensity.current) { ((actionWidth * 2) - (16 * scale).dp).toPx() }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val offset by animateFloatAsState(dragOffset, label = "file material swipe")
+    val shape = RoundedCornerShape((36 * scale).dp)
+    val dragState = rememberDraggableState { delta -> dragOffset = (dragOffset + delta).coerceIn(-revealPx, 0f) }
+    Box(Modifier.fillMaxWidth().height((88 * scale).dp).clip(shape).clipToBounds()) {
+        Row(Modifier.align(Alignment.CenterEnd).height((88 * scale).dp), horizontalArrangement = Arrangement.spacedBy((8 * scale).dp)) {
+            Surface(onClick = onEdit, color = editBackground, shape = RoundedCornerShape((36 * scale).dp), modifier = Modifier.width(actionWidth).fillMaxHeight()) {
+                Box(contentAlignment = Alignment.Center) { MaterialSymbol("edit", null, tint = Color(0xCC000000), size = fixedSp(24 * scale), filled = true) }
+            }
+            Surface(onClick = onDelete, color = AppColors.Warning, shape = RoundedCornerShape((36 * scale).dp), modifier = Modifier.width(actionWidth).fillMaxHeight()) {
+                Box(contentAlignment = Alignment.Center) { MaterialSymbol("delete", null, tint = AppColors.TextIconLight, size = fixedSp(24 * scale), filled = true) }
+            }
+        }
+        Box(
+            Modifier.fillMaxSize().offset { IntOffset(offset.roundToInt(), 0) }.clip(shape)
+                .draggable(dragState, Orientation.Horizontal, onDragStopped = { dragOffset = if (dragOffset < -revealPx / 2f) -revealPx else 0f })
+        ) { content() }
+    }
+}
+
+internal data class ProjectSwipeAction(val icon: String, val label: String, val background: Color, val content: Color, val onClick: () -> Unit)
+
+@Composable
+internal fun ProjectSwipeContainer(height: Float, actions: List<ProjectSwipeAction>, scale: Float, content: @Composable () -> Unit) {
+    val actionWidth = (112 * scale).dp
+    val revealPx = with(LocalDensity.current) { (actionWidth - (16 * scale).dp).toPx() }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val offset by animateFloatAsState(dragOffset, label = "project material swipe")
+    val dragState = rememberDraggableState { delta -> dragOffset = (dragOffset + delta).coerceIn(-revealPx, 0f) }
+    val cardShape = RoundedCornerShape((AppShapeRadius * scale).dp)
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height((height * scale).dp)
+            .clip(cardShape)
+            .clipToBounds()
+    ) {
+        Column(Modifier.align(Alignment.CenterEnd).width(actionWidth).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy((8 * scale).dp)) {
+            actions.forEach { action ->
+                Surface(onClick = action.onClick, color = action.background, contentColor = action.content, shape = RoundedCornerShape((32 * scale).dp), modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    Column(Modifier.fillMaxSize(), horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                        MaterialSymbol(action.icon, null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+                        Spacer(Modifier.height((4 * scale).dp))
+                        AppText(
+                            action.label,
+                            AppTextRole.Label,
+                            modifier = Modifier.fillMaxWidth(),
+                            color = LocalContentColor.current,
+                            textAlign = TextAlign.Center,
+                            designScale = scale,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .offset { IntOffset(offset.roundToInt(), 0) }
+                .clip(cardShape)
+                .draggable(
+                    dragState,
+                    Orientation.Horizontal,
+                    onDragStopped = { dragOffset = if (dragOffset < -revealPx / 2f) -revealPx else 0f }
+                )
+        ) { content() }
+    }
+}
+
+/** Wrap-content swipe reveal (deck cards have intrinsic heights). */
+@Composable
+internal fun ProjectSwipeAuto(actions: List<ProjectSwipeAction>, scale: Float, content: @Composable () -> Unit) {
+    val actionWidth = (112 * scale).dp
+    val revealPx = with(LocalDensity.current) { (actionWidth - (16 * scale).dp).toPx() }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val offset by animateFloatAsState(dragOffset, label = "wrap swipe")
+    val dragState = rememberDraggableState { delta -> dragOffset = (dragOffset + delta).coerceIn(-revealPx, 0f) }
+    val cardShape = RoundedCornerShape((AppShapeRadius * scale).dp)
+    Box(Modifier.fillMaxWidth().clip(cardShape).clipToBounds()) {
+        Column(
+            modifier = Modifier.align(Alignment.CenterEnd).width(actionWidth),
+            verticalArrangement = Arrangement.spacedBy((8 * scale).dp)
+        ) {
+            actions.forEach { action ->
+                Surface(
+                    onClick = action.onClick, color = action.background, contentColor = action.content,
+                    shape = RoundedCornerShape((36 * scale).dp),
+                    modifier = Modifier.fillMaxWidth().height((60 * scale).dp)
+                ) {
+                    Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                        MaterialSymbol(action.icon, null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+                        Spacer(Modifier.height((4 * scale).dp))
+                        AppText(action.label, AppTextRole.Label, modifier = Modifier.fillMaxWidth(), color = LocalContentColor.current, textAlign = TextAlign.Center, designScale = scale, maxLines = 1)
+                    }
+                }
+            }
+        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(offset.roundToInt(), 0) }
+                .clip(cardShape)
+                .draggable(
+                    dragState,
+                    Orientation.Horizontal,
+                    onDragStopped = { dragOffset = if (dragOffset < -revealPx / 2f) -revealPx else 0f }
+                )
+        ) { content() }
+    }
+}
+
+/** Figma 821:5124.  The filename dialog is shared by every file-card edit reveal. */
+@Composable
+internal fun FileNameEditorDialog(
+    theme: DeckTheme,
+    initialTitle: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var title by rememberSaveable(initialTitle) { mutableStateOf(initialTitle) }
+    val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+    LaunchedEffect(dialogWindow) {
+        // Figma specifies Android's 20% black dim treatment behind the dialog.
+        dialogWindow?.setDimAmount(.2f)
+    }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = theme.background,
+            shape = RoundedCornerShape(36.dp),
+            modifier = Modifier.width(331.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Surface(
+                    color = theme.secondary,
+                    shape = RoundedCornerShape(32.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    androidx.compose.foundation.text.BasicTextField(
+                        value = title,
+                        onValueChange = { title = it },
+                        singleLine = true,
+                        textStyle = appInputTextStyle(AppTextRole.Body, 1f, theme.text),
+                        visualTransformation = rememberBilingualInputTransformation(AppTextRole.Body, 1f),
+                        modifier = Modifier.fillMaxWidth().padding(24.dp),
+                        decorationBox = { input ->
+                            Box(Modifier.fillMaxWidth()) { input() }
+                        }
+                    )
+                }
+                Surface(
+                    onClick = { onConfirm(title) },
+                    color = theme.primary,
+                    contentColor = theme.onPrimary,
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier.fillMaxWidth().height(60.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        MaterialSymbol("check", null, tint = LocalContentColor.current, size = fixedSp(24f), filled = true)
+                        Spacer(Modifier.width(8.dp))
+                        AppText("完成修改", AppTextRole.Label, color = LocalContentColor.current)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun ProjectTextEditorScreen(route: AppRoute.ProjectTextEditor, viewModel: AppViewModel, nav: ScreenNavigator) {
+    val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
+    val materials by viewModel.projectCreationMaterials.collectAsState()
+    val projectMats by viewModel.projectMaterials.collectAsState()
+    val importMats by viewModel.materialImportDrafts.collectAsState()
+    val existing = (route.projectId?.let { projectMats[it] })?.firstOrNull { it.id == route.materialId }
+        ?: materials.firstOrNull { it.id == route.materialId }
+        ?: importMats.firstOrNull { it.id == route.materialId }
+    // The text editor inherits the import page that opened it: Azure for global
+    // material management, and the in-progress project family during creation.
+    val theme = DeckThemes.firstOrNull { it.key == route.themeKey }
+        ?: DeckThemes.first { it.key == "azure" }
+    var title by rememberSaveable(route.materialId) { mutableStateOf(existing?.title.orEmpty()) }
+    var content by rememberSaveable(route.materialId) { mutableStateOf(existing?.content.orEmpty()) }
+    Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
+        ScreenTopInformationBar(route.editorTitle, null, nav::goBack, backContainer = theme.cardPanel, titleColor = theme.text)
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().statusBarsPadding().padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp)
+                .clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
+            contentPadding = PaddingValues(bottom = (fixedBottomControlScrollTail(bottomOffset = 16) * scale).dp), verticalArrangement = Arrangement.spacedBy((12 * scale).dp)
+        ) {
+            item { ProjectTextField("文本标题", title, { title = it }, "标题标题", singleLine = true, theme = theme, scale = scale) }
+            item { ProjectTextField("文本输入", content, { content = it }, "此处粘贴文本", singleLine = false, theme = theme, scale = scale) }
+        }
+        BottomContentFade(scale, Modifier.align(Alignment.BottomCenter), color = AppColors.BaseBackground)
+        Surface(
+            onClick = {
+                if (route.stageForMaterialImport) {
+                    viewModel.upsertMaterialImportText(route.materialId, title, content)
+                } else if (route.projectId == null) {
+                    viewModel.upsertProjectDraftText(route.materialId, title, content)
+                } else {
+                    val material = ProjectDraftMaterial(
+                        id = route.materialId ?: "project-text-${System.currentTimeMillis()}",
+                        type = ProjectDraftMaterialType.TEXT,
+                        title = title,
+                        content = content
+                    )
+                    viewModel.upsertProjectMaterial(route.projectId, material)
+                }
+                nav.goBack()
+            }, color = theme.primary, contentColor = theme.onPrimary,
+            shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(horizontal = (16 * scale).dp, vertical = (16 * scale).dp).fillMaxWidth().height((60 * scale).dp).zIndex(1f)
+        ) { Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+            MaterialSymbol("list_alt_check", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+            Spacer(Modifier.width((8 * scale).dp)); AppText("完成输入", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
+        } }
+    }
+}
+
+@Composable
+private fun ProjectTextField(label: String, value: String, onValueChange: (String) -> Unit, placeholder: String, singleLine: Boolean, theme: DeckTheme, scale: Float) = Column(verticalArrangement = Arrangement.spacedBy((12 * scale).dp)) {
+    AppText(label, AppTextRole.SectionTitle, modifier = Modifier.padding(horizontal = (8 * scale).dp), color = theme.text, designScale = scale)
+    // Figma 493:1386: inputs sit on the family Background (#EEF4FA) and the
+    // content box is 453dp (not the smaller create-form default).
+    Surface(color = theme.background, shape = RoundedCornerShape((32 * scale).dp), modifier = Modifier.fillMaxWidth().height(if (singleLine) (75 * scale).dp else (453 * scale).dp)) {
+        androidx.compose.foundation.text.BasicTextField(
+            value = value, onValueChange = onValueChange, singleLine = singleLine,
+            textStyle = appInputTextStyle(AppTextRole.Body, scale, theme.text), visualTransformation = rememberBilingualInputTransformation(AppTextRole.Body, scale),
+            modifier = Modifier.fillMaxSize().padding((24 * scale).dp), decorationBox = { input -> Box(Modifier.fillMaxSize()) {
+                // Figma 493:1386 placeholder ink is a solid dark slate (#242436).
+                if (value.isBlank()) AppText(placeholder, AppTextRole.Body, color = Color(0xFF242436), designScale = scale)
+                input()
+            } }
+        )
+    }
+}
+
+private fun projectDocumentName(context: android.content.Context, uri: android.net.Uri): String = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+    if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+}.orEmpty().ifBlank { uri.lastPathSegment?.substringAfterLast('/') ?: "未命名文件" }

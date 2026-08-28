@@ -156,15 +156,7 @@ import kotlinx.coroutines.delay
 
 
 @Composable
-internal fun HomeScreen(
-    decks: List<DeckSummary>,
-    projects: List<ProjectSummary>,
-    dueCount: Int,
-    todayPlan: TodayPlanUiState,
-    streakDays: Int,
-    displayName: String,
-    nav: ScreenNavigator,
-) {
+internal fun HomeScreen(decks: List<DeckSummary>, projects: List<ProjectSummary>, dueCount: Int, nav: ScreenNavigator) {
     val activeDeck = decks.firstOrNull { it.dueCount > 0 } ?: decks.firstOrNull()
     // One Figma design canvas: 402dp wide. On a narrower phone, every visual value
     // uses this one scale rather than responding independently to display/font settings.
@@ -187,21 +179,21 @@ internal fun HomeScreen(
                         contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * compactScale).dp),
                         verticalArrangement = Arrangement.spacedBy((12 * compactScale).dp)
                     ) {
-                    item { DailyGoalCard(todayPlan, streakDays, compactScale) }
+                    item { DailyGoalCard(compactScale) }
                     item {
                         // Node 19:620 has a 12dp title-to-card-group gap; only the
                         // two cards *inside* the group retain the 16dp spacing.
                         Column(verticalArrangement = Arrangement.spacedBy((12 * compactScale).dp)) {
-                            Text(
-                                "${displayName.ifBlank { "现在" }}，开始今天的学习", modifier = Modifier.padding(horizontal = (8 * compactScale).dp), color = PageForegroundColor(), fontFamily = AppFonts.MiSansBold,
-                                fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale)
+                            AppText(
+                                "用户名，快来学习", AppTextRole.SectionTitle,
+                                modifier = Modifier.padding(horizontal = (8 * compactScale).dp), color = PageForegroundColor(), designScale = compactScale
                             )
                             Column(verticalArrangement = Arrangement.spacedBy((16 * compactScale).dp)) {
                                 ContinueLearningCard(
                                     deck = activeDeck, projects = projects,
                                     compactScale = compactScale,
-                                    onOpenDeck = { activeDeck?.let { nav.navigate(AppRoute.Deck(it.id)) } ?: nav.navigate(AppRoute.Project) },
-                                    onContinue = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, true)) } ?: nav.navigate(AppRoute.Project) }
+                                    onOpenDeck = { activeDeck?.let { nav.navigate(AppRoute.Deck(it.id)) } },
+                                    onContinue = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, true)) } }
                                 )
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * compactScale).dp)) {
                                     QuickLearningCard(
@@ -209,16 +201,16 @@ internal fun HomeScreen(
                                         button = AppColors.Pink.primary, textColor = AppColors.Pink.ink,
                                         iconBackground = AppColors.Pink.primarySecondary,
                                         icon = "brightness_alert", iconTint = AppColors.Pink.ink,
-                                        label = if (activeDeck == null) "创建项目" else "到期复习",
-                                        compactScale = compactScale, onClick = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, true)) } ?: nav.navigate(AppRoute.Project) }
+                                        label = "昨日错题",
+                                        compactScale = compactScale, onClick = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, true)) } }
                                     )
                                     QuickLearningCard(
                                         modifier = Modifier.weight(1f), background = AppColors.Orange.background,
                                         button = AppColors.Orange.primary, textColor = AppColors.Orange.ink,
                                         iconBackground = AppColors.Orange.primarySecondary,
                                         icon = "star_shine", iconTint = AppColors.Orange.ink,
-                                        label = if (activeDeck == null) "查看项目" else "随机复习",
-                                        compactScale = compactScale, onClick = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, false)) } ?: nav.navigate(AppRoute.Project) }
+                                        label = "随机复习",
+                                        compactScale = compactScale, onClick = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, false)) } }
                                     )
                                 }
                             }
@@ -232,11 +224,7 @@ internal fun HomeScreen(
 }
 
 @Composable
-private fun DailyGoalCard(todayPlan: TodayPlanUiState, streakDays: Int, compactScale: Float) {
-    val dailyGoal = todayPlan.dailyGoal.coerceAtLeast(0)
-    val completed = todayPlan.completedCount.coerceAtLeast(0)
-    val progress = if (dailyGoal == 0) 0f else (completed.toFloat() / dailyGoal).coerceIn(0f, 1f)
-    val percentage = (progress * 100).toInt()
+private fun DailyGoalCard(compactScale: Float) {
     Card(
         shape = RoundedCornerShape(AppShapeRadius.dp),
         colors = CardDefaults.cardColors(containerColor = AppColors.Blue.primary),
@@ -253,7 +241,7 @@ private fun DailyGoalCard(todayPlan: TodayPlanUiState, streakDays: Int, compactS
                 ) {
                     MaterialSymbol("local_fire_department", null, tint = AppColors.TextIconLight, size = fixedSp(28 * compactScale), filled = true)
                     Spacer(Modifier.width((8 * compactScale).dp))
-                    Text("今日目标", color = AppColors.TextIconLight, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale), letterSpacing = fixedSp(-.5f * compactScale))
+                    AppText("今日目标", AppTextRole.SectionTitle, color = AppColors.TextIconLight, designScale = compactScale)
                 }
                 Surface(
                     shape = RoundedCornerShape(999.dp),
@@ -262,7 +250,7 @@ private fun DailyGoalCard(todayPlan: TodayPlanUiState, streakDays: Int, compactS
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         MixedLanguageText(
-                            text = "连续天数：${streakDays.coerceAtLeast(0)}",
+                            text = "连续天数：12",
                             modifier = Modifier.fillMaxWidth(),
                             color = AppColors.Blue.ink,
                             chineseFont = AppFonts.MiSansBold,
@@ -279,15 +267,15 @@ private fun DailyGoalCard(todayPlan: TodayPlanUiState, streakDays: Int, compactS
                 }
             }
             Row(Modifier.fillMaxWidth().height((48 * compactScale).dp), verticalAlignment = Alignment.Bottom) {
-                Text(completed.toString(), modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(48 * compactScale), lineHeight = fixedSp(48 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight, letterSpacing = fixedSp(-2.4f * compactScale))
-                Text("/ $dailyGoal", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight.copy(alpha = .75f))
+                Text("12", modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(48 * compactScale), lineHeight = fixedSp(48 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight, letterSpacing = fixedSp(-2.4f * compactScale))
+                Text("/ 50", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight.copy(alpha = .75f))
                 Text("卡片已复习", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), color = AppColors.TextIconLight.copy(alpha = .75f), fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale))
                 Spacer(Modifier.weight(1f))
-                Text("${percentage}%", modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(47 * compactScale), lineHeight = fixedSp(36 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight)
+                Text("24%", modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(47 * compactScale), lineHeight = fixedSp(36 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight)
             }
             Row(Modifier.fillMaxWidth().height((20 * compactScale).dp), horizontalArrangement = Arrangement.spacedBy((5 * compactScale).dp)) {
-                Box(Modifier.weight(progress.coerceAtLeast(.001f)).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card))
-                Box(Modifier.weight((1f - progress).coerceAtLeast(.001f)).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card.copy(alpha = .5f)))
+                Box(Modifier.width((97 * compactScale).dp).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card))
+                Box(Modifier.weight(1f).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card.copy(alpha = .5f)))
             }
         }
     }
@@ -301,33 +289,18 @@ private fun ContinueLearningCard(
     onOpenDeck: () -> Unit,
     onContinue: () -> Unit
 ) {
-    if (deck == null) {
-        ProjectThemedCard(
-            title = "还没有可复习的卡片",
-            count = 0,
-            countLabel = "cards",
-            progress = 0f,
-            theme = deckTheme(ProjectSummary(id = "empty", name = "")),
-            icon = "playing_cards",
-            variant = ProjectThemedCardVariant.BASE_PAGE,
-            designScale = compactScale,
-            onClick = onOpenDeck,
-            actionLabel = "创建项目",
-            onAction = onContinue,
-        )
-        return
-    }
-    val theme = deckTheme(deck, projects)
-    val cardCount = deck.cardCount
-    val dueCount = deck.dueCount
+    val fallbackDeck = deck ?: DeckSummary("", "计算机网络", 2, "builtin", "violet", 20, 14)
+    val theme = deckTheme(fallbackDeck, projects)
+    val cardCount = deck?.cardCount ?: 20
+    val dueCount = deck?.dueCount ?: 14
     val progress = if (cardCount == 0) 0f else ((cardCount - dueCount).coerceAtLeast(0).toFloat() / cardCount).coerceIn(0f, 1f)
     ProjectThemedCard(
-        title = displayDeckTitle(deck),
+        title = displayDeckTitle(fallbackDeck),
         count = cardCount,
         countLabel = "cards",
         progress = progress,
         theme = theme,
-        icon = studyDeckIcon(deck),
+        icon = studyDeckIcon(fallbackDeck),
         variant = ProjectThemedCardVariant.BASE_PAGE,
         designScale = compactScale,
         onClick = onOpenDeck,
@@ -387,17 +360,11 @@ private fun QuickLearningCard(
                 modifier = Modifier.fillMaxWidth().height((52 * compactScale).dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Text(
+                    AppText(
                         label,
+                        AppTextRole.Label,
                         color = textColor,
-                        // Figma 287:8015: both Chinese action labels use MiSans VF 630.
-                        // Use the card-specific 630 face explicitly so this cannot
-                        // regress to Android's semantic Bold mapping.
-                        fontFamily = AppFonts.MiSansBold,
-                        fontWeight = FontWeight.Normal,
-                        fontSize = fixedSp(16 * compactScale),
-                        lineHeight = fixedSp(20 * compactScale),
-                        style = figmaCardTextStyle()
+                        designScale = compactScale
                     )
                 }
             }

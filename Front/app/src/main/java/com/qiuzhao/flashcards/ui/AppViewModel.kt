@@ -33,13 +33,16 @@ import com.qiuzhao.flashcards.domain.v25.V25CardDraft
 import com.qiuzhao.flashcards.domain.v25.V25CoverageMode
 import com.qiuzhao.flashcards.domain.v25.V25Deck
 import com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio
+import com.qiuzhao.flashcards.domain.v25.V25ErrorCodes
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
 import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25MasteryFilter
+import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
 import com.qiuzhao.flashcards.domain.v25.V25Rating
 import com.qiuzhao.flashcards.domain.v25.V25Repository
 import com.qiuzhao.flashcards.domain.v25.V25Result
+import com.qiuzhao.flashcards.domain.v25.V25SampleCard
 import com.qiuzhao.flashcards.domain.v25.V25StatsDashboard
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.domain.v25.V25TodayPlan
@@ -71,11 +74,46 @@ data class PdfGenerationConfig(
     val requirement: String = "",
 )
 
+/** Generation inputs selected on the final project UI before the user chooses server chapters. */
+internal data class ProjectGenerationDraft(
+    val projectId: String,
+    val deckName: String,
+    val config: PdfGenerationConfig,
+)
+
 data class LocalAccount(val nickname: String, val email: String)
 
 data class AccountBootstrap(val loaded: Boolean = false, val account: LocalAccount? = null)
 
 data class PdfReadFailure(val title: String, val detail: String)
+
+/**
+ * Presentation-only state for the final project/material screens.  A material can be staged
+ * before it is uploaded, but the release contract still permits exactly one PDF per project.
+ * Text entries therefore never become a pretend server resource.
+ */
+internal enum class ProjectDraftMaterialType { FILE, TEXT }
+
+internal data class ProjectDraftMaterial(
+    val id: String,
+    val type: ProjectDraftMaterialType,
+    val title: String,
+    val extension: String? = null,
+    val content: String = "",
+    val uri: Uri? = null,
+)
+
+private fun ProjectDraftMaterial.renamedFile(rawTitle: String): ProjectDraftMaterial {
+    val normalized = rawTitle.trim().ifBlank { title }
+    val resolvedExtension = normalized.substringAfterLast('.', extension.orEmpty()).lowercase()
+    return copy(
+        title = normalized,
+        extension = resolvedExtension.ifBlank { extension.orEmpty() }.ifBlank { null },
+    )
+}
+
+/** Ephemeral handoff from a text parser into the existing deck-import flow. */
+data class TextImportFlow(val deckName: String, val cards: List<CardDraft>)
 
 /** Server-derived weekly activity. The UI never derives it from a local review history. */
 data class WeeklyActivityData(
@@ -187,6 +225,21 @@ class AppViewModel(
     private val _activePdfProject = MutableStateFlow<V25LearningProject?>(null)
     val activePdfProject: StateFlow<V25LearningProject?> = _activePdfProject.asStateFlow()
 
+    private val _projectCreationMaterials = MutableStateFlow<List<ProjectDraftMaterial>>(emptyList())
+    internal val projectCreationMaterials: StateFlow<List<ProjectDraftMaterial>> =
+        _projectCreationMaterials.asStateFlow()
+    private val _projectMaterials = MutableStateFlow<Map<String, List<ProjectDraftMaterial>>>(emptyMap())
+    internal val projectMaterials: StateFlow<Map<String, List<ProjectDraftMaterial>>> =
+        _projectMaterials.asStateFlow()
+    private val _materialImportDrafts = MutableStateFlow<List<ProjectDraftMaterial>>(emptyList())
+    internal val materialImportDrafts: StateFlow<List<ProjectDraftMaterial>> =
+        _materialImportDrafts.asStateFlow()
+    private val _textImportFlow = MutableStateFlow<TextImportFlow?>(null)
+    val textImportFlow: StateFlow<TextImportFlow?> = _textImportFlow.asStateFlow()
+    private val _projectGenerationDraft = MutableStateFlow<ProjectGenerationDraft?>(null)
+    internal val projectGenerationDraft: StateFlow<ProjectGenerationDraft?> =
+        _projectGenerationDraft.asStateFlow()
+
     private val _pendingDeletion = MutableStateFlow<PendingDeletionUiState?>(null)
     val pendingDeletion: StateFlow<PendingDeletionUiState?> = _pendingDeletion.asStateFlow()
 
@@ -282,6 +335,7 @@ class AppViewModel(
                 projectsById.clear()
                 result.value.forEach { project -> projectsById[project.projectId] = project }
                 _projects.value = result.value.map(::toProjectSummary)
+                syncProjectMaterials(result.value)
             }
             is V25Result.Failure -> handleFailure("list_projects", result)
         }
@@ -308,11 +362,276 @@ class AppViewModel(
         }
     }
 
+    /** Starts a new project form; the form can stage one PDF before the upload is committed. */
+    fun resetProjectCreationDraft() {
+        _projectCreationMaterials.value = emptyList()
+        _materialImportDrafts.value = emptyList()
+    }
+
+    /**
+     * Stores a URI only until the user confirms project creation.  Keeping the URI instead of
+     * just a display name is essential: the previous final-UI implementation could only create
+     * a local mock because the actual PDF bytes had already been discarded.
+     */
+    fun addProjectDraftFile(uri: Uri, displayName: String = contentResolver.displayName(uri)) {
+        val extension = displayName.substringAfterLast('.', "").lowercase()
+        if (extension != "pdf") {
+            _uiMessage.value = "当前项目仅支持导入一份 PDF"
+            return
+        }
+        _projectCreationMaterials.value = listOf(
+            ProjectDraftMaterial(
+                id = "project-pdf-${System.nanoTime()}",
+                type = ProjectDraftMaterialType.FILE,
+                title = displayName,
+                extension = extension,
+                uri = uri,
+            ),
+        )
+    }
+
+    /** Kept for an old visual callback; it intentionally refuses name-only fake files. */
+    fun addProjectDraftFile(@Suppress("UNUSED_PARAMETER") displayName: String) {
+        _uiMessage.value = "请通过文件选择器选择 PDF，不能只保存文件名"
+    }
+
+    fun deleteProjectDraftMaterial(materialId: String) {
+        _projectCreationMaterials.value = _projectCreationMaterials.value.filterNot { it.id == materialId }
+    }
+
+    internal fun renameProjectDraftFile(materialId: String, title: String) {
+        _projectCreationMaterials.value = _projectCreationMaterials.value.map { material ->
+            if (material.id == materialId) material.renamedFile(title) else material
+        }
+    }
+
+    /** Text and multi-file materials have no backend contract yet, so do not retain fake data. */
+    fun upsertProjectDraftText(
+        @Suppress("UNUSED_PARAMETER") materialId: String?,
+        @Suppress("UNUSED_PARAMETER") title: String,
+        @Suppress("UNUSED_PARAMETER") content: String,
+    ) {
+        _uiMessage.value = "当前服务只支持 PDF 资料，不支持文本资料"
+    }
+
+    internal fun projectMaterialList(projectId: String): List<ProjectDraftMaterial> =
+        _projectMaterials.value[projectId].orEmpty()
+
+    internal fun deleteProjectMaterial(
+        @Suppress("UNUSED_PARAMETER") projectId: String,
+        @Suppress("UNUSED_PARAMETER") materialId: String,
+    ) {
+        _uiMessage.value = "项目 PDF 不能单独删除；如需移除，请删除项目或在解析失败后替换 PDF"
+    }
+
+    internal fun upsertProjectMaterial(
+        @Suppress("UNUSED_PARAMETER") projectId: String,
+        @Suppress("UNUSED_PARAMETER") material: ProjectDraftMaterial,
+    ) {
+        _uiMessage.value = "当前项目不支持追加资料；每个项目仅绑定一份 PDF"
+    }
+
+    internal fun renameProjectFile(
+        @Suppress("UNUSED_PARAMETER") projectId: String,
+        @Suppress("UNUSED_PARAMETER") materialId: String,
+        @Suppress("UNUSED_PARAMETER") title: String,
+    ) {
+        _uiMessage.value = "PDF 文件名由服务端管理；可在项目编辑页修改项目名称"
+    }
+
+    internal fun beginMaterialImport() {
+        _materialImportDrafts.value = emptyList()
+    }
+
+    internal fun stageMaterialImportFiles(uris: List<Uri>) {
+        val uri = uris.singleOrNull()
+        if (uri == null) {
+            _uiMessage.value = "一次只能选择一份 PDF"
+            return
+        }
+        val displayName = contentResolver.displayName(uri)
+        val extension = displayName.substringAfterLast('.', "").lowercase()
+        if (extension != "pdf") {
+            _uiMessage.value = "当前项目仅支持 PDF"
+            return
+        }
+        _materialImportDrafts.value = listOf(
+            ProjectDraftMaterial(
+                id = "staged-pdf-${System.nanoTime()}",
+                type = ProjectDraftMaterialType.FILE,
+                title = displayName,
+                extension = extension,
+                uri = uri,
+            ),
+        )
+    }
+
+    internal fun stageMaterialImportText(
+        @Suppress("UNUSED_PARAMETER") title: String,
+        @Suppress("UNUSED_PARAMETER") content: String,
+    ) {
+        _uiMessage.value = "当前服务只支持 PDF 资料，不支持文本资料"
+    }
+
+    internal fun upsertMaterialImportText(
+        @Suppress("UNUSED_PARAMETER") materialId: String?,
+        @Suppress("UNUSED_PARAMETER") title: String,
+        @Suppress("UNUSED_PARAMETER") content: String,
+    ) {
+        _uiMessage.value = "当前服务只支持 PDF 资料，不支持文本资料"
+    }
+
+    internal fun removeMaterialImportDraft(materialId: String) {
+        _materialImportDrafts.value = _materialImportDrafts.value.filterNot { it.id == materialId }
+    }
+
+    internal fun renameMaterialImportFile(materialId: String, title: String) {
+        _materialImportDrafts.value = _materialImportDrafts.value.map { material ->
+            if (material.id == materialId) material.renamedFile(title) else material
+        }
+    }
+
+    /**
+     * Commits staged content only through a real service operation.  New projects retain the
+     * URI until the form is submitted; existing projects can replace their file only when the
+     * service accepts a replace-PDF transition.
+     */
+    internal fun commitMaterialImport(
+        projectId: String?,
+        onResult: (success: Boolean, message: String?) -> Unit = { _, _ -> },
+    ) {
+        val staged = _materialImportDrafts.value.singleOrNull() ?: run {
+            _uiMessage.value = "请先选择一份 PDF"
+            onResult(false, "请先选择一份 PDF")
+            return
+        }
+        val uri = staged.uri ?: run {
+            _uiMessage.value = "无法读取所选 PDF"
+            onResult(false, "无法读取所选 PDF")
+            return
+        }
+        if (projectId == null) {
+            _projectCreationMaterials.value = listOf(staged)
+            _materialImportDrafts.value = emptyList()
+            onResult(true, null)
+            return
+        }
+        replaceProjectPdf(projectId, uri) { success, message ->
+            if (success) _materialImportDrafts.value = emptyList()
+            else _uiMessage.value = message ?: "当前项目不能替换 PDF"
+            onResult(success, message)
+        }
+    }
+
+    /** Creates the project form's staged PDF through multipart POST /projects. */
+    fun createProjectFromDraft(
+        name: String,
+        @Suppress("UNUSED_PARAMETER") themeKey: String,
+        onResult: (String?) -> Unit,
+    ) {
+        val material = _projectCreationMaterials.value.singleOrNull()
+        val uri = material?.uri
+        if (uri == null) {
+            onResult("请先选择一份 PDF")
+            return
+        }
+        createProject(uri, name) { _, error ->
+            if (error == null) {
+                _projectCreationMaterials.value = emptyList()
+                _materialImportDrafts.value = emptyList()
+            }
+            onResult(error)
+        }
+    }
+
+    /** Renames an existing project through PATCH /projects/{project_id}. */
+    fun renameProjectFromEditor(
+        projectId: String,
+        name: String,
+        @Suppress("UNUSED_PARAMETER") themeKey: String,
+        onResult: (String?) -> Unit,
+    ) = renameProject(projectId, name, onResult)
+
+    /**
+     * Compatibility entry point for the pre-project PDF wizard.  It now creates a real V2.5
+     * project and waits for its server-side parse result; it never manufactures chapters from
+     * the filename or stores a local-only document.
+     */
+    fun uploadPdf(
+        uri: Uri,
+        onParsed: (List<PdfChapter>) -> Unit,
+        onFailure: (PdfReadFailure) -> Unit,
+    ) = viewModelScope.launch {
+        val fileName = contentResolver.displayName(uri)
+        val input = contentResolver.openInputStream(uri)
+        if (input == null) {
+            onFailure(PdfReadFailure("无法读取 PDF", "所选文件无法打开，请重新选择。"))
+            return@launch
+        }
+        input.use { content ->
+            val projectName = fileName.substringBeforeLast('.').trim().ifBlank { null }
+            when (val result = v25Repository.createProject(fileName, content, projectName)) {
+                is V25Result.Success -> {
+                    projectsById[result.value.projectId] = result.value
+                    syncProjectMaterial(result.value)
+                    _activePdfProject.value = result.value
+                    _pdfFile.value = result.value.toPdfFile()
+                    refreshProjects()
+                    awaitPdfParse(result.value.projectId, onParsed, onFailure)
+                }
+                is V25Result.Failure -> {
+                    handleFailure("create_project_for_pdf_wizard", result, surface = false)
+                    onFailure(PdfReadFailure("上传失败", userMessage(result)))
+                }
+            }
+        }
+    }
+
+    /** The parser is asynchronous, so a parse-in-progress response is not mistaken for success. */
+    private suspend fun awaitPdfParse(
+        projectId: String,
+        onParsed: (List<PdfChapter>) -> Unit,
+        onFailure: (PdfReadFailure) -> Unit,
+    ) {
+        repeat(120) {
+            when (val result = v25Repository.getProject(projectId)) {
+                is V25Result.Success -> {
+                    projectsById[projectId] = result.value
+                    syncProjectMaterial(result.value)
+                    _activePdfProject.value = result.value
+                    _pdfFile.value = result.value.toPdfFile()
+                    when (result.value.status) {
+                        V25ProjectStatus.PARSING -> delay(1_000)
+                        V25ProjectStatus.AWAITING_CHAPTER_CONFIRMATION,
+                        V25ProjectStatus.READY -> {
+                            onParsed(_pdfFile.value?.chapters.orEmpty())
+                            return
+                        }
+                        V25ProjectStatus.PARSE_FAILED -> {
+                            onFailure(
+                                PdfReadFailure(
+                                    "PDF 解析失败",
+                                    result.value.file.errorCode ?: "服务未能解析该 PDF，请替换文件后重试。",
+                                ),
+                            )
+                            return
+                        }
+                    }
+                }
+                is V25Result.Failure -> {
+                    handleFailure("poll_project_parse", result, surface = false)
+                    onFailure(PdfReadFailure("无法获取解析结果", userMessage(result)))
+                    return
+                }
+            }
+        }
+        onFailure(PdfReadFailure("解析仍在进行", "解析超过两分钟仍未完成，请稍后从项目页继续查看。"))
+    }
+
     /** Project creation accepts exactly one PDF; text/Markdown are not a Release API. */
     fun createProject(uri: Uri, name: String, onResult: (String?, String?) -> Unit) = viewModelScope.launch {
-        val resolver = getApplication<Application>().contentResolver
-        val fileName = resolver.displayName(uri)
-        val input = resolver.openInputStream(uri)
+        val fileName = contentResolver.displayName(uri)
+        val input = contentResolver.openInputStream(uri)
         if (input == null) {
             onResult(null, "无法读取所选 PDF")
             return@launch
@@ -321,6 +640,7 @@ class AppViewModel(
             when (val result = v25Repository.createProject(fileName, content, name.trim().ifBlank { null })) {
                 is V25Result.Success -> {
                     projectsById[result.value.projectId] = result.value
+                    syncProjectMaterial(result.value)
                     _activePdfProject.value = result.value
                     _pdfFile.value = result.value.toPdfFile()
                     refreshProjects()
@@ -336,9 +656,8 @@ class AppViewModel(
 
     /** Replaces the only PDF owned by a project after a parse failure. */
     fun replaceProjectPdf(projectId: String, uri: Uri, onResult: (Boolean, String?) -> Unit) = viewModelScope.launch {
-        val resolver = getApplication<Application>().contentResolver
-        val fileName = resolver.displayName(uri)
-        val input = resolver.openInputStream(uri)
+        val fileName = contentResolver.displayName(uri)
+        val input = contentResolver.openInputStream(uri)
         if (input == null) {
             onResult(false, "无法读取所选 PDF")
             return@launch
@@ -347,6 +666,7 @@ class AppViewModel(
             when (val result = v25Repository.replaceProjectPdf(projectId, fileName, content)) {
                 is V25Result.Success -> {
                     projectsById[projectId] = result.value
+                    syncProjectMaterial(result.value)
                     _activePdfProject.value = result.value
                     _pdfFile.value = result.value.toPdfFile()
                     refreshProjects()
@@ -369,6 +689,7 @@ class AppViewModel(
         when (val result = v25Repository.renameProject(projectId, normalized)) {
             is V25Result.Success -> {
                 projectsById[projectId] = result.value
+                syncProjectMaterial(result.value)
                 if (_activePdfProject.value?.projectId == projectId) _activePdfProject.value = result.value
                 _pdfFile.value = _activePdfProject.value?.toPdfFile()
                 refreshProjects()
@@ -398,11 +719,23 @@ class AppViewModel(
         }
     }
 
+    /** Captures visual form choices, then hydrates the real project before chapter selection. */
+    internal fun prepareProjectGeneration(
+        projectId: String,
+        deckName: String,
+        config: PdfGenerationConfig,
+        onReady: (Boolean) -> Unit,
+    ) {
+        _projectGenerationDraft.value = ProjectGenerationDraft(projectId, deckName, config)
+        openProjectForGeneration(projectId, onReady)
+    }
+
     /** Opens a real project for chapter confirmation and generation. */
     fun openProjectForGeneration(projectId: String, onReady: (Boolean) -> Unit) = viewModelScope.launch {
         when (val result = v25Repository.getProject(projectId)) {
             is V25Result.Success -> {
                 projectsById[projectId] = result.value
+                syncProjectMaterial(result.value)
                 _activePdfProject.value = result.value
                 _pdfFile.value = result.value.toPdfFile()
                 onReady(true)
@@ -420,6 +753,7 @@ class AppViewModel(
         when (val result = v25Repository.getProject(projectId)) {
             is V25Result.Success -> {
                 projectsById[projectId] = result.value
+                syncProjectMaterial(result.value)
                 _activePdfProject.value = result.value
                 _pdfFile.value = result.value.toPdfFile()
                 refreshProjects()
@@ -438,6 +772,7 @@ class AppViewModel(
         when (val result = v25Repository.confirmChapters(project.projectId)) {
             is V25Result.Success -> {
                 projectsById[project.projectId] = result.value
+                syncProjectMaterial(result.value)
                 _activePdfProject.value = result.value
                 _pdfFile.value = result.value.toPdfFile()
                 refreshProjects()
@@ -488,13 +823,36 @@ class AppViewModel(
         onReady: () -> Unit,
         onFailure: (String?) -> Unit = {},
     ) = viewModelScope.launch {
-        val project = _activePdfProject.value ?: run {
+        val currentProject = _activePdfProject.value ?: run {
             onFailure("PDF_NOT_READY")
             return@launch
         }
         if (chapterIds.isEmpty()) {
             onFailure("CHAPTER_NOT_FOUND")
             return@launch
+        }
+        val project = when (currentProject.status) {
+            V25ProjectStatus.AWAITING_CHAPTER_CONFIRMATION -> when (
+                val confirmed = v25Repository.confirmChapters(currentProject.projectId)
+            ) {
+                is V25Result.Success -> {
+                    projectsById[confirmed.value.projectId] = confirmed.value
+                    syncProjectMaterial(confirmed.value)
+                    _activePdfProject.value = confirmed.value
+                    _pdfFile.value = confirmed.value.toPdfFile()
+                    confirmed.value
+                }
+                is V25Result.Failure -> {
+                    handleFailure("confirm_chapters_for_generation", confirmed, surface = false)
+                    onFailure(confirmed.code)
+                    return@launch
+                }
+            }
+            V25ProjectStatus.READY -> currentProject
+            else -> {
+                onFailure("PDF_NOT_READY")
+                return@launch
+            }
         }
         val deckId = existingDeckId ?: when (val created = v25Repository.createDeck(
             deckName.trim().ifBlank { "${project.name} 卡片组" },
@@ -517,9 +875,20 @@ class AppViewModel(
                 is V25Result.Success -> {
                     _pdfTask.value = created.value
                     _pdfTaskDeckId.value = deckId
-                    _pdfSamples.value = samples.value.map { sample -> CardDraft(sample.front, sample.back) }
-                    refreshDecks()
-                    onReady()
+                    // Current V2.5 workers may acknowledge the request before the sample cards
+                    // are ready. Poll the persisted task state instead of presenting an empty
+                    // local preview.
+                    when (val ready = awaitSampleCards(created.value)) {
+                        is V25Result.Success -> {
+                            _pdfSamples.value = ready.value.map { sample -> CardDraft(sample.front, sample.back) }
+                            refreshDecks()
+                            onReady()
+                        }
+                        is V25Result.Failure -> {
+                            handleFailure("await_samples", ready, surface = false)
+                            onFailure(ready.code)
+                        }
+                    }
                 }
                 is V25Result.Failure -> {
                     _pdfTask.value = created.value
@@ -529,6 +898,17 @@ class AppViewModel(
                 }
             }
         }
+    }
+
+    /** Legacy wizard overload: samples belong to the active project's real V2.5 task. */
+    fun generatePdfSamples(
+        chapterIds: List<String>,
+        config: PdfGenerationConfig,
+        onReady: () -> Unit,
+        onFailure: (String?) -> Unit = {},
+    ) {
+        val projectName = _activePdfProject.value?.name.orEmpty()
+        generatePdfSamples(null, "${projectName.ifBlank { "PDF" }} 卡片组", chapterIds, config, onReady, onFailure)
     }
 
     /** Starts sample-confirmed generation. Leaving the screen is safe; polling resumes on re-entry. */
@@ -588,6 +968,53 @@ class AppViewModel(
         }
     }
 
+    /** Wait for the server-owned sample worker; never infer samples from local UI configuration. */
+    private suspend fun awaitSampleCards(initial: V25GenerationTask): V25Result<List<V25SampleCard>> {
+        var current = initial
+        repeat(120) {
+            when (current.status) {
+                V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION -> {
+                    _pdfTask.value = current
+                    return V25Result.Success(current.sampleCards)
+                }
+                V25TaskStatus.FAILED, V25TaskStatus.ABANDONED -> {
+                    _pdfTask.value = current
+                    return V25Result.Failure(current.errorCode ?: V25ErrorCodes.GENERATION_FAILED)
+                }
+                else -> Unit
+            }
+            delay(2_500)
+            when (val result = v25Repository.getTask(current.taskId)) {
+                is V25Result.Success -> current = result.value
+                is V25Result.Failure -> return result
+            }
+        }
+        return V25Result.Failure("SAMPLE_TIMEOUT")
+    }
+
+    /** A generated sample already owns a DRAFT task; starting it is the only valid next action. */
+    fun createPdfTask(
+        @Suppress("UNUSED_PARAMETER") existingDeckId: String?,
+        @Suppress("UNUSED_PARAMETER") deckName: String,
+        @Suppress("UNUSED_PARAMETER") chapterIds: List<String>,
+        @Suppress("UNUSED_PARAMETER") config: PdfGenerationConfig,
+        onStarted: () -> Unit,
+        onFailure: (String?) -> Unit = {},
+    ) = startPdfTask(onStarted, onFailure)
+
+    /** V2.5 has no pause/resume task state; refresh is the only safe re-entry operation. */
+    fun resumePdfTask() {
+        refreshPdfTask()
+    }
+
+    fun beginTextImportFlow(deckName: String, cards: List<CardDraft>) {
+        _textImportFlow.value = TextImportFlow(deckName, cards)
+    }
+
+    fun clearTextImportFlow() {
+        _textImportFlow.value = null
+    }
+
     fun startStudy(deckId: String, reviewMode: Boolean) = viewModelScope.launch {
         val result = if (reviewMode) {
             v25Repository.deckReviewQueue(deckId).mapSuccess { queue -> queue.map { it.card } }
@@ -644,6 +1071,14 @@ class AppViewModel(
             is V25Result.Failure -> handleFailure("create_deck", created)
         }
     }
+
+    /** Visual theme is local presentation only; deck persistence remains server-authoritative. */
+    fun importDeck(
+        name: String,
+        drafts: List<CardDraft>,
+        onDone: (String) -> Unit,
+        @Suppress("UNUSED_PARAMETER") themeKey: String,
+    ) = importDeck(name, drafts, onDone)
 
     fun addCardsToDeck(deckId: String, drafts: List<CardDraft>, onDone: () -> Unit) = viewModelScope.launch {
         val valid = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
@@ -841,6 +1276,11 @@ class AppViewModel(
         _apiKeyStatus.value = null
         cardFlows.clear()
         clearPdfFlow()
+        _projectCreationMaterials.value = emptyList()
+        _projectMaterials.value = emptyMap()
+        _materialImportDrafts.value = emptyList()
+        _textImportFlow.value = null
+        _projectGenerationDraft.value = null
         _pendingDeletion.value = null
     }
 
@@ -870,6 +1310,25 @@ class AppViewModel(
         themeKey = themeFor(project.projectId),
         deckCount = project.deckCount,
         materialCount = 1,
+    )
+
+    private fun syncProjectMaterials(projects: List<V25LearningProject>) {
+        _projectMaterials.value = projects.associate { project ->
+            project.projectId to listOf(project.toProjectMaterial())
+        }
+    }
+
+    private fun syncProjectMaterial(project: V25LearningProject) {
+        _projectMaterials.value = _projectMaterials.value.toMutableMap().apply {
+            put(project.projectId, listOf(project.toProjectMaterial()))
+        }
+    }
+
+    private fun V25LearningProject.toProjectMaterial() = ProjectDraftMaterial(
+        id = "project-pdf-${projectId}-${file.id}",
+        type = ProjectDraftMaterialType.FILE,
+        title = file.name,
+        extension = file.name.substringAfterLast('.', "").lowercase().ifBlank { "pdf" },
     )
 
     private fun toDeckSummary(deck: V25Deck) = DeckSummary(
@@ -931,6 +1390,9 @@ class AppViewModel(
             val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
             if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
         }.orEmpty().ifBlank { uri.lastPathSegment?.substringAfterLast('/') ?: "learning-project.pdf" }
+
+    private val contentResolver: android.content.ContentResolver
+        get() = getApplication<Application>().contentResolver
 
     private fun <T, R> V25Result<T>.mapSuccess(transform: (T) -> R): V25Result<R> = when (this) {
         is V25Result.Success -> V25Result.Success(transform(value))

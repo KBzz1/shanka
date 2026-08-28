@@ -140,7 +140,6 @@ import com.qiuzhao.flashcards.data.CardDraft
 import com.qiuzhao.flashcards.data.remote.DeckProgress
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.FlashcardEntity
-import com.qiuzhao.flashcards.data.remote.Dashboard
 import com.qiuzhao.flashcards.data.ImportParser
 import com.qiuzhao.flashcards.data.remote.Rating
 import com.qiuzhao.flashcards.R
@@ -201,13 +200,11 @@ private fun WeeklyActivityCard(designScale: Float, weeklyActivity: WeeklyActivit
                 verticalAlignment = Alignment.Bottom
             ) {
                 Column {
-                    Text(
-                        text = "每周活动",
+                    AppText(
+                        "每周活动",
+                        AppTextRole.SectionTitle,
                         color = AppColors.TextIconDark,
-                        fontFamily = AppFonts.MiSansBold,
-                        fontWeight = FontWeight.Normal,
-                        fontSize = fixedSp(20 * designScale),
-                        lineHeight = fixedSp(27 * designScale)
+                        designScale = designScale
                     )
                     MixedLanguageText(
                         text = "已复习${weeklyActivity.total} cards",
@@ -317,7 +314,7 @@ private fun MasteryCard(designScale: Float, dashboard: DashboardUiState?) {
         ) {
             WeeklyGoalRing(designScale, dashboard)
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)) {
-                Text("这数据不赖，继续努力", color = AppColors.TextIconDark, fontFamily = AppFonts.MiSansBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * designScale), lineHeight = fixedSp(27 * designScale))
+                AppText("这数据不赖，继续努力", AppTextRole.SectionTitle, color = AppColors.TextIconDark, designScale = designScale)
                 DataMetricRow("psychology_alt", "回忆正确率", dashboard.percent(dashboard?.recallAccuracy), designScale)
                 DataMetricRow("bolt", "首次答对率", dashboard.percent(dashboard?.firstAttemptAccuracy), designScale)
                 DataMetricRow("mountain_flag", "记忆保持率", dashboard.percent(dashboard?.retentionRate), designScale)
