@@ -248,6 +248,11 @@ class AppViewModel(
     val importAttempt: StateFlow<ImportAttempt?> = importCoordinator.attempt
     val importSubmitting: StateFlow<Boolean> = importCoordinator.submitting
 
+    /** One rating = fixed client_event_id + idempotency key; retries replay the identical event. */
+    private val reviewCoordinator = ReviewCoordinator(v25Repository)
+    val reviewAttempt: StateFlow<ReviewAttempt?> = reviewCoordinator.attempt
+    val reviewSubmitting: StateFlow<Boolean> = reviewCoordinator.submitting
+
     private val _uiMessage = MutableStateFlow<String?>(null)
     val uiMessage: StateFlow<String?> = _uiMessage.asStateFlow()
 
@@ -1032,15 +1037,23 @@ class AppViewModel(
         }
     }
 
-    fun rate(cardId: String, rating: Rating) = viewModelScope.launch {
-        when (val result = v25Repository.rateCard(cardId, V25Rating.valueOf(rating.name))) {
+    /**
+     * Submits one user rating through the review coordinator. A success fires [onSuccess] (queue
+     * advance, counters) only after the server committed the event; a failure keeps the card and
+     * the attempt so a retry replays the identical event with the same dedupe identifiers.
+     */
+    fun rate(cardId: String, rating: Rating, onSuccess: () -> Unit = {}) = viewModelScope.launch {
+        when (val result = reviewCoordinator.submit(cardId, V25Rating.valueOf(rating.name))) {
             is V25Result.Success -> {
                 _studyCards.value = _studyCards.value.filterNot { it.id == cardId }
                 refreshDecks()
                 refreshDashboard()
                 refreshTodayPlan()
+                onSuccess()
             }
-            is V25Result.Failure -> handleFailure("submit_review", result)
+            is V25Result.Failure -> {
+                if (result.code != ReviewCoordinator.IN_FLIGHT_CODE) handleFailure("submit_review", result)
+            }
         }
     }
 
@@ -1310,6 +1323,7 @@ class AppViewModel(
         _projectGenerationDraft.value = null
         _pendingDeletion.value = null
         importCoordinator.reset()
+        reviewCoordinator.reset()
     }
 
     private fun clearPdfFlow() {

@@ -160,6 +160,7 @@ internal fun StudyScreen(viewModel: AppViewModel, nav: ScreenNavigator, deckId: 
     val cards by viewModel.studyCards.collectAsState()
     val decks by viewModel.decks.collectAsState()
     val projects by viewModel.projects.collectAsState()
+    val reviewSubmitting by viewModel.reviewSubmitting.collectAsState()
     // The flip/free-practice theme follows the owning project (per the user's
     // colour semantics), falling back to the deck's stored family.
     val theme = decks.firstOrNull { it.id == deckId }?.let { deck -> deckTheme(deck, projects) } ?: DeckThemes.first()
@@ -193,17 +194,21 @@ internal fun StudyScreen(viewModel: AppViewModel, nav: ScreenNavigator, deckId: 
             canGoNext = safeIndex < remainingCards.lastIndex,
             rememberedCount = rememberedCount,
             forgottenCount = forgottenCount,
+            submitting = reviewSubmitting,
             modifier = Modifier.fillMaxSize(),
             onBack = nav::popBackStack,
             onEdit = viewModel::updateCard,
             onPrevious = { currentIndex = (safeIndex - 1).coerceAtLeast(0) },
             onNext = { currentIndex = (safeIndex + 1).coerceAtMost(remainingCards.lastIndex) },
             onRate = { rating ->
-                viewModel.rate(card.id, rating)
-                if (rating == Rating.GOOD) rememberedCount++ else forgottenCount++
-                val updatedIds = initialCardIds.orEmpty().filterNot { it == card.id }
-                remainingCardIds = updatedIds
-                currentIndex = safeIndex.coerceAtMost((updatedIds.size - 1).coerceAtLeast(0))
+                // The card leaves the queue only after the server committed the event; a failure
+                // keeps the card on screen and the retry replays the same event identifiers.
+                viewModel.rate(card.id, rating) {
+                    if (rating == Rating.GOOD) rememberedCount++ else forgottenCount++
+                    val updatedIds = initialCardIds.orEmpty().filterNot { it == card.id }
+                    remainingCardIds = updatedIds
+                    currentIndex = safeIndex.coerceAtMost((updatedIds.size - 1).coerceAtLeast(0))
+                }
             }
         )
         return
@@ -255,6 +260,7 @@ private fun ReviewStudy(
     canGoNext: Boolean,
     rememberedCount: Int,
     forgottenCount: Int,
+    submitting: Boolean,
     modifier: Modifier,
     onBack: () -> Unit,
     onEdit: (FlashcardEntity) -> Unit,
@@ -289,13 +295,14 @@ private fun ReviewStudy(
                     flipped = flipped,
                     onFlip = { flipped = !flipped },
                     onRate = onRate,
+                    canRate = !submitting,
                     modifier = Modifier.fillMaxSize(),
                     designScale = designScale,
                     theme = theme
                 )
             }
             Spacer(Modifier.height((16 * designScale).dp))
-            if (flipped) ReviewAnswerControls(theme, canGoPrevious, canGoNext, onPrevious, onNext) { onRate(Rating.HARD) }
+            if (flipped) ReviewAnswerControls(theme, canGoPrevious, canGoNext, onPrevious, onNext, enabled = !submitting) { onRate(Rating.HARD) }
             else ReviewQuestionControls(theme, canGoPrevious, canGoNext, rememberedCount, forgottenCount, onPrevious, onNext)
         }
         if (flipped) ReviewSwipeHint(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = (756 * designScale).dp), designScale) else Text(
@@ -339,12 +346,13 @@ private fun ReviewQuestionControls(
 }
 
 @Composable
-private fun ReviewAnswerControls(theme: DeckTheme, canGoPrevious: Boolean, canGoNext: Boolean, onPrevious: () -> Unit, onNext: () -> Unit, onHard: () -> Unit) {
+private fun ReviewAnswerControls(theme: DeckTheme, canGoPrevious: Boolean, canGoNext: Boolean, onPrevious: () -> Unit, onNext: () -> Unit, enabled: Boolean, onHard: () -> Unit) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     Row(Modifier.fillMaxWidth().height((72 * scale).dp), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
         ReviewNavigationButton("arrow_back", enabled = canGoPrevious, Modifier.width((96 * scale).dp).fillMaxHeight(), scale, theme, onPrevious)
         Surface(
             onClick = onHard,
+            enabled = enabled,
             // Figma 44:2464 uses the semantic amber surface without an outline.
             color = AppColors.Orange.surface,
             contentColor = AppColors.Orange.ink,
@@ -432,6 +440,7 @@ private fun FigmaReviewCard(
     flipped: Boolean,
     onFlip: () -> Unit,
     onRate: (Rating) -> Unit,
+    canRate: Boolean,
     modifier: Modifier,
     designScale: Float,
     theme: DeckTheme
@@ -447,6 +456,11 @@ private fun FigmaReviewCard(
     val frontAlpha = if (rotation <= 90f) 1f else 0f
     val backAlpha = if (rotation > 90f) 1f else 0f
     val faceShape = RoundedCornerShape((AppShapeRadius * designScale).dp)
+    // A swipe that triggered a rating leaves the card shifted; snap it back while the
+    // submission is in flight so a failure shows the card centred and ready to retry.
+    LaunchedEffect(canRate) {
+        if (!canRate) offsetX = 0f
+    }
     Box(
         modifier = modifier
             .offset { IntOffset(offsetX.roundToInt(), 0) }
@@ -458,7 +472,7 @@ private fun FigmaReviewCard(
             .draggable(
                 state = draggable,
                 orientation = Orientation.Horizontal,
-                enabled = flipped,
+                enabled = flipped && canRate,
                 onDragStopped = {
                     when {
                         // Figma 44:2464: left = remembered; right = forgot.
