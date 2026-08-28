@@ -253,6 +253,7 @@ internal fun parseDeletionTaskBlocker(value: JSONObject): V25DeletionTaskBlocker
         deckId = optionalString(value, "deck_id"),
         canAbandon = requiredBoolean(value, "can_abandon"),
         allowedActions = stringList(value, "allowed_actions"),
+        canCancel = optionalBoolean(value, "can_cancel") ?: false,
     )
 
 internal fun parseDeletionPreflight(value: JSONObject): V25DeletionPreflight {
@@ -273,6 +274,8 @@ internal fun parseDeletionPreflight(value: JSONObject): V25DeletionPreflight {
             projectStatus = optionalEnum<V25ProjectStatus>(impact, "project_status"),
             deckName = optionalString(impact, "deck_name"),
         ),
+        cancelableTaskIds = optionalStringList(value, "cancelable_task_ids"),
+        canCancel = optionalBoolean(value, "can_cancel") ?: false,
     )
 }
 

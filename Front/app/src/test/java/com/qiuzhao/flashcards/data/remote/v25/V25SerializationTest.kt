@@ -161,15 +161,19 @@ class V25SerializationTest {
         assertFalse(preflight.canDelete)
         assertEquals(listOf("t-draft"), preflight.abandonableTaskIds)
         assertTrue(preflight.hasUncancellableTasks)
+        assertEquals(listOf("t-draft", "t-generating"), preflight.cancelableTaskIds)
+        assertTrue(preflight.canCancel)
         assertEquals(
-            listOf("ABANDON_AND_RETRY", "WAIT_FOR_TERMINAL", "VIEW_TASKS"),
+            listOf("CANCEL_AND_DELETE", "ABANDON_AND_RETRY", "WAIT_FOR_TERMINAL", "VIEW_TASKS"),
             preflight.actions,
         )
         assertEquals(2, preflight.blockers.size)
         assertEquals(V25TaskStatus.DRAFT, preflight.blockers[0].status)
         assertTrue(preflight.blockers[0].canAbandon)
+        assertTrue(preflight.blockers[0].canCancel)
         assertEquals(V25TaskStatus.GENERATING, preflight.blockers[1].status)
         assertFalse(preflight.blockers[1].canAbandon)
+        assertTrue(preflight.blockers[1].canCancel)
         assertEquals(true, preflight.impact.retainDecks)
         assertEquals(2, preflight.impact.deckCount)
         assertEquals(3, preflight.impact.cardCount)
@@ -540,14 +544,16 @@ class V25SerializationTest {
          "blockers": [
            {"task_id": "t-draft", "status": "DRAFT", "internal_stage": null,
             "project_id": "p-1", "deck_id": "d-1", "can_abandon": true,
-            "allowed_actions": ["ABANDON_AND_RETRY"]},
+            "can_cancel": true, "allowed_actions": ["ABANDON_AND_RETRY"]},
            {"task_id": "t-generating", "status": "GENERATING", "internal_stage": "PLANNING",
             "project_id": "p-1", "deck_id": "d-2", "can_abandon": false,
-            "allowed_actions": ["WAIT_FOR_TERMINAL", "VIEW_TASKS"]}
+            "can_cancel": true, "allowed_actions": ["CANCEL_AND_DELETE", "WAIT_FOR_TERMINAL", "VIEW_TASKS"]}
          ],
          "abandonable_task_ids": ["t-draft"],
          "has_uncancellable_tasks": true,
-         "actions": ["ABANDON_AND_RETRY", "WAIT_FOR_TERMINAL", "VIEW_TASKS"],
+         "cancelable_task_ids": ["t-draft", "t-generating"],
+         "can_cancel": true,
+         "actions": ["CANCEL_AND_DELETE", "ABANDON_AND_RETRY", "WAIT_FOR_TERMINAL", "VIEW_TASKS"],
          "impact": {"retain_decks": true, "deck_count": 2, "card_count": 3,
                     "task_count": 4, "project_status": "READY"}
         }

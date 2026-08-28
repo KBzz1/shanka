@@ -3,6 +3,7 @@ package com.qiuzhao.flashcards.data.remote.v25
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.remote.BackendClient
 import com.qiuzhao.flashcards.data.remote.HttpResult
+import com.qiuzhao.flashcards.data.remote.backendRequestPacer
 import com.qiuzhao.flashcards.data.remote.buildAuthHeaders
 import com.qiuzhao.flashcards.data.remote.requestAuthToken
 import com.qiuzhao.flashcards.data.session.SessionStore
@@ -107,6 +108,9 @@ class BackendV25Transport(
         // 60s read timeout for the large payload.
         val key = idempotencyKey ?: UUID.randomUUID().toString()
         val authToken = requestAuthToken(authenticate = true, tokenOverride = null, session = sessionStore.loadQuietly())
+        // Multipart uploads use their own implementation but still share the server's global
+        // IP gate with JSON requests (including the subsequent task/sample calls).
+        backendRequestPacer.awaitSlot()
         runCatching { executeMultipart(path, fileName, content, name, key, authToken) }
             .getOrElse { unavailableResult(it) }
     }

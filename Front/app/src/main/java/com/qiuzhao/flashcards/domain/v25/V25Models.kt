@@ -286,6 +286,7 @@ data class V25DeletionTaskBlocker(
     val deckId: String?,
     val canAbandon: Boolean,
     val allowedActions: List<String>,
+    val canCancel: Boolean = false,
 )
 
 /** Stable, typed impact summary returned by the deletion preflight endpoints. */
@@ -308,6 +309,8 @@ data class V25DeletionPreflight(
     val hasUncancellableTasks: Boolean,
     val actions: List<String>,
     val impact: V25DeletionImpact,
+    val cancelableTaskIds: List<String> = emptyList(),
+    val canCancel: Boolean = false,
 )
 
 /** Partial task-config update (PATCH /tasks/{task_id}); at least one field is required. */

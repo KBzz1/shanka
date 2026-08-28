@@ -34,6 +34,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -188,7 +189,7 @@ internal fun ProjectCreateScreen(
     }
 
     LaunchedEffect(projectId) {
-        projectId?.let { viewModel.refreshProjectDeletionPreflight(it, retainDecks = true) }
+        projectId?.let { viewModel.refreshProjectDeletionPreflight(it, retainDecks = true, allowCancel = true) }
     }
 
     // Figma 588:1922 uses a white page canvas.  The project family begins at
@@ -363,16 +364,22 @@ internal fun ProjectCreateScreen(
                 }
             },
             preflight = projectId?.let { deletionPreflights[viewModel.projectDeletionPreflightKey(it, true)] },
-            onConfirmWithAbandon = { retainDecks, abandon ->
+            onConfirmWithAbandon = { retainDecks, abandon, cancel ->
                 if (projectDeletionInFlight) return@ProjectDeletionDialog
                 projectDeletionInFlight = true
-                viewModel.deleteProject(editingProject.id, retainDecks, abandonPreGenerationTasks = abandon) { succeeded ->
-                    projectDeletionInFlight = false
-                    if (succeeded) {
-                        showProjectDeletionConfirmation = false
-                        nav.returnToTopLevel()
-                    }
-                }
+                viewModel.deleteProject(
+                    editingProject.id,
+                    retainDecks,
+                    abandonPreGenerationTasks = abandon,
+                    onResult = { succeeded ->
+                        projectDeletionInFlight = false
+                        if (succeeded) {
+                            showProjectDeletionConfirmation = false
+                            nav.returnToTopLevel()
+                        }
+                    },
+                    cancelActiveTasks = cancel,
+                )
             },
             onDismiss = { if (!projectDeletionInFlight) showProjectDeletionConfirmation = false }
         )
@@ -438,10 +445,12 @@ internal fun ProjectDeletionDialog(
     deleting: Boolean = false,
     preflight: V25DeletionPreflight? = null,
     onConfirm: (retainDecks: Boolean) -> Unit,
-    onConfirmWithAbandon: ((retainDecks: Boolean, abandonPreGenerationTasks: Boolean) -> Unit)? = null,
+    onConfirmWithAbandon: ((retainDecks: Boolean, abandonPreGenerationTasks: Boolean, cancelActiveTasks: Boolean) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     var retainDecks by rememberSaveable(projectName) { mutableStateOf(true) }
+    var abandonPreGenerationTasks by rememberSaveable(projectName) { mutableStateOf(true) }
+    var cancelActiveTasks by rememberSaveable(projectName) { mutableStateOf(false) }
     val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
     LaunchedEffect(dialogWindow) { dialogWindow?.setDimAmount(.2f) }
 
@@ -475,20 +484,103 @@ internal fun ProjectDeletionDialog(
                     AppTextRole.CardSubtitle,
                     color = theme.text
                 )
-                preflight?.let { preview ->
-                    val abandonable = preview.blockers.count { it.canAbandon }
-                    val generating = preview.blockers.count { !it.canAbandon }
-                    val previewText = when {
-                        generating > 0 -> "有 $generating 个正式生成任务正在进行，请等待任务结束后再删除。"
-                        abandonable > 0 -> "检测到 $abandonable 个准备阶段任务；确认后会先标记为已放弃，再执行删除。"
-                        !preview.canDelete -> "项目当前仍在解析，请等待解析完成后再删除。"
-                        else -> "当前没有进行中的任务。"
-                    }
+                if (preflight == null && onConfirmWithAbandon != null) {
                     AppText(
-                        previewText,
+                        "预检暂未返回；确认后由服务器再次检查，准备阶段任务会自动放弃。",
                         AppTextRole.CardSubtitle,
-                        color = if (generating > 0 || !preview.canDelete && abandonable == 0) AppColors.WarningInk else theme.text.copy(alpha = .75f),
+                        color = theme.text.copy(alpha = .75f),
                     )
+                } else {
+                    preflight?.let { preview ->
+                        val abandonable = preview.blockers.count { it.canAbandon }
+                        val generating = preview.blockers.count { !it.canAbandon }
+                        val previewText = when {
+                            generating > 0 -> "有 $generating 个正式生成任务正在进行，请等待任务结束后再删除。"
+                            abandonable > 0 -> "检测到 $abandonable 个准备阶段任务；确认后会先标记为已放弃，再执行删除。"
+                            !preview.canDelete -> "项目当前仍在解析，请等待解析完成后再删除。"
+                            else -> "当前没有进行中的任务。"
+                        }
+                        AppText(
+                            previewText,
+                            AppTextRole.CardSubtitle,
+                            color = if (generating > 0 || !preview.canDelete && abandonable == 0) AppColors.WarningInk else theme.text.copy(alpha = .75f),
+                        )
+                    }
+                }
+                if (onConfirmWithAbandon != null) {
+                    val optionEnabled = !deleting && preflight?.hasUncancellableTasks != true
+                    Surface(
+                        onClick = { if (optionEnabled) abandonPreGenerationTasks = !abandonPreGenerationTasks },
+                        enabled = optionEnabled,
+                        color = theme.cardPanel,
+                        contentColor = theme.text,
+                        shape = RoundedCornerShape(AppNestedShapeRadius.dp),
+                        modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
+                            contentDescription = "同时放弃准备阶段任务"
+                            this.selected = abandonPreGenerationTasks
+                            role = Role.Checkbox
+                        },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Checkbox(
+                                checked = abandonPreGenerationTasks,
+                                onCheckedChange = { if (optionEnabled) abandonPreGenerationTasks = it },
+                                enabled = optionEnabled,
+                            )
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            ) {
+                                AppText("同时放弃准备阶段任务", AppTextRole.CardTitle, color = theme.text)
+                                AppText(
+                                    "草稿、样卡生成中、待确认任务会在删除事务中标记为已放弃；正式生成中仍需等待。",
+                                    AppTextRole.CardSubtitle,
+                                    color = theme.text.copy(alpha = .75f),
+                                )
+                            }
+                        }
+                    }
+                    if (preflight?.canCancel == true) {
+                        Surface(
+                            onClick = { if (!deleting) cancelActiveTasks = !cancelActiveTasks },
+                            enabled = !deleting,
+                            color = if (cancelActiveTasks) AppColors.WarningSecondary else theme.cardPanel,
+                            contentColor = theme.text,
+                            shape = RoundedCornerShape(AppNestedShapeRadius.dp),
+                            modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
+                                contentDescription = "同时取消进行中的制卡任务"
+                                this.selected = cancelActiveTasks
+                                role = Role.Checkbox
+                            },
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Checkbox(
+                                    checked = cancelActiveTasks,
+                                    onCheckedChange = { if (!deleting) cancelActiveTasks = it },
+                                    enabled = !deleting,
+                                )
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    AppText("同时取消进行中的制卡任务", AppTextRole.CardTitle, color = theme.text)
+                                    AppText(
+                                        "包括正式生成中的任务；任务会标记为已放弃，然后继续删除项目。",
+                                        AppTextRole.CardSubtitle,
+                                        color = theme.text.copy(alpha = .75f),
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 ProjectDeletionChoice(
                     selected = retainDecks,
@@ -525,16 +617,24 @@ internal fun ProjectDeletionDialog(
                     }
                     Surface(
                         onClick = {
-                            val abandon = preflight?.let { preview ->
-                                preview.blockers.isNotEmpty() && preview.blockers.all { it.canAbandon }
-                            } ?: false
-                            if (onConfirmWithAbandon != null) onConfirmWithAbandon(retainDecks, abandon)
+                            val abandon = if (cancelActiveTasks) {
+                                false
+                            } else {
+                                preflight?.let { preview ->
+                                    abandonPreGenerationTasks && preview.blockers.isNotEmpty() &&
+                                        preview.blockers.all { it.canAbandon }
+                                } ?: abandonPreGenerationTasks
+                            }
+                            if (onConfirmWithAbandon != null) {
+                                onConfirmWithAbandon(retainDecks, abandon, cancelActiveTasks)
+                            }
                             else onConfirm(retainDecks)
                         },
                         enabled = !deleting && (
                             preflight == null ||
                                 (!preflight.hasUncancellableTasks &&
-                                    (preflight.canDelete || preflight.abandonableTaskIds.isNotEmpty()))
+                                    (preflight.canDelete || preflight.abandonableTaskIds.isNotEmpty())) ||
+                                preflight.canCancel
                             ),
                         color = AppColors.WarningStrong,
                         contentColor = AppColors.TextIconLight,

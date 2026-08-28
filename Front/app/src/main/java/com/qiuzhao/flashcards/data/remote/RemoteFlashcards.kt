@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -161,6 +163,39 @@ internal fun buildAuthHeaders(token: String?): Map<String, String> =
 internal fun requestAuthToken(authenticate: Boolean, tokenOverride: String?, session: Session?): String? =
     tokenOverride ?: if (authenticate) session?.token else null
 
+/**
+ * Serialises request starts across every BackendClient in this process. The backend's IP gate
+ * is a fixed five-requests-per-second window and the auth and V2.5 repositories intentionally
+ * have separate clients, so an instance-local limiter cannot protect the shared device. A
+ * conservative 220 ms spacing keeps a burst below that server contract while still allowing
+ * foreground requests to proceed without waiting for a failed 429 retry.
+ */
+internal class RequestPacer(
+    private val minIntervalMs: Long = 220L,
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val sleeper: suspend (Long) -> Unit = { delay(it) },
+) {
+    init {
+        require(minIntervalMs > 0) { "request pacing interval must be positive" }
+    }
+
+    private val mutex = Mutex()
+    private var nextSlotMs = 0L
+
+    suspend fun awaitSlot() {
+        val waitMs = mutex.withLock {
+            val now = nowMs()
+            val slot = maxOf(now, nextSlotMs)
+            nextSlotMs = slot + minIntervalMs
+            slot - now
+        }
+        if (waitMs > 0) sleeper(waitMs)
+    }
+}
+
+/** One process-wide gate shared by auth, legacy and V2.5 repository clients. */
+internal val backendRequestPacer = RequestPacer()
+
 class BackendClient(
     context: Context,
     private val baseUrl: String = defaultBaseUrl(),
@@ -192,6 +227,10 @@ class BackendClient(
             // particular, 10.0.2.2 is only meaningful to an emulator; a
             // physical phone must never be taken down by its absence.
             val authToken = requestAuthToken(authenticate, token, sessionStore.loadQuietly())
+            // The API's IP limiter counts every request, including reads. Reserve a
+            // process-wide slot before opening the connection so concurrent auth and V2.5
+            // clients cannot make the following sample request lose the race to a 429.
+            backendRequestPacer.awaitSlot()
             last = runCatching { execute(method, path, body, contentType, key, authToken) }
                 .getOrElse { unavailableResult(it) }
             val elapsedMs = (System.nanoTime() - started) / 1_000_000
@@ -212,6 +251,7 @@ class BackendClient(
         var last: HttpResult
         do {
             val started = System.nanoTime()
+            backendRequestPacer.awaitSlot()
             last = runCatching { executeMultipart(uri, key, sessionStore.load()?.token) }
                 .getOrElse { unavailableResult(it) }
             val elapsedMs = (System.nanoTime() - started) / 1_000_000

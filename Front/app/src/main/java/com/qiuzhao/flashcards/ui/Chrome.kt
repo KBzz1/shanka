@@ -201,7 +201,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
         entry<AppRoute.ProjectDetail> { route ->
             LaunchedEffect(route.id) {
                 viewModel.refreshProjectTasks(route.id)
-                viewModel.refreshProjectDeletionPreflight(route.id, retainDecks = true)
+                viewModel.refreshProjectDeletionPreflight(route.id, retainDecks = true, allowCancel = true)
             }
             val project = projects.firstOrNull { it.id == route.id }
             if (project == null) LoadingScreen() else ProjectDetailScreen(
@@ -214,26 +214,28 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                 },
                 tasks = projectTasks[route.id].orEmpty(),
                 deletionPreflight = deletionPreflights[viewModel.projectDeletionPreflightKey(route.id, true)],
-                onDeleteProjectWithAbandon = { retainDecks, abandon, onResult ->
+                onDeleteProjectWithAbandon = { retainDecks, abandon, cancel, onResult ->
                     viewModel.deleteProject(
                         project.id,
                         retainDecks,
-                        abandon,
-                        onResult,
+                        abandonPreGenerationTasks = abandon,
+                        onResult = onResult,
+                        cancelActiveTasks = cancel,
                     )
                 },
                 deckDeletionPreflight = { deckId ->
                     deletionPreflights[viewModel.deckDeletionPreflightKey(deckId)]
                 },
                 onRefreshDeckDeletionPreflight = { deckId ->
-                    viewModel.refreshDeckDeletionPreflight(deckId)
+                    viewModel.refreshDeckDeletionPreflight(deckId, allowCancel = true)
                 },
-                onDeleteDeckWithAbandon = { deckId, abandon, onResult ->
+                onDeleteDeckWithAbandon = { deckId, abandon, cancel, onResult ->
                     viewModel.deleteDeck(
                         deckId,
                         onSuccess = { onResult(true) },
                         onFailure = { onResult(false) },
                         abandonPreGenerationTasks = abandon,
+                        cancelActiveTasks = cancel,
                     )
                 },
             )

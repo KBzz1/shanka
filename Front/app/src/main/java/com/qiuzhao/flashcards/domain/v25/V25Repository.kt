@@ -80,12 +80,14 @@ interface V25Repository {
         retainDecks: Boolean,
         abandonPreGenerationTasks: Boolean = false,
         idempotencyKey: String? = null,
+        cancelActiveTasks: Boolean = false,
     ): V25Result<Unit> = deleteProject(projectId, retainDecks)
 
     /** GET /projects/{project_id}/deletion-preflight — read-only impact and task blockers. */
     suspend fun getProjectDeletionPreflight(
         projectId: String,
         retainDecks: Boolean = true,
+        allowCancel: Boolean = false,
     ): V25Result<V25DeletionPreflight> =
         V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "删除预检暂不可用")
 
@@ -185,10 +187,14 @@ interface V25Repository {
         deckId: String,
         abandonPreGenerationTasks: Boolean = false,
         idempotencyKey: String? = null,
+        cancelActiveTasks: Boolean = false,
     ): V25Result<Unit> = deleteDeck(deckId)
 
     /** GET /decks/{deck_id}/deletion-preflight — read-only impact and task blockers. */
-    suspend fun getDeckDeletionPreflight(deckId: String): V25Result<V25DeletionPreflight> =
+    suspend fun getDeckDeletionPreflight(
+        deckId: String,
+        allowCancel: Boolean = false,
+    ): V25Result<V25DeletionPreflight> =
         V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "删除预检暂不可用")
 
     /** GET /decks/{deck_id}/cards — cards with free-browse order/difficulty/mastery filters. */

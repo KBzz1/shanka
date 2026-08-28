@@ -220,6 +220,45 @@ class V25RepositoryContractTest {
         assertFalse(transport.calls[3].idempotent)
     }
 
+    @Test
+    fun `cancellation decision is part of deletion path and preflight`() = runBlocking {
+        val transport = FakeTransport()
+        val repo = repository(FakeSessionStore(session), transport)
+
+        repo.deleteProject(
+            "p-1",
+            retainDecks = false,
+            cancelActiveTasks = true,
+            idempotencyKey = "project-cancel-key",
+        )
+        repo.getProjectDeletionPreflight("p-1", retainDecks = false, allowCancel = true)
+        repo.deleteDeck(
+            "d-1",
+            cancelActiveTasks = true,
+            idempotencyKey = "deck-cancel-key",
+        )
+        repo.getDeckDeletionPreflight("d-1", allowCancel = true)
+
+        assertEquals(
+            "/projects/p-1?retain_decks=false&cancel_active_tasks=true",
+            transport.calls[0].path,
+        )
+        assertEquals("project-cancel-key", transport.calls[0].idempotencyKey)
+        assertEquals(
+            "/projects/p-1/deletion-preflight?retain_decks=false&cancel_active_tasks=true",
+            transport.calls[1].path,
+        )
+        assertEquals(
+            "/decks/d-1?cancel_active_tasks=true",
+            transport.calls[2].path,
+        )
+        assertEquals("deck-cancel-key", transport.calls[2].idempotencyKey)
+        assertEquals(
+            "/decks/d-1/deletion-preflight?cancel_active_tasks=true",
+            transport.calls[3].path,
+        )
+    }
+
     // --- logout ----------------------------------------------------------------------------
 
     @Test

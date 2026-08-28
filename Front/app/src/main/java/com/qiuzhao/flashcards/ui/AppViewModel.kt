@@ -83,6 +83,52 @@ internal data class ProjectGenerationDraft(
     val config: PdfGenerationConfig,
 )
 
+/**
+ * A sample request can outlive the screen that started it.  Reusing only an unfinished task with
+ * the same project, deck, chapter snapshot and config lets a retry resume a lost/429 response
+ * instead of creating another deck and task.  Terminal tasks and changed inputs intentionally
+ * start a new operation.
+ */
+internal fun reusableSampleTask(
+    task: V25GenerationTask?,
+    projectId: String,
+    deckId: String?,
+    chapterIds: List<String>,
+    config: V25GenerationConfig,
+): V25GenerationTask? = task?.takeIf {
+    sampleTaskMatches(it, projectId, deckId, chapterIds, config) &&
+        it.status in setOf(
+            V25TaskStatus.DRAFT,
+            V25TaskStatus.SAMPLE_GENERATING,
+            V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION,
+        )
+}
+
+/** A sample-stage failure can be retried through the server's linked-task endpoint. */
+internal fun retryableSampleTask(
+    task: V25GenerationTask?,
+    projectId: String,
+    deckId: String?,
+    chapterIds: List<String>,
+    config: V25GenerationConfig,
+): V25GenerationTask? = task?.takeIf {
+    sampleTaskMatches(it, projectId, deckId, chapterIds, config) &&
+        it.status == V25TaskStatus.FAILED &&
+        it.sampleCards.isEmpty()
+}
+
+private fun sampleTaskMatches(
+    task: V25GenerationTask,
+    projectId: String,
+    deckId: String?,
+    chapterIds: List<String>,
+    config: V25GenerationConfig,
+): Boolean =
+    task.projectId == projectId &&
+        (deckId == null || task.deckId == deckId) &&
+        task.selectedChapters.map { chapter -> chapter.id } == chapterIds &&
+        task.generationConfig == config
+
 data class LocalAccount(val nickname: String, val email: String)
 
 data class AccountBootstrap(val loaded: Boolean = false, val account: LocalAccount? = null)
@@ -389,9 +435,10 @@ class AppViewModel(
     fun refreshProjectDeletionPreflight(
         projectId: String,
         retainDecks: Boolean,
+        allowCancel: Boolean = true,
         onResult: (V25DeletionPreflight?) -> Unit = {},
     ): Job = viewModelScope.launch {
-        when (val result = v25Repository.getProjectDeletionPreflight(projectId, retainDecks)) {
+        when (val result = v25Repository.getProjectDeletionPreflight(projectId, retainDecks, allowCancel)) {
             is V25Result.Success -> {
                 val key = projectDeletionKey(projectId, retainDecks)
                 _deletionPreflights.value = _deletionPreflights.value + (key to result.value)
@@ -407,9 +454,10 @@ class AppViewModel(
     /** Refreshes the advisory deletion preview used by deck confirmation affordances. */
     fun refreshDeckDeletionPreflight(
         deckId: String,
+        allowCancel: Boolean = true,
         onResult: (V25DeletionPreflight?) -> Unit = {},
     ): Job = viewModelScope.launch {
-        when (val result = v25Repository.getDeckDeletionPreflight(deckId)) {
+        when (val result = v25Repository.getDeckDeletionPreflight(deckId, allowCancel)) {
             is V25Result.Success -> {
                 _deletionPreflights.value = _deletionPreflights.value + (deckDeletionKey(deckId) to result.value)
                 onResult(result.value)
@@ -823,22 +871,35 @@ class AppViewModel(
         projectId: String,
         retainDecks: Boolean,
         onResult: (Boolean) -> Unit = {},
-    ) = deleteProjectInternal(projectId, retainDecks, false, onResult)
+    ) = deleteProjectInternal(projectId, retainDecks, false, false, onResult)
 
     fun deleteProject(
         projectId: String,
         retainDecks: Boolean,
         abandonPreGenerationTasks: Boolean,
         onResult: (Boolean) -> Unit = {},
-    ) = deleteProjectInternal(projectId, retainDecks, abandonPreGenerationTasks, onResult)
+        cancelActiveTasks: Boolean = false,
+    ) = deleteProjectInternal(
+        projectId,
+        retainDecks,
+        abandonPreGenerationTasks,
+        cancelActiveTasks,
+        onResult,
+    )
 
     private fun deleteProjectInternal(
         projectId: String,
         retainDecks: Boolean,
         abandonPreGenerationTasks: Boolean,
+        cancelActiveTasks: Boolean,
         onResult: (Boolean) -> Unit,
     ) = viewModelScope.launch {
-        val operation = projectDeletionKey(projectId, null)
+        val operation = projectDeletionOperationKey(
+            projectId,
+            retainDecks,
+            abandonPreGenerationTasks,
+            cancelActiveTasks,
+        )
         val idempotencyKey = beginWrite(operation)
         if (idempotencyKey == null) {
             onResult(false)
@@ -852,6 +913,7 @@ class AppViewModel(
                     retainDecks,
                     abandonPreGenerationTasks,
                     idempotencyKey,
+                    cancelActiveTasks,
                 )
             ) {
                 is V25Result.Success -> {
@@ -868,7 +930,7 @@ class AppViewModel(
                 }
                 is V25Result.Failure -> {
                     if (result.code == V25ErrorCodes.PROJECT_HAS_ACTIVE_TASK) {
-                        refreshProjectDeletionPreflight(projectId, retainDecks)
+                        refreshProjectDeletionPreflight(projectId, retainDecks, allowCancel = true)
                     }
                     handleFailure("delete_project", result)
                     onResult(false)
@@ -1014,7 +1076,22 @@ class AppViewModel(
                 return@launch
             }
         }
-        val deckId = existingDeckId ?: when (val created = v25Repository.createDeck(
+        val generationConfig = V25GenerationConfig(coverageMode(config.quantity), difficultyRatio(config), config.requirement.trim())
+        val pending = reusableSampleTask(
+            task = _pdfTask.value,
+            projectId = project.projectId,
+            deckId = existingDeckId,
+            chapterIds = chapterIds,
+            config = generationConfig,
+        )
+        val failedSample = retryableSampleTask(
+            task = _pdfTask.value,
+            projectId = project.projectId,
+            deckId = existingDeckId,
+            chapterIds = chapterIds,
+            config = generationConfig,
+        )
+        val deckId = existingDeckId ?: pending?.deckId ?: failedSample?.deckId ?: when (val created = v25Repository.createDeck(
             deckName.trim().ifBlank { "${project.name} 卡片组" },
             project.projectId,
         )) {
@@ -1025,37 +1102,78 @@ class AppViewModel(
                 return@launch
             }
         }
-        val generationConfig = V25GenerationConfig(coverageMode(config.quantity), difficultyRatio(config), config.requirement.trim())
-        when (val created = v25Repository.createTask(project.projectId, deckId, chapterIds, generationConfig)) {
+        val task = pending ?: if (failedSample != null) {
+            when (val retried = v25Repository.retryTask(failedSample.taskId)) {
+                is V25Result.Success -> retried.value
+                is V25Result.Failure -> {
+                    handleFailure("retry_sample_task", retried, surface = false)
+                    onFailure(retried.code)
+                    return@launch
+                }
+            }
+        } else when (val created = v25Repository.createTask(project.projectId, deckId, chapterIds, generationConfig)) {
             is V25Result.Failure -> {
                 handleFailure("create_task", created, surface = false)
                 onFailure(created.code)
+                return@launch
             }
-            is V25Result.Success -> when (val samples = v25Repository.generateSamples(created.value.taskId)) {
+            is V25Result.Success -> created.value
+        }
+        _pdfTask.value = task
+        _pdfTaskDeckId.value = task.deckId ?: deckId
+
+        suspend fun deliverSamples(candidate: V25GenerationTask) {
+            // The worker is server-owned; even an acknowledged POST may still have no cards.
+            when (val ready = awaitSampleCards(candidate)) {
                 is V25Result.Success -> {
-                    _pdfTask.value = created.value
-                    _pdfTaskDeckId.value = deckId
-                    // Current V2.5 workers may acknowledge the request before the sample cards
-                    // are ready. Poll the persisted task state instead of presenting an empty
-                    // local preview.
-                    when (val ready = awaitSampleCards(created.value)) {
-                        is V25Result.Success -> {
-                            _pdfSamples.value = ready.value.map { sample -> CardDraft(sample.front, sample.back) }
-                            refreshDecks()
-                            onReady()
-                        }
-                        is V25Result.Failure -> {
-                            handleFailure("await_samples", ready, surface = false)
-                            onFailure(ready.code)
-                        }
-                    }
+                    _pdfSamples.value = ready.value.map { sample -> CardDraft(sample.front, sample.back) }
+                    refreshDecks()
+                    onReady()
                 }
                 is V25Result.Failure -> {
-                    _pdfTask.value = created.value
-                    _pdfTaskDeckId.value = deckId
-                    handleFailure("generate_samples", samples, surface = false)
-                    onFailure(samples.code)
+                    handleFailure("await_samples", ready, surface = false)
+                    onFailure(ready.code)
                 }
+            }
+        }
+
+        when (task.status) {
+            V25TaskStatus.SAMPLE_GENERATING,
+            V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION -> deliverSamples(task)
+            V25TaskStatus.DRAFT -> when (val samples = v25Repository.generateSamples(task.taskId)) {
+                is V25Result.Success -> deliverSamples(task)
+                is V25Result.Failure -> {
+                    // The request may have reached the server just before the response was
+                    // lost. Re-read once on a state conflict and continue waiting instead of
+                    // reporting a false failure or creating a duplicate task on retry.
+                    if (samples.code == "TASK_STATE_CONFLICT") {
+                        when (val refreshed = v25Repository.getTask(task.taskId)) {
+                            is V25Result.Success -> when (refreshed.value.status) {
+                                V25TaskStatus.SAMPLE_GENERATING,
+                                V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION -> deliverSamples(refreshed.value)
+                                else -> {
+                                    handleFailure("generate_samples", samples, surface = false)
+                                    onFailure(samples.code)
+                                }
+                            }
+                            is V25Result.Failure -> {
+                                handleFailure("refresh_samples_task", refreshed, surface = false)
+                                onFailure(refreshed.code)
+                            }
+                        }
+                    } else {
+                        handleFailure("generate_samples", samples, surface = false)
+                        onFailure(samples.code)
+                    }
+                }
+            }
+            else -> {
+                handleFailure(
+                    "generate_samples",
+                    V25Result.Failure(V25ErrorCodes.TASK_STATE_CONFLICT),
+                    surface = false,
+                )
+                onFailure(V25ErrorCodes.TASK_STATE_CONFLICT)
             }
         }
     }
@@ -1145,7 +1263,13 @@ class AppViewModel(
             }
             delay(2_500)
             when (val result = v25Repository.getTask(current.taskId)) {
-                is V25Result.Success -> current = result.value
+                is V25Result.Success -> {
+                    current = result.value
+                    // Keep the persisted task state visible while the worker is running. This
+                    // makes a screen re-entry observe SAMPLE_GENERATING instead of the stale
+                    // DRAFT snapshot and gives the user an honest progress state.
+                    _pdfTask.value = current
+                }
                 is V25Result.Failure -> return result
             }
         }
@@ -1298,8 +1422,13 @@ class AppViewModel(
         onSuccess: () -> Unit = {},
         onFailure: () -> Unit = {},
         abandonPreGenerationTasks: Boolean = false,
+        cancelActiveTasks: Boolean = false,
     ) = viewModelScope.launch {
-        val operation = deckDeletionKey(deckId)
+        val operation = deckDeletionOperationKey(
+            deckId,
+            abandonPreGenerationTasks,
+            cancelActiveTasks,
+        )
         val idempotencyKey = beginWrite(operation)
         if (idempotencyKey == null) {
             onFailure()
@@ -1314,6 +1443,7 @@ class AppViewModel(
                     deckId,
                     abandonPreGenerationTasks,
                     idempotencyKey,
+                    cancelActiveTasks,
                 )
             ) {
                 is V25Result.Success -> {
@@ -1326,7 +1456,7 @@ class AppViewModel(
                 }
                 is V25Result.Failure -> {
                     if (result.code == "TASK_IN_PROGRESS") {
-                        refreshDeckDeletionPreflight(deckId)
+                        refreshDeckDeletionPreflight(deckId, allowCancel = true)
                     }
                     // Roll back only when no refresh has already observed the deck.  This keeps
                     // a late failure from resurrecting a deck that another action removed.
@@ -1493,6 +1623,21 @@ class AppViewModel(
         else "project:$projectId:retain=$retainDecks"
 
     private fun deckDeletionKey(deckId: String): String = "delete_deck:$deckId"
+
+    private fun projectDeletionOperationKey(
+        projectId: String,
+        retainDecks: Boolean,
+        abandonPreGenerationTasks: Boolean,
+        cancelActiveTasks: Boolean,
+    ): String =
+        "delete_project:$projectId:retain=$retainDecks:abandon=$abandonPreGenerationTasks:cancel=$cancelActiveTasks"
+
+    private fun deckDeletionOperationKey(
+        deckId: String,
+        abandonPreGenerationTasks: Boolean,
+        cancelActiveTasks: Boolean,
+    ): String =
+        "delete_deck:$deckId:abandon=$abandonPreGenerationTasks:cancel=$cancelActiveTasks"
 
     /** One semantic destructive action gets one stable idempotency key and one in-flight gate. */
     private fun beginWrite(operation: String): String? {

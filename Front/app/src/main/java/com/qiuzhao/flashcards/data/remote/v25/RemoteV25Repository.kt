@@ -149,22 +149,30 @@ class RemoteV25Repository(
         retainDecks: Boolean,
         abandonPreGenerationTasks: Boolean,
         idempotencyKey: String?,
+        cancelActiveTasks: Boolean,
     ): V25Result<Unit> = call(
         "delete_project",
         "DELETE",
-        deletionQueryPath("/projects/$projectId", retainDecks, abandonPreGenerationTasks),
+        deletionQueryPath(
+            "/projects/$projectId",
+            retainDecks,
+            abandonPreGenerationTasks,
+            cancelActiveTasks,
+        ),
         idempotencyKey = idempotencyKey,
     ) { Unit }
 
     override suspend fun getProjectDeletionPreflight(
         projectId: String,
         retainDecks: Boolean,
+        allowCancel: Boolean,
     ): V25Result<V25DeletionPreflight> = call(
         "project_deletion_preflight",
         "GET",
         queryPath(
             "/projects/$projectId/deletion-preflight",
             "retain_decks" to if (retainDecks) null else "false",
+            "cancel_active_tasks" to if (allowCancel) "true" else null,
         ),
         idempotent = false,
         map = ::parseDeletionPreflight,
@@ -275,18 +283,30 @@ class RemoteV25Repository(
         deckId: String,
         abandonPreGenerationTasks: Boolean,
         idempotencyKey: String?,
+        cancelActiveTasks: Boolean,
     ): V25Result<Unit> = call(
         "delete_deck",
         "DELETE",
-        deletionQueryPath("/decks/$deckId", null, abandonPreGenerationTasks),
+        deletionQueryPath(
+            "/decks/$deckId",
+            null,
+            abandonPreGenerationTasks,
+            cancelActiveTasks,
+        ),
         idempotencyKey = idempotencyKey,
     ) { Unit }
 
-    override suspend fun getDeckDeletionPreflight(deckId: String): V25Result<V25DeletionPreflight> =
+    override suspend fun getDeckDeletionPreflight(
+        deckId: String,
+        allowCancel: Boolean,
+    ): V25Result<V25DeletionPreflight> =
         call(
             "deck_deletion_preflight",
             "GET",
-            "/decks/$deckId/deletion-preflight",
+            queryPath(
+                "/decks/$deckId/deletion-preflight",
+                "cancel_active_tasks" to if (allowCancel) "true" else null,
+            ),
             idempotent = false,
             map = ::parseDeletionPreflight,
         )
@@ -465,13 +485,18 @@ class RemoteV25Repository(
         base: String,
         retainDecks: Boolean?,
         abandonPreGenerationTasks: Boolean,
+        cancelActiveTasks: Boolean,
     ): String = buildString {
         append(base)
-        if (retainDecks != null || abandonPreGenerationTasks) append("?")
+        if (retainDecks != null || abandonPreGenerationTasks || cancelActiveTasks) append("?")
         if (retainDecks != null) {
             append("retain_decks=").append(retainDecks)
-            if (abandonPreGenerationTasks) append("&")
+            if (abandonPreGenerationTasks || cancelActiveTasks) append("&")
         }
-        if (abandonPreGenerationTasks) append("abandon_pre_generation_tasks=true")
+        if (abandonPreGenerationTasks) {
+            append("abandon_pre_generation_tasks=true")
+            if (cancelActiveTasks) append("&")
+        }
+        if (cancelActiveTasks) append("cancel_active_tasks=true")
     }
 }

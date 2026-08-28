@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -66,10 +67,10 @@ internal fun ProjectDetailScreen(
     onDeleteProject: (retainDecks: Boolean, onResult: (Boolean) -> Unit) -> Unit,
     tasks: List<V25GenerationTask> = emptyList(),
     deletionPreflight: V25DeletionPreflight? = null,
-    onDeleteProjectWithAbandon: ((Boolean, Boolean, (Boolean) -> Unit) -> Unit)? = null,
+    onDeleteProjectWithAbandon: ((Boolean, Boolean, Boolean, (Boolean) -> Unit) -> Unit)? = null,
     deckDeletionPreflight: (String) -> V25DeletionPreflight? = { null },
     onRefreshDeckDeletionPreflight: (String) -> Unit = {},
-    onDeleteDeckWithAbandon: ((String, Boolean, (Boolean) -> Unit) -> Unit)? = null,
+    onDeleteDeckWithAbandon: ((String, Boolean, Boolean, (Boolean) -> Unit) -> Unit)? = null,
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val theme = deckTheme(project)
@@ -78,6 +79,7 @@ internal fun ProjectDetailScreen(
     var projectDeletionInFlight by rememberSaveable(project.id) { mutableStateOf(false) }
     var deckPendingDeletion by rememberSaveable { mutableStateOf<String?>(null) }
     var deckDeletionInFlight by rememberSaveable { mutableStateOf(false) }
+    var cancelActiveDeckTasks by rememberSaveable { mutableStateOf(false) }
     // The coloured project canvas uses the family Background token; every
     // project-owned deck card then lifts to that family's Surface token.
     Box(Modifier.fillMaxSize().background(theme.background)) {
@@ -104,6 +106,7 @@ internal fun ProjectDetailScreen(
                     nav,
                     onRequestDeleteDeck = {
                         deckPendingDeletion = it
+                        cancelActiveDeckTasks = false
                         onRefreshDeckDeletionPreflight(it)
                     },
                     modifier = Modifier.weight(1f),
@@ -137,7 +140,7 @@ internal fun ProjectDetailScreen(
                 }
             },
             preflight = deletionPreflight,
-            onConfirmWithAbandon = { retainDecks, abandon ->
+            onConfirmWithAbandon = { retainDecks, abandon, cancel ->
                 if (projectDeletionInFlight) return@ProjectDeletionDialog
                 projectDeletionInFlight = true
                 val finish: (Boolean) -> Unit = { succeeded ->
@@ -148,7 +151,7 @@ internal fun ProjectDetailScreen(
                     }
                 }
                 if (onDeleteProjectWithAbandon != null) {
-                    onDeleteProjectWithAbandon(retainDecks, abandon, finish)
+                    onDeleteProjectWithAbandon(retainDecks, abandon, cancel, finish)
                 } else {
                     onDeleteProject(retainDecks, finish)
                 }
@@ -163,8 +166,10 @@ internal fun ProjectDetailScreen(
             val canConfirm = if (onDeleteDeckWithAbandon == null) {
                 true
             } else {
-                preflight != null && !preflight.hasUncancellableTasks &&
-                    (preflight.canDelete || preflight.abandonableTaskIds.isNotEmpty())
+                // A preflight is advisory.  If it failed (for example while an older
+                // backend is still being deployed), the DELETE endpoint remains the
+                // authority and will repeat the check atomically.
+                preflight == null || !preflight.hasUncancellableTasks || preflight.canCancel
             }
             AlertDialog(
                 onDismissRequest = { if (!deckDeletionInFlight) deckPendingDeletion = null },
@@ -177,12 +182,16 @@ internal fun ProjectDetailScreen(
                         )
                         when {
                             preflight == null && onDeleteDeckWithAbandon != null -> Text(
-                                "正在检查进行中的制卡任务…",
+                                "预检暂未返回；确认后由服务器再次检查，准备阶段任务会自动放弃。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             preflight?.hasUncancellableTasks == true -> Text(
-                                "存在正式生成中的任务，请等待任务结束后再删除。",
+                                if (preflight.canCancel) {
+                                    "存在正式生成中的任务；可在下方选择同时取消后删除。"
+                                } else {
+                                    "存在正式生成中的任务，请等待任务结束后再删除。"
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error,
                             )
@@ -193,6 +202,24 @@ internal fun ProjectDetailScreen(
                             )
                             preflight?.canDelete == true -> Text(
                                 "当前没有进行中的任务。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (preflight?.canCancel == true) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = cancelActiveDeckTasks,
+                                    onCheckedChange = { cancelActiveDeckTasks = it },
+                                    enabled = !deckDeletionInFlight,
+                                )
+                                Text(
+                                    "同时取消进行中的制卡任务",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            Text(
+                                "会取消该卡片组关联的正式生成与准备阶段任务，并继续删除卡片组。",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -210,12 +237,19 @@ internal fun ProjectDetailScreen(
                     TextButton(
                         enabled = canConfirm && !deckDeletionInFlight,
                         onClick = {
-                            val abandon = preflight?.let {
-                                it.blockers.isNotEmpty() && it.blockers.all { blocker -> blocker.canAbandon }
-                            } ?: false
+                            // Unknown preflight is intentionally fail-safe for the UI: the
+                            // backend performs the authoritative atomic check and can reject
+                            // a truly non-interruptible generation task.
+                            val abandon = if (cancelActiveDeckTasks) {
+                                false
+                            } else {
+                                preflight?.let {
+                                    it.blockers.isNotEmpty() && it.blockers.all { blocker -> blocker.canAbandon }
+                                } ?: (onDeleteDeckWithAbandon != null)
+                            }
                             if (onDeleteDeckWithAbandon != null) {
                                 deckDeletionInFlight = true
-                                onDeleteDeckWithAbandon(deckId, abandon) { succeeded ->
+                                onDeleteDeckWithAbandon(deckId, abandon, cancelActiveDeckTasks) { succeeded ->
                                     deckDeletionInFlight = false
                                     if (succeeded) deckPendingDeletion = null
                                 }
