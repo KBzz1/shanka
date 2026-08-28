@@ -63,6 +63,7 @@ class Task(BaseModel):
     file_id: str | None
     deck_id: str | None
     retry_of_task_id: str | None = None
+    operation_id: str | None = None
     status: str  # V2.5 七态（DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION/GENERATING/COMPLETED/FAILED/ABANDONED）
     internal_stage: str | None = None  # PLANNING/GENERATING/SCORING/PUBLISHING（运行期观测）
     selected_chapters: list[Chapter]

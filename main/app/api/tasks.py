@@ -95,6 +95,7 @@ def create_task_endpoint(
             config=payload.generation_config,
             now=_now(),
             settings=settings,  # 预算硬上限（spec §10）
+            operation_key=get_idempotency_key(request),
         )
         session.flush()
         return 201, task_view(task)
@@ -226,6 +227,7 @@ def retry_task_endpoint(
             task_id=task_id,
             now=_now(),
             settings=settings,  # 预算硬上限
+            operation_key=get_idempotency_key(request),
         )
         session.flush()
         return 201, task_view(task)

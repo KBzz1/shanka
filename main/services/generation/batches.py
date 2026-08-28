@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
+from infra.clock import SystemClock
 from infra.db.models import (
     Batch,
     Card,
@@ -44,6 +45,7 @@ from infra.db.models import (
     Task,
     TextChunk,
 )
+from infra.db.session import format_utc
 from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
 from infra.llm.prompts import (
     asset_versions,
@@ -64,6 +66,7 @@ from services.generation.response_parse import (
 )
 from services.generation.rubric import batch_quality
 from services.generation.schema_validator import load_card_schema, validate_card
+from services.tasks.lease import TaskLease, require_lease
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,11 @@ _DEFAULT_MAX_INPUT_CHARS = 10_000
 _DEFAULT_MAX_OUTPUT_TOKENS = 768
 
 _GENERATING_STAGE = "GENERATING"
+
+
+def _task_lease(session: Session, task_id: str) -> TaskLease | None:
+    value = session.info.get(f"task-lease:{task_id}")
+    return value if isinstance(value, TaskLease) else None
 
 
 def plan_batches(
@@ -155,6 +163,15 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     batch_size 语义已删除（批 = 单元，无 offset 反推）；重试预算（generation_retry_limit）
     以账本尝试数为权威（Batch.retry_count 只是兼容投影）。
     """
+    lease = _task_lease(session, task_id)
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+        )
     settings = session.info.get("settings")
     retry_limit = (
         settings.generation_retry_limit if isinstance(settings, Settings) else _DEFAULT_RETRY_LIMIT
@@ -185,6 +202,14 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         unit = session.get(KnowledgePoint, batch.generation_unit_id)
     if unit is None or unit.task_id != task_id:
         # 旧批次无 generation_unit_id（迁移兼容 NULL）或外键失配：无法按单元锚定生成
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+            )
         _skip_batch(batch, task=task, now=now, unit=None)
         logger.warning(
             "batch skipped, no generation unit",
@@ -200,6 +225,14 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     pages = _load_unit_pages(session, unit=unit, max_chars=max_input_chars)
     if not pages:
         # 单元无可用来源页（来源不足的极端情形）：按安全弃权直接 SKIPPED，不发调用
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+            )
         _skip_batch(batch, task=task, now=now, unit=unit)
         logger.warning(
             "batch skipped, source insufficient",
@@ -225,6 +258,14 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         batch.retry_count = attempt_count(
             session, task_id=task_id, stage=_GENERATING_STAGE, operation_key=operation_key
         )
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+            )
         _skip_batch(batch, task=task, now=now, unit=unit)
         session.flush()
         return 1
@@ -248,6 +289,7 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         scope_type="TASK",
         scope_id=task_id,
         task_id=task_id,
+        operation_id=task.operation_id,
         stage=_GENERATING_STAGE,
         operation_key=operation_key,
         input_fingerprint=fingerprint,
@@ -259,6 +301,14 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         schema_version=versions["schema_version"],
         now=now,
     )
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+        )
     session.commit()  # §9：STARTED 占位 + 批次抢占先提交，之后才发调用（红线 R-17 不持写锁）
     try:
         result = client.chat(
@@ -269,6 +319,15 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     except RetryableUpstreamError as exc:
         if exc.code is ErrorCode.API_KEY_UNAVAILABLE and not exc.retryable:
             # Key 错误（401，§6.3）：记账后上抛 → executor 任务 FAILED，不重试
+            if lease is not None:
+                require_lease(
+                    session,
+                    task_id=task_id,
+                    worker_id=lease.worker_id,
+                    token=lease.token,
+                    version=lease.version,
+                    now=format_utc(SystemClock().now_utc()),
+                )
             finish_failed(session, attempt, error_code=exc.code.value, now=now)
             session.flush()
             raise
@@ -284,13 +343,39 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
             retry_limit=retry_limit,
         )
     except AppError as exc:  # 其他系统级错误：记账后上抛（executor 任务 FAILED）
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+                now=format_utc(SystemClock().now_utc()),
+            )
         finish_failed(session, attempt, error_code=exc.code.value, now=now)
         session.flush()
         raise
     except Exception:
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+                now=format_utc(SystemClock().now_utc()),
+            )
         finish_failed(session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=now)
         session.flush()
         raise
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+        )
     _observe_llm_call(result)  # 8.3：每批一次 chat 的 llm 指标上报
     # 输出校验层（spec §5.3/§5.6）：先原子拒绝原始非法响应，再投影（禁止过滤/降格）
     try:
@@ -322,6 +407,14 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
     if not cards:
         # 合法显式空数组 = 安全弃权（§5.3）→ SOURCE_INSUFFICIENT 直接 SKIPPED，不重试；
         # 调用本身成功 → 账本 SUCCESS（normalized_result 不写入——红线 4）
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+            )
         finish_success(
             session,
             attempt,
@@ -369,6 +462,14 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
             now=now,
             retry_limit=retry_limit,
         )
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+        )
     inserted, fresh = _insert_card(
         session, task=task, deck_id=deck_id, now=now, batch=batch, unit=unit, internal=internal
     )
@@ -408,6 +509,16 @@ def _finish_attempt_failed(
 ) -> int:
     """失败尝试落库（账本 FAILED）：预算内 → 批次 FAILED（下次尝试为重试）；预算耗尽
     （尝试数 >= 1+limit，含 UNKNOWN）→ 批次 SKIPPED。Batch.retry_count = 账本尝试数投影。"""
+    lease = _task_lease(session, task.task_id)
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=format_utc(SystemClock().now_utc()),
+        )
     finish_failed(session, attempt, error_code=error_code, now=now)
     batch.retry_count = attempt.attempt_no  # 投影 = 本次（失败）尝试后的账本尝试数
     if attempt.attempt_no >= 1 + retry_limit:

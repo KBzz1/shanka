@@ -18,7 +18,7 @@ import json
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
@@ -28,7 +28,9 @@ from infra.db.models import (
     Card,
     Chapter,
     Deck,
+    GenerationOperation,
     LearningProject,
+    LlmCallAttempt,
     PdfFile,
     ProjectStudySettings,
     Task,
@@ -38,6 +40,9 @@ from services.deletion.service import (
     abandon_pre_generation,
     preflight_payload,
     resource_tasks,
+)
+from services.deletion.service import (
+    cancel_active_tasks as cancel_active_generation_tasks,
 )
 from services.pdf.service import chapter_view, delete_chapter, pdf_view, update_chapter, upload_pdf
 
@@ -261,6 +266,7 @@ def delete_project(
     retain_decks: bool,
     storage: Any,
     abandon_pre_generation_tasks: bool = False,
+    cancel_active_tasks: bool = False,
     now: str | None = None,
 ) -> None:
     """删除项目聚合（两决策，PRD V25-GEN-FR-09）。存储清理失败 → 抛错回滚元数据。
@@ -276,7 +282,16 @@ def delete_project(
         raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "项目解析中，暂时无法删除")
     active_tasks = resource_tasks(session, user_id=user_id, project_id=project_id)
     if active_tasks:
-        if abandon_pre_generation_tasks:
+        if cancel_active_tasks:
+            cancel_active_generation_tasks(
+                session,
+                user_id=user_id,
+                tasks=active_tasks,
+                now=now or format_utc(SystemClock().now_utc()),
+                resource_type="PROJECT",
+                resource_id=project_id,
+            )
+        elif abandon_pre_generation_tasks:
             abandon_pre_generation(
                 session,
                 user_id=user_id,
@@ -309,7 +324,9 @@ def delete_project(
             session.delete(deck)
     # 任务历史全删：knowledge_points/batches/llm_call_attempts 级联；
     # 保留牌组的已发布卡 source_task_id 经 FK SET NULL（来源查看不可再承诺）
-    for task in session.scalars(select(Task).where(Task.project_id == project_id)).all():
+    project_tasks = list(session.scalars(select(Task).where(Task.project_id == project_id)).all())
+    _detach_task_history(session, project_tasks, now=now or format_utc(SystemClock().now_utc()))
+    for task in project_tasks:
         session.delete(task)
     settings = session.get(ProjectStudySettings, project_id)
     if settings is not None:
@@ -334,7 +351,12 @@ def _active_task_count(session: Session, project_id: str) -> int:
 
 
 def project_deletion_preflight(
-    session: Session, *, user_id: str, project_id: str, retain_decks: bool
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    retain_decks: bool,
+    allow_cancel: bool = False,
 ) -> dict[str, object]:
     """Read-only deletion preview; the DELETE endpoint repeats all checks atomically."""
     project = _owned_project(session, user_id=user_id, project_id=project_id)
@@ -351,6 +373,7 @@ def project_deletion_preflight(
         resource_type="PROJECT",
         resource_id=project_id,
         project_id=project_id,
+        allow_cancel=allow_cancel,
         impact={
             "retain_decks": retain_decks,
             "deck_count": len(decks),
@@ -369,6 +392,26 @@ def project_deletion_preflight(
     # `can_delete` from a second, differently-filtered query.
     payload["blocking_task_count"] = len(blockers)
     return payload
+
+
+def _detach_task_history(session: Session, tasks: list[Task], *, now: str) -> None:
+    """保留 LLM 对账行但解除已删除任务的外键/快照引用。"""
+    for task in tasks:
+        session.execute(
+            update(LlmCallAttempt)
+            .where(LlmCallAttempt.task_id == task.task_id)
+            .values(task_id=None)
+        )
+        operations = session.scalars(
+            select(GenerationOperation).where(GenerationOperation.task_id == task.task_id)
+        ).all()
+        for operation in operations:
+            if operation.status == "ACTIVE":
+                operation.status = "ABANDONED"
+                operation.ended_at = now
+                operation.terminal_reason = "RESOURCE_DELETE"
+            operation.task_id = None
+            operation.updated_at = now
 
 
 def update_project_chapter(

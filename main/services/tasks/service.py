@@ -36,11 +36,27 @@ from app.errors import AppError, ErrorCode
 from app.schemas.samples import GenerationConfig
 from domain.enums import TaskStatus
 from domain.task import TERMINAL_TASK_STATUSES
-from infra.db.models import ApiKey, Card, Chapter, LearningProject, PdfFile, Task
+from infra.db.models import (
+    ApiKey,
+    Card,
+    Chapter,
+    GenerationOperation,
+    LearningProject,
+    LlmCallAttempt,
+    PdfFile,
+    Task,
+)
 from services.decks.service import _owned as _owned_deck
 from services.generation.quota import task_unit_budget
 from services.generation.samples import config_fingerprint
 from services.generation.validate import validate_config
+from services.tasks.lease import TaskLease, require_lease
+from services.tasks.operations import (
+    begin_operation,
+    bind_operation_task,
+    finish_operation,
+    normalized_input_fingerprint,
+)
 
 
 def _uuid4() -> str:
@@ -141,17 +157,28 @@ def _budget_guard(
 
 
 def _cas_transition(
-    session: Session, *, task_id: str, from_statuses: frozenset[str], values: dict[str, Any]
+    session: Session,
+    *,
+    task_id: str,
+    from_statuses: frozenset[str],
+    values: dict[str, Any],
+    lease: TaskLease | None = None,
 ) -> bool:
     """状态转移条件更新（并发安全）：WHERE task_id AND status IN (前置)；rowcount=0 →
     前置不符或已转移。不 commit——由调用方提交。"""
+    predicates: list[Any] = [Task.task_id == task_id, Task.status.in_(from_statuses)]
+    if lease is not None:
+        predicates.extend(
+            [
+                Task.claimed_by == lease.worker_id,
+                Task.lease_token == lease.token,
+                Task.lease_version == lease.version,
+                Task.lease_until.is_not(None),
+            ]
+        )
     result = cast(
         CursorResult[Any],
-        session.execute(
-            update(Task)
-            .where(Task.task_id == task_id, Task.status.in_(from_statuses))
-            .values(**values)
-        ),
+        session.execute(update(Task).where(*predicates).values(**values)),
     )
     return result.rowcount == 1
 
@@ -165,6 +192,7 @@ def task_view(task: Task) -> dict[str, object]:
         "file_id": task.file_id,
         "deck_id": task.deck_id,
         "retry_of_task_id": task.retry_of_task_id,  # V2.5 失败重试关联
+        "operation_id": task.operation_id,
         "status": task.status,
         "internal_stage": task.stage,  # V2.5：stage 列 → internal_stage 语义（运行期观测）
         "selected_chapters": json.loads(task.selected_chapters),
@@ -198,6 +226,7 @@ def create_task(
     config: GenerationConfig,
     now: str,
     settings: Settings | None = None,
+    operation_key: str | None = None,
 ) -> Task:
     """建立 DRAFT（自动保存语义，6.4）：章节/牌组同项目归属校验 → 已保存 Key →
     预算硬上限 → 落 DRAFT（章节快照 + 目标牌组 + 配置；internal_stage 空）。
@@ -208,6 +237,23 @@ def create_task(
     _require_same_project_deck(session, user_id=user_id, project_id=project_id, deck_id=deck_id)
     _require_api_key(session, user_id=user_id)
     _budget_guard(session, chapter_count=len(chapter_ids), config=config, settings=settings)
+    stable_operation_key = operation_key or _uuid4()
+    input_fingerprint = normalized_input_fingerprint(
+        user_id=user_id,
+        project_id=project_id,
+        deck_id=deck_id,
+        chapter_snapshot=chapter_snapshot,
+        generation_config=config.model_dump(),
+    )
+    operation, existing_task, _deduplicated = begin_operation(
+        session,
+        user_id=user_id,
+        operation_key=stable_operation_key,
+        input_fingerprint=input_fingerprint,
+        now=now,
+    )
+    if existing_task is not None:
+        return existing_task
     task = Task(
         task_id=_uuid4(),
         user_id=user_id,
@@ -222,9 +268,11 @@ def create_task(
         resumable=0,
         created_at=now,
         updated_at=now,
+        operation_id=operation.operation_id,
     )
     session.add(task)
     session.flush()
+    bind_operation_task(session, operation, task, now=now)
     return task
 
 
@@ -311,6 +359,17 @@ def update_task(
     ):
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "任务状态已变化，请刷新后重试")
     session.refresh(task)
+    if task.operation_id is not None:
+        operation = session.get(GenerationOperation, task.operation_id)
+        if operation is not None:
+            operation.input_fingerprint = normalized_input_fingerprint(
+                user_id=user_id,
+                project_id=project_id,
+                deck_id=new_deck,
+                chapter_snapshot=snapshot,
+                generation_config=new_config.model_dump(),
+            )
+            operation.updated_at = now
     return task
 
 
@@ -330,12 +389,27 @@ def request_samples(session: Session, *, user_id: str, task_id: str, now: str) -
 
 
 def complete_samples(
-    session: Session, *, task_id: str, cards: list[dict[str, object]], config_hash: str, now: str
+    session: Session,
+    *,
+    task_id: str,
+    cards: list[dict[str, object]],
+    config_hash: str,
+    now: str,
+    lease: TaskLease | None = None,
 ) -> bool:
     """样卡 worker 完成（4.1）：条件更新 WHERE SAMPLE_GENERATING 持久化样卡 + 配置指纹
     → AWAITING_SAMPLE_CONFIRMATION。SAMPLE_GENERATING 时并发 abandon/转移 → rowcount=0
     不写入（后台请求完成写入无害、不复活终态）。返回是否写入。"""
-    return _cas_transition(
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=now,
+        )
+    written = _cas_transition(
         session,
         task_id=task_id,
         from_statuses=frozenset({TaskStatus.SAMPLE_GENERATING.value}),
@@ -343,9 +417,17 @@ def complete_samples(
             "sample_cards": json.dumps(cards, ensure_ascii=False),
             "sample_config_hash": config_hash,
             "status": TaskStatus.AWAITING_SAMPLE_CONFIRMATION.value,
+            "claimed_by": None,
+            "lease_token": None,
+            "lease_until": None,
+            "lease_version": (Task.lease_version + 1) if lease is not None else Task.lease_version,
             "updated_at": now,
         },
+        lease=lease,
     )
+    if written:
+        finish_operation(session, task_id=task_id, status="ACTIVE", now=now)
+    return written
 
 
 def start_task(session: Session, *, user_id: str, task_id: str, now: str) -> Task:
@@ -376,10 +458,18 @@ def start_task(session: Session, *, user_id: str, task_id: str, now: str) -> Tas
             "stage": "PLANNING",  # internal_stage 起点（4.1 内部阶段依次 PLANNING→…）
             "sample_confirmed_at": now,
             "updated_at": now,
+            "claimed_by": None,
+            "lease_token": None,
+            "lease_until": None,
+            "lease_version": Task.lease_version + 1,
         },
     ):
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "任务状态已变化，请刷新后重试")
     session.refresh(task)
+    # Starting formal generation keeps the durable operation ACTIVE.  The operation is closed
+    # only when the task reaches a terminal state (or is explicitly abandoned/deleted), so a
+    # worker restart can still reconcile the same generation intent.
+    finish_operation(session, task_id=task_id, status="ACTIVE", now=now)
     return task
 
 
@@ -399,13 +489,19 @@ def abandon_task(session: Session, *, user_id: str, task_id: str, now: str) -> T
         ),
         values={
             "status": TaskStatus.ABANDONED.value,
+            "stage": None,
             "ended_at": now,
             "resumable": 0,
             "updated_at": now,
+            "claimed_by": None,
+            "lease_token": None,
+            "lease_until": None,
+            "lease_version": Task.lease_version + 1,
         },
     ):
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "仅正式生成前任务可放弃")
     session.refresh(task)
+    finish_operation(session, task_id=task_id, status="ABANDONED", now=now, reason="USER_ABANDON")
     return task
 
 
@@ -416,6 +512,7 @@ def retry_task(
     task_id: str,
     now: str,
     settings: Settings | None = None,
+    operation_key: str | None = None,
 ) -> Task:
     """失败重试（6.4/PRD V25-GEN-FR-07）：仅 FAILED；创建关联新任务（retry_of_task_id
     指向原任务），复制项目/PDF/牌组/章节/配置。已确认样卡沿用（正式生成失败 → 新任务
@@ -440,6 +537,28 @@ def retry_task(
         config=config,
         settings=settings,
     )
+    try:
+        snapshot = json.loads(original.selected_chapters)
+        if not isinstance(snapshot, list):
+            raise TypeError
+    except (ValueError, TypeError):
+        raise AppError(ErrorCode.INTERNAL_ERROR, "任务章节快照数据异常") from None
+    operation, existing_task, _deduplicated = begin_operation(
+        session,
+        user_id=user_id,
+        operation_key=operation_key or _uuid4(),
+        input_fingerprint=normalized_input_fingerprint(
+            user_id=user_id,
+            project_id=original.project_id,
+            deck_id=original.deck_id,
+            chapter_snapshot=snapshot,
+            generation_config=config.model_dump(),
+            behavior_version="generation-retry-v1",
+        ),
+        now=now,
+    )
+    if existing_task is not None:
+        return existing_task
     new_task = Task(
         task_id=_uuid4(),
         user_id=user_id,
@@ -455,6 +574,7 @@ def retry_task(
         resumable=0,
         created_at=now,
         updated_at=now,
+        operation_id=operation.operation_id,
     )
     if (
         original.sample_confirmed_at is not None
@@ -468,6 +588,7 @@ def retry_task(
         new_task.sample_confirmed_at = now
     session.add(new_task)
     session.flush()
+    bind_operation_task(session, operation, new_task, now=now)
     return new_task
 
 
@@ -499,4 +620,21 @@ def delete_task(
     else:
         for card in published:
             card.source_task_id = None
+    # Keep the cost/audit ledger after deleting task history.  The migration is compatible with
+    # old SQLite files whose task FK was CASCADE because the explicit NULL happens before the
+    # task DELETE; operation identity is retained but no longer points at a missing task row.
+    session.execute(
+        update(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id).values(task_id=None)
+    )
+    operation = session.scalar(
+        select(GenerationOperation).where(GenerationOperation.task_id == task_id)
+    )
+    if operation is not None:
+        operation_time = task.updated_at or operation.updated_at
+        operation.task_id = None
+        operation.updated_at = operation_time
+        if operation.status == "ACTIVE":
+            operation.status = "ABANDONED"
+            operation.ended_at = operation_time
+            operation.terminal_reason = "TASK_DELETE"
     session.delete(task)

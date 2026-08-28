@@ -102,12 +102,14 @@ def deck_deletion_preflight_endpoint(
     request: Request,
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
+    cancel_active_tasks: Annotated[bool, Query()] = False,
 ) -> JSONResponse:
     """Return deck impact and active task blockers; this does not reserve the deck."""
     body = deck_deletion_preflight(
         session,
         user_id=request.state.principal.user_id,
         deck_id=deck_id,
+        allow_cancel=cancel_active_tasks,
     )
     return JSONResponse(content=body)
 
@@ -147,11 +149,13 @@ def delete_deck_endpoint(
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
     abandon_pre_generation_tasks: Annotated[bool, Query()] = False,
+    cancel_active_tasks: Annotated[bool, Query()] = False,
 ) -> Response:
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = (
         f"/decks/{deck_id}?abandon_pre_generation_tasks={str(abandon_pre_generation_tasks).lower()}"
+        f"&cancel_active_tasks={str(cancel_active_tasks).lower()}"
     )
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
@@ -161,6 +165,7 @@ def delete_deck_endpoint(
             user_id=user_id,
             deck_id=deck_id,
             abandon_pre_generation_tasks=abandon_pre_generation_tasks,
+            cancel_active_tasks=cancel_active_tasks,
             now=_now(),
         )
         return 204, {}

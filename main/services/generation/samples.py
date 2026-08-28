@@ -14,15 +14,17 @@ V2.5：样卡经 POST /tasks/{task_id}/samples 落 SAMPLE_GENERATING，执行器
 - 密钥由执行器解密并以带 Key 的 client 注入（红线 4：明文仅存在于 infra/llm 实例）；
 - 输出先做强信封校验（parse_cards_json：非 JSON / 无 cards → GENERATION_FAILED），
   再逐卡 Card v1 校验（Schema 是唯一入库门槛，§5.6），非法输出不降格不入库；
-- 样卡调用暂不写 llm_call_attempts 账本（账本 stage 枚举仅正式流水线阶段；样卡失败
-  经任务 FAILED + error_code 可观测，重试走任务重试链路）。
+- 已持久化任务的样卡调用写入 ``llm_call_attempts(stage=SAMPLE)``：每个难度独立的
+  operation_key、输入指纹和重试预算；调用前提交 STARTED，成功结果存规范化轻量卡，
+  进程重启后可复用 SUCCESS 而不再次付费。直接用于纯函数测试的临时 Task 不写账本。
 """
 
 import hashlib
 import json
 import logging
 import uuid
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -30,8 +32,15 @@ from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import GenerationConfig
 from infra.db.models import Task, TextChunk
-from infra.llm.deepseek import DeepSeekClient
-from infra.llm.prompts import load_asset, safe_json_dumps
+from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
+from infra.llm.prompts import asset_versions, load_asset, safe_json_dumps
+from services.generation.ledger import (
+    attempt_count,
+    create_attempt,
+    find_success_result,
+    finish_failed,
+    finish_success,
+)
 from services.generation.llm_metrics import observe_llm_call
 from services.generation.response_parse import parse_cards_json, to_internal_card
 from services.generation.schema_validator import load_card_schema, validate_card
@@ -61,6 +70,8 @@ def sample_cards_llm(
     snapshot = json.loads(task.selected_chapters)
     if not isinstance(snapshot, list) or not snapshot:
         raise ValueError("章节快照为空")
+    if task.file_id is None:
+        raise ValueError("任务缺少 PDF")
     first = snapshot[0]
     chapter_name = str(first["name"])
     pages = load_pages(
@@ -74,34 +85,133 @@ def sample_cards_llm(
     visible = _cap_pages(pages, settings.generator_max_input_chars)
     ratio = config.difficulty_ratio
     enabled = [
-        difficulty
-        for difficulty in _ENABLED_DIFFICULTIES
-        if getattr(ratio, difficulty.lower()) > 0
+        difficulty for difficulty in _ENABLED_DIFFICULTIES if getattr(ratio, difficulty.lower()) > 0
     ]
     card_schema = load_card_schema()
     cards: list[dict[str, object]] = []
+    # sample_cards_llm 也被低层纯函数测试直接调用，只有已经存在于 DB 的任务才启用
+    # durable ledger；后台 worker 路径始终满足该条件。
+    durable_task = session.get(Task, task.task_id)
+    ledger_enabled = durable_task is not None and task.user_id is not None
+    versions = asset_versions()
     for difficulty in enabled:
         system_prompt, user_prompt = _build_prompts(
             config, chapter_name=chapter_name, difficulty=difficulty, pages=visible
         )
-        # 模型输出形状偶发漂移（json_object 模式不保证键名）：非法输出重试 1 次
-        # （与正式批量链账本内重试同语义；两次均非法 → GENERATION_FAILED）。
-        for attempt in range(2):
-            result = client.chat(
-                user_prompt,
-                system_prompt=system_prompt,
-                max_tokens=settings.generator_max_output_tokens,
+        operation_key = f"sample:{difficulty}"
+        fingerprint = _sample_input_fingerprint(
+            task,
+            config=config,
+            difficulty=difficulty,
+            pages=pages,
+            versions=versions,
+        )
+        if ledger_enabled:
+            cached = find_success_result(
+                session,
+                task_id=task.task_id,
+                stage="SAMPLE",
+                operation_key=operation_key,
+                input_fingerprint=fingerprint,
             )
+            if cached:
+                try:
+                    cached_card = json.loads(cached)
+                except (TypeError, ValueError):
+                    cached_card = None
+                if isinstance(cached_card, dict):
+                    cards.append(cached_card)
+                    continue
+        # 输出形状漂移与短暂网络故障只重试当前难度，已成功难度不会因恢复而重复付费。
+        max_attempts = 2 if not ledger_enabled else max(1, settings.sample_retry_limit + 1)
+        for attempt in range(max_attempts):
+            ledger_attempt = None
+            if ledger_enabled:
+                if task.user_id is None:
+                    raise ValueError("任务缺少用户")
+                used = attempt_count(
+                    session,
+                    task_id=task.task_id,
+                    stage="SAMPLE",
+                    operation_key=operation_key,
+                )
+                if used >= max_attempts:
+                    raise AppError(ErrorCode.GENERATION_FAILED, "样卡生成重试次数已用尽")
+                ledger_attempt = create_attempt(
+                    session,
+                    user_id=task.user_id,
+                    scope_type="TASK",
+                    scope_id=task.task_id,
+                    task_id=task.task_id,
+                    operation_id=task.operation_id,
+                    stage="SAMPLE",
+                    operation_key=operation_key,
+                    input_fingerprint=fingerprint,
+                    attempt_no=used + 1,
+                    model=settings.deepseek_model,
+                    prompt_name="generator-sample",
+                    prompt_version=versions["generator_prompt_version"],
+                    schema_name="generator_output",
+                    schema_version=versions["schema_version"],
+                    now=task.updated_at,
+                )
+                # STARTED 必须在外部调用前独立提交；否则进程崩溃后无法恢复/计费对账。
+                session.commit()
+            try:
+                result = client.chat(
+                    user_prompt,
+                    system_prompt=system_prompt,
+                    max_tokens=settings.generator_max_output_tokens,
+                )
+            except RetryableUpstreamError as exc:
+                if ledger_attempt is not None:
+                    finish_failed(session, ledger_attempt, error_code=exc.code.value)
+                    session.commit()
+                if not exc.retryable or attempt >= max_attempts - 1:
+                    raise
+                logger.warning(
+                    "sample generation upstream retry",
+                    extra={"difficulty": difficulty, "attempt": attempt},
+                )
+                continue
+            except AppError as exc:
+                if ledger_attempt is not None:
+                    finish_failed(session, ledger_attempt, error_code=exc.code.value)
+                    session.commit()
+                raise
             observe_llm_call(result)
             raw_cards = parse_cards_json(str(result["content"]))
             if not raw_cards:
                 _log_invalid_output(difficulty, attempt, result)
+                if ledger_attempt is not None:
+                    finish_failed(
+                        session, ledger_attempt, error_code=ErrorCode.GENERATION_FAILED.value
+                    )
+                    session.commit()
                 continue
             internal = to_internal_card(raw_cards[0])
             if validate_card(internal, card_schema):
                 _log_invalid_output(difficulty, attempt, result)
+                if ledger_attempt is not None:
+                    finish_failed(
+                        session, ledger_attempt, error_code=ErrorCode.GENERATION_FAILED.value
+                    )
+                    session.commit()
                 continue
-            cards.append(_to_sample_card(internal, difficulty=difficulty))
+            sample_card = _to_sample_card(internal, difficulty=difficulty)
+            if ledger_attempt is not None:
+                finish_success(
+                    session,
+                    ledger_attempt,
+                    usage=result.get("usage", {}),
+                    http_status=int(result.get("http_status", 200)),
+                    duration_ms=int(result.get("duration_ms", 0)),
+                    normalized_result=json.dumps(
+                        sample_card, ensure_ascii=False, separators=(",", ":")
+                    ),
+                )
+                session.commit()
+            cards.append(sample_card)
             break
         else:
             raise AppError(ErrorCode.GENERATION_FAILED, "样卡生成输出无效")
@@ -109,12 +219,41 @@ def sample_cards_llm(
 
 
 def _log_invalid_output(difficulty: str, attempt: int, result: dict[str, Any]) -> None:
-    """非法输出诊断日志：仅截断的模型内容片段（不含 Key/PDF/Prompt，红线 4/AC-08）。"""
-    snippet = str(result.get("content", ""))[:200]
+    """非法输出诊断日志：只记长度和类型，不把模型原文写入日志（红线 4/AC-08）。"""
+    content = result.get("content", "")
     logger.warning(
         "sample generation invalid output",
-        extra={"difficulty": difficulty, "attempt": attempt, "output_snippet": snippet},
+        extra={
+            "difficulty": difficulty,
+            "attempt": attempt,
+            "output_type": type(content).__name__,
+            "output_length": len(str(content)),
+        },
     )
+
+
+def _sample_input_fingerprint(
+    task: Task,
+    *,
+    config: GenerationConfig,
+    difficulty: str,
+    pages: Sequence[TextChunk],
+    versions: dict[str, str],
+) -> str:
+    """样卡账本指纹：只含锚定/页摘要/资产版本，不含原文或完整 Prompt。"""
+    payload = {
+        "task_id": task.task_id,
+        "difficulty": difficulty,
+        "config": config_fingerprint(config),
+        "pages": [
+            {"chunk_id": page.chunk_id, "content_sha256": page.content_sha256} for page in pages
+        ],
+        "generator_prompt_version": versions["generator_prompt_version"],
+        "generator_output_schema_version": versions["schema_version"],
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _cap_pages(pages: Sequence[TextChunk], max_chars: int) -> list[dict[str, object]]:
@@ -126,9 +265,7 @@ def _cap_pages(pages: Sequence[TextChunk], max_chars: int) -> list[dict[str, obj
             break
         content = page.content or ""
         remaining = max_chars - used
-        visible.append(
-            {"page_number": page.page_number, "content": content[:remaining]}
-        )
+        visible.append({"page_number": page.page_number, "content": content[:remaining]})
         used += min(len(content), remaining)
     return visible
 

@@ -142,6 +142,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `task_id` | uuid | ✓ | |
+| `operation_id` | uuid | ✗ | 生成操作记录 ID;同一用户的稳定操作键跨请求/重启复用同一生成意图 |
 | `project_id` | uuid | 新任务必填 | 归属学习项目;迁移前已失去 PDF 的终态历史任务可为 null(只读历史,不可重试) |
 | `file_id` | uuid | 新任务必填 | 项目当前 PDF;历史终态任务可为 null |
 | `deck_id` | uuid | 新任务必填 | 目标牌组,必须属于同一项目;删除牌组后置 `null`(任务保留) |
@@ -158,6 +159,13 @@
 | `failure_stage` | enum | ✗ | `PLANNING` / `GENERATING` / `SCORING` / `PUBLISHING` |
 | `created_at` / `started_at` / `ended_at` | datetime | 按需 | |
 | `updated_at` | datetime | ✓ | 长任务轮询刷新区分 |
+
+执行一致性字段（不作为用户状态）：`claimed_by` / `lease_token` / `lease_version` /
+`lease_until` 组成短租约与 fencing token；`attempt_count` / `next_attempt_at` 用于队列观测
+与退避。worker 必须先原子抢占并提交租约，再调用外部模型；结果写入必须带同一 token/version，
+租约过期或资源删除后旧 worker 的写入一律被 CAS 拒绝。`generation_operations` 按
+`(user_id, operation_key)` 唯一记录操作输入指纹、任务关联与终态，`llm_call_attempts` 通过
+`operation_id` 对账样卡、规划、生成、评分的实际调用；终态历史保留，避免重试或删除造成重复计费。
 
 删除规则(V2.5,PRD 7.3):删除任务默认只删历史——已发布卡的 `source_task_id` 置空;用户选择连同结果删除时才删除该任务的已发布卡及复习数据。失败任务遗留的 `STAGED` 卡在删除任务时级联清理,绝不能转为无来源可见卡。
 
@@ -499,7 +507,7 @@ FAILED ──retry──→ 新任务 DRAFT(retry_of_task_id 指向原任务;正
 - **失败重试**:`POST /tasks/{task_id}/retry` 只允许失败任务,创建关联新任务(复制已确认配置;正式生成失败可沿用已确认样卡),原失败任务保留并显示关联(PRD 5.13)。
 - **用户侧无暂停/取消**:`PAUSED`/`resume`/`cancel` 用户 API 全部删除;执行器内部恢复经同一状态的租约/心跳重新抢占,不暴露用户状态。历史 `PAUSED` 任务迁为 `FAILED` 并写 `LEGACY_PAUSED_TASK`(5.2)。
 - **abandon**:`POST /tasks/{task_id}/abandon` 只允许 `DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION`(正式生成前),进入 `ABANDONED` 终态;`SAMPLE_GENERATING` 时后台请求完成后样卡写入无害。
-- **删除保护**:活跃任务(`DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING`)不允许删除其项目、引用章节或目标牌组;正式生成前可先 abandon,解析或正式生成中需等待终态(`PROJECT_HAS_ACTIVE_TASK` / `TASK_STATE_CONFLICT`)。
+- **删除保护**:活跃任务(`DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING`)默认不允许删除其项目、引用章节或目标牌组;正式生成前可先 abandon。删除预检会列出任务 ID、阶段与 `can_cancel`；用户在二次确认中显式选择 `cancel_active_tasks=true` 时，服务端在同一写事务内 CAS 取消全部活跃任务（包括 `GENERATING`）后继续删除，旧 worker 的租约/fencing 写入失效。未选择该决策时仍返回 `PROJECT_HAS_ACTIVE_TASK` / `TASK_STATE_CONFLICT`。
 - `FAILED`:系统级不可恢复错误(如 API Key 失效、上游持续不可用)或 0 张有效卡;`error_code` 用户安全。批次级失败(Schema 重试达上限)不置 `FAILED` —— 该批 `SKIPPED`,任务继续处理其余批次(见 4.2)。
 - 前端页面状态映射:`GENERATING` = 生成中,`COMPLETED` = 完成,`FAILED` = 失败可重试,`ABANDONED` = 已放弃。
 
@@ -529,7 +537,7 @@ NEW → LEARNING → REVIEW →(AGAIN)→ RELEARNING →(GOOD/EASY)→ REVIEW
 
 ### 4.4 任务执行架构定式
 
-- **进程内调度器**：PDF 解析、规划 worker、生成 worker、评分 worker 由 API 进程内后台循环扫描执行；规划/评分 worker 以条件更新 CAS 抢占（并发单执行者），任务/批次状态与游标存 DB（**DB 即状态**），LLM 调用尝试与全阶段 token 以 `llm_call_attempts` 账本为权威，不引入外部任务队列（Celery/RQ/Redis）。
+- **进程内调度器**：PDF 解析、规划 worker、生成 worker、评分 worker 由 API 进程内后台循环扫描执行；各 worker 以 DB 原子租约 + fencing token 抢占，任务/批次状态与游标存 DB（**DB 即状态**），LLM 调用尝试与全阶段 token 以 `llm_call_attempts` 账本为权威，不引入外部任务队列（Celery/RQ/Redis）。生成 worker 每轮最多处理配置的批次数（默认 4），超大任务通过下一轮继续，避免独占调度循环。
 - **多实例演进**：孤儿 RUNNING 心跳恢复（30 分钟）+ DB 条件更新抢占已支持多 worker；未来多实例仅增加 DB 轮询调度，业务逻辑不变。
 - 禁止以性能为由提前引入任务队列。
 
@@ -602,9 +610,9 @@ Scheduler(
 | POST | `/v1/projects` | multipart PDF + 可选 name;上传成功即建立项目(PDF 异步解析) | ✓ |
 | GET | `/v1/projects` | 当前用户项目列表,支持真实空态 | - |
 | GET | `/v1/projects/{project_id}` | 项目详情(含 file/chapters 摘要与派生计数) | - |
-| GET | `/v1/projects/{project_id}/deletion-preflight?retain_decks=true\|false` | 删除预检:影响范围、阻塞任务与可执行动作 | - |
+| GET | `/v1/projects/{project_id}/deletion-preflight?retain_decks=true\|false&cancel_active_tasks=true\|false` | 删除预检:影响范围、阻塞任务与可执行动作;只读 | - |
 | PATCH | `/v1/projects/{project_id}` | 重命名(1~60 字符,去首尾空白) | ✓ |
-| DELETE | `/v1/projects/{project_id}?retain_decks=true\|false&abandon_pre_generation_tasks=true\|false` | 可原子放弃正式生成前任务;正式生成中仍保护 | ✓ |
+| DELETE | `/v1/projects/{project_id}?retain_decks=true\|false&abandon_pre_generation_tasks=true\|false&cancel_active_tasks=true\|false` | 二次确认后可原子取消全部活跃任务(含 GENERATING)并删除;默认仍保护 | ✓ |
 | POST | `/v1/projects/{project_id}/replace-pdf` | 仅解析失败项目可替换并重新解析(原子替换 PDF) | ✓ |
 | PATCH | `/v1/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页 | ✓ |
 | DELETE | `/v1/projects/{project_id}/chapters/{chapter_id}?delete_cards=false` | 活跃任务保护;保留卡时 `chapter_id` 置空 | ✓ |
@@ -629,7 +637,7 @@ Scheduler(
 | --- | --- | --- | --- |
 | POST | `/v1/projects/{project_id}/tasks` | 建立 `DRAFT`,保存章节、目标牌组和配置(自动保存语义) | ✓ |
 | GET | `/v1/tasks?project_id=&status=` | 学习页任务区与历史列表 | - |
-| GET | `/v1/tasks/{task_id}` | 任务详情(七态、internal_stage、样卡、失败码) | - |
+| GET | `/v1/tasks/{task_id}` | 任务详情(七态、internal_stage、样卡、失败码、operation_id) | - |
 | PATCH | `/v1/tasks/{task_id}` | 仅 `DRAFT`/`AWAITING_SAMPLE_CONFIRMATION` 可改配置,修改后样卡失效 | ✓ |
 | POST | `/v1/tasks/{task_id}/samples` | 持久化生成 1~3 张样卡(比例>0 的难度各 1 张);幂等键防重复触发 | ✓ |
 | POST | `/v1/tasks/{task_id}/start` | 校验 `sample_config_hash` 后进入 `GENERATING` | ✓ |
@@ -647,8 +655,8 @@ Scheduler(
 | POST | `/v1/decks` | 新建牌组 `{ name, project_id? }`;手动独立牌组 project_id=null | ✓ |
 | PATCH | `/v1/decks/{deck_id}` | 牌组改名;`version` 递增供缓存刷新;返回含真实进度 | ✓ |
 | GET | `/v1/decks/{deck_id}` | 详情 + 进度(card_count / due_count / mastered / review_count / mastery_ratio) | - |
-| GET | `/v1/decks/{deck_id}/deletion-preflight` | 删除预检:影响范围、阻塞任务与可执行动作 | - |
-| DELETE | `/v1/decks/{deck_id}?abandon_pre_generation_tasks=true\|false` | 可原子放弃正式生成前任务;正式生成中仍保护 | ✓ |
+| GET | `/v1/decks/{deck_id}/deletion-preflight?cancel_active_tasks=true\|false` | 删除预检:影响范围、阻塞任务与可执行动作;只读 | - |
+| DELETE | `/v1/decks/{deck_id}?abandon_pre_generation_tasks=true\|false&cancel_active_tasks=true\|false` | 二次确认后可原子取消全部活跃任务(含 GENERATING)并删除;默认仍保护 | ✓ |
 | GET | `/v1/decks/{deck_id}/cards` | 自由刷题:支持 order、content_difficulty、mastery 过滤 | - |
 | POST | `/v1/decks/{deck_id}/cards` | 手动新增卡片 `{ front, back }`,分配 position | ✓ |
 | POST | `/v1/decks/{deck_id}/cards/import` | 批量导入 `{ cards: [{ front, back }] }`,原子写入,返回逐张结果 | ✓ |

@@ -35,6 +35,7 @@ failure_stage 按 task.stage 归因（PLANNING/GENERATING/SCORING/PUBLISHING）�
 
 import json
 import logging
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -57,6 +58,15 @@ from services.generation.ledger import mark_stale_unknown
 from services.generation.planning_executor import claim_planning_task, run_planning
 from services.generation.samples import config_fingerprint, sample_cards_llm
 from services.generation.scoring import enter_scoring_stage, run_scoring_stage
+from services.tasks.lease import (
+    TaskLease,
+    claim_task,
+    recover_expired_leases,
+    release_task,
+    renew_task,
+    require_lease,
+)
+from services.tasks.operations import finish_operation
 from services.tasks.service import complete_samples
 
 logger = logging.getLogger(__name__)
@@ -136,25 +146,35 @@ def _format_cutoff(now: str, minutes: int) -> str:
     return format_utc(dt - timedelta(minutes=minutes))
 
 
-def _publish_guard_update(session: Session, *, task: Task, values: dict[str, Any]) -> bool:
+def _publish_guard_update(
+    session: Session, *, task: Task, values: dict[str, Any], lease: TaskLease | None = None
+) -> bool:
     """发布阶段条件更新（4.1 幂等转移）：WHERE GENERATING+PUBLISHING；rowcount=0 →
     并发 worker 已转移（发布/失败）→ 不覆盖。不 commit——由调用方提交。"""
+    predicates: list[Any] = [
+        Task.task_id == task.task_id,
+        Task.status == "GENERATING",
+        Task.stage == "PUBLISHING",
+    ]
+    if lease is not None:
+        predicates.extend(
+            [
+                Task.claimed_by == lease.worker_id,
+                Task.lease_token == lease.token,
+                Task.lease_version == lease.version,
+                Task.lease_until.is_not(None),
+            ]
+        )
     result = cast(
         CursorResult[Any],
-        session.execute(
-            update(Task)
-            .where(
-                Task.task_id == task.task_id,
-                Task.status == "GENERATING",
-                Task.stage == "PUBLISHING",
-            )
-            .values(**values)
-        ),
+        session.execute(update(Task).where(*predicates).values(**values)),
     )
     return result.rowcount == 1
 
 
-def publish_generated_cards(session: Session, *, task: Task) -> None:
+def publish_generated_cards(
+    session: Session, *, task: Task, lease: TaskLease | None = None
+) -> None:
     """整批原子发布（4.1）：同一短事务内——CAS 门卫（GENERATING+PUBLISHING）→ 校验
     ≥1 张 STAGED 卡 → 全部置 PUBLISHED → 任务 COMPLETED + generated_card_count
     （只统计已发布卡）；0 张有效卡 → 任务 FAILED + TASK_ZERO_CARDS（V25-D-23，
@@ -164,7 +184,7 @@ def publish_generated_cards(session: Session, *, task: Task) -> None:
     不信任 identity map（并发转移不覆盖）。
     """
     now = format_utc(SystemClock().now_utc())
-    if not _publish_guard_update(session, task=task, values={"updated_at": now}):
+    if not _publish_guard_update(session, task=task, values={"updated_at": now}, lease=lease):
         return  # 已转移（并发 worker 完成/失败）→ 不覆盖
     staged = (
         session.scalar(
@@ -188,9 +208,21 @@ def publish_generated_cards(session: Session, *, task: Task) -> None:
                 "ended_at": now,
                 "resumable": 0,
                 "updated_at": now,
+                "claimed_by": None,
+                "lease_token": None,
+                "lease_until": None,
+                "lease_version": Task.lease_version + 1,
             },
+            lease=lease,
         ):
             session.refresh(task)
+            finish_operation(
+                session,
+                task_id=task.task_id,
+                status="FAILED",
+                now=now,
+                reason=ErrorCode.TASK_ZERO_CARDS.value,
+            )
             _observe_task_result(task, "FAILED")  # 8.3（R1 M-3）：0 卡整体失败也计数
             logger.warning(
                 "task publish failed, zero valid cards",
@@ -214,9 +246,15 @@ def publish_generated_cards(session: Session, *, task: Task) -> None:
             "ended_at": now,
             "resumable": 0,
             "updated_at": now,
+            "claimed_by": None,
+            "lease_token": None,
+            "lease_until": None,
+            "lease_version": Task.lease_version + 1,
         },
+        lease=lease,
     ):
         session.refresh(task)
+        finish_operation(session, task_id=task.task_id, status="COMPLETED", now=now)
         logger.info(
             "task published",
             extra={"task_id": task.task_id, "published_cards": staged},
@@ -256,7 +294,12 @@ def _recover_generating_orphans(session: Session, *, task: Task, settings: Setti
 
 
 def _fail_task(
-    session: Session, task: Task, *, error_code: str, failure_stage: str | None = None
+    session: Session,
+    task: Task,
+    *,
+    error_code: str,
+    failure_stage: str | None = None,
+    lease: TaskLease | None = None,
 ) -> None:
     """任务 FAILED 条件更新（R1 M-2：与 _publish_guard_update 同款 CAS 门卫，不信任
     identity map）——WHERE 当前 DB 状态 == 读取快照（status+stage）：stale worker
@@ -267,31 +310,50 @@ def _fail_task(
     （GENERATING/SCORING/PUBLISHING 分支各自归因——spec 6.4/8）；样卡路径
     （stage 为 NULL）不写该列（M-5 裁决：枚举仅正式流水线阶段，NULL 即正确值）。
     观测（8.3）只在实际转移（rowcount=1）时上报。"""
+    now = format_utc(SystemClock().now_utc())
     values: dict[str, Any] = {
         "status": "FAILED",
         "error_code": error_code,
-        "ended_at": task.updated_at,
+        "ended_at": now,
         "resumable": 0,
+        "updated_at": now,
+        "claimed_by": None,
+        "lease_token": None,
+        "lease_until": None,
+        "lease_version": Task.lease_version + 1,
     }
     derived_stage = failure_stage if failure_stage is not None else task.stage
     if derived_stage is not None:
         values["failure_stage"] = derived_stage
+    predicates: list[Any] = [
+        Task.task_id == task.task_id,
+        Task.status == task.status,
+        Task.stage == task.stage,
+    ]
+    if lease is not None:
+        predicates.extend(
+            [
+                Task.claimed_by == lease.worker_id,
+                Task.lease_token == lease.token,
+                Task.lease_version == lease.version,
+                Task.lease_until.is_not(None),
+            ]
+        )
     result = cast(
         CursorResult[Any],
-        session.execute(
-            update(Task)
-            .where(
-                Task.task_id == task.task_id,
-                Task.status == task.status,
-                Task.stage == task.stage,
-            )
-            .values(**values)
-        ),
+        session.execute(update(Task).where(*predicates).values(**values)),
     )
     if result.rowcount == 0:
         session.expire(task)  # 并发已转移 → 不覆盖；放弃快照防残写
         return
     session.refresh(task)
+    finish_operation(
+        session,
+        task_id=task.task_id,
+        status="FAILED",
+        now=now,
+        reason=error_code,
+    )
     _observe_task_result(task, "FAILED")  # 8.3：系统级失败也计数（仅实际转移时）
 
 
@@ -300,6 +362,7 @@ def _complete_sample_task(
     task: Task,
     settings: Settings,
     client_factory: ClientFactory | None = None,
+    lease: TaskLease | None = None,
 ) -> int:
     """单任务样卡完成（4.1）：读任务配置 → 按启用难度真实生成 1~3 张样卡
     （V5A adapter：密钥解密 → 带 Key client 注入 sample_cards_llm → 章节文本 + 校验；
@@ -307,6 +370,7 @@ def _complete_sample_task(
     返回写入数（0 = 并发 abandon/转移，不复活不写）。不可恢复错误 → FAILED。
     密钥缺失/上游 401（API_KEY_UNAVAILABLE）等 AppError 向 worker 传播 →
     任务 FAILED + error_code（不吞不降格）。"""
+    lease = lease or _lease_for(session, task.task_id)
     try:
         config = GenerationConfig(**json.loads(task.generation_config))
         api_key = _decrypt_api_key(session, task=task, settings=settings)
@@ -324,20 +388,46 @@ def _complete_sample_task(
     except (ValueError, TypeError, KeyError):
         # 防御：配置/快照损坏（正常流程不可能）→ 条件更新 FAILED（并发 abandon 不覆盖），
         # 可重试/删除，不悬挂 SAMPLE_GENERATING
+        failed_now = format_utc(SystemClock().now_utc())
         failed = cast(
             CursorResult[Any],
             session.execute(
                 update(Task)
-                .where(Task.task_id == task.task_id, Task.status == "SAMPLE_GENERATING")
+                .where(
+                    Task.task_id == task.task_id,
+                    Task.status == "SAMPLE_GENERATING",
+                    *(
+                        [
+                            Task.claimed_by == lease.worker_id,
+                            Task.lease_token == lease.token,
+                            Task.lease_version == lease.version,
+                        ]
+                        if lease is not None
+                        else []
+                    ),
+                )
                 .values(
                     status="FAILED",
+                    stage=None,
                     error_code=ErrorCode.GENERATION_FAILED.value,
-                    ended_at=format_utc(SystemClock().now_utc()),
+                    ended_at=failed_now,
                     resumable=0,
+                    updated_at=failed_now,
+                    claimed_by=None,
+                    lease_token=None,
+                    lease_until=None,
+                    lease_version=Task.lease_version + 1,
                 )
             ),
         )
         if failed.rowcount:
+            finish_operation(
+                session,
+                task_id=task.task_id,
+                status="FAILED",
+                now=failed_now,
+                reason=ErrorCode.GENERATION_FAILED.value,
+            )
             logger.warning(
                 "task sample generation failed",
                 extra={"task_id": task.task_id, "internal_reason": "SAMPLE_INPUT_INVALID"},
@@ -349,6 +439,7 @@ def _complete_sample_task(
         cards=cards,
         config_hash=config_fingerprint(config),
         now=format_utc(SystemClock().now_utc()),
+        lease=lease,
     )
     if written:
         logger.info(
@@ -367,6 +458,9 @@ def _sample_worker(
     逐任务异常守卫（与规划/生成/评分 worker 同构）：单任务样卡路径异常（编程/DB
     错误，_complete_sample_task 内层仅捕输入类异常）→ 该任务 FAILED 兜底，不中止
     整轮扫描（其余样卡任务与后续 worker 照常处理）。"""
+    worker_id = f"sample-{uuid.uuid4()}"
+    now = format_utc(SystemClock().now_utc())
+    _recover_expired_task_leases(session, now=now, settings=settings)
     tasks = session.scalars(
         select(Task)
         .where(Task.status == "SAMPLE_GENERATING")
@@ -374,12 +468,22 @@ def _sample_worker(
     ).all()
     written = 0
     for task in tasks:
+        lease = claim_task(
+            session,
+            task_id=task.task_id,
+            worker_id=worker_id,
+            now=format_utc(SystemClock().now_utc()),
+            statuses=frozenset({"SAMPLE_GENERATING"}),
+        )
+        if lease is None:
+            continue
+        session.refresh(task)
+        session.info[_lease_info_key(task.task_id)] = lease
+        session.commit()  # 租约先提交，再进入可能耗时/崩溃的外部调用
         try:
-            written += _complete_sample_task(
-                session, task, settings, client_factory=client_factory
-            )
+            written += _complete_sample_task(session, task, settings, client_factory=client_factory)
         except AppError as exc:
-            _fail_task(session, task, error_code=exc.code.value)
+            _fail_task(session, task, error_code=exc.code.value, lease=lease)
             # M-5 裁决：样卡阶段失败不写 failure_stage（_fail_task 条件更新在
             # stage=NULL 时跳过该列，DB 保持 NULL——枚举仅正式流水线阶段，
             # SAMPLE_GENERATING 无对应值，NULL 即正确值）
@@ -388,12 +492,40 @@ def _sample_worker(
                 extra={"task_id": task.task_id, "error_code": exc.code.value},
             )
         except Exception:  # noqa: BLE001
-            _fail_task(session, task, error_code=ErrorCode.GENERATION_FAILED.value)
+            _fail_task(
+                session,
+                task,
+                error_code=ErrorCode.GENERATION_FAILED.value,
+                lease=lease,
+            )
             logger.warning(
                 "task sample generation unexpected failure",
                 extra={"task_id": task.task_id},
             )
+        finally:
+            if release_task(
+                session,
+                lease,
+                now=format_utc(SystemClock().now_utc()),
+            ):
+                session.commit()
+            session.info.pop(_lease_info_key(task.task_id), None)
     return written
+
+
+def _lease_info_key(task_id: str) -> str:
+    return f"task-lease:{task_id}"
+
+
+def _lease_for(session: Session, task_id: str) -> TaskLease | None:
+    value = session.info.get(_lease_info_key(task_id))
+    return value if isinstance(value, TaskLease) else None
+
+
+def _recover_expired_task_leases(session: Session, *, now: str, settings: Settings) -> int:
+    """在每轮调度开始时回收 TTL 或心跳过期的执行权。"""
+    stale_before = _format_cutoff(now, settings.orphan_timeout_minutes)
+    return recover_expired_leases(session, now=now, stale_before=stale_before)
 
 
 def process_active_tasks(
@@ -402,6 +534,7 @@ def process_active_tasks(
     storage: Any = None,
     settings: Settings | None = None,
     client_factory: ClientFactory | None = None,
+    work_quantum: int | None = None,
 ) -> int:
     """扫描一轮：先样卡 worker（SAMPLE_GENERATING 完成），再规划 worker（CAS 抢占一个
     PLANNING 任务 → run_planning），再生成 worker（GENERATING + stage=GENERATING 任务
@@ -416,6 +549,7 @@ def process_active_tasks(
     """
     settings = settings or Settings()
     now = format_utc(SystemClock().now_utc())
+    _recover_expired_task_leases(session, now=now, settings=settings)
     # 样卡 worker 入口（V2.5）：完成 SAMPLE_GENERATING → AWAITING_SAMPLE_CONFIRMATION
     sample_count = _sample_worker(session, settings, client_factory=client_factory)
     # 规划 worker 入口（spec §6.1）：每次扫描至多接管一个 PLANNING 任务
@@ -424,51 +558,137 @@ def process_active_tasks(
     )
     if claimed is not None:
         session.commit()  # CAS1/CAS2 接管 + 章节快照冻结原子提交（§4.2 规划快照冻结时刻）
+        planning_worker_id = f"planning-{uuid.uuid4()}"
+        planning_lease = claim_task(
+            session,
+            task_id=claimed.task_id,
+            worker_id=planning_worker_id,
+            now=format_utc(SystemClock().now_utc()),
+            statuses=frozenset({"GENERATING"}),
+            stages=frozenset({"PLANNING"}),
+        )
+        if planning_lease is None:
+            # Another process won the execution lease between the planning CAS and this claim.
+            # Do not run the external planner with an unfenced snapshot.
+            claimed = None
+        else:
+            session.refresh(claimed)
+            session.info[_lease_info_key(claimed.task_id)] = planning_lease
+            session.commit()  # 租约先提交，再进入可能耗时的规划调用
         try:
-            api_key = _decrypt_api_key(session, task=claimed, settings=settings)
-            client = (
-                client_factory(api_key)
-                if client_factory is not None
-                else DeepSeekClient(settings, api_key=api_key)
-            )
-            try:
-                run_planning(session, claimed, settings=settings, client=client)
-            finally:
-                client.close()
+            if claimed is not None and planning_lease is not None:
+                api_key = _decrypt_api_key(session, task=claimed, settings=settings)
+                client = (
+                    client_factory(api_key)
+                    if client_factory is not None
+                    else DeepSeekClient(settings, api_key=api_key)
+                )
+                try:
+                    run_planning(session, claimed, settings=settings, client=client)
+                finally:
+                    client.close()
         except AppError as exc:
             # 系统级错误（Key 解密失败/上游不可用）→ FAILED + failure_stage=PLANNING（§6.3）
-            _fail_task(session, claimed, error_code=exc.code.value, failure_stage="PLANNING")
-            logger.warning(
-                "task planning failed",
-                extra={"task_id": claimed.task_id, "error_code": exc.code.value},
-            )
+            if claimed is not None and planning_lease is not None:
+                _fail_task(
+                    session,
+                    claimed,
+                    error_code=exc.code.value,
+                    failure_stage="PLANNING",
+                    lease=planning_lease,
+                )
+                logger.warning(
+                    "task planning failed",
+                    extra={"task_id": claimed.task_id, "error_code": exc.code.value},
+                )
         except Exception:  # noqa: BLE001
-            _fail_task(
-                session,
-                claimed,
-                error_code=ErrorCode.GENERATION_FAILED.value,
-                failure_stage="PLANNING",
-            )
-            logger.warning("task planning unexpected failure", extra={"task_id": claimed.task_id})
+            if claimed is not None and planning_lease is not None:
+                _fail_task(
+                    session,
+                    claimed,
+                    error_code=ErrorCode.GENERATION_FAILED.value,
+                    failure_stage="PLANNING",
+                    lease=planning_lease,
+                )
+                logger.warning(
+                    "task planning unexpected failure", extra={"task_id": claimed.task_id}
+                )
+        finally:
+            if planning_lease is not None:
+                if release_task(
+                    session,
+                    planning_lease,
+                    now=format_utc(SystemClock().now_utc()),
+                ):
+                    session.commit()
+                if claimed is not None:
+                    session.info.pop(_lease_info_key(claimed.task_id), None)
     # 生成 worker 扫描：GENERATING + stage=GENERATING（避免与规划中任务冲突，spec §6.1）
     tasks = session.scalars(
         select(Task)
         .where(Task.status == "GENERATING", Task.stage == "GENERATING")
-        .order_by(Task.created_at)
+        .order_by(Task.updated_at, Task.created_at, Task.task_id)
     ).all()
+    generation_worker_id = f"generation-{uuid.uuid4()}"
+    processed_generation = 0
+    processed_generation_ids: set[str] = set()
     for task in tasks:
+        if work_quantum is not None and processed_generation >= max(1, work_quantum):
+            break
+        # Check the heartbeat before claiming: claim_task refreshes updated_at, so doing orphan
+        # recovery only after the claim would hide a PROCESSING batch left by a crashed worker.
+        _recover_generating_orphans(session, task=task, settings=settings)
+        lease = claim_task(
+            session,
+            task_id=task.task_id,
+            worker_id=generation_worker_id,
+            now=format_utc(SystemClock().now_utc()),
+            statuses=frozenset({"GENERATING"}),
+            stages=frozenset({"GENERATING"}),
+        )
+        if lease is None:
+            continue
+        session.refresh(task)
+        session.info[_lease_info_key(task.task_id)] = lease
+        session.commit()  # 先持久化租约，再执行可能包含多次外部调用的批次
         try:
-            _execute_task(session, task, settings=settings, client_factory=client_factory)
+            _execute_task(
+                session,
+                task,
+                settings=settings,
+                client_factory=client_factory,
+                lease=lease,
+                max_batches=work_quantum,
+            )
+            processed_generation += 1
+            processed_generation_ids.add(task.task_id)
         except AppError as exc:
             # 系统级错误（API Key 失效/上游持续不可用）→ FAILED；已入库卡片保留（4.1）
-            _fail_task(session, task, error_code=exc.code.value)
+            _fail_task(session, task, error_code=exc.code.value, lease=lease)
+            processed_generation += 1
+            processed_generation_ids.add(task.task_id)
             logger.warning(
                 "task execution failed",
                 extra={"task_id": task.task_id, "error_code": exc.code.value},
             )
         except Exception:  # noqa: BLE001
-            _fail_task(session, task, error_code=ErrorCode.GENERATION_FAILED.value)
+            _fail_task(
+                session,
+                task,
+                error_code=ErrorCode.GENERATION_FAILED.value,
+                lease=lease,
+            )
+            processed_generation += 1
+            processed_generation_ids.add(task.task_id)
             logger.warning("task execution unexpected failure", extra={"task_id": task.task_id})
+        finally:
+            if release_task(
+                session,
+                lease,
+                now=format_utc(SystemClock().now_utc()),
+            ):
+                session.commit()
+            session.info.pop(_lease_info_key(task.task_id), None)
     # 评分 worker 扫描：GENERATING + stage IN (SCORING, PUBLISHING)（spec §8 + 4.1：
     # 心跳超时孤儿可 CAS 接管——SCORING 重跑评分、PUBLISHING 直接发布；心跳新鲜 =
     # 在途 worker 存活，跳过）
@@ -478,29 +698,60 @@ def process_active_tasks(
         .order_by(Task.created_at)
     ).all()
     acted = 0
+    scoring_worker_id = f"scoring-{uuid.uuid4()}"
     for task in scoring_tasks:
+        if not _heartbeat_stale(
+            task.updated_at,
+            format_utc(SystemClock().now_utc()),
+            settings.orphan_timeout_minutes,
+        ):
+            continue
+        lease = claim_task(
+            session,
+            task_id=task.task_id,
+            worker_id=scoring_worker_id,
+            now=format_utc(SystemClock().now_utc()),
+            statuses=frozenset({"GENERATING"}),
+            stages=frozenset({"SCORING", "PUBLISHING"}),
+        )
+        if lease is None:
+            continue
+        session.refresh(task)
+        session.info[_lease_info_key(task.task_id)] = lease
+        session.commit()
         try:
             acted += _execute_scoring_task(
-                session, task, settings=settings, client_factory=client_factory
+                session, task, settings=settings, client_factory=client_factory, lease=lease
             )
         except AppError as exc:
             # 评分 worker 不可恢复错误（资产加载失败等）→ FAILED + failure_stage=SCORING
-            _fail_task(session, task, error_code=exc.code.value)
+            _fail_task(session, task, error_code=exc.code.value, lease=lease)
             logger.warning(
                 "task scoring failed",
                 extra={"task_id": task.task_id, "error_code": exc.code.value},
             )
         except Exception:  # noqa: BLE001
-            _fail_task(session, task, error_code=ErrorCode.GENERATION_FAILED.value)
+            _fail_task(
+                session,
+                task,
+                error_code=ErrorCode.GENERATION_FAILED.value,
+                lease=lease,
+            )
             logger.warning("task scoring unexpected failure", extra={"task_id": task.task_id})
+        finally:
+            if release_task(
+                session,
+                lease,
+                now=format_utc(SystemClock().now_utc()),
+            ):
+                session.commit()
+            session.info.pop(_lease_info_key(task.task_id), None)
     # 处理任务数：同一任务规划 + 生成同轮衔接只计一次；SCORING 孤儿接管按实际行动计数
     claimed_id = claimed.task_id if claimed is not None else None
-    return (
-        sample_count
-        + sum(1 for task in tasks if task.task_id != claimed_id)
-        + (1 if claimed else 0)
-        + acted
+    generation_count = processed_generation - (
+        1 if claimed_id is not None and claimed_id in processed_generation_ids else 0
     )
+    return sample_count + generation_count + (1 if claimed else 0) + acted
 
 
 def _execute_task(
@@ -509,6 +760,8 @@ def _execute_task(
     *,
     settings: Settings,
     client_factory: ClientFactory | None,
+    lease: TaskLease | None = None,
+    max_batches: int | None = None,
 ) -> None:
     """执行单个任务：GENERATING 孤儿恢复（心跳超时）→ plan_batches（若未建）→ 解密 Key
     构造 client → 循环 process_next_batch → COMPLETED。"""
@@ -542,12 +795,33 @@ def _execute_task(
         # 已提交、未完成批次 PENDING/FAILED 可恢复——与 Task 3 崩溃恢复语义一致）
         # final review I-1：每批 commit 后复查任务状态——expire_on_commit=False 下 identity map
         # 停留 GENERATING，批次间隙状态转移后不再抢占下一批（停止处理，保留已入库卡）
+        completed_in_quantum = 0
         while process_next_batch(session, task_id=task.task_id, client=client) > 0:
+            if lease is not None:
+                require_lease(
+                    session,
+                    task_id=task.task_id,
+                    worker_id=lease.worker_id,
+                    token=lease.token,
+                    version=lease.version,
+                    now=format_utc(SystemClock().now_utc()),
+                )
             task.updated_at = format_utc(SystemClock().now_utc())
             session.commit()
             session.refresh(task)
+            if lease is not None:
+                heartbeat_now = format_utc(SystemClock().now_utc())
+                if not renew_task(session, lease, now=heartbeat_now):
+                    session.refresh(task)
+                    return
+                task.updated_at = heartbeat_now
+                session.commit()
+                session.refresh(task)
+            completed_in_quantum += 1
             if task.status != "GENERATING":
                 break
+            if max_batches is not None and completed_in_quantum >= max(1, max_batches):
+                return
         # 批循环结束 → SCORING 阶段（spec §8 独立阶段）：条件更新 stage='GENERATING' → 'SCORING'
         # （转移 → rowcount=0 → 不进入评分）；评分 worker 异常上抛 → 调用方 FAILED（failure_stage
         # 由 task.stage=SCORING 派生）
@@ -559,7 +833,7 @@ def _execute_task(
             # 同一短事务校验 STAGED 卡 → 全部 PUBLISHED → COMPLETED（或 TASK_ZERO_CARDS FAILED）；
             # stage 未到 PUBLISHING（并发转移）→ 不发布，终态由其他 worker 决定
             if task.status == "GENERATING" and task.stage == "PUBLISHING":
-                publish_generated_cards(session, task=task)
+                publish_generated_cards(session, task=task, lease=lease)
                 session.refresh(task)
             if task.status == "COMPLETED":
                 _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
@@ -573,6 +847,7 @@ def _execute_scoring_task(
     *,
     settings: Settings,
     client_factory: ClientFactory | None,
+    lease: TaskLease | None = None,
 ) -> int:
     """SCORING/PUBLISHING 孤儿接管（spec §8 + 4.1 + CAS2 同款心跳判据）：仅心跳超时的
     GENERATING+SCORING/PUBLISHING 任务可被接管（新鲜心跳 = 在途 worker 存活，跳过不干预）。
@@ -583,8 +858,11 @@ def _execute_scoring_task(
       直接执行原子发布（无 LLM 调用）。
     返回实际行动数（1 = 接管，0 = 跳过）。"""
     _require_str(task.updated_at, "任务数据不完整（缺少时间戳）")
+    lease = lease or _lease_for(session, task.task_id)
     now = format_utc(SystemClock().now_utc())
-    if not _heartbeat_stale(task.updated_at, now, settings.orphan_timeout_minutes):
+    if lease is None and not _heartbeat_stale(
+        task.updated_at, now, settings.orphan_timeout_minutes
+    ):
         return 0  # 心跳新鲜 → 在途 worker 存活，不干预
     cutoff = _format_cutoff(now, settings.orphan_timeout_minutes)
     if task.stage == "PUBLISHING":
@@ -596,7 +874,17 @@ def _execute_scoring_task(
                     Task.task_id == task.task_id,
                     Task.status == "GENERATING",
                     Task.stage == "PUBLISHING",
-                    Task.updated_at < cutoff,
+                    *([Task.updated_at < cutoff] if lease is None else []),
+                    *(
+                        [
+                            Task.claimed_by == lease.worker_id,
+                            Task.lease_token == lease.token,
+                            Task.lease_version == lease.version,
+                            Task.lease_until.is_not(None),
+                        ]
+                        if lease is not None
+                        else []
+                    ),
                 )
                 .values(updated_at=now)
             ),
@@ -605,7 +893,7 @@ def _execute_scoring_task(
             return 0  # 已被其他 worker 接管或状态已转移
         session.refresh(task)
         session.commit()  # 接管心跳提交（发布无 LLM，不持写事务义务）
-        publish_generated_cards(session, task=task)
+        publish_generated_cards(session, task=task, lease=lease)
         session.refresh(task)
         if task.status == "COMPLETED":
             _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
@@ -618,7 +906,17 @@ def _execute_scoring_task(
                 Task.task_id == task.task_id,
                 Task.status == "GENERATING",
                 Task.stage == "SCORING",
-                Task.updated_at < cutoff,
+                *([Task.updated_at < cutoff] if lease is None else []),
+                *(
+                    [
+                        Task.claimed_by == lease.worker_id,
+                        Task.lease_token == lease.token,
+                        Task.lease_version == lease.version,
+                        Task.lease_until.is_not(None),
+                    ]
+                    if lease is not None
+                    else []
+                ),
             )
             .values(updated_at=now)
         ),
@@ -645,7 +943,7 @@ def _execute_scoring_task(
         # 原子发布（4.1）：run_scoring_stage 终态条件更新 SCORING → PUBLISHING 成功后
         # 同短事务发布；stage 未到 PUBLISHING（并发转移）→ 不发布
         if task.status == "GENERATING" and task.stage == "PUBLISHING":
-            publish_generated_cards(session, task=task)
+            publish_generated_cards(session, task=task, lease=lease)
             session.refresh(task)
         if task.status == "COMPLETED":
             _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
@@ -668,6 +966,9 @@ def scan_once(
             storage=storage,
             settings=settings,
             client_factory=client_factory,
+            work_quantum=(
+                settings.generation_work_quantum_batches if settings is not None else None
+            ),
         )
         session.commit()
     return n

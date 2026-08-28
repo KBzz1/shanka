@@ -25,6 +25,8 @@ users 1──N learning_projects 1──1 pdf_files(file_id 唯一权威)
                             1──N decks(project_id 可空=独立牌组)
                             1──N tasks ──N batches 1──1 knowledge_points
                                         └──N cards(source_task_id, STAGED/PUBLISHED)
+users 1──N generation_operations ──0..1 tasks
+                                 └──N llm_call_attempts
 users 1──N decks 1──N cards 1──1 review_states
 users 1──N review_events ──N cards
 users 1──N llm_call_attempts
@@ -83,6 +85,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | task_id | TEXT | PK | |
+| operation_id | TEXT | NULL, FK → generation_operations ON DELETE SET NULL | 稳定生成操作身份;同一用户 operation_key 跨请求/重启复用 |
 | user_id | TEXT | NULL, FK → users | 数据主体隔离键(V2.2,决策 D-05);新写入保证必填 |
 | project_id | TEXT | NULL, FK → learning_projects ON DELETE SET NULL | V2.5 归属项目;新写入保证必填,NULL 只兼容迁移前已失去 PDF 的终态任务(只读历史,不可重试) |
 | file_id | TEXT | NULL, FK → pdf_files ON DELETE SET NULL | 删除 PDF 后任务保留,file_id 置空 |
@@ -104,10 +107,42 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | resumable | INTEGER | NOT NULL DEFAULT 0 | V2.5 内部租约恢复判定用(不暴露用户 API) |
 | failure_stage | TEXT | NULL | `PLANNING / GENERATING / SCORING / PUBLISHING` |
 | error_code | TEXT | NULL | |
+| claimed_by | TEXT | NULL | 当前 worker 标识;与 `lease_token` / `lease_until` 同时为空或同时非空 |
+| lease_token | TEXT | NULL | 当前执行租约 fencing token;不对外暴露 |
+| lease_version | INTEGER | NOT NULL DEFAULT 0 | 每次抢占/回收递增的 fencing 版本 |
+| lease_until | TEXT | NULL | 租约绝对过期时间;过期后允许新的 worker 抢占 |
+| attempt_count | INTEGER | NOT NULL DEFAULT 0 | 队列执行尝试次数 |
+| next_attempt_at | TEXT | NULL | 退避后的最早下一次执行时间 |
 | created_at / started_at / ended_at / updated_at | TEXT | 按需 | |
+
+执行租约列:`claimed_by`、`lease_token`、`lease_version`、`lease_until`；队列观测/退避列:
+`attempt_count`、`next_attempt_at`。三项租约指针必须同时为空或同时非空；worker 先以
+`UPDATE ... WHERE status/stage AND (lease_until IS NULL OR lease_until <= now)` 原子抢占并
+提交，再调用外部模型。所有结果写入带 token + version fencing，资源删除或租约回收会使旧
+worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V2.5 七态；`Base.metadata`
+测试建表为兼容历史 fixture 额外接受旧 `PENDING/RUNNING/PAUSED`，这些值不得进入升级后的
+生产库。
 
 索引:`(user_id, created_at DESC)`、`(project_id)`、`(status, stage, updated_at)`、
 `(project_id, status, updated_at)`、`(deck_id, status, updated_at)`。
+
+### 2.5.1 generation_operations
+
+生成操作身份表，区分 HTTP 幂等缓存与跨请求/进程/重启的业务生成意图。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| operation_id | TEXT | PK | 服务端生成 |
+| user_id | TEXT | NOT NULL, FK → users | 数据主体隔离 |
+| operation_key | TEXT | NOT NULL, UNIQUE(user_id, operation_key) | 客户端稳定 operation/idempotency key |
+| input_fingerprint | TEXT | NOT NULL | 归一化输入摘要,不保存原文 |
+| status | TEXT | NOT NULL DEFAULT ACTIVE | `ACTIVE / COMPLETED / FAILED / ABANDONED` |
+| task_id | TEXT | NULL | 关联任务快照;删除任务后置空,操作历史保留 |
+| terminal_reason | TEXT | NULL | 失败/放弃/删除原因 |
+| created_at / updated_at / ended_at | TEXT | 按需 | |
+
+索引:`(user_id, status, updated_at)`；活跃输入指纹索引包含 `operation_key`，允许同一输入
+的不同用户操作并存，同时禁止同一稳定 key 创建第二个任务。
 
 ### 2.6 knowledge_points
 
@@ -289,8 +324,9 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | call_id | TEXT | PK | |
 | user_id | TEXT | NULL, FK → users | 数据归属(V2.2,决策 D-05);新写入保证必填 |
 | scope_type / scope_id | TEXT | NOT NULL | `TASK` / `CARD`;任务链路 scope_id=task_id,单卡重写 scope_id=card_id |
-| task_id | TEXT | NULL, FK → tasks ON DELETE CASCADE | 可空;手动/导入卡重写没有生成任务 |
-| stage | TEXT | NOT NULL | `PLANNING / GENERATING / SCORING / REWRITE` |
+| task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | 可空;删除任务时先解除引用以保留账本 |
+| operation_id | TEXT | NULL, FK → generation_operations ON DELETE SET NULL | 跨阶段操作归属 |
+| stage | TEXT | NOT NULL | `SAMPLE / PLANNING / GENERATING / SCORING / REWRITE` |
 | operation_key | TEXT | NOT NULL | 规划含 chapter/group/input fingerprint;生成含 batch_id;评分含确定性 group key;重写含 card_id/card_version/Idempotency-Key hash |
 | attempt_no | INTEGER | NOT NULL | 同一操作的第几次实际尝试 |
 | input_fingerprint | TEXT | NOT NULL | 输入身份(不保存完整 Prompt/原文) |
@@ -303,7 +339,7 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | duration_ms | INTEGER | NULL | 请求耗时 |
 | status | TEXT | NOT NULL DEFAULT 'STARTED' | `STARTED / SUCCESS / FAILED / UNKNOWN` |
 | error_code | TEXT | NULL | 失败类别 |
-| normalized_result | TEXT | NULL | 仅 PLANNING 成功时保存通过校验的规范化 units JSON;不保存原文、完整 Prompt 或原始模型响应 |
+| normalized_result | TEXT | NULL | PLANNING 成功时保存规范化 units JSON、SAMPLE 成功时保存规范化样卡 JSON;不保存原文、完整 Prompt 或原始模型响应 |
 | created_at / finished_at | TEXT | 按需 | 调用占位与结束时间 |
 
 唯一约束:`UNIQUE (scope_type, scope_id, stage, operation_key, attempt_no)`。
@@ -423,8 +459,8 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
 | --- | --- |
 | users | auth_sessions CASCADE(本期无用户删除接口,预留) |
 | learning_projects | project_study_settings CASCADE;user_preferences.current_project_id SET NULL;decks.project_id SET NULL;tasks.project_id SET NULL |
-| decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL(活跃任务引用时删除被 `409 PROJECT_HAS_ACTIVE_TASK` 拒绝,契约 6.5) |
-| pdf_files | chapters CASCADE;tasks.file_id SET NULL(活跃任务引用时删除被 `409 PROJECT_HAS_ACTIVE_TASK` 拒绝;项目删除按 5.3 原子事务处理) |
+| decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL(默认保护活跃任务;显式 `cancel_active_tasks=true` 先 CAS 转 ABANDONED) |
+| pdf_files | chapters CASCADE;tasks.file_id SET NULL(默认保护活跃任务;兼容删除入口显式 `cancel_active_tasks=true` 先 CAS 取消) |
 | tasks | knowledge_points、batches CASCADE;cards.source_task_id SET NULL(保留卡)或按用户选择删除其已发布卡(5.3) |
 | cards | review_states、review_events、card_rewrite_previews CASCADE |
 | card_deletion_batches | cards.delete_batch_id SET NULL |
@@ -433,7 +469,7 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
 
 - **连接配置**:每个连接开启 `PRAGMA foreign_keys=ON`(否则级联不生效);`PRAGMA journal_mode=WAL`(并发读 + 单写,满足 MVP 轮询 + 写并发场景)。两者在 SQLAlchemy engine 级 connect 事件统一配置,覆盖池化连接、后台任务与迁移脚本。
 - **写事务**:SQLite 单写者;写操作使用 `BEGIN IMMEDIATE` 事务(engine `isolation_level='IMMEDIATE'`,进入即拿写锁)。事务边界:`create deck + cards`、`submit review event + update review_state`、`batch 完成 + 更新 task 游标`、**幂等记录 INSERT + 业务副作用** 各自在同一事务内;统计聚合可异步,但成功响应后最终一致(PRD 6.6)。
-- **resume 并发防护**:`resume` 在 `BEGIN IMMEDIATE` 事务内先校验 `status == 'PAUSED' AND resumable = 1` 再置 `RUNNING`,状态校验失败返回 `TASK_STATE_CONFLICT`;孤儿 `RUNNING`(心跳 `updated_at` 超过 30 分钟)允许抢占:条件更新 `status='RUNNING' AND updated_at < now-30min`(契约 4.1)。
+- **任务租约并发防护**:worker 以 `BEGIN IMMEDIATE` 下的条件 UPDATE 抢占 `(status, stage)`，提交 `lease_token/version` 后才调用 LLM；每批/每组心跳续租，过期租约回收时递增 version。所有终态、样卡、发布和删除写入带原 token/version 的 CAS，旧 worker 只能得到 0 行更新，不得覆盖或复活已取消任务。
 - 新建卡片时同事务插入初始 `review_states`(state=NEW,初始排程参数,审核修复)。
 - 单卡重写(FR-13,决策 C-05):原地更新 `cards` 行(新内容、新 `generation_item_id`,`position` 不变,`updated_at` / `version` 递增),`review_states` 重置为新卡初始状态;旧 `generation_item_id` 随列覆盖自然作废。
 - **V2.5 原子事务(5.3)**,必须在同一事务完成:
@@ -444,6 +480,7 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
   - 重写预览应用:版本 CAS → 卡片正文更新 → ReviewState 重置 → preview APPLIED;
   - 评级:ReviewEvent 插入 → ReviewState 更新;今日/周完成动态聚合,不另存易漂移计数。
 - **V2.5 LLM 调用不持有 SQLite 长写事务**:规划/生成/评分 LLM 调用发生在事务之外,事务只包短状态/发布更新(风险 R25-07);调用账本 STARTED 占位与领域写入按既有规则同事务提交。
+- **删除原子性**:预检只读且不保留锁；真正删除在同一 `BEGIN IMMEDIATE` 事务内重新读取活跃任务。默认遇到活跃任务返回 409；用户二次确认 `cancel_active_tasks=true` 时先 CAS 取消全部活跃任务、标记 STARTED 为 UNKNOWN、复位 PROCESSING 批次并关闭 operation，再删除资源。LLM 账本保留用于成本对账，任务历史删除前解除其外键引用。
 - `cards.user_id` 由服务端写入,保证与 `decks.user_id` 一致;数据主体隔离键为 `user_id`(V2.2);(V2.1 历史:v2.1 归属校验按 `device_id` 过滤,已随 V2.3 设备架构清除删除;无隔离键列的表如 chapters、knowledge_points、batches、review_states 经 FK join 到所属隔离键)。
 
 ## 4. 看板聚合实现说明

@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from domain.task import ACTIVE_TASK_STATUSES
+from infra.clock import SystemClock
 from infra.db.models import Chapter, KnowledgePoint, LearningProject, PdfFile, Task
+from infra.db.session import format_utc
 from infra.storage.local import LocalStorage
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,7 @@ def delete_pdf(
     file_id: str,
     storage: LocalStorage,
     abandon_pre_generation_tasks: bool = False,
+    cancel_active_tasks: bool = False,
     now: str | None = None,
 ) -> None:
     """兼容 /pdfs 删除入口：委托项目删除（retain_decks=true，6.2 同一业务语义）；
@@ -113,6 +116,7 @@ def delete_pdf(
             retain_decks=True,
             storage=storage,
             abandon_pre_generation_tasks=abandon_pre_generation_tasks,
+            cancel_active_tasks=cancel_active_tasks,
             now=now,
         )
         return
@@ -128,7 +132,31 @@ def delete_pdf(
         or 0
     )
     if blocking:
-        raise AppError(ErrorCode.TASK_IN_PROGRESS, "存在进行中的任务引用该文件")
+        if not cancel_active_tasks:
+            raise AppError(ErrorCode.TASK_IN_PROGRESS, "存在进行中的任务引用该文件")
+        # Legacy/orphan PDFs have no project aggregate to delegate to.  Preserve the same
+        # cancellation fence as project/deck deletion before detaching task history.
+        from services.deletion.service import cancel_active_tasks as cancel_tasks
+
+        active_tasks = list(
+            session.scalars(
+                select(Task).where(
+                    Task.file_id == file_id,
+                    Task.user_id == user_id,
+                    Task.status.in_(ACTIVE_TASK_STATUSES),
+                )
+            ).all()
+        )
+        cancel_tasks(
+            session,
+            user_id=user_id,
+            tasks=active_tasks,
+            now=now or format_utc(SystemClock().now_utc()),
+            resource_type="PDF",
+            resource_id=file_id,
+            file_id=file_id,
+            error_code=ErrorCode.TASK_IN_PROGRESS,
+        )
     # 终态任务 file_id SET NULL（database-design §3：tasks.file_id ON DELETE SET NULL）
     for task in session.scalars(
         select(Task).where(Task.file_id == file_id, Task.user_id == user_id)

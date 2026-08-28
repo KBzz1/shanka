@@ -12,6 +12,7 @@ class DeletionTaskBlocker(BaseModel):
     project_id: str | None = None
     deck_id: str | None = None
     can_abandon: bool
+    can_cancel: bool
     allowed_actions: list[str]
 
 
@@ -22,5 +23,7 @@ class DeletionPreflight(BaseModel):
     blockers: list[DeletionTaskBlocker]
     abandonable_task_ids: list[str]
     has_uncancellable_tasks: bool
+    cancelable_task_ids: list[str]
+    can_cancel: bool
     actions: list[str]
     impact: dict[str, Any]

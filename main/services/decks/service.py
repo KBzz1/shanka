@@ -6,15 +6,31 @@
 
 import uuid
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from domain.card import VISIBLE_PREDICATE_SQL
 from infra.clock import SystemClock
-from infra.db.models import Card, Deck, LearningProject, ReviewEvent, ReviewState, Task
+from infra.db.models import (
+    Card,
+    Deck,
+    GenerationOperation,
+    LearningProject,
+    LlmCallAttempt,
+    ReviewEvent,
+    ReviewState,
+    Task,
+)
 from infra.db.session import format_utc
-from services.deletion.service import abandon_pre_generation, preflight_payload, resource_tasks
+from services.deletion.service import (
+    abandon_pre_generation,
+    preflight_payload,
+    resource_tasks,
+)
+from services.deletion.service import (
+    cancel_active_tasks as cancel_active_generation_tasks,
+)
 
 
 def _deck_id() -> str:
@@ -181,12 +197,23 @@ def delete_deck(
     user_id: str,
     deck_id: str,
     abandon_pre_generation_tasks: bool = False,
+    cancel_active_tasks: bool = False,
     now: str | None = None,
 ) -> None:
     deck = _owned(session, user_id=user_id, deck_id=deck_id)
     active_tasks = resource_tasks(session, user_id=user_id, deck_id=deck_id)
     if active_tasks:
-        if abandon_pre_generation_tasks:
+        if cancel_active_tasks:
+            cancel_active_generation_tasks(
+                session,
+                user_id=user_id,
+                tasks=active_tasks,
+                now=now or format_utc(SystemClock().now_utc()),
+                resource_type="DECK",
+                resource_id=deck_id,
+                error_code=ErrorCode.TASK_IN_PROGRESS,
+            )
+        elif abandon_pre_generation_tasks:
             abandon_pre_generation(
                 session,
                 user_id=user_id,
@@ -215,14 +242,35 @@ def delete_deck(
                 },
             )
     # tasks.deck_id SET NULL（database-design §3）；cards 级联由 FK ON DELETE CASCADE 处理
-    for task in session.scalars(
+    deck_tasks = session.scalars(
         select(Task).where(Task.deck_id == deck_id, Task.user_id == user_id)
-    ).all():
+    ).all()
+    for task in deck_tasks:
+        session.execute(
+            update(LlmCallAttempt)
+            .where(LlmCallAttempt.task_id == task.task_id)
+            .values(task_id=None)
+        )
+        for operation in session.scalars(
+            select(GenerationOperation).where(GenerationOperation.task_id == task.task_id)
+        ).all():
+            if operation.status == "ACTIVE":
+                operation.status = "ABANDONED"
+                operation.ended_at = now or format_utc(SystemClock().now_utc())
+                operation.terminal_reason = "RESOURCE_DELETE"
+            operation.task_id = None
+            operation.updated_at = now or format_utc(SystemClock().now_utc())
         task.deck_id = None
     session.delete(deck)
 
 
-def deck_deletion_preflight(session: Session, *, user_id: str, deck_id: str) -> dict[str, object]:
+def deck_deletion_preflight(
+    session: Session,
+    *,
+    user_id: str,
+    deck_id: str,
+    allow_cancel: bool = False,
+) -> dict[str, object]:
     """Read-only deck deletion preview; DELETE repeats it inside its write transaction."""
     deck = _owned(session, user_id=user_id, deck_id=deck_id)
     payload = preflight_payload(
@@ -231,6 +279,7 @@ def deck_deletion_preflight(session: Session, *, user_id: str, deck_id: str) -> 
         resource_type="DECK",
         resource_id=deck_id,
         deck_id=deck_id,
+        allow_cancel=allow_cancel,
         impact={
             "deck_count": 1,
             "card_count": session.scalar(

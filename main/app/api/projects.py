@@ -135,6 +135,7 @@ def project_deletion_preflight_endpoint(
     project_id: str,
     session: Annotated[Session, Depends(get_db_session)],
     retain_decks: Annotated[bool, Query()] = True,
+    cancel_active_tasks: Annotated[bool, Query()] = False,
 ) -> JSONResponse:
     """Return the current deletion impact and task blockers without changing state.
 
@@ -146,6 +147,7 @@ def project_deletion_preflight_endpoint(
         user_id=request.state.principal.user_id,
         project_id=project_id,
         retain_decks=retain_decks,
+        allow_cancel=cancel_active_tasks,
     )
     return JSONResponse(status_code=200, content=body)
 
@@ -187,8 +189,9 @@ def delete_project_endpoint(
     session: Annotated[Session, Depends(get_db_session)],
     retain_decks: Annotated[bool, Query()] = True,
     abandon_pre_generation_tasks: Annotated[bool, Query()] = False,
+    cancel_active_tasks: Annotated[bool, Query()] = False,
 ) -> Response:
-    """删除项目；可显式放弃正式生成前任务后继续删除，正式生成中仍需等待。"""
+    """删除项目；可选将所有活跃制卡任务一起取消后删除（含正式生成中任务）。"""
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     # Query choices are part of the idempotent operation.  A reused key must never replay a
@@ -196,6 +199,7 @@ def delete_project_endpoint(
     path = (
         f"/projects/{project_id}?retain_decks={str(retain_decks).lower()}"
         f"&abandon_pre_generation_tasks={str(abandon_pre_generation_tasks).lower()}"
+        f"&cancel_active_tasks={str(cancel_active_tasks).lower()}"
     )
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
@@ -207,6 +211,7 @@ def delete_project_endpoint(
             retain_decks=retain_decks,
             storage=request.app.state.storage,
             abandon_pre_generation_tasks=abandon_pre_generation_tasks,
+            cancel_active_tasks=cancel_active_tasks,
             now=_now(),
         )
         return 204, {}

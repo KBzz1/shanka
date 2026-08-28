@@ -67,6 +67,7 @@ def _task_executor_loop(
     session_factory: sessionmaker[Session],
     stop_event: threading.Event,
     interval: float,
+    settings: Settings,
 ) -> None:
     """任务执行器后台循环（Task 4）：逐间隔 scan_once；单轮失败不中断循环。
 
@@ -78,7 +79,7 @@ def _task_executor_loop(
         if stop_event.is_set():
             return
         try:
-            scan_tasks(session_factory)
+            scan_tasks(session_factory, settings=settings)
         except Exception:  # 扫描失败不中断循环（executor 内部已记录任务失败）
             logger.warning("task executor loop iteration failed", exc_info=True)
 
@@ -108,7 +109,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task_stop_event = threading.Event()
         task_thread = threading.Thread(
             target=_task_executor_loop,
-            args=(app.state.session_factory, task_stop_event, settings.task_scan_interval_seconds),
+            args=(
+                app.state.session_factory,
+                task_stop_event,
+                settings.task_scan_interval_seconds,
+                settings,
+            ),
             daemon=True,
         )
         task_thread.start()

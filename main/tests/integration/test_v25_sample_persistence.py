@@ -26,13 +26,14 @@ from infra.db.models import (
     Chapter,
     Deck,
     LearningProject,
+    LlmCallAttempt,
     PdfFile,
     Task,
     TextChunk,
     User,
 )
-from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.db.session import create_db_engine, create_session_factory
+from infra.llm.crypto import encrypt_key, key_from_settings
 from services.generation.samples import config_fingerprint, sample_cards_llm
 from services.tasks.service import (
     abandon_task,
@@ -162,9 +163,7 @@ def _complete_samples(session: Session, task_id: str) -> None:
     """样卡 worker 完成（SAMPLE_GENERATING → AWAITING + 持久化样卡与指纹）。"""
     from services.tasks.executor import process_active_tasks
 
-    process_active_tasks(
-        session, settings=_settings(), client_factory=_stub_factory()
-    )
+    process_active_tasks(session, settings=_settings(), client_factory=_stub_factory())
     session.commit()
     row = session.get(Task, task_id)
     assert row is not None and row.status == "AWAITING_SAMPLE_CONFIRMATION"
@@ -183,6 +182,9 @@ def _envelope(user_prompt: str) -> dict[str, object]:
 class StubClient:
     """样卡 worker 注入的假 LLM：按信封 target_difficulty 返回合规 QUESTION 卡（不触网）。"""
 
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
     def close(self) -> None:
         pass
 
@@ -191,6 +193,7 @@ class StubClient:
     ) -> dict[str, object]:
         payload = _envelope(user_prompt)
         difficulty = str(payload["target_difficulty"])
+        self.calls.append(difficulty)
         return {
             "content": json.dumps(
                 {
@@ -256,7 +259,6 @@ def _seed_chunks(session: Session, *, file_id: str, pages: int = 3) -> None:
 
 def _stub_factory() -> Callable[[str], StubClient]:
     return lambda _key: StubClient()
-
 
 
 # ---------- 启用难度 ↔ 样卡数（1~3 张） ----------
@@ -331,7 +333,6 @@ def test_sample_cards_only_for_enabled_difficulties(
             assert {"card_id", "front", "back", "card_type"} <= set(card)
 
 
-
 def test_sample_cards_fresh_ids_per_call(
     session_factory: Callable[[], Session],
 ) -> None:
@@ -391,6 +392,58 @@ def test_samples_persist_across_sessions(session_factory: Callable[[], Session])
         assert len(cards) == 3
         assert row.sample_config_hash == config_fingerprint(_config())
         assert row.sample_confirmed_at is None  # 确认发生在 start
+
+
+def test_sample_success_ledger_is_reused_after_worker_restart(
+    session_factory: Callable[[], Session],
+) -> None:
+    """同一任务的样卡成功账本可跨调用复用，已成功难度不再次调用模型。"""
+    user = _uuid()
+    with session_factory() as session:
+        ctx = _seed(session, user_id=user)
+        session.commit()
+    with session_factory() as session:
+        task = _create_draft(session, ctx, user_id=user)
+        session.commit()
+        task_id = task.task_id
+        request_samples(session, user_id=user, task_id=task_id, now=_NOW)
+        session.commit()
+
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+        first_client = StubClient()
+        first_cards = sample_cards_llm(
+            session,
+            task=task,
+            config=_config(),
+            client=first_client,
+            settings=_settings(),
+        )
+        session.commit()
+        assert len(first_client.calls) == 3
+
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+        restarted_client = StubClient()
+        second_cards = sample_cards_llm(
+            session,
+            task=task,
+            config=_config(),
+            client=restarted_client,
+            settings=_settings(),
+        )
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(
+                LlmCallAttempt.task_id == task_id,
+                LlmCallAttempt.stage == "SAMPLE",
+            )
+        ).all()
+    assert restarted_client.calls == []
+    assert [card["card_id"] for card in second_cards] == [card["card_id"] for card in first_cards]
+    assert len(attempts) == 3
+    assert {attempt.status for attempt in attempts} == {"SUCCESS"}
 
 
 def test_samples_trigger_idempotent_replay_no_double_transition(
@@ -470,9 +523,7 @@ def test_abandon_during_sample_generating_write_harmless(
         abandon_task(session, user_id=user, task_id=task_id, now=_NOW)
         session.commit()
     with session_factory() as session:
-        process_active_tasks(
-            session, settings=_settings(), client_factory=_stub_factory()
-        )
+        process_active_tasks(session, settings=_settings(), client_factory=_stub_factory())
         session.commit()
     with session_factory() as session:
         row = session.get(Task, task_id)
@@ -501,9 +552,7 @@ def test_sample_worker_failure_marks_failed(
         session.execute(update(Task).where(Task.task_id == task_id).values(selected_chapters="[]"))
         session.commit()
     with session_factory() as session:
-        process_active_tasks(
-            session, settings=_settings(), client_factory=_stub_factory()
-        )
+        process_active_tasks(session, settings=_settings(), client_factory=_stub_factory())
         session.commit()
     with session_factory() as session:
         row = session.get(Task, task_id)

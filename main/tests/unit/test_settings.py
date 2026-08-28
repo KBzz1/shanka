@@ -27,6 +27,7 @@ def test_settings_defaults() -> None:
     assert settings.deepseek_model == "deepseek-v4-flash"
     assert settings.deepseek_thinking is False
     assert settings.deepseek_timeout_seconds == 60.0
+    assert settings.generation_work_quantum_batches == 4
 
 
 def test_new_hard_limits_defaults() -> None:

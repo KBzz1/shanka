@@ -198,3 +198,49 @@ def test_decks_delete_blocked_by_non_terminal_task(session_factory: Callable[[],
     with session_factory() as session, pytest.raises(AppError) as excinfo:
         delete_deck(session, user_id=user, deck_id=deck_id)
     assert excinfo.value.code is ErrorCode.TASK_IN_PROGRESS
+
+
+def test_decks_delete_cancels_active_task_when_explicit(
+    session_factory: Callable[[], Session],
+) -> None:
+    """显式选择取消后，正式生成任务被围栏并与牌组原子删除。"""
+    from infra.db.models import Deck as DeckModel
+    from infra.db.models import Task
+
+    user = _uuid()
+    with session_factory() as session:
+        _ensure_user(session, user)
+        deck = create_deck(session, user_id=user, name="D", now="2026-08-11T00:00:00.000Z")
+        task = Task(
+            task_id=_uuid(),
+            user_id=user,
+            status="GENERATING",
+            stage="GENERATING",
+            selected_chapters="[]",
+            generation_config="{}",
+            deck_id=deck.deck_id,
+            generated_card_count=0,
+            resumable=0,
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+        session.add(task)
+        session.commit()
+        deck_id, task_id = deck.deck_id, task.task_id
+
+    with session_factory() as session:
+        delete_deck(
+            session,
+            user_id=user,
+            deck_id=deck_id,
+            cancel_active_tasks=True,
+            now="2026-08-11T00:01:00.000Z",
+        )
+        session.commit()
+
+    with session_factory() as session:
+        assert session.get(DeckModel, deck_id) is None
+        canceled = session.get(Task, task_id)
+        assert canceled is not None
+        assert canceled.status == "ABANDONED"
+        assert canceled.stage is None

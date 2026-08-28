@@ -61,6 +61,7 @@ from services.generation.ledger import (
 from services.generation.llm_metrics import observe_llm_call as _observe_llm_call
 from services.generation.quota import largest_remainder
 from services.generation.scoring_validator import validate_scores
+from services.tasks.lease import TaskLease, renew_task, require_lease
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,11 @@ class ScoringGroup:
 
 def _now_utc() -> str:
     return format_utc(SystemClock().now_utc())
+
+
+def _task_lease(session: Session, task_id: str) -> TaskLease | None:
+    value = session.info.get(f"task-lease:{task_id}")
+    return value if isinstance(value, TaskLease) else None
 
 
 def _unit_hash_key(task_id: str, unit_id: str) -> str:
@@ -295,6 +301,16 @@ def plan_scoring_groups(session: Session, *, task: Task, settings: Settings) -> 
     层内哈希序确定性；BASIC/UNDERSTANDING 按层合批（双限再拆）、DEEP_QUESTION 逐单元；
     组数超 max_scoring_calls_per_task → 按层配额（候选数占比，最大余数法）+ 哈希序缩减。
     """
+    lease = _task_lease(session, task.task_id)
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=_now_utc(),
+        )
     versions = asset_versions()
     unit_cards = _task_unit_cards(session, task_id=task.task_id)
     if not unit_cards:
@@ -492,6 +508,16 @@ def _run_scoring_group(
 
     任何失败 → finish_failed + 心跳 commit，不重试、不阻塞（返回后继续下一组）。
     """
+    lease = _task_lease(session, task.task_id)
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=_now_utc(),
+        )
     attempt_now = _now_utc()
     attempt_no = (
         attempt_count(
@@ -512,6 +538,7 @@ def _run_scoring_group(
         scope_type="TASK",
         scope_id=task.task_id,
         task_id=task.task_id,
+        operation_id=task.operation_id,
         stage=_SCORING_STAGE,
         operation_key=group.operation_key,
         input_fingerprint=group.input_fingerprint,
@@ -527,6 +554,15 @@ def _run_scoring_group(
     task.updated_at = attempt_now  # 心跳与 STARTED 占位同事务（§9）
     if not entries:
         # 组数据已消失（并发删除）：STARTED+FAILED 同事务记账，不调用（恢复跳过）
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task.task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+                now=attempt_now,
+            )
         finish_failed(
             session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=attempt_now
         )
@@ -543,6 +579,8 @@ def _run_scoring_group(
         return
     system_prompt, user_prompt = _build_scoring_prompts(entries, cards_by_gen, pages_by_chunk)
     max_tokens = _scoring_max_tokens(sum(len(ids) for _, ids in entries), settings=settings)
+    if lease is not None and not renew_task(session, lease, now=attempt_now):
+        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "任务执行权已失效，请由新的执行者继续")
     session.commit()  # §9：STARTED 占位 + 心跳先提交，之后才发调用
     try:
         result = client.chat(user_prompt, system_prompt=system_prompt, max_tokens=max_tokens)
@@ -570,6 +608,15 @@ def _run_scoring_group(
             internal_reason="SCORING_CALL_ERROR",
         )
         return
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=_now_utc(),
+        )
     _observe_llm_call(result)  # 8.3：成功 chat 即上报
     # 事务外校验（§5.4/§5.6：输出非法 → 整次 FAILED，不落部分分数；红线 4：原始响应不落库）
     try:
@@ -589,6 +636,15 @@ def _run_scoring_group(
     session.expire_all()
     if task.status != "GENERATING" or task.stage != _SCORING_STAGE:
         return  # 调用期间已取消/转移 → 不再回写（STARTED 留给恢复转 UNKNOWN）
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=_now_utc(),
+        )
     fresh_unit_cards = _task_unit_cards(session, task_id=task.task_id, refresh=True)
     fresh_units = list(
         session.scalars(
@@ -625,21 +681,24 @@ def _run_scoring_group(
         != group.input_fingerprint
     ):
         # 版本/内容漂移（用户编辑）→ 整组 FAILED + STALE_SCORING_INPUT，旧分数不写回
-        finish_failed(
-            session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=finish_now
-        )
-        task.updated_at = finish_now
-        session.commit()
-        logger.warning(
-            "scoring group stale input rejected",
-            extra={
-                "task_id": task.task_id,
-                "operation_key": group.operation_key,
-                "internal_reason": "STALE_SCORING_INPUT",
-            },
+        _finish_group_failed(
+            session,
+            task,
+            attempt,
+            error_code=ErrorCode.GENERATION_FAILED.value,
+            internal_reason="STALE_SCORING_INPUT",
         )
         return
     # 回写 Card 5 字段（总分 = 代码计算四维和；不触碰 version/updated_at——用户编辑语义）
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=finish_now,
+        )
     for gen_id, score in scores.items():
         card = fresh_cards.get(gen_id)
         if card is None:
@@ -688,6 +747,16 @@ def _finish_group_failed(
 ) -> None:
     """组失败落库（§8 非阻塞）：finish_failed + 心跳同事务 commit。"""
     finish_now = _now_utc()
+    lease = _task_lease(session, task.task_id)
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=finish_now,
+        )
     finish_failed(session, attempt, error_code=error_code, now=finish_now)
     task.updated_at = finish_now
     session.commit()
@@ -711,12 +780,31 @@ def run_scoring_stage(
     GENERATING+PUBLISHING → 校验 ≥1 张 STAGED 卡 → 全部 PUBLISHED → COMPLETED；
     0 张 → FAILED + TASK_ZERO_CARDS）。失败不重试不阻塞；账本为已尝试游标 + 调用上限权威。
     """
+    lease = _task_lease(session, task.task_id)
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=_now_utc(),
+        )
     versions = asset_versions()
     groups = plan_scoring_groups(session, task=task, settings=settings)
     for group in groups:
         session.refresh(task)
         if task.status != "GENERATING" or task.stage != _SCORING_STAGE:
             return  # 取消/转移 → 停止（不再付费调用）
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task.task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+                now=_now_utc(),
+            )
         if scoring_attempt_total(session, task_id=task.task_id) >= max(
             0, settings.max_scoring_calls_per_task
         ):
@@ -743,6 +831,16 @@ def run_scoring_stage(
         _run_scoring_group(
             session, task, group, settings=settings, client=client, versions=versions
         )
+        if lease is not None:
+            session.refresh(task)
+            if task.status != "GENERATING" or task.stage != _SCORING_STAGE:
+                return
+            heartbeat_now = _now_utc()
+            if not renew_task(session, lease, now=heartbeat_now):
+                session.expire(task)
+                return
+            session.commit()
+            session.refresh(task)
     now = _now_utc()
     result = cast(
         CursorResult[Any],
@@ -752,6 +850,16 @@ def run_scoring_stage(
                 Task.task_id == task.task_id,
                 Task.status == "GENERATING",
                 Task.stage == _SCORING_STAGE,
+                *(
+                    [
+                        Task.claimed_by == lease.worker_id,
+                        Task.lease_token == lease.token,
+                        Task.lease_version == lease.version,
+                        Task.lease_until.is_not(None),
+                    ]
+                    if lease is not None
+                    else []
+                ),
             )
             .values(stage="PUBLISHING", updated_at=now)
         ),
@@ -770,11 +878,38 @@ def enter_scoring_stage(session: Session, *, task_id: str, settings: Settings) -
     WHERE status='GENERATING' AND stage='GENERATING' → stage='SCORING'（+ 心跳）。
     rowcount=0 → 并发取消/转移，不覆盖，返回 False。"""
     now = _now_utc()
+    lease = _task_lease(session, task_id)
+    if lease is not None:
+        try:
+            require_lease(
+                session,
+                task_id=task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+                now=now,
+            )
+        except AppError:
+            return False
     result = cast(
         CursorResult[Any],
         session.execute(
             update(Task)
-            .where(Task.task_id == task_id, Task.status == "GENERATING", Task.stage == "GENERATING")
+            .where(
+                Task.task_id == task_id,
+                Task.status == "GENERATING",
+                Task.stage == "GENERATING",
+                *(
+                    [
+                        Task.claimed_by == lease.worker_id,
+                        Task.lease_token == lease.token,
+                        Task.lease_version == lease.version,
+                        Task.lease_until.is_not(None),
+                    ]
+                    if lease is not None
+                    else []
+                ),
+            )
             .values(stage=_SCORING_STAGE, updated_at=now)
         ),
     )

@@ -51,9 +51,13 @@ class Settings(BaseSettings):
     task_scan_interval_seconds: float = 1.0
     # 分批生成（V5A 4.2/5.7：可运维调整，客户端不得硬编码）
     batch_size: int = 3  # 每批知识点数
+    # 单轮任务 worker 最多处理的生成批次数；避免大任务独占进程，让其它任务获得调度机会
+    generation_work_quantum_batches: int = 4
     generation_retry_limit: int = (
         2  # 批次 Schema 校验失败重试上限（重试 2 次，共 3 次尝试；达上限批次 SKIPPED）
     )
+    # 样卡单难度调用重试上限；每个难度独立记账，避免已成功难度因整任务重试而重复付费
+    sample_retry_limit: int = 1
     # 孤儿 RUNNING 任务恢复阈值（V5B 4.5：超过该分钟数无心跳视为孤儿，Task 2 恢复消费）
     orphan_timeout_minutes: int = 30
     # LLM 硬上限与预算（spec §10 全局硬上限、§8 scoring、§6.2/§6.3 planning；可运维调整）

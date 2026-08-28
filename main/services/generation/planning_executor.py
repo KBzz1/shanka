@@ -59,6 +59,8 @@ from services.generation.quota import (
     task_unit_budget,
 )
 from services.pdf.text_chunks import load_pages
+from services.tasks.lease import TaskLease, renew_task, require_lease
+from services.tasks.operations import finish_operation
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,11 @@ _UTC_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"  # database-design 0：UTC、恒 3 位毫�
 
 def _now_utc() -> str:
     return format_utc(SystemClock().now_utc())
+
+
+def _task_lease(session: Session, task_id: str) -> TaskLease | None:
+    value = session.info.get(f"task-lease:{task_id}")
+    return value if isinstance(value, TaskLease) else None
 
 
 def _parse_utc(value: str) -> datetime:
@@ -121,6 +128,7 @@ def claim_planning_task(session: Session, *, orphan_timeout_minutes: int, now: s
             Task.status == _GENERATING_STATUS,
             Task.stage == _PLANNING_STAGE,
             Task.started_at.is_(None),  # 尚未被接管（CAS1）
+            Task.lease_until.is_(None),
         )
         .order_by(Task.created_at, Task.task_id)
         .limit(1)
@@ -135,6 +143,7 @@ def claim_planning_task(session: Session, *, orphan_timeout_minutes: int, now: s
                     Task.status == _GENERATING_STATUS,
                     Task.stage == _PLANNING_STAGE,
                     Task.started_at.is_(None),
+                    Task.lease_until.is_(None),
                 )
                 .values(
                     started_at=func.coalesce(Task.started_at, now),
@@ -155,6 +164,7 @@ def claim_planning_task(session: Session, *, orphan_timeout_minutes: int, now: s
             Task.stage == _PLANNING_STAGE,
             Task.started_at.is_not(None),  # 曾被接管（CAS2：仅心跳超时）
             Task.updated_at < cutoff,
+            (Task.lease_until.is_(None) | (Task.lease_until <= now)),
         )
         .order_by(Task.updated_at, Task.task_id)
         .limit(1)
@@ -170,6 +180,7 @@ def claim_planning_task(session: Session, *, orphan_timeout_minutes: int, now: s
                     Task.stage == _PLANNING_STAGE,
                     Task.started_at.is_not(None),
                     Task.updated_at < cutoff,
+                    (Task.lease_until.is_(None) | (Task.lease_until <= now)),
                 )
                 .values(updated_at=now)
             ),
@@ -210,10 +221,18 @@ def _freeze_chapter_snapshot(session: Session, *, task: Task, now: str) -> bool:
 def _stale_fail(session: Session, *, task: Task, now: str) -> bool:
     """章节快照失效：任务 FAILED + failure_stage=PLANNING（内部原因 CHAPTER_SNAPSHOT_STALE）。"""
     task.status = "FAILED"
+    task.stage = None
     task.failure_stage = _PLANNING_STAGE
     task.error_code = ErrorCode.GENERATION_FAILED.value
     task.ended_at = now
     task.resumable = 0
+    finish_operation(
+        session,
+        task_id=task.task_id,
+        status="FAILED",
+        now=now,
+        reason=ErrorCode.GENERATION_FAILED.value,
+    )
     logger.warning(
         "task planning chapter snapshot stale",
         extra={"task_id": task.task_id, "internal_reason": "CHAPTER_SNAPSHOT_STALE"},
@@ -233,6 +252,16 @@ def run_planning(
     时钟：不捕获 run 级冻结 now——每次尝试/心跳/终态各自读取新时钟（review fix 1：
     心跳必须真实推进，否则长运行任务会被 CAS2 误判孤儿接管）。
     """
+    lease = _task_lease(session, task.task_id)
+    if lease is not None:
+        require_lease(
+            session,
+            task_id=task.task_id,
+            worker_id=lease.worker_id,
+            token=lease.token,
+            version=lease.version,
+            now=_now_utc(),
+        )
     versions = asset_versions()
     try:
         snapshot = json.loads(task.selected_chapters)
@@ -321,6 +350,15 @@ def run_planning(
             session.refresh(task)
             if task.status != _GENERATING_STATUS or task.stage != _PLANNING_STAGE:
                 return  # 已取消/转移 → 停止（不再付费调用）
+            if lease is not None:
+                require_lease(
+                    session,
+                    task_id=task.task_id,
+                    worker_id=lease.worker_id,
+                    token=lease.token,
+                    version=lease.version,
+                    now=_now_utc(),
+                )
             operation_key = f"planning:{entry['chapter_id']}:{gi}"
             quota = sub_quotas[gi]
             fingerprint = group_fingerprint(group, quota, versions, str(mode))
@@ -342,6 +380,17 @@ def run_planning(
                 skipped_groups += 1
             else:
                 merged.extend((u, entry["chapter_id"]) for u in units)
+            if (
+                lease is not None
+                and task.status == _GENERATING_STATUS
+                and task.stage == _PLANNING_STAGE
+            ):
+                heartbeat_now = _now_utc()
+                if not renew_task(session, lease, now=heartbeat_now):
+                    session.expire(task)
+                    return
+                session.commit()
+                session.refresh(task)
     if task.status != _GENERATING_STATUS:
         return  # Key 错误/输入漂移等内部失败已置 FAILED（或外部转移）→ 不再落最终事务
     # 4. 合并：跨组指纹去重 + 全局 priority（§6.2）
@@ -399,6 +448,7 @@ def _run_group(
 ) -> list[dict[str, Any]] | None:
     """单组规划：输入漂移守卫 → 恢复复用 → 预算 → 尝试循环。返回规范化 units；
     None = 组 SKIPPED、停止或任务已 FAILED（Key 错误/输入漂移）。"""
+    lease = _task_lease(session, task.task_id)
     # §6.2 输入漂移守卫：该 operation_key 已有账本尝试但 fingerprint 与重推导不一致
     # → 不得错误复用/续跑旧结果，任务以规划输入漂移失败（fail fast，不发调用）
     drifted = session.scalar(
@@ -481,6 +531,7 @@ def _run_group(
             scope_type="TASK",
             scope_id=task.task_id,
             task_id=task.task_id,
+            operation_id=task.operation_id,
             stage=_PLANNING_STAGE,
             operation_key=operation_key,
             input_fingerprint=fingerprint,
@@ -505,28 +556,46 @@ def _run_group(
             if exc.code is ErrorCode.API_KEY_UNAVAILABLE and not exc.retryable:
                 # Key 错误（401，§6.3）：条件更新 FAILED + PLANNING，不重试
                 # （review fix 2：guard 失败/并发取消 → 不覆盖 CANCELLED）
+                # The upstream result is definitive even when a competing worker has already
+                # moved the task to a terminal state.  Commit that call-ledger fact first; the
+                # subsequent guarded task transition may then lose the race without rolling the
+                # FAILED attempt back to STARTED.
                 finish_failed(session, attempt, error_code=exc.code.value, now=finish_now)
-                task.updated_at = finish_now
+                session.commit()
+                if not _planning_guard_update(session, task, values={"updated_at": finish_now}):
+                    return None
                 session.commit()
                 _fail_planning_inplace(session, task, error_code=exc.code.value)
                 return None
             # 上游暂时失败（429/5xx/网络）与输出解析失败 → 预算内重试（§6.3）
+            if not _planning_guard_update(session, task, values={"updated_at": finish_now}):
+                return None
             finish_failed(session, attempt, error_code=exc.code.value, now=finish_now)
-            task.updated_at = finish_now
             session.commit()
             if _attempt_total(session, task, operation_key) >= budget:
                 return None
             continue
         except Exception:  # noqa: BLE001 —— 未预期异常按输出类失败走预算重试
             finish_now = _now_utc()
+            if not _planning_guard_update(session, task, values={"updated_at": finish_now}):
+                return None
             finish_failed(
                 session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=finish_now
             )
-            task.updated_at = finish_now
             session.commit()
             if _attempt_total(session, task, operation_key) >= budget:
                 return None
             continue
+        lease = _task_lease(session, task.task_id)
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task.task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+                now=_now_utc(),
+            )
         # 事务外校验（§6.3 输出非法 → 预算内重试；红线 4：原始响应不落库）
         try:
             raw = json.loads(result["content"])
@@ -540,15 +609,18 @@ def _run_group(
             )
         except (ValueError, TypeError, AppError):
             finish_now = _now_utc()
+            if not _planning_guard_update(session, task, values={"updated_at": finish_now}):
+                return None
             finish_failed(
                 session, attempt, error_code=ErrorCode.GENERATION_FAILED.value, now=finish_now
             )
-            task.updated_at = finish_now
             session.commit()
             if _attempt_total(session, task, operation_key) >= budget:
                 return None
             continue
         finish_now = _now_utc()
+        if not _planning_guard_update(session, task, values={"updated_at": finish_now}):
+            return None
         finish_success(
             session,
             attempt,
@@ -558,7 +630,6 @@ def _run_group(
             normalized_result=json.dumps(units, ensure_ascii=False),
             now=finish_now,
         )
-        task.updated_at = finish_now
         session.commit()
         return units
 
@@ -642,6 +713,7 @@ def _fail_planning_inplace(
         task,
         values={
             "status": "FAILED",
+            "stage": None,
             "failure_stage": _PLANNING_STAGE,
             "error_code": error_code,
             "ended_at": now,
@@ -650,10 +722,18 @@ def _fail_planning_inplace(
     ):
         return False
     task.status = "FAILED"
+    task.stage = None
     task.failure_stage = _PLANNING_STAGE
     task.error_code = error_code
     task.ended_at = now
     task.resumable = 0
+    finish_operation(
+        session,
+        task_id=task.task_id,
+        status="FAILED",
+        now=now,
+        reason=error_code,
+    )
     extra: dict[str, object] = {"task_id": task.task_id, "error_code": error_code}
     if internal_reason is not None:
         extra["internal_reason"] = internal_reason
@@ -664,17 +744,32 @@ def _fail_planning_inplace(
 def _planning_guard_update(session: Session, task: Task, *, values: dict[str, Any]) -> bool:
     """最终短事务条件更新（§6.2 step 7）：WHERE GENERATING+PLANNING；rowcount=0 → 回滚。"""
     session.refresh(task)
+    lease = _task_lease(session, task.task_id)
+    predicates: list[Any] = [
+        Task.task_id == task.task_id,
+        Task.status == _GENERATING_STATUS,
+        Task.stage == _PLANNING_STAGE,
+    ]
+    if lease is not None:
+        predicates.extend(
+            [
+                Task.claimed_by == lease.worker_id,
+                Task.lease_token == lease.token,
+                Task.lease_version == lease.version,
+                Task.lease_until.is_not(None),
+            ]
+        )
+    if values.get("status") in {"FAILED", "COMPLETED"} and lease is not None:
+        values = {
+            **values,
+            "claimed_by": None,
+            "lease_token": None,
+            "lease_until": None,
+            "lease_version": Task.lease_version + 1,
+        }
     result = cast(
         CursorResult[Any],
-        session.execute(
-            update(Task)
-            .where(
-                Task.task_id == task.task_id,
-                Task.status == _GENERATING_STATUS,
-                Task.stage == _PLANNING_STAGE,
-            )
-            .values(**values)
-        ),
+        session.execute(update(Task).where(*predicates).values(**values)),
     )
     if result.rowcount == 0:
         session.rollback()  # 条件不成立（已取消/转移）→ 整事务回滚，不信任 identity map
@@ -690,6 +785,7 @@ def _finish_planning_failed(session: Session, task: Task, *, error_code: str, sk
         task,
         values={
             "status": "FAILED",
+            "stage": None,
             "failure_stage": _PLANNING_STAGE,
             "error_code": error_code,
             "ended_at": now,
@@ -699,11 +795,19 @@ def _finish_planning_failed(session: Session, task: Task, *, error_code: str, sk
     ):
         return
     task.status = "FAILED"
+    task.stage = None
     task.failure_stage = _PLANNING_STAGE
     task.error_code = error_code
     task.ended_at = now
     task.resumable = 0
     task.skipped_planning_group_count = skipped
+    finish_operation(
+        session,
+        task_id=task.task_id,
+        status="FAILED",
+        now=now,
+        reason=error_code,
+    )
     logger.warning(
         "task planning failed",
         extra={
@@ -723,6 +827,7 @@ def _finish_planning_empty(session: Session, task: Task, *, skipped: int) -> Non
         task,
         values={
             "status": "COMPLETED",
+            "stage": None,
             "completion_reason": "NO_GENERATION_UNITS",
             "total_batch_count": 0,
             "completed_batch_count": 0,
@@ -734,12 +839,14 @@ def _finish_planning_empty(session: Session, task: Task, *, skipped: int) -> Non
     ):
         return
     task.status = "COMPLETED"
+    task.stage = None
     task.completion_reason = "NO_GENERATION_UNITS"
     task.total_batch_count = 0
     task.completed_batch_count = 0
     task.skipped_planning_group_count = skipped
     task.ended_at = now
     task.resumable = 0
+    finish_operation(session, task_id=task.task_id, status="COMPLETED", now=now)
     logger.info(
         "task planning empty result",
         extra={

@@ -241,8 +241,9 @@ def parse_database_tables(md_text: str) -> dict[str, dict[str, str]]:
     tables: dict[str, dict[str, str]] = {}
     current: str | None = None
     for line in md_text.splitlines():
-        # 表头可带版本注解后缀（如 `### 2.17 learning_projects（V2.5 新增）`）
-        m = re.match(r"^### 2\.\d+ ([a-z_]+)(（.*）)?$", line.strip())
+        # 表头可带版本注解后缀（如 `### 2.17 learning_projects（V2.5 新增）`）。
+        # 允许 2.5.1 这类同一数据库章节内的新增表，避免把下一张表的列误归入前一表。
+        m = re.match(r"^### 2\.\d+(?:\.\d+)? ([a-z_]+)(（.*）)?$", line.strip())
         if m:
             current = m.group(1)
             tables[current] = {}

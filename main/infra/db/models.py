@@ -77,6 +77,46 @@ class Chapter(Base):
     end_page: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
+class GenerationOperation(Base):
+    """生成操作唯一性记录。
+
+    ``idempotency_keys`` 只覆盖单个 HTTP 请求；本表覆盖跨请求、跨进程和重启后的同一
+    生成意图。``task_id`` 故意是可空的非外键快照，避免 operation/task 互相依赖导致历史
+    数据删除时的循环 FK；任务侧通过 ``operation_id`` 反向关联。
+    """
+
+    __tablename__ = "generation_operations"
+    __table_args__ = (
+        UniqueConstraint("user_id", "operation_key", name="uq_generation_operations_user_key"),
+        CheckConstraint(
+            "status IN ('ACTIVE','COMPLETED','FAILED','ABANDONED')",
+            name="ck_generation_operations_status_domain",
+        ),
+        Index("ix_generation_operations_user_status", "user_id", "status", "updated_at"),
+        Index(
+            "ix_generation_operations_active_input",
+            "user_id",
+            "input_fingerprint",
+            "operation_key",
+            unique=True,
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.user_id"), nullable=False)
+    operation_key: Mapped[str] = mapped_column(String, nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="ACTIVE", server_default=text("'ACTIVE'")
+    )  # ACTIVE/COMPLETED/FAILED/ABANDONED
+    task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    terminal_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    ended_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 class Task(Base):
     """2.5 tasks：生成任务（V2.5 七态；file_id/deck_id/project_id 删除后 SET NULL 保留任务）。
 
@@ -88,6 +128,25 @@ class Task(Base):
 
     __tablename__ = "tasks"
     __table_args__ = (
+        # Keep legacy values accepted by ``Base.metadata.create_all`` fixtures; the Alembic
+        # migration normalizes them before installing the production-only V2.5 domain check.
+        CheckConstraint(
+            "status IN ('DRAFT','SAMPLE_GENERATING','AWAITING_SAMPLE_CONFIRMATION',"
+            "'GENERATING','COMPLETED','FAILED','ABANDONED',"
+            "'PENDING','RUNNING','PAUSED')",
+            name="ck_tasks_status_domain",
+        ),
+        CheckConstraint(
+            "stage IS NULL OR stage IN ('PLANNING','GENERATING','SCORING','PUBLISHING')",
+            name="ck_tasks_stage_domain",
+        ),
+        CheckConstraint(
+            "(claimed_by IS NULL AND lease_token IS NULL AND lease_until IS NULL)"
+            " OR (claimed_by IS NOT NULL AND lease_token IS NOT NULL AND lease_until IS NOT NULL)",
+            name="ck_tasks_lease_fields_together",
+        ),
+        CheckConstraint("lease_version >= 0", name="ck_tasks_lease_version_nonnegative"),
+        CheckConstraint("attempt_count >= 0", name="ck_tasks_attempt_count_nonnegative"),
         Index("ix_tasks_user_created", "user_id", "created_at"),
         Index("ix_tasks_project_id", "project_id"),
         # Worker scans and deletion preflight both filter active status by resource.  Keep the
@@ -112,6 +171,11 @@ class Task(Base):
     retry_of_task_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("tasks.task_id", ondelete="SET NULL"), nullable=True
     )  # V2.5 只指向同用户失败任务
+    operation_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("generation_operations.operation_id", ondelete="SET NULL"),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String, nullable=False)  # V2.5 七态
     stage: Mapped[str | None] = mapped_column(
         String, nullable=True
@@ -138,6 +202,16 @@ class Task(Base):
     skipped_planning_group_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    claimed_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    lease_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    lease_until: Mapped[str | None] = mapped_column(String, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    next_attempt_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class KnowledgePoint(Base):
@@ -412,6 +486,11 @@ class LlmCallAttempt(Base):
         ),
         Index("ix_llm_call_attempts_user_created", "user_id", "created_at"),
         Index("ix_llm_call_attempts_task_stage_operation", "task_id", "stage", "operation_key"),
+        Index("ix_llm_call_attempts_operation", "operation_id", "stage", "operation_key"),
+        CheckConstraint(
+            "stage IN ('SAMPLE','PLANNING','GENERATING','SCORING','REWRITE')",
+            name="ck_llm_call_attempts_stage_domain",
+        ),
     )
 
     call_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -419,7 +498,12 @@ class LlmCallAttempt(Base):
     scope_type: Mapped[str] = mapped_column(String, nullable=False)  # TASK/CARD
     scope_id: Mapped[str] = mapped_column(String, nullable=False)
     task_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=True
+        String, ForeignKey("tasks.task_id", ondelete="SET NULL"), nullable=True
+    )
+    operation_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("generation_operations.operation_id", ondelete="SET NULL"),
+        nullable=True,
     )
     stage: Mapped[str] = mapped_column(
         String, nullable=False

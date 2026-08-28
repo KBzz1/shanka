@@ -26,13 +26,13 @@ from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
 from infra.db.models import Base, Task, TextChunk
 from infra.db.session import create_db_engine, create_session_factory
+from infra.llm.deepseek import RetryableUpstreamError
 from services.generation.samples import config_fingerprint, sample_cards_llm
 from services.generation.validate import validate_config
 
 _NOW = "2026-08-15T00:00:00.000Z"
 
 _SETTINGS = Settings(deepseek_api_key="stub", api_key_encryption_key="aa" * 32, _env_file=None)
-
 
 
 def _uuid() -> str:
@@ -60,10 +60,17 @@ class StubClient:
     - fail_difficulty：该难度调用抛注入的 AppError（上游错误传播语义）。
     """
 
-    def __init__(self, *, invalid: bool = False, fail_difficulty: str | None = None):
+    def __init__(
+        self,
+        *,
+        invalid: bool = False,
+        fail_difficulty: str | None = None,
+        transient_failures: int = 0,
+    ):
         self.calls: list[str] = []
         self.invalid = invalid
         self.fail_difficulty = fail_difficulty
+        self.transient_failures = transient_failures
 
     def chat(
         self, user_prompt: str, system_prompt: str | None = None, max_tokens: int | None = None
@@ -71,6 +78,13 @@ class StubClient:
         payload = _envelope(user_prompt)
         difficulty = str(payload["target_difficulty"])
         self.calls.append(difficulty)
+        if self.transient_failures > 0:
+            self.transient_failures -= 1
+            raise RetryableUpstreamError(
+                ErrorCode.GENERATION_FAILED,
+                "注入的短暂上游失败",
+                retryable=True,
+            )
         if self.fail_difficulty == difficulty:
             raise AppError(ErrorCode.GENERATION_FAILED, "注入的上游失败")
         if self.invalid:
@@ -186,9 +200,7 @@ def _generate(
     file_id = file_id or _uuid()
     _seed_chunks(session, file_id=file_id)
     task = _task(config, file_id=file_id)
-    return sample_cards_llm(
-        session, task=task, config=config, client=client, settings=_SETTINGS
-    )
+    return sample_cards_llm(session, task=task, config=config, client=client, settings=_SETTINGS)
 
 
 def test_samples_llm_three_cards_all_difficulties(
@@ -261,9 +273,8 @@ def test_samples_llm_rejects_invalid_output(
     session_factory: Callable[[], Session],
 ) -> None:
     """非 JSON 输出 → GENERATION_FAILED（Schema 唯一门槛，不降格不重试）。"""
-    with session_factory() as session:
-        with pytest.raises(AppError) as excinfo:
-            _generate(session, _config(), client=StubClient(invalid=True), file_id="f-5")
+    with session_factory() as session, pytest.raises(AppError) as excinfo:
+        _generate(session, _config(), client=StubClient(invalid=True), file_id="f-5")
     assert excinfo.value.code is ErrorCode.GENERATION_FAILED
 
 
@@ -271,15 +282,26 @@ def test_samples_llm_upstream_error_propagates(
     session_factory: Callable[[], Session],
 ) -> None:
     """上游（Key 401 等）AppError 原样传播 → 由 executor 映射任务 FAILED + error_code。"""
-    with session_factory() as session:
-        with pytest.raises(AppError) as excinfo:
-            _generate(
-                session,
-                _config(),
-                client=StubClient(fail_difficulty="UNDERSTANDING"),
-                file_id="f-6",
-            )
+    with session_factory() as session, pytest.raises(AppError) as excinfo:
+        _generate(
+            session,
+            _config(),
+            client=StubClient(fail_difficulty="UNDERSTANDING"),
+            file_id="f-6",
+        )
     assert excinfo.value.code is ErrorCode.GENERATION_FAILED
+
+
+def test_samples_llm_retries_transient_upstream_error(
+    session_factory: Callable[[], Session],
+) -> None:
+    """短暂网络/5xx 故障只重试当前难度，不能让整次样卡任务直接失败。"""
+    with session_factory() as session:
+        client = StubClient(transient_failures=1)
+        cards = _generate(session, _config(), client=client, file_id="f-7")
+
+    assert len(cards) == 3
+    assert client.calls == ["BASIC", "BASIC", "UNDERSTANDING", "DEEP_QUESTION"]
 
 
 def test_samples_fingerprint_deterministic_and_sensitive() -> None:

@@ -51,6 +51,7 @@ def create_attempt(
     scope_type: str,
     scope_id: str,
     task_id: str | None,
+    operation_id: str | None = None,
     stage: str,
     operation_key: str,
     input_fingerprint: str,
@@ -75,6 +76,7 @@ def create_attempt(
         scope_type=scope_type,
         scope_id=scope_id,
         task_id=task_id,
+        operation_id=operation_id,
         stage=stage,
         operation_key=operation_key,
         attempt_no=attempt_no,
@@ -116,7 +118,11 @@ def finish_success(
     """
     attempt.status = SUCCESS
     for usage_key, column in _USAGE_KEYS.items():
-        setattr(attempt, column, usage[usage_key])
+        # Providers may omit cache counters on models/endpoints that do not expose them.  Store
+        # zero rather than raising after a paid call has already completed; the ledger remains
+        # the single cost/audit source and callers can still distinguish missing counters by
+        # the provider's raw response only outside this persistence boundary.
+        setattr(attempt, column, int(usage.get(usage_key, 0) or 0))
     attempt.http_status = http_status
     attempt.duration_ms = duration_ms
     attempt.normalized_result = normalized_result
