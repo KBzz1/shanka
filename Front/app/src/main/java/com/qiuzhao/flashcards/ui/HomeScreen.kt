@@ -332,8 +332,10 @@ private fun DailyGoalCard(compactScale: Float, todayPlan: TodayPlanUiState, stre
                 Text(homeGoalPercent(completed, goal), modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(47 * compactScale), lineHeight = fixedSp(36 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight)
             }
             Row(Modifier.fillMaxWidth().height((20 * compactScale).dp), horizontalArrangement = Arrangement.spacedBy((5 * compactScale).dp)) {
-                Box(Modifier.weight(percent).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card))
-                Box(Modifier.weight(1f - percent).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card.copy(alpha = .5f)))
+                // Weight must stay positive even at 0% / 100% (e.g. an unset daily goal);
+                // the tiny floor mirrors LearningDataProgressCard's track treatment.
+                Box(Modifier.weight(percent.coerceAtLeast(0.001f)).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card))
+                Box(Modifier.weight((1f - percent).coerceAtLeast(0.001f)).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card.copy(alpha = .5f)))
             }
         }
     }
