@@ -186,6 +186,7 @@ internal fun parsePdfFile(value: JSONObject): V25PdfFile = V25PdfFile(
     status = optionalString(value, "status"),
     errorCode = optionalString(value, "error_code"),
     chapters = optionalArray(value, "chapters").map(::parseChapter),
+    createdAt = optionalInstant(value, "created_at"),
 )
 
 internal fun parseLearningProject(value: JSONObject): V25LearningProject = V25LearningProject(

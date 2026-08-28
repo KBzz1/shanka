@@ -195,6 +195,8 @@ data class V25PdfFile(
     val status: String? = null,
     val errorCode: String? = null,
     val chapters: List<V25Chapter> = emptyList(),
+    /** Server record time of the uploaded PDF; shown as the import date in material cards. */
+    val createdAt: Instant? = null,
 )
 
 /** Aggregate root of PDF, chapters, decks and tasks (Architecture 3.2). */

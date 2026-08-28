@@ -689,7 +689,7 @@ internal fun ProjectDraftFileCard(
                         color = theme.text,
                         designScale = scale
                     )
-                    AppText("26/8/11", AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
+                    AppText(formatImportDate(material.importedAt), AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
                     AppText("导入", AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
                 }
             }

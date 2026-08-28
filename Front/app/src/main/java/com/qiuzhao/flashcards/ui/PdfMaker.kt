@@ -149,6 +149,7 @@ import com.qiuzhao.flashcards.ui.motion.AppMotion
 import com.qiuzhao.flashcards.ui.navigation.AppNavigator
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 import com.qiuzhao.flashcards.ui.navigation.rememberAppNavigationState
+import java.time.Instant
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
@@ -200,7 +201,9 @@ private data class SmartImportFile(
     val uri: Uri,
     val name: String,
     val format: String,
-    val selected: Boolean = false
+    val selected: Boolean = false,
+    /** Local pick time; the card shows this as the import date until the server record exists. */
+    val importedAt: Instant = Instant.now()
 )
 
 private fun displayNameFor(uri: Uri, context: android.content.Context): String {
@@ -577,7 +580,7 @@ private fun SmartImportFileCard(file: SmartImportFile, scale: Float, onToggle: (
     SmartSwipeDeleteContainer(file.id, scale, "删除文件", onDelete) { cardModifier ->
         SmartSelectableCard(
             title = file.name,
-            subtitle = "${file.format.uppercase()} 26/8/11 导入",
+            subtitle = "${file.format.uppercase()} ${formatImportDate(file.importedAt)} 导入",
             selected = file.selected,
             selectedIcon = "check_circle",
             unselectedIcon = "picture_as_pdf",
