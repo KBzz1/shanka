@@ -246,14 +246,24 @@ class AppViewModel(
     /** Local-first sign out and token revocation are owned by [AuthViewModel]. */
     fun logout() = auth.logout()
 
+    /**
+     * Hydrates the signed-in home state without making the app trip the global
+     * server IP limiter. Session restoration has already issued one /auth/me
+     * request, so the first wave contains only the three states needed to render
+     * the library. The secondary panels are intentionally deferred to the next
+     * one-second window; neither wave waits on an unrelated panel request.
+     */
     fun refreshAll() {
-        refreshProfile()
         refreshProjects()
         refreshDecks()
-        refreshDashboard()
         refreshTodayPlan()
-        refreshApiKeyStatus()
-        recoverPendingDeletion()
+        viewModelScope.launch {
+            delay(1_100)
+            refreshDashboard()
+            refreshApiKeyStatus()
+            recoverPendingDeletion()
+            refreshProfile()
+        }
     }
 
     fun refreshProfile(): Job = viewModelScope.launch {
