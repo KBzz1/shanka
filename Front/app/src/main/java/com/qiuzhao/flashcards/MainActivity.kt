@@ -43,7 +43,8 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * 启动路由根组合：会话校验中 → 占位屏；未登录 → 登录/注册页；已登录 → 既有主界面导航。
+ * 启动路由根组合：会话校验中 → 占位屏；未登录 → 默认登录/注册页（登录门，登录后才能用）；
+ * 已登录 → 主界面导航。设置里退出登录后回到未登录状态，同样回到默认登录页。
  * 从 MainActivity 抽出，instrumented 测试可用注入的 AppViewModel 直接渲染同一启动路由。
  */
 @Composable
@@ -74,13 +75,13 @@ fun ShankaRoot(appViewModel: AppViewModel) {
     }
 }
 
-/** The signed-out state uses the upstream b944790 login/register surfaces, not a second visual shell. */
+/** The signed-out state uses the default login surface (no 「直接进入」 button) as the gate. */
 @Composable
 private fun AuthEntry(appViewModel: AppViewModel) {
     val navigationState = rememberAppNavigationState()
     val navigator = remember { AppNavigator(navigationState) }
     when (navigationState.currentRoute) {
         AppRoute.Register -> RegisterScreen(appViewModel, navigator)
-        else -> LoginScreen(appViewModel, navigator, showBack = false, firstLaunch = true)
+        else -> LoginScreen(appViewModel, navigator, showBack = false)
     }
 }

@@ -52,10 +52,18 @@ import com.qiuzhao.flashcards.ui.navigation.AppRoute
 
 /** Figma 540:3778: a project owns a statistics and deck-management view. */
 @Composable
-internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummary>, nav: ScreenNavigator, onDeleteDeck: (String) -> Unit) {
+internal fun ProjectDetailScreen(
+    project: ProjectSummary,
+    decks: List<DeckSummary>,
+    nav: ScreenNavigator,
+    onDeleteDeck: (String) -> Unit,
+    onDeleteProject: (retainDecks: Boolean, onResult: (Boolean) -> Unit) -> Unit,
+) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val theme = deckTheme(project)
     var section by rememberSaveable { mutableStateOf(ProjectDetailSection.STATISTICS) }
+    var showProjectDeletionConfirmation by rememberSaveable(project.id) { mutableStateOf(false) }
+    var projectDeletionInFlight by rememberSaveable(project.id) { mutableStateOf(false) }
     // The coloured project canvas uses the family Background token; every
     // project-owned deck card then lifts to that family's Surface token.
     Box(Modifier.fillMaxSize().background(theme.background)) {
@@ -64,7 +72,9 @@ internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummar
             backContainer = theme.cardPanel,
             onTrailingAction = { nav.navigate(AppRoute.ProjectEdit(project.id)) },
             trailingActionSymbol = "edit", trailingActionDescription = "编辑项目",
-            trailingActionContainer = theme.cardPanel
+            trailingActionContainer = theme.cardPanel,
+            onSecondaryTrailingAction = { showProjectDeletionConfirmation = true },
+            secondaryTrailingActionDescription = "删除项目"
         )
         Column(
             modifier = Modifier.fillMaxSize().statusBarsPadding().padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp),
@@ -85,6 +95,25 @@ internal fun ProjectDetailScreen(project: ProjectSummary, decks: List<DeckSummar
                 modifier = Modifier.align(Alignment.BottomCenter).zIndex(1f)
             )
         }
+    }
+    if (showProjectDeletionConfirmation) {
+        ProjectDeletionDialog(
+            projectName = project.name,
+            theme = theme,
+            deleting = projectDeletionInFlight,
+            onConfirm = { retainDecks ->
+                if (projectDeletionInFlight) return@ProjectDeletionDialog
+                projectDeletionInFlight = true
+                onDeleteProject(retainDecks) { succeeded ->
+                    projectDeletionInFlight = false
+                    if (succeeded) {
+                        showProjectDeletionConfirmation = false
+                        nav.returnToTopLevel()
+                    }
+                }
+            },
+            onDismiss = { if (!projectDeletionInFlight) showProjectDeletionConfirmation = false }
+        )
     }
 }
 

@@ -60,8 +60,7 @@ sealed interface AppRoute : NavKey {
     @Serializable data class EditCardList(val deckId: String) : AppRoute
     @Serializable data class ImportToDeck(val deckId: String) : AppRoute
     @Serializable data object PdfMaker : AppRoute
-    /** First app entry has no visible back affordance. */
-    @Serializable data object FirstLogin : AppRoute
+    /** Avatar-triggered login dialog; the only sign-in entry in the release shell. */
     @Serializable data object Login : AppRoute
     @Serializable data object Register : AppRoute
     @Serializable data object Settings : AppRoute

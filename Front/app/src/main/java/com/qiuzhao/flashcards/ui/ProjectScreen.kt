@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -55,6 +56,11 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -171,6 +177,8 @@ internal fun ProjectCreateScreen(
     var selectedTheme by rememberSaveable(projectId) { mutableStateOf(editingProject?.themeKey ?: "violet") }
     var message by remember { mutableStateOf<String?>(null) }
     var editingFile by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
+    var showProjectDeletionConfirmation by rememberSaveable(projectId) { mutableStateOf(false) }
+    var projectDeletionInFlight by rememberSaveable(projectId) { mutableStateOf(false) }
     val theme = DeckThemes.firstOrNull { it.key == selectedTheme } ?: DeckThemes.first()
     val context = LocalContext.current
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -259,6 +267,14 @@ internal fun ProjectCreateScreen(
                         onDelete = { viewModel.deleteProjectDraftMaterial(it.id) }
                     )
                 }
+                if (editingProject != null) {
+                    item {
+                        ProjectDeletionEntry(
+                            scale = scale,
+                            onRequestDeletion = { showProjectDeletionConfirmation = true }
+                        )
+                    }
+                }
                 message?.let { error -> item { AppText(error, AppTextRole.CardSubtitle, color = AppColors.WarningStrong, designScale = scale) } }
             }
         }
@@ -323,6 +339,232 @@ internal fun ProjectCreateScreen(
             },
             onDismiss = { editingFile = null }
         )
+    }
+    if (editingProject != null && showProjectDeletionConfirmation) {
+        ProjectDeletionDialog(
+            projectName = editingProject.name,
+            theme = theme,
+            deleting = projectDeletionInFlight,
+            onConfirm = { retainDecks ->
+                if (projectDeletionInFlight) return@ProjectDeletionDialog
+                projectDeletionInFlight = true
+                viewModel.deleteProject(editingProject.id, retainDecks) { succeeded ->
+                    projectDeletionInFlight = false
+                    if (succeeded) {
+                        showProjectDeletionConfirmation = false
+                        nav.returnToTopLevel()
+                    }
+                }
+            },
+            onDismiss = { if (!projectDeletionInFlight) showProjectDeletionConfirmation = false }
+        )
+    }
+}
+
+/**
+ * The edit form owns the destructive entry so it remains visually separate from normal project
+ * settings. The second, modal confirmation chooses the backend's retain_decks contract value.
+ */
+@Composable
+private fun ProjectDeletionEntry(scale: Float, onRequestDeletion: () -> Unit) = Surface(
+    color = AppColors.WarningSecondary,
+    shape = RoundedCornerShape((AppShapeRadius * scale).dp),
+    modifier = Modifier.fillMaxWidth()
+) {
+    Column(
+        modifier = Modifier.padding((20 * scale).dp),
+        verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy((12 * scale).dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            MaterialSymbol("delete", null, tint = AppColors.WarningInk, size = fixedSp(24 * scale), filled = true)
+            AppText("删除项目", AppTextRole.SectionTitle, color = AppColors.WarningInk, designScale = scale)
+        }
+        AppText(
+            "删除后会移除项目的 PDF、章节、制卡任务历史和项目设置。",
+            AppTextRole.CardSubtitle,
+            color = AppColors.WarningInk,
+            designScale = scale
+        )
+        Surface(
+            onClick = onRequestDeletion,
+            color = AppColors.WarningStrong,
+            contentColor = AppColors.TextIconLight,
+            shape = RoundedCornerShape((AppButtonShapeRadius * scale).dp),
+            modifier = Modifier.fillMaxWidth().height((60 * scale).dp)
+                .semantics { contentDescription = "删除项目" }
+        ) {
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                MaterialSymbol("delete", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+                Spacer(Modifier.width((8 * scale).dp))
+                AppText("删除项目", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
+            }
+        }
+    }
+}
+
+/**
+ * V25-GEN-FR-09's second confirmation: the user explicitly chooses whether project decks and
+ * cards survive before the irreversible DELETE /projects request is allowed to leave the app.
+ */
+@Composable
+internal fun ProjectDeletionDialog(
+    projectName: String,
+    theme: DeckTheme,
+    deleting: Boolean = false,
+    onConfirm: (retainDecks: Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var retainDecks by rememberSaveable(projectName) { mutableStateOf(true) }
+    val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
+    LaunchedEffect(dialogWindow) { dialogWindow?.setDimAmount(.2f) }
+
+    Dialog(onDismissRequest = { if (!deleting) onDismiss() }) {
+        Surface(
+            color = theme.background,
+            shape = RoundedCornerShape(36.dp),
+            modifier = Modifier.width(331.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        color = AppColors.WarningStrong,
+                        shape = RoundedCornerShape(999.dp),
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            MaterialSymbol("delete", null, tint = AppColors.TextIconLight, size = fixedSp(24f), filled = true)
+                        }
+                    }
+                    AppText("删除“$projectName”吗？", AppTextRole.SectionTitle, color = theme.text, maxLines = 2)
+                }
+                AppText(
+                    "项目的 PDF、章节、制卡任务历史和项目设置会被删除。请确认卡组和卡片的处理方式。",
+                    AppTextRole.CardSubtitle,
+                    color = theme.text
+                )
+                ProjectDeletionChoice(
+                    selected = retainDecks,
+                    title = "保留卡组和卡片",
+                    description = "卡组会脱离项目继续学习；来源查看和 AI 重写不再可用。",
+                    theme = theme,
+                    enabled = !deleting,
+                    onClick = { retainDecks = true }
+                )
+                ProjectDeletionChoice(
+                    selected = !retainDecks,
+                    title = "同时删除卡组和卡片",
+                    description = "卡组、卡片和相关学习记录也会被删除，且无法恢复。",
+                    theme = theme,
+                    destructive = true,
+                    enabled = !deleting,
+                    onClick = { retainDecks = false }
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Surface(
+                        onClick = onDismiss,
+                        enabled = !deleting,
+                        color = theme.cardPanel,
+                        contentColor = theme.text,
+                        shape = RoundedCornerShape(AppButtonShapeRadius.dp),
+                        modifier = Modifier.weight(1f).height(60.dp).semantics { contentDescription = "取消删除项目" }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            AppText("取消", AppTextRole.Label, color = LocalContentColor.current)
+                        }
+                    }
+                    Surface(
+                        onClick = { onConfirm(retainDecks) },
+                        enabled = !deleting,
+                        color = AppColors.WarningStrong,
+                        contentColor = AppColors.TextIconLight,
+                        shape = RoundedCornerShape(AppButtonShapeRadius.dp),
+                        modifier = Modifier.weight(1.35f).height(60.dp)
+                            .semantics { contentDescription = "确认删除项目" }
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            MaterialSymbol("delete", null, tint = LocalContentColor.current, size = fixedSp(24f), filled = true)
+                            Spacer(Modifier.width(8.dp))
+                            AppText(if (deleting) "正在删除" else "确认删除", AppTextRole.Label, color = LocalContentColor.current)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProjectDeletionChoice(
+    selected: Boolean,
+    title: String,
+    description: String,
+    theme: DeckTheme,
+    destructive: Boolean = false,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val titleColor = if (destructive) AppColors.WarningInk else theme.text
+    val borderColor = if (selected) {
+        if (destructive) AppColors.WarningStrong else theme.primary
+    } else {
+        theme.cardPanel
+    }
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        color = if (selected) theme.cardPanel else AppColors.Card,
+        contentColor = titleColor,
+        shape = RoundedCornerShape(AppNestedShapeRadius.dp),
+        border = BorderStroke(if (selected) 2.dp else 1.dp, borderColor),
+        modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
+            contentDescription = title
+            this.selected = selected
+            role = Role.RadioButton
+        }
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Surface(
+                color = if (selected) borderColor else AppColors.Card,
+                shape = RoundedCornerShape(999.dp),
+                border = if (selected) null else BorderStroke(1.dp, borderColor),
+                modifier = Modifier.size(24.dp)
+            ) {
+                if (selected) Box(contentAlignment = Alignment.Center) {
+                    MaterialSymbol("check", null, tint = AppColors.TextIconLight, size = fixedSp(16f), filled = true)
+                }
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                AppText(title, AppTextRole.CardTitle, color = titleColor)
+                AppText(description, AppTextRole.CardSubtitle, color = titleColor.copy(alpha = .8f))
+            }
+        }
     }
 }
 

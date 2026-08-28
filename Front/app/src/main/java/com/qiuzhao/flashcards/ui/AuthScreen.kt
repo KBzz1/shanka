@@ -72,8 +72,7 @@ import kotlin.random.Random
 internal fun LoginScreen(
     viewModel: AppViewModel,
     nav: ScreenNavigator,
-    showBack: Boolean = false,
-    firstLaunch: Boolean = false
+    showBack: Boolean = false
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -161,44 +160,15 @@ internal fun LoginScreen(
                             if (error == null) loginRevealStarted = true else message = error
                         }
                     }
-                    if (firstLaunch) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy((12 * scale).dp)
-                        ) {
-                            AuthIconButton(
-                                text = "直接进入",
-                                icon = "front_hand",
-                                color = AppColors.Blue.surface,
-                                contentColor = AppColors.TextIconDark,
-                                scale = scale,
-                                enabled = !loginRevealStarted,
-                                modifier = Modifier.weight(1f),
-                                onClick = nav::popBackStack
-                            )
-                            AuthIconButton(
-                                text = "还未注册",
-                                icon = "app_registration",
-                                color = AppColors.Blue.surface,
-                                contentColor = AppColors.TextIconDark,
-                                scale = scale,
-                                enabled = !loginRevealStarted,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                nav.navigate(AppRoute.Register)
-                            }
-                        }
-                    } else {
-                        AuthIconButton(
-                            text = "还未注册",
-                            icon = "app_registration",
-                            color = AppColors.Blue.surface,
-                            contentColor = AppColors.TextIconDark,
-                            scale = scale,
-                            enabled = !loginRevealStarted
-                        ) {
-                            nav.navigate(AppRoute.Register)
-                        }
+                    AuthIconButton(
+                        text = "还未注册",
+                        icon = "app_registration",
+                        color = AppColors.Blue.surface,
+                        contentColor = AppColors.TextIconDark,
+                        scale = scale,
+                        enabled = !loginRevealStarted
+                    ) {
+                        nav.navigate(AppRoute.Register)
                     }
                 }
             }

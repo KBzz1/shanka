@@ -48,7 +48,12 @@ internal fun MaterialManagementScreen(project: ProjectSummary?, viewModel: AppVi
     val theme = DeckThemes.first { it.key == "azure" }
     val drafts by viewModel.projectCreationMaterials.collectAsState()
     val projectMats by viewModel.projectMaterials.collectAsState()
-    val list = project?.let { projectMats[it.id] } ?: drafts
+    // Global entry (project == null) is the app-wide materials library: every
+    // project's bound PDF plus any unbound creation drafts. Project creation
+    // clears its drafts on success, so the created project's PDF must come from
+    // projectMaterials[projectId] or the page would stay empty after a save.
+    val list = project?.let { projectMats[it.id] }
+        ?: (projectMats.values.flatten() + drafts)
     var query by rememberSaveable { mutableStateOf("") }
     var editingFile by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
     val filtered = list.filter { material -> query.isBlank() || material.title.contains(query, true) || material.content.contains(query, true) }
