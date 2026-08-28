@@ -28,10 +28,12 @@ from infra.db.models import (
     LearningProject,
     PdfFile,
     Task,
+    TextChunk,
     User,
 )
+from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.db.session import create_db_engine, create_session_factory
-from services.generation.samples import config_fingerprint, sample_cards
+from services.generation.samples import config_fingerprint, sample_cards_llm
 from services.tasks.service import (
     abandon_task,
     create_task,
@@ -123,16 +125,20 @@ def _seed(session: Session, *, user_id: str) -> dict[str, object]:
         session.add(ch)
         session.flush()
         chapter_ids.append(ch.chapter_id)
+    encryption_key = key_from_settings(_settings())
+    assert encryption_key is not None
     session.execute(
         insert(ApiKey).values(
             user_id=user_id,
-            encrypted_key="enc",
+            encrypted_key=encrypt_key("sk-test-0123456789", encryption_key),
             status="AVAILABLE",
             masked_key="sk-****",
             updated_at=_NOW,
         )
     )
     session.flush()
+    # 样卡真实生成需章节文本：按章节页区间种页文本（第 1 章 1-2 页、第 2 章 2-3 页）
+    _seed_chunks(session, file_id=pdf.file_id, pages=3)
     return {
         "project_id": project.project_id,
         "deck_id": deck.deck_id,
@@ -156,7 +162,9 @@ def _complete_samples(session: Session, task_id: str) -> None:
     """样卡 worker 完成（SAMPLE_GENERATING → AWAITING + 持久化样卡与指纹）。"""
     from services.tasks.executor import process_active_tasks
 
-    process_active_tasks(session, settings=_settings())
+    process_active_tasks(
+        session, settings=_settings(), client_factory=_stub_factory()
+    )
     session.commit()
     row = session.get(Task, task_id)
     assert row is not None and row.status == "AWAITING_SAMPLE_CONFIRMATION"
@@ -167,41 +175,188 @@ def _settings() -> Settings:
     return Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
 
 
+def _envelope(user_prompt: str) -> dict[str, object]:
+    raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
+    return json.loads(raw)  # type: ignore[return-value]
+
+
+class StubClient:
+    """样卡 worker 注入的假 LLM：按信封 target_difficulty 返回合规 QUESTION 卡（不触网）。"""
+
+    def close(self) -> None:
+        pass
+
+    def chat(
+        self, user_prompt: str, system_prompt: str | None = None, max_tokens: int | None = None
+    ) -> dict[str, object]:
+        payload = _envelope(user_prompt)
+        difficulty = str(payload["target_difficulty"])
+        return {
+            "content": json.dumps(
+                {
+                    "cards": [
+                        {
+                            "type": "QUESTION",
+                            "question": f"样卡问题-{difficulty}",
+                            "answer": f"样卡答案-{difficulty}",
+                        }
+                    ]
+                }
+            ),
+            "usage": {"prompt_cache_miss_tokens": 5, "completion_tokens": 3},
+            "model": "deepseek-v4-flash",
+            "http_status": 200,
+            "duration_ms": 1,
+        }
+
+
+def _seed_file(session: Session) -> str:
+    """User + PdfFile 行（text_chunks FK 前置），返回 file_id。"""
+    user_id = _uuid()
+    session.add(
+        User(
+            user_id=user_id,
+            username=f"u-{user_id[:8]}",
+            email=f"u-{user_id[:8]}@example.com",
+            password_hash="x",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+    session.flush()
+    pdf = PdfFile(
+        file_id=_uuid(),
+        user_id=user_id,
+        filename="b.pdf",
+        storage_key=_uuid(),
+        size_bytes=10,
+        status="PARSED",
+        created_at=_NOW,
+    )
+    session.add(pdf)
+    session.flush()
+    return pdf.file_id
+
+
+def _seed_chunks(session: Session, *, file_id: str, pages: int = 3) -> None:
+    for page in range(1, pages + 1):
+        session.execute(
+            insert(TextChunk).values(
+                chunk_id=_uuid(),
+                file_id=file_id,
+                page_number=page,
+                char_count=20,
+                content_sha256="0" * 64,
+                content=f"第 {page} 页：上下文工程核心概念。",
+                created_at=_NOW,
+            )
+        )
+    session.flush()
+
+
+def _stub_factory() -> Callable[[str], StubClient]:
+    return lambda _key: StubClient()
+
+
+
 # ---------- 启用难度 ↔ 样卡数（1~3 张） ----------
 
 
-def test_sample_cards_only_for_enabled_difficulties() -> None:
-    """比例为 0 的难度不生成样卡；1~3 张与启用难度一一对应（契约 3.5）。"""
-    chapter = "第一章"
-    task_id = _uuid()
-    # 三档全启用 → 3 张
-    cards = sample_cards(_config(40, 40, 20), chapter_name=chapter, task_id=task_id)
-    assert len(cards) == 3
-    assert {c["target_difficulty"] for c in cards} == {
-        "BASIC",
-        "UNDERSTANDING",
-        "DEEP_QUESTION",
-    }
-    # 禁用理解档（0）→ 2 张，不含 UNDERSTANDING
-    cards = sample_cards(_config(40, 0, 60), chapter_name=chapter, task_id=task_id)
-    assert len(cards) == 2
-    assert {c["target_difficulty"] for c in cards} == {"BASIC", "DEEP_QUESTION"}
-    # 仅启用基础档（100/0/0）→ 1 张
-    cards = sample_cards(_config(100, 0, 0), chapter_name=chapter, task_id=task_id)
-    assert len(cards) == 1
-    assert {c["target_difficulty"] for c in cards} == {"BASIC"}
-    # 每张样卡为合法轻量组件（3.13：card_id/front/back/card_type）
-    for card in cards:
-        assert {"card_id", "front", "back", "card_type"} <= set(card)
+def _llm_task(config: GenerationConfig, *, file_id: str) -> Task:
+    return Task(
+        task_id=_uuid(),
+        user_id=_uuid(),
+        file_id=file_id,
+        status="SAMPLE_GENERATING",
+        selected_chapters=json.dumps(
+            [
+                {
+                    "chapter_id": _uuid(),
+                    "name": "第一章",
+                    "start_page": 1,
+                    "end_page": 2,
+                }
+            ]
+        ),
+        generation_config=config.model_dump_json(),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
 
 
-def test_sample_cards_deterministic_per_task() -> None:
-    """同配置 + 同章节 + 同任务 → 同 card_id（seed 带任务维度，F-1）。"""
-    a = sample_cards(_config(), chapter_name="第一章", task_id="t1")
-    b = sample_cards(_config(), chapter_name="第一章", task_id="t1")
-    c = sample_cards(_config(), chapter_name="第一章", task_id="t2")
-    assert [x["card_id"] for x in a] == [x["card_id"] for x in b]
-    assert [x["card_id"] for x in a] != [x["card_id"] for x in c]
+def test_sample_cards_only_for_enabled_difficulties(
+    session_factory: Callable[[], Session],
+) -> None:
+    """比例为 0 的难度不生成样卡；1~3 张与启用难度一一对应（契约 3.5，真实生成路径）。"""
+    with session_factory() as session:
+        file_id = _seed_file(session)
+        _seed_chunks(session, file_id=file_id)
+        client = StubClient()
+        # 三档全启用 → 3 张
+        cards = sample_cards_llm(
+            session,
+            task=_llm_task(_config(40, 40, 20), file_id=file_id),
+            config=_config(40, 40, 20),
+            client=client,
+            settings=_settings(),
+        )
+        assert len(cards) == 3
+        assert {c["target_difficulty"] for c in cards} == {
+            "BASIC",
+            "UNDERSTANDING",
+            "DEEP_QUESTION",
+        }
+        # 禁用理解档（0）→ 2 张，不含 UNDERSTANDING
+        cards = sample_cards_llm(
+            session,
+            task=_llm_task(_config(40, 0, 60), file_id=file_id),
+            config=_config(40, 0, 60),
+            client=client,
+            settings=_settings(),
+        )
+        assert len(cards) == 2
+        assert {c["target_difficulty"] for c in cards} == {"BASIC", "DEEP_QUESTION"}
+        # 仅启用基础档（100/0/0）→ 1 张
+        cards = sample_cards_llm(
+            session,
+            task=_llm_task(_config(100, 0, 0), file_id=file_id),
+            config=_config(100, 0, 0),
+            client=client,
+            settings=_settings(),
+        )
+        assert len(cards) == 1
+        assert {c["target_difficulty"] for c in cards} == {"BASIC"}
+        # 每张样卡为合法轻量组件（3.13：card_id/front/back/card_type）
+        for card in cards:
+            assert {"card_id", "front", "back", "card_type"} <= set(card)
+
+
+
+def test_sample_cards_fresh_ids_per_call(
+    session_factory: Callable[[], Session],
+) -> None:
+    """LLM 样卡每次生成全新 card_id/generation_item_id（V5A 真实生成语义，无确定性 seed）。"""
+    with session_factory() as session:
+        file_id = _seed_file(session)
+        _seed_chunks(session, file_id=file_id)
+        a = sample_cards_llm(
+            session,
+            task=_llm_task(_config(), file_id=file_id),
+            config=_config(),
+            client=StubClient(),
+            settings=_settings(),
+        )
+        b = sample_cards_llm(
+            session,
+            task=_llm_task(_config(), file_id=file_id),
+            config=_config(),
+            client=StubClient(),
+            settings=_settings(),
+        )
+    assert [x["card_id"] for x in a] != [x["card_id"] for x in b]
+    for card in a + b:
+        assert card["source"] == "GENERATED"
+        assert card["generation_item_id"]
 
 
 def test_sample_config_fingerprint_deterministic() -> None:
@@ -315,7 +470,9 @@ def test_abandon_during_sample_generating_write_harmless(
         abandon_task(session, user_id=user, task_id=task_id, now=_NOW)
         session.commit()
     with session_factory() as session:
-        process_active_tasks(session, settings=_settings())
+        process_active_tasks(
+            session, settings=_settings(), client_factory=_stub_factory()
+        )
         session.commit()
     with session_factory() as session:
         row = session.get(Task, task_id)
@@ -344,7 +501,9 @@ def test_sample_worker_failure_marks_failed(
         session.execute(update(Task).where(Task.task_id == task_id).values(selected_chapters="[]"))
         session.commit()
     with session_factory() as session:
-        process_active_tasks(session, settings=_settings())
+        process_active_tasks(
+            session, settings=_settings(), client_factory=_stub_factory()
+        )
         session.commit()
     with session_factory() as session:
         row = session.get(Task, task_id)
@@ -381,15 +540,22 @@ def test_sample_worker_unexpected_error_fails_task_and_continues_round(
     original = tasks_executor._complete_sample_task
     calls = {"n": 0}
 
-    def flaky(session: Session, task: Task) -> int:
+    def flaky(
+        session: Session,
+        task: Task,
+        settings: Settings,
+        client_factory: Callable[[str], StubClient] | None = None,
+    ) -> int:
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("注入的样卡路径异常（DB/编程错误）")
-        return original(session, task)
+        return original(session, task, settings, client_factory=client_factory)
 
     monkeypatch.setattr(tasks_executor, "_complete_sample_task", flaky)
     with session_factory() as session:
-        process_active_tasks(session, settings=_settings())  # 异常被兜底，不向上传播
+        process_active_tasks(  # 异常被兜底，不向上传播
+            session, settings=_settings(), client_factory=_stub_factory()
+        )
         session.commit()
     with session_factory() as session:
         rows = session.scalars(select(Task)).all()

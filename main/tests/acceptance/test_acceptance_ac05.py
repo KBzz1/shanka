@@ -214,7 +214,7 @@ def _create_and_start(
     assert resp.status_code == 201
     task_id = str(resp.json()["task_id"])
     assert client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
-    scan_tasks(_db_factory(db_path), settings=_SETTINGS)
+    scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=_sample_factory)
     resp = client.get(f"/tasks/{task_id}", headers=user)
     assert resp.status_code == 200 and resp.json()["status"] == "AWAITING_SAMPLE_CONFIRMATION"
     assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
@@ -223,6 +223,33 @@ def _create_and_start(
 
 def _db_factory(db_path: Path) -> sessionmaker[Session]:
     return create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+
+
+def _sample_factory(api_key: str) -> DeepSeekClient:
+    """样卡 worker 扫描注入：仅 GENERATOR_INPUT → 固定合法卡（崩溃模拟扫描用的
+    _scripted_factory 不参与样卡阶段——避免调用计数被 3 次样卡调用打乱）。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        user = body["messages"][-1]["content"]
+        content = json.dumps(
+            {"cards": [{"type": "QUESTION", "question": "q0", "answer": "a0"}]},
+            ensure_ascii=False,
+        )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": content}}],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 5,
+                    "prompt_cache_hit_tokens": 2,
+                    "prompt_cache_miss_tokens": 8,
+                },
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+    return DeepSeekClient(_SETTINGS, transport=httpx.MockTransport(handler))
 
 
 def _scripted_factory(

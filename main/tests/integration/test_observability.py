@@ -406,28 +406,28 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
     _run_task(client, db_path, user=user)
     after = client.get("/metrics").text
 
-    # llm（生成 6 批 + 评分 5 组 = 11 次 chat；规划调用不在 llm 指标口径）
+    # llm（样卡 3 次 + 生成 6 批 + 评分 5 组 = 14 次 chat；规划调用不在 llm 指标口径）
     ok_labels = ['model="deepseek-v4-flash"', 'http_status="200"']
     assert (
         _labeled_value(after, "llm_requests_total", ok_labels)
         - _labeled_value(before, "llm_requests_total", ok_labels)
-    ) == 11.0
+    ) == 14.0
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="cache_hit"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="cache_hit"'])
-    ) == 22.0  # 11 次 × 2
+    ) == 28.0  # 14 次 × 2
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="cache_miss"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="cache_miss"'])
-    ) == 88.0  # 11 次 × 8
+    ) == 112.0  # 14 次 × 8
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="output"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="output"'])
-    ) == 55.0  # 11 次 × 5
+    ) == 70.0  # 14 次 × 5
     assert (
         _plain_value(after, "llm_request_duration_seconds_count")
         - _plain_value(before, "llm_request_duration_seconds_count")
-    ) == 11.0
+    ) == 14.0
     # generation（1 个任务 COMPLETED）
     assert (
         _labeled_value(after, "generation_tasks_total", ['result="COMPLETED"'])

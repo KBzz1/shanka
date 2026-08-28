@@ -39,6 +39,7 @@ from infra.db.models import (
 from infra.db.session import create_db_engine, create_session_factory
 from services.generation.samples import config_fingerprint
 from services.pdf.text_chunks import persist_text_chunks
+from infra.llm.crypto import encrypt_key, key_from_settings
 from services.tasks.service import (
     abandon_task,
     create_task,
@@ -152,10 +153,12 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         now=_NOW,
     )
     if with_key:
+        encryption_key = key_from_settings(_ensure_settings(session))
+        assert encryption_key is not None
         session.execute(
             insert(ApiKey).values(
                 user_id=user_id,
-                encrypted_key="enc",
+                encrypted_key=encrypt_key("sk-test-0123456789", encryption_key),
                 status="AVAILABLE",
                 masked_key="sk-****",
                 updated_at=_NOW,
@@ -756,7 +759,7 @@ def test_no_service_path_writes_legacy_task_status(
         session.commit()
         _assert_seven(session)
         # 样卡 worker 扫描完成（SAMPLE_GENERATING → AWAITING）
-        tasks_executor.process_active_tasks(session, settings=_ensure_settings(session))
+        tasks_executor.process_active_tasks(session, settings=_ensure_settings(session), client_factory=_stub_factory())
         session.commit()
         _assert_seven(session)
         start_task(session, user_id=user, task_id=task_id, now=_NOW)
@@ -803,6 +806,42 @@ def _ensure_settings(session: Session) -> Settings:
     return settings
 
 
+class _StubClient:
+    """样卡 worker 注入的假 LLM：按信封 target_difficulty 返回合规 QUESTION 卡（不触网）。"""
+
+    def close(self) -> None:
+        pass
+
+    def chat(
+        self, user_prompt: str, system_prompt: str | None = None, max_tokens: int | None = None
+    ) -> dict[str, object]:
+        import json as _json
+
+        raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
+        difficulty = str(_json.loads(raw)["target_difficulty"])
+        return {
+            "content": _json.dumps(
+                {
+                    "cards": [
+                        {
+                            "type": "QUESTION",
+                            "question": f"样卡问题-{difficulty}",
+                            "answer": f"样卡答案-{difficulty}",
+                        }
+                    ]
+                }
+            ),
+            "usage": {"prompt_cache_miss_tokens": 5, "completion_tokens": 3},
+            "model": "deepseek-v4-flash",
+            "http_status": 200,
+            "duration_ms": 1,
+        }
+
+
+def _stub_factory() -> Callable[[str], _StubClient]:
+    return lambda _key: _StubClient()
+
+
 # ---------- 并发/恢复：样卡任务跨"重启"续跑 ----------
 
 
@@ -822,7 +861,7 @@ def test_sample_task_resumes_after_restart(session_factory: Callable[[], Session
         session.commit()
     # "重启"：新 session 显式扫描
     with session_factory() as session:
-        process_active_tasks(session, settings=_ensure_settings(session))
+        process_active_tasks(session, settings=_ensure_settings(session), client_factory=_stub_factory())
         session.commit()
     with session_factory() as session:
         row = session.get(Task, task_id)

@@ -55,7 +55,7 @@ from infra.metrics import GENERATION_TASKS_DURATION_SECONDS, GENERATION_TASKS_TO
 from services.generation.batches import plan_batches, process_next_batch
 from services.generation.ledger import mark_stale_unknown
 from services.generation.planning_executor import claim_planning_task, run_planning
-from services.generation.samples import config_fingerprint, sample_cards
+from services.generation.samples import config_fingerprint, sample_cards_llm
 from services.generation.scoring import enter_scoring_stage, run_scoring_stage
 from services.tasks.service import complete_samples
 
@@ -295,17 +295,32 @@ def _fail_task(
     _observe_task_result(task, "FAILED")  # 8.3：系统级失败也计数（仅实际转移时）
 
 
-def _complete_sample_task(session: Session, task: Task) -> int:
-    """单任务样卡完成（4.1）：读任务配置 → 生成 1~3 张样卡（比例>0 难度各 1 张，
+def _complete_sample_task(
+    session: Session,
+    task: Task,
+    settings: Settings,
+    client_factory: ClientFactory | None = None,
+) -> int:
+    """单任务样卡完成（4.1）：读任务配置 → 按启用难度真实生成 1~3 张样卡
+    （V5A adapter：密钥解密 → 带 Key client 注入 sample_cards_llm → 章节文本 + 校验；
     章节名取快照，删除后可还原）→ 条件更新持久化样卡 + 配置指纹 → AWAITING。
-    返回写入数（0 = 并发 abandon/转移，不复活不写）。不可恢复错误 → FAILED。"""
+    返回写入数（0 = 并发 abandon/转移，不复活不写）。不可恢复错误 → FAILED。
+    密钥缺失/上游 401（API_KEY_UNAVAILABLE）等 AppError 向 worker 传播 →
+    任务 FAILED + error_code（不吞不降格）。"""
     try:
         config = GenerationConfig(**json.loads(task.generation_config))
-        snapshot = json.loads(task.selected_chapters)
-        chapter_name = str(snapshot[0]["name"]) if snapshot and isinstance(snapshot, list) else ""
-        if not chapter_name:
-            raise ValueError("章节快照为空")
-        cards = sample_cards(config, chapter_name=chapter_name, task_id=task.task_id)
+        api_key = _decrypt_api_key(session, task=task, settings=settings)
+        client = (
+            client_factory(api_key)
+            if client_factory is not None
+            else DeepSeekClient(settings, api_key=api_key)
+        )
+        try:
+            cards = sample_cards_llm(
+                session, task=task, config=config, client=client, settings=settings
+            )
+        finally:
+            client.close()
     except (ValueError, TypeError, KeyError):
         # 防御：配置/快照损坏（正常流程不可能）→ 条件更新 FAILED（并发 abandon 不覆盖），
         # 可重试/删除，不悬挂 SAMPLE_GENERATING
@@ -343,8 +358,11 @@ def _complete_sample_task(session: Session, task: Task) -> int:
     return int(written)
 
 
-def _sample_worker(session: Session) -> int:
-    """样卡 worker：完成全部 SAMPLE_GENERATING 任务（后台请求，幂等键已防重复触发）。
+def _sample_worker(
+    session: Session, settings: Settings, client_factory: ClientFactory | None = None
+) -> int:
+    """样卡 worker：真实 LLM 完成全部 SAMPLE_GENERATING 任务（后台请求，幂等键已防
+    重复触发；带 Key client 按任务构造，调用后关闭）。
 
     逐任务异常守卫（与规划/生成/评分 worker 同构）：单任务样卡路径异常（编程/DB
     错误，_complete_sample_task 内层仅捕输入类异常）→ 该任务 FAILED 兜底，不中止
@@ -357,7 +375,9 @@ def _sample_worker(session: Session) -> int:
     written = 0
     for task in tasks:
         try:
-            written += _complete_sample_task(session, task)
+            written += _complete_sample_task(
+                session, task, settings, client_factory=client_factory
+            )
         except AppError as exc:
             _fail_task(session, task, error_code=exc.code.value)
             # M-5 裁决：样卡阶段失败不写 failure_stage（_fail_task 条件更新在
@@ -397,7 +417,7 @@ def process_active_tasks(
     settings = settings or Settings()
     now = format_utc(SystemClock().now_utc())
     # 样卡 worker 入口（V2.5）：完成 SAMPLE_GENERATING → AWAITING_SAMPLE_CONFIRMATION
-    sample_count = _sample_worker(session)
+    sample_count = _sample_worker(session, settings, client_factory=client_factory)
     # 规划 worker 入口（spec §6.1）：每次扫描至多接管一个 PLANNING 任务
     claimed = claim_planning_task(
         session, orphan_timeout_minutes=settings.orphan_timeout_minutes, now=now

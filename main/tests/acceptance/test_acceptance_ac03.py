@@ -15,6 +15,7 @@ PDF 上下文（plan Task 5 决策）：种 DB 行（User + PdfFile PARSED + Cha
 牌组 + ApiKey），不依赖样书——AC-03 聚焦样卡构成，PDF 全链路由 AC-01 覆盖。
 """
 
+import json
 import uuid
 from pathlib import Path
 from typing import cast
@@ -35,14 +36,57 @@ from infra.db.models import (
     PdfFile,
     ReviewState,
     Task,
+    TextChunk,
     User,
 )
+from infra.llm.crypto import encrypt_key, key_from_settings
 from services.tasks.executor import process_active_tasks
 from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 _NOW = "2026-08-11T00:00:00.000Z"
+
+
+def _test_settings() -> Settings:
+    # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
+    return Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
+
+
+def _envelope(user_prompt: str) -> dict[str, object]:
+    raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
+    return json.loads(raw)  # type: ignore[return-value]
+
+
+class StubClient:
+    """样卡 worker 注入的假 LLM：按信封 target_difficulty 返回合规 QUESTION 卡（不触网）。"""
+
+    def close(self) -> None:
+        pass
+
+    def chat(
+        self, user_prompt: str, system_prompt: str | None = None, max_tokens: int | None = None
+    ) -> dict[str, object]:
+        payload = _envelope(user_prompt)
+        difficulty = str(payload["target_difficulty"])
+        return {
+            "content": json.dumps(
+                {
+                    "cards": [
+                        {
+                            "type": "QUESTION",
+                            "question": f"样卡问题-{difficulty}",
+                            "answer": f"样卡答案-{difficulty}",
+                        }
+                    ]
+                }
+            ),
+            "usage": {"prompt_cache_miss_tokens": 5, "completion_tokens": 3},
+            "model": "deepseek-v4-flash",
+            "http_status": 200,
+            "duration_ms": 1,
+        }
+
 
 
 @pytest.fixture
@@ -130,15 +174,30 @@ def _seed_pdf_context(client: TestClient, user: dict[str, str]) -> dict[str, obj
             session.add(ch)
             session.flush()
             chapter_ids.append(ch.chapter_id)
+        encryption_key = key_from_settings(_test_settings())
+        assert encryption_key is not None
         session.execute(
             insert(ApiKey).values(
                 user_id=owner.user_id,
-                encrypted_key="enc",  # 样卡用 fake 生成，不触网不解密
+                encrypted_key=encrypt_key("sk-test-0123456789", encryption_key),
                 status="AVAILABLE",
                 masked_key="sk-****",
                 updated_at=_NOW,
             )
         )
+        # 样卡真实生成需章节文本：首章 1-2 页、次章 2-3 页 → 种页 1..3
+        for page in range(1, 4):
+            session.execute(
+                insert(TextChunk).values(
+                    chunk_id=str(uuid.uuid4()),
+                    file_id=pdf.file_id,
+                    page_number=page,
+                    char_count=20,
+                    content_sha256="0" * 64,
+                    content=f"第 {page} 页：上下文工程核心概念。",
+                    created_at=_NOW,
+                )
+            )
         session.commit()
     return {"project_id": project.project_id, "deck_id": deck.deck_id, "chapter_ids": chapter_ids}
 
@@ -166,7 +225,9 @@ def test_acceptance_ac03_sample_cards(client: TestClient) -> None:
     assert client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
     app = cast(FastAPI, client.app)
     with app.state.session_factory() as session:
-        process_active_tasks(session)
+        process_active_tasks(
+            session, settings=_test_settings(), client_factory=lambda _key: StubClient()
+        )
         session.commit()
     resp = client.get(f"/tasks/{task_id}", headers=user)
     assert resp.status_code == 200

@@ -127,7 +127,14 @@ def _pipeline_factory(
                 payload = json.loads(
                     user.split("<GENERATOR_INPUT>", 1)[1].split("</GENERATOR_INPUT>", 1)[0]
                 )
-                index = int(payload["learning_objective"].split("知识点", 1)[1])
+                objective = str(payload["learning_objective"])
+                # 样卡生成（V5A 真实样卡）：learning_objective 为章节名（无"知识点"前缀）→
+                # 固定取首张合法卡（样卡构成另一组验收用例覆盖；此处仅保证流水线可通）
+                index = (
+                    int(objective.split("知识点", 1)[1])
+                    if "知识点" in objective
+                    else 0
+                )
                 content = json.dumps({"cards": [cards[index % len(cards)]]}, ensure_ascii=False)
             resp_body: dict[str, object] = {
                 "choices": [{"message": {"content": content}}],
