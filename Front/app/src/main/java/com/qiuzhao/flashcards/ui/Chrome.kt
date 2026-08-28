@@ -166,6 +166,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val dueCount by viewModel.dueCount.collectAsState()
     val dashboard by viewModel.dashboard.collectAsState()
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
+    val todayPlan by viewModel.todayPlan.collectAsState()
     val accountBootstrap by viewModel.accountBootstrap.collectAsState()
     val account = accountBootstrap.account
     var projectSearchQuery by remember { mutableStateOf("") }
@@ -191,7 +192,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     }
 
     val typedEntryProvider = entryProvider {
-        entry<AppRoute.Home> { HomeScreen(decks, projects, dueCount, navigator) }
+        entry<AppRoute.Home> { HomeScreen(decks, projects, dueCount, account?.nickname, todayPlan, dashboard?.streakDays, navigator) }
         entry<AppRoute.Project> { ProjectScreen(projects, decks, projectSearchQuery, viewModel, navigator) }
         entry<AppRoute.ProjectCreate> { ProjectCreateScreen(viewModel, navigator) }
         entry<AppRoute.ProjectEdit> { route ->

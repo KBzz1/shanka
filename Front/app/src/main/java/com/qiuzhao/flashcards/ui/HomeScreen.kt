@@ -156,7 +156,15 @@ import kotlinx.coroutines.delay
 
 
 @Composable
-internal fun HomeScreen(decks: List<DeckSummary>, projects: List<ProjectSummary>, dueCount: Int, nav: ScreenNavigator) {
+internal fun HomeScreen(
+    decks: List<DeckSummary>,
+    projects: List<ProjectSummary>,
+    dueCount: Int,
+    nickname: String?,
+    todayPlan: TodayPlanUiState,
+    streakDays: Int?,
+    nav: ScreenNavigator,
+) {
     val activeDeck = decks.firstOrNull { it.dueCount > 0 } ?: decks.firstOrNull()
     // One Figma design canvas: 402dp wide. On a narrower phone, every visual value
     // uses this one scale rather than responding independently to display/font settings.
@@ -179,39 +187,43 @@ internal fun HomeScreen(decks: List<DeckSummary>, projects: List<ProjectSummary>
                         contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * compactScale).dp),
                         verticalArrangement = Arrangement.spacedBy((12 * compactScale).dp)
                     ) {
-                    item { DailyGoalCard(compactScale) }
+                    item { DailyGoalCard(compactScale, todayPlan, streakDays) }
                     item {
-                        // Node 19:620 has a 12dp title-to-card-group gap; only the
-                        // two cards *inside* the group retain the 16dp spacing.
-                        Column(verticalArrangement = Arrangement.spacedBy((12 * compactScale).dp)) {
-                            AppText(
-                                "用户名，快来学习", AppTextRole.SectionTitle,
-                                modifier = Modifier.padding(horizontal = (8 * compactScale).dp), color = PageForegroundColor(), designScale = compactScale
-                            )
-                            Column(verticalArrangement = Arrangement.spacedBy((16 * compactScale).dp)) {
-                                ContinueLearningCard(
-                                    deck = activeDeck, projects = projects,
-                                    compactScale = compactScale,
-                                    onOpenDeck = { activeDeck?.let { nav.navigate(AppRoute.Deck(it.id)) } },
-                                    onContinue = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, true)) } }
+                        if (activeDeck == null) {
+                            EmptyHomeCard(compactScale, onGoImport = { nav.navigate(AppRoute.Import) })
+                        } else {
+                            // Node 19:620 has a 12dp title-to-card-group gap; only the
+                            // two cards *inside* the group retain the 16dp spacing.
+                            Column(verticalArrangement = Arrangement.spacedBy((12 * compactScale).dp)) {
+                                AppText(
+                                    homeGreeting(nickname), AppTextRole.SectionTitle,
+                                    modifier = Modifier.padding(horizontal = (8 * compactScale).dp), color = PageForegroundColor(), designScale = compactScale
                                 )
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * compactScale).dp)) {
-                                    QuickLearningCard(
-                                        modifier = Modifier.weight(1f), background = AppColors.Pink.background,
-                                        button = AppColors.Pink.primary, textColor = AppColors.Pink.ink,
-                                        iconBackground = AppColors.Pink.primarySecondary,
-                                        icon = "brightness_alert", iconTint = AppColors.Pink.ink,
-                                        label = "昨日错题",
-                                        compactScale = compactScale, onClick = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, true)) } }
+                                Column(verticalArrangement = Arrangement.spacedBy((16 * compactScale).dp)) {
+                                    ContinueLearningCard(
+                                        deck = activeDeck, projects = projects,
+                                        compactScale = compactScale,
+                                        onOpenDeck = { nav.navigate(AppRoute.Deck(activeDeck.id)) },
+                                        onContinue = { nav.navigate(AppRoute.Study(activeDeck.id, true)) }
                                     )
-                                    QuickLearningCard(
-                                        modifier = Modifier.weight(1f), background = AppColors.Orange.background,
-                                        button = AppColors.Orange.primary, textColor = AppColors.Orange.ink,
-                                        iconBackground = AppColors.Orange.primarySecondary,
-                                        icon = "star_shine", iconTint = AppColors.Orange.ink,
-                                        label = "随机复习",
-                                        compactScale = compactScale, onClick = { activeDeck?.let { nav.navigate(AppRoute.Study(it.id, false)) } }
-                                    )
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * compactScale).dp)) {
+                                        QuickLearningCard(
+                                            modifier = Modifier.weight(1f), background = AppColors.Pink.background,
+                                            button = AppColors.Pink.primary, textColor = AppColors.Pink.ink,
+                                            iconBackground = AppColors.Pink.primarySecondary,
+                                            icon = "brightness_alert", iconTint = AppColors.Pink.ink,
+                                            label = "昨日错题",
+                                            compactScale = compactScale, onClick = { nav.navigate(AppRoute.Study(activeDeck.id, true)) }
+                                        )
+                                        QuickLearningCard(
+                                            modifier = Modifier.weight(1f), background = AppColors.Orange.background,
+                                            button = AppColors.Orange.primary, textColor = AppColors.Orange.ink,
+                                            iconBackground = AppColors.Orange.primarySecondary,
+                                            icon = "star_shine", iconTint = AppColors.Orange.ink,
+                                            label = "随机复习",
+                                            compactScale = compactScale, onClick = { nav.navigate(AppRoute.Study(activeDeck.id, false)) }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -223,8 +235,54 @@ internal fun HomeScreen(decks: List<DeckSummary>, projects: List<ProjectSummary>
     }
 }
 
+/** JVM-testable home projections; a null or blank nickname falls back to the honest generic greeting. */
+internal fun homeGreeting(nickname: String?): String = "${nickname?.takeIf { it.isNotBlank() } ?: "同学"}，快来学习"
+
+/** Streak shows a dash when the dashboard never loaded — never a fabricated zero. */
+internal fun homeStreakText(streakDays: Int?): String = streakDays?.let { "连续天数：$it" } ?: "连续天数：—"
+
+/** Goal percent is derived from the server plan; an unset goal stays a dash. */
+internal fun homeGoalPercent(completedCount: Int, dailyGoal: Int): String {
+    val goal = dailyGoal.coerceAtLeast(0)
+    val completed = completedCount.coerceAtLeast(0)
+    return if (goal == 0) "—" else "${((completed.toFloat() / goal).coerceIn(0f, 1f) * 100).roundToInt()}%"
+}
+
 @Composable
-private fun DailyGoalCard(compactScale: Float) {
+private fun EmptyHomeCard(compactScale: Float, onGoImport: () -> Unit) {
+    Card(
+        shape = RoundedCornerShape(AppShapeRadius.dp),
+        colors = CardDefaults.cardColors(containerColor = AppColors.Blue.background),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding((24 * compactScale).dp),
+            verticalArrangement = Arrangement.spacedBy((16 * compactScale).dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            MaterialSymbol("note_stack_add", null, tint = AppColors.Blue.ink, size = fixedSp(40 * compactScale), filled = true)
+            AppText("还没有卡组", AppTextRole.SectionTitle, color = AppColors.TextIconDark, designScale = compactScale)
+            AppText("导入一组问答卡，开始你的第一轮学习。", AppTextRole.Body, color = AppColors.TextIconDark.copy(alpha = .6f), designScale = compactScale, textAlign = TextAlign.Center)
+            Surface(
+                onClick = onGoImport,
+                color = AppColors.Blue.primary,
+                contentColor = AppColors.TextIconLight,
+                shape = RoundedCornerShape((AppButtonShapeRadius * compactScale).dp),
+                modifier = Modifier.fillMaxWidth().height((52 * compactScale).dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    AppText("导入卡片", AppTextRole.Label, color = AppColors.TextIconLight, designScale = compactScale)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DailyGoalCard(compactScale: Float, todayPlan: TodayPlanUiState, streakDays: Int?) {
+    val goal = todayPlan.dailyGoal.coerceAtLeast(0)
+    val completed = todayPlan.completedCount.coerceAtLeast(0)
+    val percent = if (goal == 0) 0f else ((completed.toFloat() / goal).coerceIn(0f, 1f))
     Card(
         shape = RoundedCornerShape(AppShapeRadius.dp),
         colors = CardDefaults.cardColors(containerColor = AppColors.Blue.primary),
@@ -250,7 +308,7 @@ private fun DailyGoalCard(compactScale: Float) {
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         MixedLanguageText(
-                            text = "连续天数：12",
+                            text = homeStreakText(streakDays),
                             modifier = Modifier.fillMaxWidth(),
                             color = AppColors.Blue.ink,
                             chineseFont = AppFonts.MiSansBold,
@@ -267,15 +325,15 @@ private fun DailyGoalCard(compactScale: Float) {
                 }
             }
             Row(Modifier.fillMaxWidth().height((48 * compactScale).dp), verticalAlignment = Alignment.Bottom) {
-                Text("12", modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(48 * compactScale), lineHeight = fixedSp(48 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight, letterSpacing = fixedSp(-2.4f * compactScale))
-                Text("/ 50", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight.copy(alpha = .75f))
+                Text("$completed", modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(48 * compactScale), lineHeight = fixedSp(48 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight, letterSpacing = fixedSp(-2.4f * compactScale))
+                Text("/ $goal", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight.copy(alpha = .75f))
                 Text("卡片已复习", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), color = AppColors.TextIconLight.copy(alpha = .75f), fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale))
                 Spacer(Modifier.weight(1f))
-                Text("24%", modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(47 * compactScale), lineHeight = fixedSp(36 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight)
+                Text(homeGoalPercent(completed, goal), modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(47 * compactScale), lineHeight = fixedSp(36 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight)
             }
             Row(Modifier.fillMaxWidth().height((20 * compactScale).dp), horizontalArrangement = Arrangement.spacedBy((5 * compactScale).dp)) {
-                Box(Modifier.width((97 * compactScale).dp).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card))
-                Box(Modifier.weight(1f).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card.copy(alpha = .5f)))
+                Box(Modifier.weight(percent).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card))
+                Box(Modifier.weight(1f - percent).fillMaxSize().clip(RoundedCornerShape(999.dp)).background(AppColors.Card.copy(alpha = .5f)))
             }
         }
     }
@@ -283,24 +341,23 @@ private fun DailyGoalCard(compactScale: Float) {
 
 @Composable
 private fun ContinueLearningCard(
-    deck: DeckSummary?,
+    deck: DeckSummary,
     projects: List<ProjectSummary>,
     compactScale: Float,
     onOpenDeck: () -> Unit,
     onContinue: () -> Unit
 ) {
-    val fallbackDeck = deck ?: DeckSummary("", "计算机网络", 2, "builtin", "violet", 20, 14)
-    val theme = deckTheme(fallbackDeck, projects)
-    val cardCount = deck?.cardCount ?: 20
-    val dueCount = deck?.dueCount ?: 14
+    val theme = deckTheme(deck, projects)
+    val cardCount = deck.cardCount
+    val dueCount = deck.dueCount
     val progress = if (cardCount == 0) 0f else ((cardCount - dueCount).coerceAtLeast(0).toFloat() / cardCount).coerceIn(0f, 1f)
     ProjectThemedCard(
-        title = displayDeckTitle(fallbackDeck),
+        title = displayDeckTitle(deck),
         count = cardCount,
         countLabel = "cards",
         progress = progress,
         theme = theme,
-        icon = studyDeckIcon(fallbackDeck),
+        icon = studyDeckIcon(deck),
         variant = ProjectThemedCardVariant.BASE_PAGE,
         designScale = compactScale,
         onClick = onOpenDeck,
