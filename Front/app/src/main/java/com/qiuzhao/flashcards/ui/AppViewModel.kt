@@ -243,6 +243,11 @@ class AppViewModel(
     private val _pendingDeletion = MutableStateFlow<PendingDeletionUiState?>(null)
     val pendingDeletion: StateFlow<PendingDeletionUiState?> = _pendingDeletion.asStateFlow()
 
+    /** One import operation = fixed keys + remembered deck; retries replay only the failed step. */
+    private val importCoordinator = ImportCoordinator(v25Repository)
+    val importAttempt: StateFlow<ImportAttempt?> = importCoordinator.attempt
+    val importSubmitting: StateFlow<Boolean> = importCoordinator.submitting
+
     private val _uiMessage = MutableStateFlow<String?>(null)
     val uiMessage: StateFlow<String?> = _uiMessage.asStateFlow()
 
@@ -1054,21 +1059,30 @@ class AppViewModel(
         } ?: DeckProgress(0, 0, 0, 0)
     }
 
-    fun importDeck(name: String, drafts: List<CardDraft>, onDone: (String) -> Unit) = viewModelScope.launch {
+    fun importDeck(
+        name: String,
+        drafts: List<CardDraft>,
+        onFailure: () -> Unit = {},
+        onDone: (String) -> Unit,
+    ) = viewModelScope.launch {
         val valid = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
         if (name.isBlank() || valid.isEmpty()) return@launch
-        when (val created = v25Repository.createDeck(name.trim())) {
-            is V25Result.Success -> when (val added = v25Repository.importCards(
-                created.value.deckId,
-                valid.map { V25CardDraft(it.front.trim(), it.back.trim()) },
-            )) {
-                is V25Result.Success -> {
-                    refreshDecks()
-                    onDone(created.value.deckId)
-                }
-                is V25Result.Failure -> handleFailure("import_cards", added)
+        when (val result = importCoordinator.submit(
+            ImportTarget.NewDeck(name.trim()),
+            valid.map { V25CardDraft(it.front.trim(), it.back.trim()) },
+        )) {
+            // Navigate and clear drafts only after the server committed the batch.
+            is V25Result.Success -> {
+                refreshDecks()
+                refreshTodayPlan()
+                onDone(result.value)
             }
-            is V25Result.Failure -> handleFailure("create_deck", created)
+            is V25Result.Failure -> {
+                if (result.code != ImportCoordinator.IN_FLIGHT_CODE) {
+                    handleFailure("import_deck", result)
+                    onFailure()
+                }
+            }
         }
     }
 
@@ -1078,18 +1092,31 @@ class AppViewModel(
         drafts: List<CardDraft>,
         onDone: (String) -> Unit,
         @Suppress("UNUSED_PARAMETER") themeKey: String,
-    ) = importDeck(name, drafts, onDone)
+    ) = importDeck(name, drafts, onDone = onDone)
 
-    fun addCardsToDeck(deckId: String, drafts: List<CardDraft>, onDone: () -> Unit) = viewModelScope.launch {
+    fun addCardsToDeck(
+        deckId: String,
+        drafts: List<CardDraft>,
+        onFailure: () -> Unit = {},
+        onDone: () -> Unit,
+    ) = viewModelScope.launch {
         val valid = drafts.filter { it.front.isNotBlank() && it.back.isNotBlank() }
         if (valid.isEmpty()) return@launch
-        when (val result = v25Repository.importCards(deckId, valid.map { V25CardDraft(it.front.trim(), it.back.trim()) })) {
+        when (val result = importCoordinator.submit(
+            ImportTarget.ExistingDeck(deckId),
+            valid.map { V25CardDraft(it.front.trim(), it.back.trim()) },
+        )) {
             is V25Result.Success -> {
                 refreshCards(deckId)
                 refreshDecks()
                 onDone()
             }
-            is V25Result.Failure -> handleFailure("add_cards", result)
+            is V25Result.Failure -> {
+                if (result.code != ImportCoordinator.IN_FLIGHT_CODE) {
+                    handleFailure("add_cards", result)
+                    onFailure()
+                }
+            }
         }
     }
 
@@ -1282,6 +1309,7 @@ class AppViewModel(
         _textImportFlow.value = null
         _projectGenerationDraft.value = null
         _pendingDeletion.value = null
+        importCoordinator.reset()
     }
 
     private fun clearPdfFlow() {

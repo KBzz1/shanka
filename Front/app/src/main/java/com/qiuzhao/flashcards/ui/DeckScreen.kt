@@ -215,12 +215,14 @@ internal fun DetailPrimaryButton(
     icon: String,
     primary: Boolean,
     designScale: Float,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val container = if (primary) AppColors.Blue.primary else AppColors.Blue.primarySecondary
     val content = if (primary) AppColors.TextIconLight else AppColors.Blue.ink
     Button(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier.fillMaxWidth().height((60 * designScale).dp),
         shape = RoundedCornerShape((24 * designScale).dp),
         colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = container, contentColor = content),

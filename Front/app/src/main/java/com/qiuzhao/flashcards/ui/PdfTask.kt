@@ -178,6 +178,10 @@ private fun TaskTerminalCard(
 private data class TaskFailureBlock(val title: String, val detail: String, val canOpenSettings: Boolean = false)
 
 private fun failedTaskBlock(code: String?): TaskFailureBlock = when (code) {
+    "IMPORT_FAILED" -> TaskFailureBlock(
+        "导入失败",
+        "卡片草稿已保留；重试只会补上失败的步骤，不会重复创建卡组或卡片。",
+    )
     "API_KEY_UNAVAILABLE", "API_KEY_INVALID" -> TaskFailureBlock(
         "API Key 不可用",
         "当前保存的 DeepSeek API Key 无效或不可用，请更新有效 Key 后再重试。",

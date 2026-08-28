@@ -157,6 +157,7 @@ import kotlinx.coroutines.delay
 @Composable
 internal fun AddCardScreen(deckId: String, viewModel: AppViewModel, nav: ScreenNavigator) {
     val designScale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(0.75f, 1f)
+    val submitting by viewModel.importSubmitting.collectAsState()
     var front by remember { mutableStateOf("") }
     var back by remember { mutableStateOf("") }
 
@@ -198,10 +199,16 @@ internal fun AddCardScreen(deckId: String, viewModel: AppViewModel, nav: ScreenN
                     .padding(start = (16 * designScale).dp, end = (16 * designScale).dp, bottom = (32 * designScale).dp).zIndex(1f),
                 verticalArrangement = Arrangement.spacedBy((12 * designScale).dp)
             ) {
-                DetailPrimaryButton("添加单个卡片", "add_circle", true, designScale) {
+                DetailPrimaryButton(
+                    if (submitting) "正在添加…" else "添加单个卡片",
+                    if (submitting) "hourglass_top" else "add_circle",
+                    true,
+                    designScale,
+                    enabled = !submitting,
+                ) {
                     viewModel.addCardsToDeck(deckId, listOf(CardDraft(front = front, back = back))) { nav.goBack() }
                 }
-                DetailPrimaryButton("批量导入", "note_stack_add", false, designScale) { nav.navigate(AppRoute.ImportToDeck(deckId)) }
+                DetailPrimaryButton("批量导入", "note_stack_add", false, designScale, enabled = !submitting) { nav.navigate(AppRoute.ImportToDeck(deckId)) }
             }
         }
     }
@@ -262,6 +269,9 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
     val drafts = remember { mutableStateListOf<CardDraft>() }
     var errors by remember { mutableStateOf(emptyList<String>()) }
     var stage by remember(existingDeckId) { mutableStateOf(if (existingDeckId == null) ImportStage.CHOICE else ImportStage.PASTE) }
+    // The submit coordinator's in-flight flag gates the save button: no double submits, and a
+    // failed batch keeps the drafts on screen so the retry replays only the failed step.
+    val submitting by viewModel.importSubmitting.collectAsState()
 
     if (drafts.isEmpty()) {
         when (stage) {
@@ -319,10 +329,15 @@ internal fun ImportScreen(viewModel: AppViewModel, nav: ScreenNavigator, existin
                             viewModel.addCardsToDeck(existingDeckId, drafts.toList()) { nav.goBack() }
                         }
                     },
+                    enabled = !submitting,
                     modifier = Modifier.fillMaxWidth().height(54.dp)
                 ) {
                     MixedLanguageText(
-                        text = if (existingDeckId == null) "保存 ${drafts.size} 张卡" else "加入当前卡组（${drafts.size} 张）",
+                        text = when {
+                            submitting -> "正在保存…"
+                            existingDeckId == null -> "保存 ${drafts.size} 张卡"
+                            else -> "加入当前卡组（${drafts.size} 张）"
+                        },
                         color = LocalContentColor.current,
                         chineseFont = AppFonts.MiSansBold,
                         latinFont = AppFonts.GoogleSansFlexBold,

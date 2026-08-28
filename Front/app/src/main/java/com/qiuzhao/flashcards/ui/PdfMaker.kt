@@ -246,6 +246,37 @@ internal fun PdfSmartCardsFlow(decks: List<DeckSummary>, viewModel: AppViewModel
     var generationCheckInFlight by remember { mutableStateOf(false) }
     var generationConfig by remember { mutableStateOf(PdfGenerationConfig()) }
     var textImportDeckId by remember(textImport) { mutableStateOf<String?>(null) }
+    var textImportFailed by remember(textImport) { mutableStateOf(false) }
+    // One shared submit path for the text import: the first call and every retry run through the
+    // same AppViewModel entry points, whose coordinator resumes the stored attempt with its
+    // fixed keys instead of creating a second deck or duplicating cards.
+    val submitTextImport: () -> Unit = submit@{
+        val activeTextImport = textImport ?: return@submit
+        taskState = PdfTaskState.GENERATING
+        textImportFailed = false
+        step = PdfMakerStep.TASK
+        val completeTextImport: (String) -> Unit = { deckId ->
+            textImportDeckId = deckId
+            taskState = PdfTaskState.COMPLETE
+        }
+        val onTextImportFailure: () -> Unit = {
+            textImportFailed = true
+            taskState = PdfTaskState.FAILED
+        }
+        val existingDeckId = selectedExistingDeckId
+        if (useExistingDeck && existingDeckId != null) {
+            viewModel.addCardsToDeck(existingDeckId, activeTextImport.cards, onTextImportFailure) {
+                completeTextImport(existingDeckId)
+            }
+        } else {
+            viewModel.importDeck(
+                deckName.ifBlank { activeTextImport.deckName },
+                activeTextImport.cards,
+                onTextImportFailure,
+                onDone = completeTextImport,
+            )
+        }
+    }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         uris.forEach { uri ->
             val name = displayNameFor(uri, context)
@@ -369,22 +400,8 @@ internal fun PdfSmartCardsFlow(decks: List<DeckSummary>, viewModel: AppViewModel
             onBack = { step = PdfMakerStep.SETTINGS },
             onGenerate = {
                 val selected = chapters.filter { it.selected }.mapNotNull { it.remoteId }
-                val activeTextImport = textImport
-                if (activeTextImport != null) {
-                    taskState = PdfTaskState.GENERATING
-                    step = PdfMakerStep.TASK
-                    val completeTextImport: (String) -> Unit = { deckId ->
-                        textImportDeckId = deckId
-                        taskState = PdfTaskState.COMPLETE
-                    }
-                    val existingDeckId = selectedExistingDeckId
-                    if (useExistingDeck && existingDeckId != null) {
-                        viewModel.addCardsToDeck(existingDeckId, activeTextImport.cards) {
-                            completeTextImport(existingDeckId)
-                        }
-                    } else {
-                        viewModel.importDeck(deckName.ifBlank { activeTextImport.deckName }, activeTextImport.cards, completeTextImport)
-                    }
+                if (textImport != null) {
+                    submitTextImport()
                 } else if (selected.isEmpty()) {
                     generationBlocked = PdfGenerationBlock("未选择章节", "请返回上一步选择至少一个章节。")
                 } else if (!generationCheckInFlight) {
@@ -430,13 +447,17 @@ internal fun PdfSmartCardsFlow(decks: List<DeckSummary>, viewModel: AppViewModel
                 }
             },
             onRetry = {
-                viewModel.retryPdfTask {
-                    taskState = PdfTaskState.GENERATING
-                    step = PdfMakerStep.PREVIEW
+                if (textImportFailed) {
+                    submitTextImport()
+                } else {
+                    viewModel.retryPdfTask {
+                        taskState = PdfTaskState.GENERATING
+                        step = PdfMakerStep.PREVIEW
+                    }
                 }
             },
             onAbandon = { viewModel.abandonPdfTask { taskState = PdfTaskState.ABANDONED } },
-            errorCode = remoteTask?.errorCode,
+            errorCode = if (textImportFailed) "IMPORT_FAILED" else remoteTask?.errorCode,
             onOpenSettings = { nav.navigate(AppRoute.Settings) },
         )
     }
