@@ -253,6 +253,11 @@ class AppViewModel(
     val reviewAttempt: StateFlow<ReviewAttempt?> = reviewCoordinator.attempt
     val reviewSubmitting: StateFlow<Boolean> = reviewCoordinator.submitting
 
+    /** One PDF upload = fixed idempotency key; retries replay the identical multipart request. */
+    private val pdfUploadCoordinator = PdfUploadCoordinator()
+    val pdfUploadAttempt: StateFlow<PdfUploadAttempt?> = pdfUploadCoordinator.attempt
+    val pdfUploading: StateFlow<Boolean> = pdfUploadCoordinator.uploading
+
     private val _uiMessage = MutableStateFlow<String?>(null)
     val uiMessage: StateFlow<String?> = _uiMessage.asStateFlow()
 
@@ -573,15 +578,24 @@ class AppViewModel(
         onFailure: (PdfReadFailure) -> Unit,
     ) = viewModelScope.launch {
         val fileName = contentResolver.displayName(uri)
+        // One user operation owns its fixed Idempotency-Key; the retry reopens the stream
+        // (an InputStream is single-use) but replays the identical multipart request.
+        val attempt = pdfUploadCoordinator.begin(PdfUploadOperation.CreateProject(null), uri.toString(), fileName)
+        if (attempt == null) {
+            onFailure(PdfReadFailure("上传进行中", "当前已在处理一个 PDF 上传，请稍候再试。"))
+            return@launch
+        }
         val input = contentResolver.openInputStream(uri)
         if (input == null) {
+            pdfUploadCoordinator.fail()
             onFailure(PdfReadFailure("无法读取 PDF", "所选文件无法打开，请重新选择。"))
             return@launch
         }
         input.use { content ->
             val projectName = fileName.substringBeforeLast('.').trim().ifBlank { null }
-            when (val result = v25Repository.createProject(fileName, content, projectName)) {
+            when (val result = v25Repository.createProject(fileName, content, projectName, idempotencyKey = attempt.idempotencyKey)) {
                 is V25Result.Success -> {
+                    pdfUploadCoordinator.commit()
                     projectsById[result.value.projectId] = result.value
                     syncProjectMaterial(result.value)
                     _activePdfProject.value = result.value
@@ -590,6 +604,7 @@ class AppViewModel(
                     awaitPdfParse(result.value.projectId, onParsed, onFailure)
                 }
                 is V25Result.Failure -> {
+                    pdfUploadCoordinator.fail()
                     handleFailure("create_project_for_pdf_wizard", result, surface = false)
                     onFailure(PdfReadFailure("上传失败", userMessage(result)))
                 }
@@ -641,14 +656,25 @@ class AppViewModel(
     /** Project creation accepts exactly one PDF; text/Markdown are not a Release API. */
     fun createProject(uri: Uri, name: String, onResult: (String?, String?) -> Unit) = viewModelScope.launch {
         val fileName = contentResolver.displayName(uri)
+        val attempt = pdfUploadCoordinator.begin(
+            PdfUploadOperation.CreateProject(name.trim().ifBlank { null }),
+            uri.toString(),
+            fileName,
+        )
+        if (attempt == null) {
+            onResult(null, "上传进行中，请稍候再试")
+            return@launch
+        }
         val input = contentResolver.openInputStream(uri)
         if (input == null) {
+            pdfUploadCoordinator.fail()
             onResult(null, "无法读取所选 PDF")
             return@launch
         }
         input.use { content ->
-            when (val result = v25Repository.createProject(fileName, content, name.trim().ifBlank { null })) {
+            when (val result = v25Repository.createProject(fileName, content, (attempt.operation as PdfUploadOperation.CreateProject).name, idempotencyKey = attempt.idempotencyKey)) {
                 is V25Result.Success -> {
+                    pdfUploadCoordinator.commit()
                     projectsById[result.value.projectId] = result.value
                     syncProjectMaterial(result.value)
                     _activePdfProject.value = result.value
@@ -657,6 +683,7 @@ class AppViewModel(
                     onResult(result.value.projectId, null)
                 }
                 is V25Result.Failure -> {
+                    pdfUploadCoordinator.fail()
                     handleFailure("create_project", result, surface = false)
                     onResult(null, userMessage(result))
                 }
@@ -667,14 +694,21 @@ class AppViewModel(
     /** Replaces the only PDF owned by a project after a parse failure. */
     fun replaceProjectPdf(projectId: String, uri: Uri, onResult: (Boolean, String?) -> Unit) = viewModelScope.launch {
         val fileName = contentResolver.displayName(uri)
+        val attempt = pdfUploadCoordinator.begin(PdfUploadOperation.ReplacePdf(projectId), uri.toString(), fileName)
+        if (attempt == null) {
+            onResult(false, "上传进行中，请稍候再试")
+            return@launch
+        }
         val input = contentResolver.openInputStream(uri)
         if (input == null) {
+            pdfUploadCoordinator.fail()
             onResult(false, "无法读取所选 PDF")
             return@launch
         }
         input.use { content ->
-            when (val result = v25Repository.replaceProjectPdf(projectId, fileName, content)) {
+            when (val result = v25Repository.replaceProjectPdf(projectId, fileName, content, idempotencyKey = attempt.idempotencyKey)) {
                 is V25Result.Success -> {
+                    pdfUploadCoordinator.commit()
                     projectsById[projectId] = result.value
                     syncProjectMaterial(result.value)
                     _activePdfProject.value = result.value
@@ -683,6 +717,7 @@ class AppViewModel(
                     onResult(true, null)
                 }
                 is V25Result.Failure -> {
+                    pdfUploadCoordinator.fail()
                     handleFailure("replace_project_pdf", result, surface = false)
                     onResult(false, userMessage(result))
                 }
@@ -1324,6 +1359,7 @@ class AppViewModel(
         _pendingDeletion.value = null
         importCoordinator.reset()
         reviewCoordinator.reset()
+        pdfUploadCoordinator.reset()
     }
 
     private fun clearPdfFlow() {

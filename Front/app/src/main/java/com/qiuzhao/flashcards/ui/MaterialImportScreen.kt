@@ -56,6 +56,7 @@ internal fun MaterialImportScreen(
             ?: DeckThemes.first { it.key == "azure" }
     }
     val materials by viewModel.materialImportDrafts.collectAsState()
+    val pdfUploading by viewModel.pdfUploading.collectAsState()
     var isRecognizing by rememberSaveable { mutableStateOf(false) }
     var editingFile by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -124,6 +125,7 @@ internal fun MaterialImportScreen(
         Surface(
             color = theme.primary, contentColor = theme.onPrimary, shape = RoundedCornerShape(24.dp),
             onClick = { if (materials.isNotEmpty()) isRecognizing = true },
+            enabled = !pdfUploading,
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding().zIndex(1f)
                 .padding(horizontal = 16.dp, vertical = 16.dp).height(60.dp)
         ) {

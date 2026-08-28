@@ -165,6 +165,7 @@ internal fun ProjectCreateScreen(
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val materials by viewModel.projectCreationMaterials.collectAsState()
+    val pdfUploading by viewModel.pdfUploading.collectAsState()
     val projectId = editingProject?.id
     var name by rememberSaveable(projectId) { mutableStateOf(editingProject?.name.orEmpty()) }
     var selectedTheme by rememberSaveable(projectId) { mutableStateOf(editingProject?.themeKey ?: "violet") }
@@ -297,7 +298,11 @@ internal fun ProjectCreateScreen(
                 } else {
                     viewModel.renameProjectFromEditor(editingProject.id, name, selectedTheme, onResult)
                 }
-            }, color = theme.primary, contentColor = theme.onPrimary,
+            },
+            // A submission in flight is already idempotently owned; a second tap would
+            // turn one upload into two requests with fresh keys.
+            enabled = !pdfUploading,
+            color = theme.primary, contentColor = theme.onPrimary,
             shape = RoundedCornerShape((24 * scale).dp),
             modifier = Modifier.weight(1f).height((60 * scale).dp)
         ) {
