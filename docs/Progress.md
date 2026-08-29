@@ -37,7 +37,7 @@
 
 | 车道 | 计划 | 执行者能力 | 独占范围 |
 | --- | --- | --- | --- |
-| V-LANE | [视觉前端计划](superpowers/plans/2026-08-15-v2-5-visual-frontend.md) | 具备视觉理解和 Android Compose 能力 | `frontend-app/.../ui/**`、MainActivity、主题、可见资源、UI 测试与截图 |
+| V-LANE | [视觉前端计划](superpowers/plans/2026-08-15-v2-5-visual-frontend.md) | 具备视觉理解和 Android Compose 能力 | `frontend/Front/app/src/main/**`、主题、可见资源、UI 测试与截图 |
 | NV-LANE | [非视觉平台计划](superpowers/plans/2026-08-15-v2-5-nonvisual-platform.md) | 强编码/契约/数据库能力，不要求视觉 | Architecture 转正、`main/**`、迁移、AI 资产、Android `domain/v25`/`data/remote/v25`、Release 配置 |
 
 共同约束：
@@ -46,7 +46,7 @@
 2. `ui/AppViewModel.kt` 归视觉 Agent；非视觉 Agent 不修改它。
 3. `domain/v25/**` 归非视觉 Agent；接口修改需通知视觉 Agent，禁止视觉侧复制 DTO。
 4. PRD、Architecture 和本 Progress 由主集成者维护；执行 Agent 不自行改写需求或宣布总版本完成。
-5. 现有用户脏改动必须保留；特别是 nested repo 的 `.gitignore`、`Front/app/build.gradle.kts`。
+5. 现有用户脏改动必须保留；特别是 `frontend/Front/app/build.gradle.kts` 与各目录现有本地配置。
 
 ---
 
