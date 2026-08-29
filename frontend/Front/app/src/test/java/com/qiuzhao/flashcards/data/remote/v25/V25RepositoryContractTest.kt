@@ -196,7 +196,7 @@ class V25RepositoryContractTest {
     }
 
     @Test
-    fun `deletion operations carry the explicit decision and stable retry key`() = runBlocking {
+    fun `deletion operations carry only the retain decision and stable retry key`() = runBlocking {
         val transport = FakeTransport()
         val repo = repository(FakeSessionStore(session), transport)
 
@@ -210,18 +210,18 @@ class V25RepositoryContractTest {
         repo.deleteDeck("d-1", abandonPreGenerationTasks = true, idempotencyKey = "deck-key")
         repo.getDeckDeletionPreflight("d-1")
 
-        assertEquals("/projects/p-1?retain_decks=false&abandon_pre_generation_tasks=true", transport.calls[0].path)
+        assertEquals("/projects/p-1?retain_decks=false", transport.calls[0].path)
         assertEquals("project-key", transport.calls[0].idempotencyKey)
         assertEquals("/projects/p-1/deletion-preflight?retain_decks=false", transport.calls[1].path)
         assertFalse(transport.calls[1].idempotent)
-        assertEquals("/decks/d-1?abandon_pre_generation_tasks=true", transport.calls[2].path)
+        assertEquals("/decks/d-1", transport.calls[2].path)
         assertEquals("deck-key", transport.calls[2].idempotencyKey)
         assertEquals("/decks/d-1/deletion-preflight", transport.calls[3].path)
         assertFalse(transport.calls[3].idempotent)
     }
 
     @Test
-    fun `cancellation decision is part of deletion path and preflight`() = runBlocking {
+    fun `task cancellation stays server-side while preflight remains advisory`() = runBlocking {
         val transport = FakeTransport()
         val repo = repository(FakeSessionStore(session), transport)
 
@@ -240,7 +240,7 @@ class V25RepositoryContractTest {
         repo.getDeckDeletionPreflight("d-1", allowCancel = true)
 
         assertEquals(
-            "/projects/p-1?retain_decks=false&cancel_active_tasks=true",
+            "/projects/p-1?retain_decks=false",
             transport.calls[0].path,
         )
         assertEquals("project-cancel-key", transport.calls[0].idempotencyKey)
@@ -249,7 +249,7 @@ class V25RepositoryContractTest {
             transport.calls[1].path,
         )
         assertEquals(
-            "/decks/d-1?cancel_active_tasks=true",
+            "/decks/d-1",
             transport.calls[2].path,
         )
         assertEquals("deck-cancel-key", transport.calls[2].idempotencyKey)

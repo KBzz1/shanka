@@ -302,7 +302,7 @@ paths:
           $ref: '#/components/responses/RateLimited'
     delete:
       tags: [projects]
-      summary: 删除项目(可原子取消活跃制卡任务;retain_decks 选择保留或删除全部项目牌组)
+      summary: 删除项目(服务端自动取消活跃制卡任务;retain_decks 选择保留或删除全部项目牌组)
       operationId: deleteProject
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -312,20 +312,6 @@ paths:
           schema:
             type: boolean
             default: true
-        - name: abandon_pre_generation_tasks
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-          description: 同一事务内放弃 DRAFT/样卡阶段任务;GENERATING 仍返回冲突
-        - name: cancel_active_tasks
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-          description: 二次确认后同一事务内取消全部活跃制卡任务(含 GENERATING)并继续删除
       responses:
         '204':
           description: 已删除
@@ -370,6 +356,68 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /projects/{project_id}/progress:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      summary: 项目真实学习进度聚合
+      operationId: getProjectProgress
+      responses:
+        '200':
+          description: 进度摘要
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgressSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{project_id}/stats/weekly:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      summary: 当前项目周学习统计
+      operationId: getProjectWeeklyStats
+      responses:
+        '200':
+          description: 周统计
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectWeeklyStats'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{project_id}/decks/{deck_id}/attach:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/DeckId'
+    post:
+      tags: [projects]
+      summary: 将独立牌组归入当前项目
+      operationId: attachDeckToProject
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已归入项目
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deck'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
 
   /projects/{project_id}/replace-pdf:
     parameters:
@@ -1108,24 +1156,10 @@ paths:
           $ref: '#/components/responses/RateLimited'
     delete:
       tags: [decks]
-      summary: 删除牌组及其卡片、复习状态与统计(可原子取消活跃制卡任务)
+      summary: 删除牌组及其卡片、复习状态与统计(服务端自动取消活跃制卡任务)
       operationId: deleteDeck
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
-        - name: abandon_pre_generation_tasks
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-          description: 同一事务内放弃 DRAFT/样卡阶段任务;GENERATING 仍返回冲突
-        - name: cancel_active_tasks
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-          description: 二次确认后同一事务内取消全部活跃制卡任务(含 GENERATING)并继续删除
       responses:
         '204':
           description: 已删除
@@ -1315,6 +1349,48 @@ paths:
           $ref: '#/components/responses/RateLimited'
 
   # ---------- 今日学习计划(V2.5) ----------
+  /study/plan:
+    get:
+      tags: [study]
+      summary: 读取当前项目今日学习计划配置
+      operationId: getStudyPlan
+      responses:
+        '200':
+          description: 当前计划；未配置时 configured=false
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudyPlan'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags: [study]
+      summary: 原子保存当前项目今日学习计划
+      operationId: updateStudyPlan
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StudyPlanUpdateRequest'
+      responses:
+        '200':
+          description: 保存后的计划
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudyPlan'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
   /study/today:
     get:
       tags: [study]
@@ -1327,6 +1403,49 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TodayStudyPlan'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /study/today/backlog:
+    get:
+      tags: [study]
+      summary: 分页读取超过巩固软目标的到期卡
+      operationId: getStudyTodayBacklog
+      parameters:
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: 积压卡分页
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, offset, limit, total]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TodayPlanCard'
+                  offset:
+                    type: integer
+                  limit:
+                    type: integer
+                  total:
+                    type: integer
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -2249,6 +2368,21 @@ components:
         mastery_ratio:
           type: number
           description: mastered_card_count / card_count,card_count 为 0 时为 0
+        not_started_count:
+          type: integer
+        learning_count:
+          type: integer
+        relearning_count:
+          type: integer
+        consolidating_count:
+          type: integer
+        mastered_count:
+          type: integer
+        review_event_count:
+          type: integer
+        last_studied_at:
+          type: [string, 'null']
+          format: date-time
         created_at:
           type: string
           format: date-time
@@ -2512,7 +2646,7 @@ components:
           description: 上周为 0 时返回 null(客户端显示"暂无对比")
         weekly_goal:
           type: integer
-          description: 服务端派生 = daily_learning_goal × 7(不再接受客户端参数)
+          description: 账号看板兼容字段；项目周统计按每日新学与每日巩固目标之和 × 7 派生
         weekly_goal_progress:
           type: number
           description: min(weekly_completed_count / weekly_goal, 1)
@@ -2710,6 +2844,7 @@ components:
           minimum: 10
           maximum: 200
           multipleOf: 10
+          description: 旧账号兼容偏好；新项目的每日新学/巩固目标由 StudyPlan 保存
         learning_timezone:
           type: string
           description: 有效 IANA 时区,账号级权威
@@ -2733,6 +2868,7 @@ components:
           minimum: 10
           maximum: 200
           multipleOf: 10
+          description: 旧账号兼容偏好；新项目的每日新学/巩固目标由 StudyPlan 保存
         learning_timezone:
           type: string
           description: 有效 IANA 时区
@@ -2804,6 +2940,22 @@ components:
         include_unassigned:
           type: boolean
           description: 是否包含 chapter_id=null 的新卡
+        selected_deck_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: 今日学习计划选中的卡组；空数组表示尚未配置
+        daily_new_goal:
+          type: integer
+          minimum: 0
+          maximum: 200
+          multipleOf: 10
+        daily_review_goal:
+          type: integer
+          minimum: 0
+          maximum: 200
+          multipleOf: 10
         updated_at:
           type: string
           format: date-time
@@ -2818,6 +2970,136 @@ components:
             format: uuid
         include_unassigned:
           type: boolean
+        selected_deck_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        daily_new_goal:
+          type: integer
+          minimum: 0
+          maximum: 200
+          multipleOf: 10
+        daily_review_goal:
+          type: integer
+          minimum: 0
+          maximum: 200
+          multipleOf: 10
+
+    StudyPlan:
+      type: object
+      required: [configured, current_project_id, selected_deck_ids, daily_new_goal, daily_review_goal]
+      properties:
+        configured:
+          type: boolean
+        current_project_id:
+          type: [string, 'null']
+          format: uuid
+        selected_deck_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        daily_new_goal:
+          type: integer
+          minimum: 0
+          maximum: 200
+          multipleOf: 10
+        daily_review_goal:
+          type: integer
+          minimum: 0
+          maximum: 200
+          multipleOf: 10
+        updated_at:
+          type: [string, 'null']
+          format: date-time
+
+    StudyPlanUpdateRequest:
+      type: object
+      required: [project_id, selected_deck_ids, daily_new_goal, daily_review_goal]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+          description: 当前项目
+        selected_deck_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        daily_new_goal:
+          type: integer
+          minimum: 0
+          maximum: 200
+          multipleOf: 10
+        daily_review_goal:
+          type: integer
+          minimum: 0
+          maximum: 200
+          multipleOf: 10
+
+    ProgressSummary:
+      type: object
+      required: [card_count, not_started_count, learning_count, relearning_count, consolidating_count, mastered_count, due_count, review_event_count]
+      properties:
+        card_count:
+          type: integer
+        not_started_count:
+          type: integer
+        learning_count:
+          type: integer
+        relearning_count:
+          type: integer
+        consolidating_count:
+          type: integer
+        mastered_count:
+          type: integer
+        due_count:
+          type: integer
+        review_event_count:
+          type: integer
+        last_studied_at:
+          type: [string, 'null']
+          format: date-time
+
+    ProjectWeeklyStats:
+      type: object
+      required: [project_id, period_start, period_end, timezone, weekly_activity, weekly_total, weekly_completed_count, weekly_new_goal, weekly_review_goal, weekly_goal, weekly_goal_progress, new_completed_count, review_completed_count, updated_at]
+      properties:
+        project_id:
+          type: string
+          format: uuid
+        period_start:
+          type: string
+          format: date-time
+        period_end:
+          type: string
+          format: date-time
+        timezone:
+          type: string
+        weekly_activity:
+          type: array
+          items:
+            type: integer
+        weekly_total:
+          type: integer
+        weekly_completed_count:
+          type: integer
+        weekly_new_goal:
+          type: integer
+        weekly_review_goal:
+          type: integer
+        weekly_goal:
+          type: integer
+        weekly_goal_progress:
+          type: [number, 'null']
+        new_completed_count:
+          type: integer
+        review_completed_count:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
 
     DeletionTaskBlocker:
       type: object
@@ -2978,6 +3260,9 @@ components:
             forgetting_risk:
               type: number
               description: 统一 FSRS 适配器按服务端 now 计算;无法计算时置 0
+            plan_kind:
+              type: [string, 'null']
+              enum: [DUE, NEW, null]
 
     TodayStudyPlan:
       type: object
@@ -3006,7 +3291,7 @@ components:
           description: 无当前项目时返回 null(空态)
         daily_goal:
           type: integer
-          description: 服务端偏好
+          description: 当天实际核心队列目标（新学 + 巩固）；可用卡不足时按实际队列收敛
         today_completed_count:
           type: integer
           description: 今日去重完成数(同一 (账号学习日期, card_id) 只计一次)
@@ -3021,7 +3306,28 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TodayPlanCard'
-          description: 有序卡片列表(遗忘风险 DESC → 逾期时长 DESC → card_id;新卡按章节顺序、position、card_id)
+          description: 有序卡片列表(到期卡按遗忘风险、逾期时长、card_id;新卡按 deck_id、position、card_id)
+        daily_new_goal:
+          type: integer
+        daily_review_goal:
+          type: integer
+        new_completed_count:
+          type: integer
+        review_completed_count:
+          type: integer
+        new_remaining_count:
+          type: integer
+        review_remaining_count:
+          type: integer
+        core_target_count:
+          type: integer
+        plan_configured:
+          type: boolean
+        selected_deck_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
 
   responses:
     BadRequest:

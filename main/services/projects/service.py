@@ -7,7 +7,8 @@
   retain_decks=false 删除整个聚合（牌组/卡片/复习数据经 FK 级联）。
 - 存储补偿：storage.delete 在 DB 删除之后、事务提交之前执行；失败抛错 → 调用方不 commit
   → 元数据整体回滚（绝不宣称成功却半删，可重试）。
-- 删除保护：解析中项目 → PROJECT_STATE_CONFLICT；活跃（非终态）任务 → PROJECT_HAS_ACTIVE_TASK。
+- 删除安全：解析中的 PDF 使用版本栅栏，活跃任务在确认删除时由服务端自动取消；迟到的
+  parser/worker 结果不得写回已删除项目。
 - 章节删除（V25-GEN-FR-02）：被活跃任务引用的章节不可删；delete_cards 决定卡去留，
   保留的卡 chapter_id 置空进入"未归属章节"；章节同步移出新卡范围。
 - 兼容 /pdfs 路由委托本服务同一业务模型（6.2 注，无第二套项目/任务状态）。
@@ -18,10 +19,11 @@ import json
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
+from domain.card import VISIBLE_PREDICATE_SQL
 from domain.task import ACTIVE_TASK_STATUSES as _ACTIVE_TASK_STATUSES
 from infra.clock import SystemClock
 from infra.db.models import (
@@ -32,17 +34,17 @@ from infra.db.models import (
     LearningProject,
     LlmCallAttempt,
     PdfFile,
+    ProjectStudyDeck,
     ProjectStudySettings,
     Task,
 )
 from infra.db.session import format_utc
 from services.deletion.service import (
-    abandon_pre_generation,
-    preflight_payload,
-    resource_tasks,
+    cancel_active_tasks as cancel_active_generation_tasks,
 )
 from services.deletion.service import (
-    cancel_active_tasks as cancel_active_generation_tasks,
+    preflight_payload,
+    resource_tasks,
 )
 from services.pdf.service import chapter_view, delete_chapter, pdf_view, update_chapter, upload_pdf
 
@@ -57,6 +59,11 @@ def _validate_name(name: str) -> str:
     if not stripped or len(stripped) > 60:
         raise AppError(ErrorCode.VALIDATION_ERROR, "项目名须为去首尾空白后 1~60 字符")
     return stripped
+
+
+def _validate_daily_goal(value: int, field: str) -> None:
+    if value < 0 or value > 200 or value % 10 != 0:
+        raise AppError(ErrorCode.VALIDATION_ERROR, f"{field} 须为 0~200 的 10 倍数")
 
 
 def _default_name(filename: str) -> str:
@@ -168,6 +175,20 @@ def create_project(
     )
     session.add(project)
     session.flush()
+    # A newly created project starts with an explicitly unconfigured deck-scoped plan.  Keeping
+    # the row lets today's queue distinguish a fresh project from pre-plan legacy rows that are
+    # still served by the compatibility chapter scope.
+    session.add(
+        ProjectStudySettings(
+            project_id=project.project_id,
+            selected_chapter_ids="[]",
+            include_unassigned=0,
+            daily_new_goal=10,
+            daily_review_goal=40,
+            updated_at=now,
+        )
+    )
+    session.flush()
     return project_view(session, project)
 
 
@@ -278,46 +299,24 @@ def delete_project(
     """
     project = _owned_project(session, user_id=user_id, project_id=project_id)
     pdf = _require_pdf(session, project)
+    # PDF 解析采用租约 + 版本栅栏；删除可以在 PENDING/PARSING 时进行，迟到的解析结果
+    # 会因 PDF 行/parse_version 不匹配而丢弃，不能再阻塞用户清理项目。
     if pdf.status in ("PENDING", "PARSING"):
-        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "项目解析中，暂时无法删除")
+        pdf.parse_version += 1
+        pdf.parse_lease_token = None
+        pdf.parse_lease_until = None
     active_tasks = resource_tasks(session, user_id=user_id, project_id=project_id)
     if active_tasks:
-        if cancel_active_tasks:
-            cancel_active_generation_tasks(
-                session,
-                user_id=user_id,
-                tasks=active_tasks,
-                now=now or format_utc(SystemClock().now_utc()),
-                resource_type="PROJECT",
-                resource_id=project_id,
-            )
-        elif abandon_pre_generation_tasks:
-            abandon_pre_generation(
-                session,
-                user_id=user_id,
-                tasks=active_tasks,
-                now=now or format_utc(SystemClock().now_utc()),
-                resource_type="PROJECT",
-                resource_id=project_id,
-            )
-        else:
-            can_abandon = [task.task_id for task in active_tasks if task.status != "GENERATING"]
-            actions = (
-                ("ABANDON_AND_RETRY", "VIEW_TASKS")
-                if can_abandon
-                else ("WAIT_FOR_TERMINAL", "VIEW_TASKS")
-            )
-            raise AppError(
-                ErrorCode.PROJECT_HAS_ACTIVE_TASK,
-                "存在进行中的制卡任务，请先放弃可放弃任务或等待正式生成完成",
-                actions=actions,
-                details={
-                    "resource_type": "PROJECT",
-                    "resource_id": project_id,
-                    "task_ids": [task.task_id for task in active_tasks],
-                    "abandonable_task_ids": can_abandon,
-                },
-            )
+        # 产品语义：确认删除后所有关联任务自动取消。保留旧参数签名仅让历史内部调用
+        # 不立即失效，客户端不再暴露任务处理复选框。
+        cancel_active_generation_tasks(
+            session,
+            user_id=user_id,
+            tasks=active_tasks,
+            now=now or format_utc(SystemClock().now_utc()),
+            resource_type="PROJECT",
+            resource_id=project_id,
+        )
     if not retain_decks:
         # 牌组删除 → 卡片 → review_states/review_events 经 FK CASCADE 级联（PRAGMA ON）
         for deck in session.scalars(select(Deck).where(Deck.project_id == project_id)).all():
@@ -364,7 +363,14 @@ def project_deletion_preflight(
     decks = session.scalars(select(Deck).where(Deck.project_id == project_id)).all()
     deck_ids = [deck.deck_id for deck in decks]
     card_count = (
-        _count(session, Card, Card.deck_id.in_(deck_ids)) if deck_ids and not retain_decks else 0
+        _count(
+            session,
+            Card,
+            Card.user_id == user_id,
+            Card.deck_id.in_(deck_ids),
+        )
+        if deck_ids and not retain_decks
+        else 0
     )
     blockers = resource_tasks(session, user_id=user_id, project_id=project_id)
     payload = preflight_payload(
@@ -382,12 +388,7 @@ def project_deletion_preflight(
             "project_status": _project_status(pdf, project.chapters_confirmed_at),
         },
     )
-    if pdf.status in ("PENDING", "PARSING"):
-        payload["can_delete"] = False
-        payload["actions"] = ["WAIT_FOR_TERMINAL", "VIEW_TASKS"]
-        payload["project_state_blocked"] = True
-    else:
-        payload["project_state_blocked"] = False
+    payload["project_state_blocked"] = False
     # Keep this explicit local read so a future implementation cannot accidentally compute
     # `can_delete` from a second, differently-filtered query.
     payload["blocking_task_count"] = len(blockers)
@@ -513,7 +514,9 @@ def get_study_settings(
 ) -> dict[str, Any]:
     """项目学习设置（3.17）：get-or-create（默认空范围 + include_unassigned=false）。"""
     _owned_project(session, user_id=user_id, project_id=project_id)  # 归属校验（404）
-    return _settings_view(_get_or_create_settings(session, project_id=project_id, now=now))
+    return _settings_view(
+        session, _get_or_create_settings(session, project_id=project_id, now=now)
+    )
 
 
 def update_study_settings(
@@ -535,12 +538,52 @@ def update_study_settings(
         updates["selected_chapter_ids"] = json.dumps(ids, ensure_ascii=False)
     if payload.get("include_unassigned") is not None:
         updates["include_unassigned"] = 1 if payload["include_unassigned"] else 0
+    selected_deck_ids = payload.get("selected_deck_ids")
+    if selected_deck_ids is not None:
+        unique_deck_ids = list(dict.fromkeys(selected_deck_ids))
+        deck_query = select(Deck).where(Deck.user_id == user_id, Deck.project_id == project_id)
+        if unique_deck_ids:
+            deck_query = deck_query.where(Deck.deck_id.in_(unique_deck_ids))
+        decks = list(
+            session.scalars(deck_query).all()
+        )
+        if {deck.deck_id for deck in decks} != set(unique_deck_ids):
+            raise AppError(ErrorCode.DECK_NOT_FOUND, "所选卡组不存在或不属于当前项目")
+        if unique_deck_ids:
+            eligible = _count(
+                session,
+                Card,
+                Card.user_id == user_id,
+                Card.deck_id.in_(unique_deck_ids),
+                text(VISIBLE_PREDICATE_SQL),
+            )
+            if eligible == 0:
+                raise AppError(ErrorCode.VALIDATION_ERROR, "所选卡组暂无可学习卡片")
+        session.query(ProjectStudyDeck).filter(
+            ProjectStudyDeck.project_id == project_id
+        ).delete(synchronize_session=False)
+        for deck_id in unique_deck_ids:
+            session.add(ProjectStudyDeck(project_id=project_id, deck_id=deck_id, created_at=now))
+        updates["daily_new_goal"] = row.daily_new_goal
+        updates["daily_review_goal"] = row.daily_review_goal
+    if payload.get("daily_new_goal") is not None:
+        _validate_daily_goal(payload["daily_new_goal"], "每日新学目标")
+        updates["daily_new_goal"] = payload["daily_new_goal"]
+    if payload.get("daily_review_goal") is not None:
+        _validate_daily_goal(payload["daily_review_goal"], "每日巩固目标")
+        updates["daily_review_goal"] = payload["daily_review_goal"]
+    if (
+        updates.get("daily_new_goal", row.daily_new_goal)
+        + updates.get("daily_review_goal", row.daily_review_goal)
+        == 0
+    ):
+        raise AppError(ErrorCode.VALIDATION_ERROR, "每日新学和巩固目标不能同时为 0")
     if not updates:
-        return _settings_view(row)
+        return _settings_view(session, row)
     updates["updated_at"] = now
     for column, value in updates.items():
         setattr(row, column, value)
-    return _settings_view(row)
+    return _settings_view(session, row)
 
 
 def _validate_chapter_ids(session: Session, project: LearningProject, ids: list[str]) -> None:
@@ -574,7 +617,7 @@ def _get_or_create_settings(session: Session, *, project_id: str, now: str) -> P
     return row
 
 
-def _settings_view(row: ProjectStudySettings) -> dict[str, Any]:
+def _settings_view(session: Session, row: ProjectStudySettings) -> dict[str, Any]:
     try:
         ids = json.loads(row.selected_chapter_ids)
     except (ValueError, TypeError):
@@ -582,5 +625,14 @@ def _settings_view(row: ProjectStudySettings) -> dict[str, Any]:
     return {
         "selected_new_card_chapter_ids": ids,
         "include_unassigned": bool(row.include_unassigned),
+        "selected_deck_ids": list(
+            session.scalars(
+                select(ProjectStudyDeck.deck_id)
+                .where(ProjectStudyDeck.project_id == row.project_id)
+                .order_by(ProjectStudyDeck.created_at, ProjectStudyDeck.deck_id)
+            ).all()
+        ),
+        "daily_new_goal": int(row.daily_new_goal),
+        "daily_review_goal": int(row.daily_review_goal),
         "updated_at": row.updated_at,
     }

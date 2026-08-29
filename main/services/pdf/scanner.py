@@ -1,17 +1,20 @@
 """services.pdf.scanner：进程内 DB 驱动 PDF 解析扫描器（契约 4.4 定式）。
 
-状态机：PENDING → PARSING → PARSED / FAILED(error_code)。
-- 单进程 MVP：PENDING/PARSING 均视为可处理（进程崩溃后 PARSING 残留，重启重新解析）；
-- 重复解析幂等：处理前清理该 file_id 的既有 chapters 与 text_chunks 再重建；
+状态机：PENDING → PARSING(短租约) → PARSED / FAILED(error_code)。
+- 领取阶段只持有短数据库事务；解析耗时在事务外进行，租约过期后可被另一 worker 接管；
+- 删除/替换会递增 parse_version 并清除租约，迟到结果通过 token/version 栅栏丢弃；
+- 重复解析幂等：发布前清理该 file_id 的既有 chapters 与 text_chunks 再重建；
 - PARSED 时完整页文本一页一行落 text_chunks（spec §4.1，与章节解耦）；
 - 失败不删除原始文件（5.1）；FAILED 行不再重试（终态）。
 """
 
 import logging
 import uuid
-from typing import Any
+from datetime import timedelta
+from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
@@ -62,65 +65,155 @@ def validate_upload(
 
 
 def process_pending(session: Session, *, storage: Any) -> int:
-    """处理一条可解析行（PENDING 或 PARSING 残留）。返回处理数（0 或 1）。"""
+    """领取并处理一条 PDF；解析耗时阶段不持有数据库事务。
+
+    ``parse_lease_token`` 和 ``parse_version`` 组成发布栅栏：删除/替换 PDF 后，旧扫描器
+    即便已经读完文件，也只能丢弃结果，不能把章节或文本块写回新状态。
+    """
+    now_dt = SystemClock().now_utc()
+    now = format_utc(now_dt)
+    lease_until = format_utc(now_dt + timedelta(minutes=10))
     row = session.scalar(
         select(PdfFile)
-        .where(PdfFile.status.in_(["PENDING", "PARSING"]))
+        .where(
+            PdfFile.status.in_(["PENDING", "PARSING"]),
+            (PdfFile.parse_lease_until.is_(None) | (PdfFile.parse_lease_until <= now)),
+        )
         .order_by(PdfFile.created_at)
         .limit(1)
     )
     if row is None:
         return 0
-    row.status = "PARSING"
-    session.flush()
+    file_id = row.file_id
+    storage_key = row.storage_key
+    lease_token = str(uuid.uuid4())
+    parse_version = int(row.parse_version) + 1
+    # The initial read only chooses a candidate.  Claim it with a conditional UPDATE so two
+    # workers that observe the same expired lease cannot both parse/publish the file.
+    claimed = cast(
+        CursorResult[Any],
+        session.execute(
+            update(PdfFile)
+            .where(
+                PdfFile.file_id == file_id,
+                PdfFile.status.in_(["PENDING", "PARSING"]),
+                (PdfFile.parse_lease_until.is_(None) | (PdfFile.parse_lease_until <= now)),
+            )
+            .values(
+                status="PARSING",
+                parse_lease_token=lease_token,
+                parse_lease_until=lease_until,
+                parse_version=PdfFile.parse_version + 1,
+            )
+        ),
+    )
+    if claimed.rowcount != 1:
+        session.rollback()
+        return 0
+    # 先提交领取，释放写事务，让项目删除可以在解析期间完成。
+    session.commit()
     try:
-        path = storage.open(row.storage_key)
-        _text_sample, chapters = parse_pdf(
-            path
-        )  # 文本样例仅确认文本层存在，不落日志/不落库（AC-08）
-        # 完整页文本是功能数据（spec §4.1 AC-08 改准）：一页一行落 text_chunks，
-        # 与章节解耦（页文本不随章节编辑重建）；重解析先清理再重建（幂等）
+        path = storage.open(storage_key)
+        _text_sample, chapters = parse_pdf(path)
         pages = extract_pages(path)
-        persist_text_chunks(
-            session,
-            file_id=row.file_id,
-            pages=pages,
-            now=format_utc(SystemClock().now_utc()),
-        )
-        # 幂等：清理既有 chapters 再插入
-        for old in session.scalars(select(Chapter).where(Chapter.file_id == row.file_id)).all():
+        current = session.get(PdfFile, file_id)
+        if (
+            current is None
+            or current.status != "PARSING"
+            or current.parse_lease_token != lease_token
+            or current.parse_version != parse_version
+        ):
+            session.rollback()
+            logger.info("pdf parse result discarded", extra={"file_id": file_id})
+            return 1
+        persist_text_chunks(session, file_id=file_id, pages=pages, now=now)
+        for old in session.scalars(select(Chapter).where(Chapter.file_id == file_id)).all():
             session.delete(old)
         session.flush()
         for ch in chapters:
             session.add(
                 Chapter(
                     chapter_id=str(uuid.uuid4()),
-                    file_id=row.file_id,
+                    file_id=file_id,
                     name=ch["name"],
                     start_page=ch["start_page"],
                     end_page=ch["end_page"],
                 )
             )
-        row.status = "PARSED"
-        row.error_code = None
+        # Publish through a conditional UPDATE, not only an in-memory object assignment.  A
+        # project deletion/replacement may have committed after the pre-publish read; the fence
+        # then affects zero rows and all parsed chunks/chapters are rolled back as stale output.
+        published = cast(
+            CursorResult[Any],
+            session.execute(
+                update(PdfFile)
+                .where(
+                    PdfFile.file_id == file_id,
+                    PdfFile.status == "PARSING",
+                    PdfFile.parse_lease_token == lease_token,
+                    PdfFile.parse_version == parse_version,
+                )
+                .values(
+                    status="PARSED",
+                    error_code=None,
+                    parse_lease_token=None,
+                    parse_lease_until=None,
+                )
+            ),
+        )
+        if published.rowcount != 1:
+            session.rollback()
+            logger.info("pdf parse result discarded", extra={"file_id": file_id})
+            return 1
     except AppError as exc:
-        # 2026-08-11 联调诊断：解析失败记日志（此前 AppError 路径无日志，前端无法对照）
         logger.warning(
             "pdf parse failed",
-            extra={
-                "error_code": exc.code.value,
-                # 不能叫 message：与 JSON formatter 的日志正文字段冲突（G101）
-                "error_message": str(exc),
-                "file_id": row.file_id,
-                # 身份字段不进日志（§4.5）：file_id 已足够定位（P4-6a review）
-            },
+            extra={"error_code": exc.code.value, "error_message": str(exc), "file_id": file_id},
         )
-        row.status = "FAILED"
-        row.error_code = exc.code.value
+        session.rollback()
+        failed = cast(
+            CursorResult[Any],
+            session.execute(
+                update(PdfFile)
+                .where(
+                    PdfFile.file_id == file_id,
+                    PdfFile.status == "PARSING",
+                    PdfFile.parse_lease_token == lease_token,
+                    PdfFile.parse_version == parse_version,
+                )
+                .values(
+                    status="FAILED",
+                    error_code=exc.code.value,
+                    parse_lease_token=None,
+                    parse_lease_until=None,
+                )
+            ),
+        )
+        if failed.rowcount != 1:
+            session.rollback()
     except Exception:  # noqa: BLE001
         logger.warning("pdf parse unexpected failure", extra={"error_code": "PDF_PARSE_FAILED"})
-        row.status = "FAILED"
-        row.error_code = "PDF_PARSE_FAILED"
+        session.rollback()
+        failed = cast(
+            CursorResult[Any],
+            session.execute(
+                update(PdfFile)
+                .where(
+                    PdfFile.file_id == file_id,
+                    PdfFile.status == "PARSING",
+                    PdfFile.parse_lease_token == lease_token,
+                    PdfFile.parse_version == parse_version,
+                )
+                .values(
+                    status="FAILED",
+                    error_code="PDF_PARSE_FAILED",
+                    parse_lease_token=None,
+                    parse_lease_until=None,
+                )
+            ),
+        )
+        if failed.rowcount != 1:
+            session.rollback()
     return 1
 
 

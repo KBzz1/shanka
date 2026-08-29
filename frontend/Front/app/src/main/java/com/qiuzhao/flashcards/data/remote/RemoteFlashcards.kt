@@ -42,6 +42,13 @@ data class DeckSummary(
     val masteredCards: Int = 0,
     val reviewCount: Int = 0,
     val masteryRatio: Float? = null,
+    val notStartedCount: Int = 0,
+    val learningCount: Int = 0,
+    val relearningCount: Int = 0,
+    val consolidatingCount: Int = 0,
+    val masteredLifecycleCount: Int = 0,
+    val reviewEventCount: Int = 0,
+    val lastStudiedAt: String? = null,
     /** Null is a legacy standalone deck until the server migration assigns a project. */
     val projectId: String? = null,
     /** Explicit source selections; a deck never implicitly reads every project material. */

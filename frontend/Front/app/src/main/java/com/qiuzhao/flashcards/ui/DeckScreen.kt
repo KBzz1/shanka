@@ -189,7 +189,7 @@ internal fun DeckScreen(deck: DeckSummary, viewModel: AppViewModel, nav: ScreenN
                             StatisticsMetricCard(honestCount(progress.masteredCards), StatisticsMetricKind.MasteredCards, StatisticsMetricSurface.White, designScale, Modifier.weight(1f))
                         }
                     }
-                    item { DeckWeeklyReviewCard(designScale) }
+                    item { DeckWeeklyReviewCard(deck, designScale) }
                 }
             }
             DeckDetailHeader(
@@ -205,7 +205,7 @@ internal fun DeckScreen(deck: DeckSummary, viewModel: AppViewModel, nav: ScreenN
                 horizontalArrangement = Arrangement.spacedBy((12 * designScale).dp)
             ) {
                 CardListActionButton("编辑", "edit", false, Modifier.weight(1f), designScale, theme) { nav.navigate(AppRoute.EditCardList(deck.id)) }
-                CardListActionButton("开始复习", "play_circle", true, Modifier.weight(1f), designScale, theme) { nav.navigate(AppRoute.Study(deck.id, true)) }
+                CardListActionButton("开始学习", "play_circle", true, Modifier.weight(1f), designScale, theme) { nav.navigate(AppRoute.Study(deck.id, true)) }
             }
         }
     }
@@ -277,7 +277,7 @@ private fun deckOverview(deck: DeckSummary): String = when (deck.chapter) {
     8 -> "学习从运行轨迹持续改进 Agent，并为线上演进建立安全边界。"
     9 -> "关注多模态与实时 Agent 的低延迟交互、状态同步和操作风险。"
     10 -> "了解多 Agent 协作的分工、交接与共享上下文策略。"
-    else -> "这个卡组正在持续整理中；你可以添加问题，随时开始复习。"
+    else -> "这个卡组正在持续整理中；你可以添加问题，随时开始学习。"
 }
 
 @Composable
@@ -337,7 +337,7 @@ private fun ChapterProgressCard(progress: DeckProgress, masteryRatio: Float, des
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 ChapterMetric("共", "${progress.cardCount}张", designScale, theme = theme)
                 ChapterMetric("已掌握", "${progress.masteredCards}张", designScale, TextAlign.Center, theme)
-                ChapterMetric("待复习", "${progress.dueCount}张", designScale, TextAlign.End, theme)
+                ChapterMetric("待巩固", "${progress.dueCount}张", designScale, TextAlign.End, theme)
             }
             Row(
                 modifier = Modifier.fillMaxWidth().height((77 * designScale).dp),
@@ -369,7 +369,7 @@ private fun ChapterProgressCard(progress: DeckProgress, masteryRatio: Float, des
                 )
             }
             MixedLanguageText(
-                text = "累计复习${progress.reviewCount}次", color = theme.mutedText,
+                text = "累计巩固${progress.reviewCount}次", color = theme.mutedText,
                 chineseFont = AppFonts.MiSansSemibold, latinFont = AppFonts.GoogleSansFlexSemibold,
                 fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(21 * designScale),
                 style = figmaCardTextStyle()

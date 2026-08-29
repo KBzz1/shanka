@@ -28,11 +28,17 @@ class LearningProject(BaseModel):
 class ProjectStudySettings(BaseModel):
     """项目学习设置（openapi ProjectStudySettings；structure-contract 3.17）。"""
 
-    selected_new_card_chapter_ids: list[str]  # 只限制新卡；空数组 = 暂无新卡范围
-    include_unassigned: bool  # 是否包含 chapter_id=null 的新卡
+    selected_new_card_chapter_ids: list[str]  # 旧章节范围读取兼容
+    include_unassigned: bool  # 旧章节范围读取兼容
+    selected_deck_ids: list[str] = []  # 今日计划完整卡组范围
+    daily_new_goal: int = 10
+    daily_review_goal: int = 40
     updated_at: str
 
 
 class ProjectStudySettingsUpdateRequest(BaseModel):
-    selected_new_card_chapter_ids: list[str] | None = None
-    include_unassigned: bool | None = None
+    selected_new_card_chapter_ids: list[str] | None = None  # 旧接口兼容
+    include_unassigned: bool | None = None  # 旧接口兼容
+    selected_deck_ids: list[str] | None = None
+    daily_new_goal: int | None = None
+    daily_review_goal: int | None = None

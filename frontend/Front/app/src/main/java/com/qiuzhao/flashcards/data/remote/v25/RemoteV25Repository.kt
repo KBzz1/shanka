@@ -26,6 +26,8 @@ import com.qiuzhao.flashcards.domain.v25.V25ImportResult
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStudySettings
+import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
+import com.qiuzhao.flashcards.domain.v25.V25PlanCard
 import com.qiuzhao.flashcards.domain.v25.V25Rating
 import com.qiuzhao.flashcards.domain.v25.V25RatingResult
 import com.qiuzhao.flashcards.domain.v25.V25Repository
@@ -33,6 +35,8 @@ import com.qiuzhao.flashcards.domain.v25.V25Result
 import com.qiuzhao.flashcards.domain.v25.V25ReviewCard
 import com.qiuzhao.flashcards.domain.v25.V25SampleCard
 import com.qiuzhao.flashcards.domain.v25.V25StatsDashboard
+import com.qiuzhao.flashcards.domain.v25.V25StudyPlan
+import com.qiuzhao.flashcards.domain.v25.V25StudyPlanUpdate
 import com.qiuzhao.flashcards.domain.v25.V25StudySettingsPatch
 import com.qiuzhao.flashcards.domain.v25.V25TaskConfigPatch
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
@@ -138,6 +142,16 @@ class RemoteV25Repository(
     override suspend fun getProject(projectId: String): V25Result<V25LearningProject> =
         call("get_project", "GET", "/projects/$projectId", idempotent = false, map = ::parseLearningProject)
 
+    override suspend fun projectProgress(projectId: String): V25Result<V25ProgressSummary> =
+        call(
+            "project_progress",
+            "GET",
+            "/projects/$projectId/progress",
+            idempotent = false,
+        ) { value ->
+            parseProgressSummary(value, scopeId = projectId, isProject = true)
+        }
+
     override suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject> =
         call("rename_project", "PATCH", "/projects/$projectId", renameBody(name), map = ::parseLearningProject)
 
@@ -153,12 +167,7 @@ class RemoteV25Repository(
     ): V25Result<Unit> = call(
         "delete_project",
         "DELETE",
-        deletionQueryPath(
-            "/projects/$projectId",
-            retainDecks,
-            abandonPreGenerationTasks,
-            cancelActiveTasks,
-        ),
+        "/projects/$projectId?retain_decks=$retainDecks",
         idempotencyKey = idempotencyKey,
     ) { Unit }
 
@@ -273,6 +282,19 @@ class RemoteV25Repository(
     override suspend fun getDeck(deckId: String): V25Result<V25Deck> =
         call("get_deck", "GET", "/decks/$deckId", idempotent = false, map = ::parseDeck)
 
+    override suspend fun attachDeckToProject(
+        projectId: String,
+        deckId: String,
+        idempotencyKey: String?,
+    ): V25Result<V25Deck> =
+        call(
+            "attach_deck_to_project",
+            "POST",
+            "/projects/$projectId/decks/$deckId/attach",
+            idempotencyKey = idempotencyKey,
+            map = ::parseDeck,
+        )
+
     override suspend fun renameDeck(deckId: String, name: String): V25Result<V25Deck> =
         call("rename_deck", "PATCH", "/decks/$deckId", renameBody(name), map = ::parseDeck)
 
@@ -287,12 +309,7 @@ class RemoteV25Repository(
     ): V25Result<Unit> = call(
         "delete_deck",
         "DELETE",
-        deletionQueryPath(
-            "/decks/$deckId",
-            null,
-            abandonPreGenerationTasks,
-            cancelActiveTasks,
-        ),
+        "/decks/$deckId",
         idempotencyKey = idempotencyKey,
     ) { Unit }
 
@@ -366,8 +383,37 @@ class RemoteV25Repository(
 
     // --- study and review (Architecture 4.5) ------------------------------------------------------
 
+    override suspend fun getStudyPlan(): V25Result<V25StudyPlan> =
+        call("get_study_plan", "GET", "/study/plan", idempotent = false, map = ::parseStudyPlan)
+
+    override suspend fun updateStudyPlan(
+        plan: V25StudyPlanUpdate,
+        idempotencyKey: String?,
+    ): V25Result<V25StudyPlan> =
+        call(
+            "update_study_plan",
+            "PUT",
+            "/study/plan",
+            studyPlanBody(plan),
+            idempotencyKey = idempotencyKey,
+            map = ::parseStudyPlan,
+        )
+
     override suspend fun todayPlan(): V25Result<V25TodayPlan> =
         call("today_plan", "GET", "/study/today", idempotent = false, map = ::parseTodayPlan)
+
+    override suspend fun studyPlanBacklog(
+        offset: Int,
+        limit: Int,
+    ): V25Result<List<V25PlanCard>> =
+        call(
+            "study_plan_backlog",
+            "GET",
+            queryPath("/study/today/backlog", "offset" to offset.toString(), "limit" to limit.toString()),
+            idempotent = false,
+        ) { value ->
+            requiredArray(value, "items").map(::parsePlanCard)
+        }
 
     override suspend fun deckReviewQueue(deckId: String): V25Result<List<V25ReviewCard>> =
         call("review_queue", "GET", "/decks/$deckId/review", idempotent = false) { value ->
@@ -481,22 +527,4 @@ class RemoteV25Repository(
         }
     }
 
-    private fun deletionQueryPath(
-        base: String,
-        retainDecks: Boolean?,
-        abandonPreGenerationTasks: Boolean,
-        cancelActiveTasks: Boolean,
-    ): String = buildString {
-        append(base)
-        if (retainDecks != null || abandonPreGenerationTasks || cancelActiveTasks) append("?")
-        if (retainDecks != null) {
-            append("retain_decks=").append(retainDecks)
-            if (abandonPreGenerationTasks || cancelActiveTasks) append("&")
-        }
-        if (abandonPreGenerationTasks) {
-            append("abandon_pre_generation_tasks=true")
-            if (cancelActiveTasks) append("&")
-        }
-        if (cancelActiveTasks) append("cancel_active_tasks=true")
-    }
 }

@@ -3,8 +3,9 @@
 - POST /projects 与 POST /{project_id}/replace-pdf：multipart 上传幂等顺序沿用 /pdfs 上传
   定式（文件读取 + 三重校验 + 页数 hint + storage.save 在幂等外，biz 只做 DB 元数据写入）；
   存储补偿（删除/替换时 storage 失败回滚元数据）见 services/projects/service.py。
-- DELETE /projects/{project_id}?retain_decks=：两种用户决策（保留或删除全部项目牌组），
-  活跃任务/解析中保护；章节删除 ?delete_cards= 同款保护与两决策。
+- DELETE /projects/{project_id}?retain_decks=：两种用户决策（保留或删除全部项目牌组）；
+  活跃任务由服务端自动取消，解析中项目由版本栅栏安全删除；章节删除 ?delete_cards= 同款
+  保护与两决策。
 - 幂等：写接口强制 Idempotency-Key 并走 execute_idempotent（契约 1.3）。
 - 路径无 /v1 前缀：/v1 语义由部署层 openapi servers url 承担（与 pdfs/decks 同理）。
 """
@@ -21,16 +22,20 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
+from app.schemas.decks import Deck
 from app.schemas.deletion import DeletionPreflight
 from app.schemas.pdfs import ChapterUpdateRequest
+from app.schemas.progress import ProgressSummary, ProjectWeeklyStats
 from app.schemas.project import ProjectStudySettingsUpdateRequest
 from app.schemas.projects import ProjectRenameRequest
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
 from infra.storage.local import LocalStorage
+from services.decks.service import attach_deck_to_project, get_deck
 from services.pdf.parser import page_count_hint
 from services.pdf.scanner import validate_upload
 from services.pdf.service import chapter_view
+from services.progress.service import project_progress, project_weekly_stats
 from services.projects.service import (
     confirm_chapters,
     create_project,
@@ -129,6 +134,68 @@ def get_project_endpoint(
     return JSONResponse(status_code=200, content=body)
 
 
+@router.get("/{project_id}/progress", response_model=ProgressSummary)
+def project_progress_endpoint(
+    request: Request,
+    project_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    body = project_progress(
+        session,
+        user_id=request.state.principal.user_id,
+        project_id=project_id,
+        now=_now(),
+    )
+    return JSONResponse(status_code=200, content=body)
+
+
+@router.get("/{project_id}/stats/weekly", response_model=ProjectWeeklyStats)
+def project_weekly_stats_endpoint(
+    request: Request,
+    project_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    body = project_weekly_stats(
+        session,
+        user_id=request.state.principal.user_id,
+        project_id=project_id,
+        now=SystemClock().now_utc(),
+    )
+    session.commit()
+    return JSONResponse(status_code=200, content=body)
+
+
+@router.post("/{project_id}/decks/{deck_id}/attach", response_model=Deck)
+def attach_deck_endpoint(
+    request: Request,
+    project_id: str,
+    deck_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    user_id = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/decks/{deck_id}/attach"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+    now = _now()
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        attach_deck_to_project(
+            session, user_id=user_id, project_id=project_id, deck_id=deck_id, now=now
+        )
+        return 200, get_deck(session, user_id=user_id, deck_id=deck_id, now=now)
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
 @router.get("/{project_id}/deletion-preflight", response_model=DeletionPreflight)
 def project_deletion_preflight_endpoint(
     request: Request,
@@ -188,19 +255,13 @@ def delete_project_endpoint(
     project_id: str,
     session: Annotated[Session, Depends(get_db_session)],
     retain_decks: Annotated[bool, Query()] = True,
-    abandon_pre_generation_tasks: Annotated[bool, Query()] = False,
-    cancel_active_tasks: Annotated[bool, Query()] = False,
 ) -> Response:
-    """删除项目；可选将所有活跃制卡任务一起取消后删除（含正式生成中任务）。"""
+    """删除项目；retain_decks 是唯一业务选择，活跃任务由服务端自动取消。"""
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     # Query choices are part of the idempotent operation.  A reused key must never replay a
     # retain-decks decision with different destructive semantics.
-    path = (
-        f"/projects/{project_id}?retain_decks={str(retain_decks).lower()}"
-        f"&abandon_pre_generation_tasks={str(abandon_pre_generation_tasks).lower()}"
-        f"&cancel_active_tasks={str(cancel_active_tasks).lower()}"
-    )
+    path = f"/projects/{project_id}?retain_decks={str(retain_decks).lower()}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
@@ -210,8 +271,6 @@ def delete_project_endpoint(
             project_id=project_id,
             retain_decks=retain_decks,
             storage=request.app.state.storage,
-            abandon_pre_generation_tasks=abandon_pre_generation_tasks,
-            cancel_active_tasks=cancel_active_tasks,
             now=_now(),
         )
         return 204, {}

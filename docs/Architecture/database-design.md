@@ -22,6 +22,7 @@ users 1──N pdf_files 1──N chapters
                     └──N text_chunks
 users 1──N learning_projects 1──1 pdf_files(file_id 唯一权威)
                             1──1 project_study_settings
+                            1──N project_study_decks ──N decks
                             1──N decks(project_id 可空=独立牌组)
                             1──N tasks ──N batches 1──1 knowledge_points
                                         └──N cards(source_task_id, STAGED/PUBLISHED)
@@ -64,6 +65,9 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | size_bytes | INTEGER | NOT NULL | |
 | status | TEXT | NOT NULL | `PENDING / PARSING / PARSED / FAILED` |
 | error_code | TEXT | NULL | `PDF_PARSE_FAILED / PDF_TOC_MISSING` |
+| parse_lease_token | TEXT | NULL | 解析 worker 短租约令牌,仅事务外解析期间有效 |
+| parse_lease_until | TEXT | NULL | 租约到期时间;过期后可重新领取 |
+| parse_version | INTEGER | NOT NULL DEFAULT 0 | 删除/替换时递增的解析 fencing 版本 |
 | created_at | TEXT | NOT NULL | |
 
 索引:`(user_id, created_at DESC)`(最近使用列表)。
@@ -422,7 +426,26 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
 | project_id | TEXT | PK, FK → learning_projects ON DELETE CASCADE | 一项目一行 |
 | selected_chapter_ids | TEXT | NOT NULL DEFAULT '[]' | 新卡章节范围(JSON);空数组 = 暂无新卡范围 |
 | include_unassigned | INTEGER | NOT NULL DEFAULT 0 | 是否包含 `chapter_id = null` 的新卡(0/1) |
+| daily_new_goal | INTEGER | NOT NULL DEFAULT 10 | 每日新学目标,0~200 且为 10 的倍数 |
+| daily_review_goal | INTEGER | NOT NULL DEFAULT 40 | 每日巩固目标,0~200 且为 10 的倍数 |
 | updated_at | TEXT | NOT NULL | |
+
+约束:`CHECK (daily_new_goal BETWEEN 0 AND 200 AND daily_new_goal % 10 = 0)`、
+`CHECK (daily_review_goal BETWEEN 0 AND 200 AND daily_review_goal % 10 = 0)`、
+`CHECK (daily_new_goal + daily_review_goal > 0)`。
+
+### 2.19.1 project_study_decks（V2.5 新增）
+
+今日学习计划选中的卡组关联表。卡组必须属于同一用户且已归属该项目；删除项目或卡组时
+关联行级联删除。计划只保存卡组 ID，不再把章节 ID JSON 当作今日计划范围。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| project_id | TEXT | 复合主键, FK → learning_projects ON DELETE CASCADE | |
+| deck_id | TEXT | 复合主键, FK → decks ON DELETE CASCADE | |
+| created_at | TEXT | NOT NULL | 选择进入计划的时间 |
+
+索引:`(deck_id)`。
 
 ### 2.20 card_deletion_batches（V2.5 新增）
 
@@ -458,9 +481,9 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
 | 删除对象 | 级联效果 |
 | --- | --- |
 | users | auth_sessions CASCADE(本期无用户删除接口,预留) |
-| learning_projects | project_study_settings CASCADE;user_preferences.current_project_id SET NULL;decks.project_id SET NULL;tasks.project_id SET NULL |
-| decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL(默认保护活跃任务;显式 `cancel_active_tasks=true` 先 CAS 转 ABANDONED) |
-| pdf_files | chapters CASCADE;tasks.file_id SET NULL(默认保护活跃任务;兼容删除入口显式 `cancel_active_tasks=true` 先 CAS 取消) |
+| learning_projects | project_study_settings/project_study_decks CASCADE;user_preferences.current_project_id SET NULL;decks.project_id SET NULL;tasks.project_id SET NULL |
+| decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL;删除确认时服务端先自动 CAS 取消全部活跃任务 |
+| pdf_files | chapters CASCADE;tasks.file_id SET NULL;项目删除确认时服务端先自动 CAS 取消全部活跃任务 |
 | tasks | knowledge_points、batches CASCADE;cards.source_task_id SET NULL(保留卡)或按用户选择删除其已发布卡(5.3) |
 | cards | review_states、review_events、card_rewrite_previews CASCADE |
 | card_deletion_batches | cards.delete_batch_id SET NULL |
@@ -480,7 +503,7 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
   - 重写预览应用:版本 CAS → 卡片正文更新 → ReviewState 重置 → preview APPLIED;
   - 评级:ReviewEvent 插入 → ReviewState 更新;今日/周完成动态聚合,不另存易漂移计数。
 - **V2.5 LLM 调用不持有 SQLite 长写事务**:规划/生成/评分 LLM 调用发生在事务之外,事务只包短状态/发布更新(风险 R25-07);调用账本 STARTED 占位与领域写入按既有规则同事务提交。
-- **删除原子性**:预检只读且不保留锁；真正删除在同一 `BEGIN IMMEDIATE` 事务内重新读取活跃任务。默认遇到活跃任务返回 409；用户二次确认 `cancel_active_tasks=true` 时先 CAS 取消全部活跃任务、标记 STARTED 为 UNKNOWN、复位 PROCESSING 批次并关闭 operation，再删除资源。LLM 账本保留用于成本对账，任务历史删除前解除其外键引用。
+- **删除原子性**:预检只读且不保留锁；真正删除在同一 `BEGIN IMMEDIATE` 事务内重新读取活跃任务。项目或卡组确认删除时，服务端先 CAS 取消全部活跃任务、标记 STARTED 为 UNKNOWN、复位 PROCESSING 批次并关闭 operation，再删除资源；客户端不再提供任务处理选项。LLM 账本保留用于成本对账，任务历史删除前解除其外键引用。
 - `cards.user_id` 由服务端写入,保证与 `decks.user_id` 一致;数据主体隔离键为 `user_id`(V2.2);(V2.1 历史:v2.1 归属校验按 `device_id` 过滤,已随 V2.3 设备架构清除删除;无隔离键列的表如 chapters、knowledge_points、batches、review_states 经 FK join 到所属隔离键)。
 
 ## 4. 看板聚合实现说明
@@ -568,7 +591,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 
 V2.5 使用一个**新的不可逆 Alembic revision**;迁移从运行时真实 head 生成,不预写 revision ID。升级前备份数据库,downgrade 继续 fail-closed。不得清空 V2.4 用户数据。
 
-- **新表**:`learning_projects`、`user_preferences`、`project_study_settings`、`card_deletion_batches`、`card_rewrite_previews`(定义见 2.17~2.21)。
+- **新表**:`learning_projects`、`user_preferences`、`project_study_settings`、`project_study_decks`、`card_deletion_batches`、`card_rewrite_previews`(定义见 2.17~2.21)。
 - **现有表调整**:
   - `users`:新增 `avatar_key NOT NULL DEFAULT 'mood_01'`。
   - `decks`:新增 `project_id NULL FK → learning_projects ON DELETE SET NULL`;source 枚举补 `GENERATED`。

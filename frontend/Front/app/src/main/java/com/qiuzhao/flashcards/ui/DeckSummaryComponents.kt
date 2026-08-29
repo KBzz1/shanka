@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.qiuzhao.flashcards.data.remote.DeckSummary
 
 /** Figma 655:4143. The owning project's primary colour is the card colour. */
 @Composable
@@ -119,7 +120,7 @@ internal fun LearningDataProgressCard(
                         Spacer(Modifier.width((4 * designScale).dp))
                         FigmaLearningSmallMetric("/ $total", theme.onPrimary, designScale)
                     }
-                    AppText(" 已复习", AppTextRole.CardSubtitle, color = theme.onPrimary, designScale = designScale)
+                    AppText(" 张卡片已学习", AppTextRole.CardSubtitle, color = theme.onPrimary, designScale = designScale)
                 }
                 FigmaLearningLargeMetric(safePercent?.let { "$it%" } ?: "—", theme.onPrimary, designScale)
             }
@@ -299,7 +300,7 @@ internal fun ReviewProgressCard(
             ) {
                 MaterialSymbol("local_fire_department", null, tint = AppColors.TextIconDark, size = fixedSp(28 * designScale), filled = true)
                 Spacer(Modifier.width((8 * designScale).dp))
-                FigmaReviewTitle("复习进度", designScale)
+                FigmaReviewTitle("学习进度", designScale)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 entries.forEach { entry -> ReviewProgressLegend(entry, designScale) }
@@ -320,17 +321,25 @@ internal fun ReviewProgressCard(
  * percentages, so the card never claims a memory distribution the server didn't provide.
  */
 @Composable
-internal fun DeckWeeklyReviewCard(designScale: Float, modifier: Modifier = Modifier) = ReviewProgressCard(
-    entries = listOf(
-        ReviewProgressEntry("熟识", AppColors.ReviewKnown, null, 0),
-        ReviewProgressEntry("认识", AppColors.ReviewRecognised, null, 0),
-        ReviewProgressEntry("模糊", AppColors.ReviewUncertain, null, 0),
-        ReviewProgressEntry("陌生", AppColors.ReviewUnfamiliar, null, 0),
-        ReviewProgressEntry("没学", AppColors.ReviewUnseen, null, 0)
-    ),
-    designScale = designScale,
-    modifier = modifier
-)
+internal fun DeckWeeklyReviewCard(deck: DeckSummary, designScale: Float, modifier: Modifier = Modifier) {
+    val total = deck.cardCount
+    fun entry(label: String, color: Color, count: Int): ReviewProgressEntry {
+        val percentage = if (total > 0) (count * 100f / total).toInt() else null
+        val height = if (total > 0) (count * 116f / total).toInt() else 0
+        return ReviewProgressEntry(label, color, percentage, height)
+    }
+    ReviewProgressCard(
+        entries = listOf(
+            entry("未开始", AppColors.ReviewUnseen, deck.notStartedCount),
+            entry("初学中", AppColors.ReviewRecognised, deck.learningCount),
+            entry("需重学", AppColors.ReviewUncertain, deck.relearningCount),
+            entry("巩固中", AppColors.ReviewUnfamiliar, deck.consolidatingCount),
+            entry("已掌握", AppColors.ReviewKnown, deck.masteredLifecycleCount),
+        ),
+        designScale = designScale,
+        modifier = modifier,
+    )
+}
 
 @Composable
 private fun FigmaReviewTitle(text: String, designScale: Float) = Box(

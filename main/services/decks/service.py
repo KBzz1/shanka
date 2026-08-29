@@ -24,12 +24,11 @@ from infra.db.models import (
 )
 from infra.db.session import format_utc
 from services.deletion.service import (
-    abandon_pre_generation,
-    preflight_payload,
-    resource_tasks,
+    cancel_active_tasks as cancel_active_generation_tasks,
 )
 from services.deletion.service import (
-    cancel_active_tasks as cancel_active_generation_tasks,
+    preflight_payload,
+    resource_tasks,
 )
 
 
@@ -79,6 +78,30 @@ def rename_deck(session: Session, *, user_id: str, deck_id: str, name: str, now:
     return deck
 
 
+def attach_deck_to_project(
+    session: Session, *, user_id: str, project_id: str, deck_id: str, now: str
+) -> Deck:
+    """将独立牌组归入项目；归属后才可被项目今日计划选择。"""
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    deck = _owned(session, user_id=user_id, deck_id=deck_id)
+    if deck.project_id is not None:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "只有独立牌组可以归入项目")
+    visible_count = session.scalar(
+        select(func.count(Card.card_id)).where(
+            Card.user_id == user_id,
+            Card.deck_id == deck_id,
+            text(VISIBLE_PREDICATE_SQL),
+        )
+    ) or 0
+    if visible_count == 0:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "卡组暂无可学习卡片")
+    deck.project_id = project.project_id
+    deck.updated_at = now
+    deck.version = now
+    session.flush()
+    return deck
+
+
 def _owned(session: Session, *, user_id: str, deck_id: str) -> Deck:
     deck = session.get(Deck, deck_id)
     if deck is None or deck.user_id != user_id:
@@ -88,26 +111,24 @@ def _owned(session: Session, *, user_id: str, deck_id: str) -> Deck:
 
 def deck_progress(
     session: Session, *, user_id: str, deck_id: str, now: str
-) -> dict[str, int | float]:
+) -> dict[str, object]:
     """派生进度（structure-contract 3.8/5.3）：card_count/due_count/mastered/review_count/
     mastery_ratio——全部只含可见卡（统一可见谓词 3.9：card_count 派生进度只含可见卡）。"""
     _owned(session, user_id=user_id, deck_id=deck_id)
-    card_count = (
-        session.scalar(
-            select(func.count(Card.card_id)).where(
-                Card.deck_id == deck_id, text(VISIBLE_PREDICATE_SQL)
-            )
-        )
-        or 0
-    )
+    visible = text(VISIBLE_PREDICATE_SQL)
+    card_count = session.scalar(
+        select(func.count(Card.card_id)).where(Card.user_id == user_id, Card.deck_id == deck_id, visible)
+    ) or 0
     due_count = (
         session.scalar(
             select(func.count(Card.card_id))
             .join(ReviewState, ReviewState.card_id == Card.card_id)
             .where(
+                Card.user_id == user_id,
                 Card.deck_id == deck_id,
+                ReviewState.state != "NEW",
                 ReviewState.due <= now,
-                text(VISIBLE_PREDICATE_SQL),
+                visible,
             )
         )
         or 0
@@ -117,10 +138,11 @@ def deck_progress(
             select(func.count(Card.card_id))
             .join(ReviewState, ReviewState.card_id == Card.card_id)
             .where(
+                Card.user_id == user_id,
                 Card.deck_id == deck_id,
                 ReviewState.state == "REVIEW",
                 ReviewState.stability >= 21,
-                text(VISIBLE_PREDICATE_SQL),
+                visible,
             )
         )
         or 0
@@ -129,9 +151,42 @@ def deck_progress(
         session.scalar(
             select(func.count(ReviewEvent.review_event_id))
             .join(Card, Card.card_id == ReviewEvent.card_id)
-            .where(Card.deck_id == deck_id, text(VISIBLE_PREDICATE_SQL))
+            .where(
+                Card.user_id == user_id,
+                Card.deck_id == deck_id,
+                ReviewEvent.user_id == user_id,
+                visible,
+            )
         )
         or 0
+    )
+    lifecycle_rows = session.execute(
+        select(ReviewState.state, ReviewState.stability)
+        .select_from(Card)
+        .outerjoin(ReviewState, ReviewState.card_id == Card.card_id)
+        .where(Card.user_id == user_id, Card.deck_id == deck_id, visible)
+    ).all()
+    lifecycle = {"NEW": 0, "LEARNING": 0, "RELEARNING": 0, "CONSOLIDATING": 0, "MASTERED": 0}
+    for state, stability in lifecycle_rows:
+        if state is None or state == "NEW":
+            lifecycle["NEW"] += 1
+        elif state == "LEARNING":
+            lifecycle["LEARNING"] += 1
+        elif state == "RELEARNING":
+            lifecycle["RELEARNING"] += 1
+        elif state == "REVIEW" and float(stability or 0) >= 21:
+            lifecycle["MASTERED"] += 1
+        else:
+            lifecycle["CONSOLIDATING"] += 1
+    last_studied = session.scalar(
+        select(func.max(ReviewEvent.reviewed_at))
+        .join(Card, Card.card_id == ReviewEvent.card_id)
+        .where(
+            Card.user_id == user_id,
+            Card.deck_id == deck_id,
+            ReviewEvent.user_id == user_id,
+            visible,
+        )
     )
     return {
         "card_count": card_count,
@@ -139,10 +194,17 @@ def deck_progress(
         "mastered_card_count": mastered,
         "review_count": review_count,
         "mastery_ratio": float(mastered) / card_count if card_count else 0.0,
+        "not_started_count": lifecycle["NEW"],
+        "learning_count": lifecycle["LEARNING"],
+        "relearning_count": lifecycle["RELEARNING"],
+        "consolidating_count": lifecycle["CONSOLIDATING"],
+        "mastered_count": lifecycle["MASTERED"],
+        "review_event_count": review_count,
+        "last_studied_at": last_studied,
     }
 
 
-def _to_deck_view(deck: Deck, progress: dict[str, int | float]) -> dict[str, object]:
+def _to_deck_view(deck: Deck, progress: dict[str, object]) -> dict[str, object]:
     return {
         "deck_id": deck.deck_id,
         "name": deck.name,
@@ -153,6 +215,13 @@ def _to_deck_view(deck: Deck, progress: dict[str, int | float]) -> dict[str, obj
         "mastered_card_count": progress["mastered_card_count"],
         "review_count": progress["review_count"],
         "mastery_ratio": progress["mastery_ratio"],
+        "not_started_count": progress["not_started_count"],
+        "learning_count": progress["learning_count"],
+        "relearning_count": progress["relearning_count"],
+        "consolidating_count": progress["consolidating_count"],
+        "mastered_count": progress["mastered_count"],
+        "review_event_count": progress["review_event_count"],
+        "last_studied_at": progress["last_studied_at"],
         "created_at": deck.created_at,
         "updated_at": deck.updated_at,
         "version": deck.version,
@@ -203,45 +272,17 @@ def delete_deck(
     deck = _owned(session, user_id=user_id, deck_id=deck_id)
     active_tasks = resource_tasks(session, user_id=user_id, deck_id=deck_id)
     if active_tasks:
-        if cancel_active_tasks:
-            cancel_active_generation_tasks(
-                session,
-                user_id=user_id,
-                tasks=active_tasks,
-                now=now or format_utc(SystemClock().now_utc()),
-                resource_type="DECK",
-                resource_id=deck_id,
-                error_code=ErrorCode.TASK_IN_PROGRESS,
-            )
-        elif abandon_pre_generation_tasks:
-            abandon_pre_generation(
-                session,
-                user_id=user_id,
-                tasks=active_tasks,
-                now=now or format_utc(SystemClock().now_utc()),
-                resource_type="DECK",
-                resource_id=deck_id,
-                error_code=ErrorCode.TASK_IN_PROGRESS,
-            )
-        else:
-            can_abandon = [task.task_id for task in active_tasks if task.status != "GENERATING"]
-            actions = (
-                ("ABANDON_AND_RETRY", "VIEW_TASKS")
-                if can_abandon
-                else ("WAIT_FOR_TERMINAL", "VIEW_TASKS")
-            )
-            raise AppError(
-                ErrorCode.TASK_IN_PROGRESS,
-                "存在进行中的任务引用该牌组，请先放弃可放弃任务或等待正式生成完成",
-                actions=actions,
-                details={
-                    "resource_type": "DECK",
-                    "resource_id": deck_id,
-                    "task_ids": [task.task_id for task in active_tasks],
-                    "abandonable_task_ids": can_abandon,
-                },
-            )
-    # tasks.deck_id SET NULL（database-design §3）；cards 级联由 FK ON DELETE CASCADE 处理
+        cancel_active_generation_tasks(
+            session,
+            user_id=user_id,
+            tasks=active_tasks,
+            now=now or format_utc(SystemClock().now_utc()),
+            resource_type="DECK",
+            resource_id=deck_id,
+            error_code=ErrorCode.TASK_IN_PROGRESS,
+        )
+    # tasks.deck_id SET NULL（database-design §3）；cards 级联由 FK ON DELETE CASCADE 处理。
+    # 活跃任务已在上方同一事务内自动取消，客户端无需传入任务处理选项。
     deck_tasks = session.scalars(
         select(Task).where(Task.deck_id == deck_id, Task.user_id == user_id)
     ).all()
@@ -283,7 +324,10 @@ def deck_deletion_preflight(
         impact={
             "deck_count": 1,
             "card_count": session.scalar(
-                select(func.count(Card.card_id)).where(Card.deck_id == deck_id)
+                select(func.count(Card.card_id)).where(
+                    Card.user_id == user_id,
+                    Card.deck_id == deck_id,
+                )
             )
             or 0,
             "task_count": session.scalar(

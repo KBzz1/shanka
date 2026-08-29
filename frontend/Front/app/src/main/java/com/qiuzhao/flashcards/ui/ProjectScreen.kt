@@ -12,7 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,7 +33,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalContentColor
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -57,10 +55,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -71,7 +66,6 @@ import kotlin.math.roundToInt
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.LEGACY_UNASSIGNED_PROJECT_ID
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
-import com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 
 /** Figma 494:1447 project root. Project data is derived from the contract layer. */
@@ -175,7 +169,6 @@ internal fun ProjectCreateScreen(
     val materials by viewModel.projectCreationMaterials.collectAsState()
     val pdfUploading by viewModel.pdfUploading.collectAsState()
     val projectId = editingProject?.id
-    val deletionPreflights by viewModel.deletionPreflights.collectAsState()
     var name by rememberSaveable(projectId) { mutableStateOf(editingProject?.name.orEmpty()) }
     var selectedTheme by rememberSaveable(projectId) { mutableStateOf(editingProject?.themeKey ?: "violet") }
     var message by remember { mutableStateOf<String?>(null) }
@@ -186,10 +179,6 @@ internal fun ProjectCreateScreen(
     val context = LocalContext.current
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let { viewModel.addProjectDraftFile(it, projectDocumentName(context, it)) }
-    }
-
-    LaunchedEffect(projectId) {
-        projectId?.let { viewModel.refreshProjectDeletionPreflight(it, retainDecks = true, allowCancel = true) }
     }
 
     // Figma 588:1922 uses a white page canvas.  The project family begins at
@@ -363,24 +352,6 @@ internal fun ProjectCreateScreen(
                     }
                 }
             },
-            preflight = projectId?.let { deletionPreflights[viewModel.projectDeletionPreflightKey(it, true)] },
-            onConfirmWithAbandon = { retainDecks, abandon, cancel ->
-                if (projectDeletionInFlight) return@ProjectDeletionDialog
-                projectDeletionInFlight = true
-                viewModel.deleteProject(
-                    editingProject.id,
-                    retainDecks,
-                    abandonPreGenerationTasks = abandon,
-                    onResult = { succeeded ->
-                        projectDeletionInFlight = false
-                        if (succeeded) {
-                            showProjectDeletionConfirmation = false
-                            nav.returnToTopLevel()
-                        }
-                    },
-                    cancelActiveTasks = cancel,
-                )
-            },
             onDismiss = { if (!projectDeletionInFlight) showProjectDeletionConfirmation = false }
         )
     }
@@ -434,282 +405,47 @@ private fun ProjectDeletionEntry(scale: Float, onRequestDeletion: () -> Unit) = 
     }
 }
 
-/**
- * V25-GEN-FR-09's second confirmation: the user explicitly chooses whether project decks and
- * cards survive before the irreversible DELETE /projects request is allowed to leave the app.
- */
+/** Compact project confirmation: the server handles task cancellation automatically. */
 @Composable
 internal fun ProjectDeletionDialog(
     projectName: String,
     theme: DeckTheme,
     deleting: Boolean = false,
-    preflight: V25DeletionPreflight? = null,
     onConfirm: (retainDecks: Boolean) -> Unit,
-    onConfirmWithAbandon: ((retainDecks: Boolean, abandonPreGenerationTasks: Boolean, cancelActiveTasks: Boolean) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
-    var retainDecks by rememberSaveable(projectName) { mutableStateOf(true) }
-    var abandonPreGenerationTasks by rememberSaveable(projectName) { mutableStateOf(true) }
-    var cancelActiveTasks by rememberSaveable(projectName) { mutableStateOf(false) }
-    val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
-    LaunchedEffect(dialogWindow) { dialogWindow?.setDimAmount(.2f) }
-
     Dialog(onDismissRequest = { if (!deleting) onDismiss() }) {
         Surface(
             color = theme.background,
             shape = RoundedCornerShape(36.dp),
-            modifier = Modifier.width(331.dp)
+            modifier = Modifier.width(331.dp),
         ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Surface(
-                        color = AppColors.WarningStrong,
-                        shape = RoundedCornerShape(999.dp),
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            MaterialSymbol("delete", null, tint = AppColors.TextIconLight, size = fixedSp(24f), filled = true)
-                        }
-                    }
-                    AppText("删除“$projectName”吗？", AppTextRole.SectionTitle, color = theme.text, maxLines = 2)
-                }
-                AppText(
-                    "项目的 PDF、章节、制卡任务历史和项目设置会被删除。请确认卡组和卡片的处理方式。",
-                    AppTextRole.CardSubtitle,
-                    color = theme.text
-                )
-                if (preflight == null && onConfirmWithAbandon != null) {
-                    AppText(
-                        "预检暂未返回；确认后由服务器再次检查，准备阶段任务会自动放弃。",
-                        AppTextRole.CardSubtitle,
-                        color = theme.text.copy(alpha = .75f),
-                    )
-                } else {
-                    preflight?.let { preview ->
-                        val abandonable = preview.blockers.count { it.canAbandon }
-                        val generating = preview.blockers.count { !it.canAbandon }
-                        val previewText = when {
-                            generating > 0 -> "有 $generating 个正式生成任务正在进行，请等待任务结束后再删除。"
-                            abandonable > 0 -> "检测到 $abandonable 个准备阶段任务；确认后会先标记为已放弃，再执行删除。"
-                            !preview.canDelete -> "项目当前仍在解析，请等待解析完成后再删除。"
-                            else -> "当前没有进行中的任务。"
-                        }
-                        AppText(
-                            previewText,
-                            AppTextRole.CardSubtitle,
-                            color = if (generating > 0 || !preview.canDelete && abandonable == 0) AppColors.WarningInk else theme.text.copy(alpha = .75f),
-                        )
-                    }
-                }
-                if (onConfirmWithAbandon != null) {
-                    val optionEnabled = !deleting && preflight?.hasUncancellableTasks != true
-                    Surface(
-                        onClick = { if (optionEnabled) abandonPreGenerationTasks = !abandonPreGenerationTasks },
-                        enabled = optionEnabled,
-                        color = theme.cardPanel,
-                        contentColor = theme.text,
-                        shape = RoundedCornerShape(AppNestedShapeRadius.dp),
-                        modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
-                            contentDescription = "同时放弃准备阶段任务"
-                            this.selected = abandonPreGenerationTasks
-                            role = Role.Checkbox
-                        },
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Checkbox(
-                                checked = abandonPreGenerationTasks,
-                                onCheckedChange = { if (optionEnabled) abandonPreGenerationTasks = it },
-                                enabled = optionEnabled,
-                            )
-                            Column(
-                                modifier = Modifier.weight(1f),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
-                            ) {
-                                AppText("同时放弃准备阶段任务", AppTextRole.CardTitle, color = theme.text)
-                                AppText(
-                                    "草稿、样卡生成中、待确认任务会在删除事务中标记为已放弃；正式生成中仍需等待。",
-                                    AppTextRole.CardSubtitle,
-                                    color = theme.text.copy(alpha = .75f),
-                                )
-                            }
-                        }
-                    }
-                    if (preflight?.canCancel == true) {
-                        Surface(
-                            onClick = { if (!deleting) cancelActiveTasks = !cancelActiveTasks },
-                            enabled = !deleting,
-                            color = if (cancelActiveTasks) AppColors.WarningSecondary else theme.cardPanel,
-                            contentColor = theme.text,
-                            shape = RoundedCornerShape(AppNestedShapeRadius.dp),
-                            modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
-                                contentDescription = "同时取消进行中的制卡任务"
-                                this.selected = cancelActiveTasks
-                                role = Role.Checkbox
-                            },
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Checkbox(
-                                    checked = cancelActiveTasks,
-                                    onCheckedChange = { if (!deleting) cancelActiveTasks = it },
-                                    enabled = !deleting,
-                                )
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                                ) {
-                                    AppText("同时取消进行中的制卡任务", AppTextRole.CardTitle, color = theme.text)
-                                    AppText(
-                                        "包括正式生成中的任务；任务会标记为已放弃，然后继续删除项目。",
-                                        AppTextRole.CardSubtitle,
-                                        color = theme.text.copy(alpha = .75f),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                ProjectDeletionChoice(
-                    selected = retainDecks,
-                    title = "保留卡组和卡片",
-                    description = "卡组会脱离项目继续学习；来源查看和 AI 重写不再可用。",
-                    theme = theme,
-                    enabled = !deleting,
-                    onClick = { retainDecks = true }
-                )
-                ProjectDeletionChoice(
-                    selected = !retainDecks,
-                    title = "同时删除卡组和卡片",
-                    description = "卡组、卡片和相关学习记录也会被删除，且无法恢复。",
-                    theme = theme,
-                    destructive = true,
-                    enabled = !deleting,
-                    onClick = { retainDecks = false }
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Surface(
-                        onClick = onDismiss,
-                        enabled = !deleting,
-                        color = theme.cardPanel,
-                        contentColor = theme.text,
-                        shape = RoundedCornerShape(AppButtonShapeRadius.dp),
-                        modifier = Modifier.weight(1f).height(60.dp).semantics { contentDescription = "取消删除项目" }
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            AppText("取消", AppTextRole.Label, color = LocalContentColor.current)
-                        }
-                    }
-                    Surface(
-                        onClick = {
-                            val abandon = if (cancelActiveTasks) {
-                                false
-                            } else {
-                                preflight?.let { preview ->
-                                    abandonPreGenerationTasks && preview.blockers.isNotEmpty() &&
-                                        preview.blockers.all { it.canAbandon }
-                                } ?: abandonPreGenerationTasks
-                            }
-                            if (onConfirmWithAbandon != null) {
-                                onConfirmWithAbandon(retainDecks, abandon, cancelActiveTasks)
-                            }
-                            else onConfirm(retainDecks)
-                        },
-                        enabled = !deleting && (
-                            preflight == null ||
-                                (!preflight.hasUncancellableTasks &&
-                                    (preflight.canDelete || preflight.abandonableTaskIds.isNotEmpty())) ||
-                                preflight.canCancel
-                            ),
-                        color = AppColors.WarningStrong,
-                        contentColor = AppColors.TextIconLight,
-                        shape = RoundedCornerShape(AppButtonShapeRadius.dp),
-                        modifier = Modifier.weight(1.35f).height(60.dp)
-                            .semantics { contentDescription = "确认删除项目" }
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxSize(),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            MaterialSymbol("delete", null, tint = LocalContentColor.current, size = fixedSp(24f), filled = true)
-                            Spacer(Modifier.width(8.dp))
-                            AppText(if (deleting) "正在删除" else "确认删除", AppTextRole.Label, color = LocalContentColor.current)
-                        }
-                    }
-                }
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                AppText("删除“$projectName”吗？", AppTextRole.SectionTitle, color = theme.text, maxLines = 2)
+                CompactDeletionButton("删除项目，保留卡组", theme, deleting) { onConfirm(true) }
+                CompactDeletionButton("删除项目及卡组", theme, deleting, destructive = true) { onConfirm(false) }
             }
         }
     }
 }
 
 @Composable
-private fun ProjectDeletionChoice(
-    selected: Boolean,
-    title: String,
-    description: String,
+private fun CompactDeletionButton(
+    label: String,
     theme: DeckTheme,
+    deleting: Boolean,
     destructive: Boolean = false,
-    enabled: Boolean,
     onClick: () -> Unit,
 ) {
-    val titleColor = if (destructive) AppColors.WarningInk else theme.text
-    val borderColor = if (selected) {
-        if (destructive) AppColors.WarningStrong else theme.primary
-    } else {
-        theme.cardPanel
-    }
     Surface(
         onClick = onClick,
-        enabled = enabled,
-        color = if (selected) theme.cardPanel else AppColors.Card,
-        contentColor = titleColor,
-        shape = RoundedCornerShape(AppNestedShapeRadius.dp),
-        border = BorderStroke(if (selected) 2.dp else 1.dp, borderColor),
-        modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
-            contentDescription = title
-            this.selected = selected
-            role = Role.RadioButton
-        }
+        enabled = !deleting,
+        color = if (destructive) AppColors.WarningStrong else theme.cardPanel,
+        contentColor = if (destructive) AppColors.TextIconLight else theme.text,
+        shape = RoundedCornerShape(AppButtonShapeRadius.dp),
+        modifier = Modifier.fillMaxWidth().height(56.dp),
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            Surface(
-                color = if (selected) borderColor else AppColors.Card,
-                shape = RoundedCornerShape(999.dp),
-                border = if (selected) null else BorderStroke(1.dp, borderColor),
-                modifier = Modifier.size(24.dp)
-            ) {
-                if (selected) Box(contentAlignment = Alignment.Center) {
-                    MaterialSymbol("check", null, tint = AppColors.TextIconLight, size = fixedSp(16f), filled = true)
-                }
-            }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                AppText(title, AppTextRole.CardTitle, color = titleColor)
-                AppText(description, AppTextRole.CardSubtitle, color = titleColor.copy(alpha = .8f))
-            }
-        }
+        Box(contentAlignment = Alignment.Center) { AppText(label, AppTextRole.Label, color = LocalContentColor.current) }
     }
 }
 

@@ -16,6 +16,13 @@ class Deck(BaseModel):
     mastered_card_count: int
     review_count: int
     mastery_ratio: float
+    not_started_count: int = 0
+    learning_count: int = 0
+    relearning_count: int = 0
+    consolidating_count: int = 0
+    mastered_count: int = 0
+    review_event_count: int = 0
+    last_studied_at: str | None = None
     created_at: str
     updated_at: str
     version: str

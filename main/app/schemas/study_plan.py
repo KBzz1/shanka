@@ -17,15 +17,46 @@ class TodayPlanCard(Card):
 
     review_state: ReviewState | None = None
     forgetting_risk: float | None = None  # 统一 FSRS 适配器按服务端 now 计算；无法计算时置 0
+    plan_kind: str | None = None  # DUE/NEW；旧客户端可忽略
+
+
+class StudyPlan(BaseModel):
+    """当前用户的可编辑今日学习计划。"""
+
+    configured: bool
+    current_project_id: str | None
+    selected_deck_ids: list[str]
+    daily_new_goal: int
+    daily_review_goal: int
+    updated_at: str | None = None
+
+
+class StudyPlanUpdateRequest(BaseModel):
+    # The plan write contract intentionally uses the unambiguous project_id field.
+    # There are no legacy plan records/clients to preserve, so the request schema and
+    # OpenAPI remain a single, exact contract.
+    project_id: str
+    selected_deck_ids: list[str]
+    daily_new_goal: int
+    daily_review_goal: int
 
 
 class TodayStudyPlan(BaseModel):
     timezone: str  # 账号学习时区
     study_date: str  # 账号学习时区下的学习日期
     current_project: LearningProject | None  # 无当前项目时返回 null（空态）
-    daily_goal: int  # 服务端偏好
-    today_completed_count: int  # 今日去重完成数（同一 (账号学习日期, card_id) 只计一次）
+    daily_goal: int  # 旧合计字段；新客户端使用双目标字段
+    today_completed_count: int  # 旧合计完成数
     due_count: int
     main_plan_remaining: int
     backlog_count: int  # 到期总数超出每日目标的部分
     cards: list[TodayPlanCard]
+    daily_new_goal: int = 0
+    daily_review_goal: int = 0
+    new_completed_count: int = 0
+    review_completed_count: int = 0
+    new_remaining_count: int = 0
+    review_remaining_count: int = 0
+    core_target_count: int = 0
+    plan_configured: bool = False
+    selected_deck_ids: list[str] = []

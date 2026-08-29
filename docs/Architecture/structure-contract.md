@@ -97,7 +97,7 @@
 | `due` | 下次复习时间 | FSRS 字段,到期判断用 |
 | `review_state` | 复习状态 | FSRS 排程状态快照 |
 | `review_event` | 复习事件 | 评级产生的不可变记录 |
-| `AGAIN / HARD / GOOD / EASY` | 忘记 / 模糊 / 记得 /(新增)简单 | FSRS 四档评级 |
+| `AGAIN / HARD / GOOD / EASY` | 没想起来 / 勉强想起 / 正常想起 / 轻松想起 | FSRS 四档评级；内部枚举保持不变 |
 | `generation_unit`(生成单元) | 知识点 | 最小规划单元:一个锚定卡片类型与目标难度的生成任务(见 3.6);数据库表名保持 `knowledge_points`(兼容壳) |
 
 ## 3. 资源模型(单一事实来源)
@@ -331,7 +331,7 @@
 | `weekly_total` | int | ✓ | 本周总复习事件数 |
 | `weekly_completed_count` | int | ✓ | V2.5 本周不同 `(账号学习日期, card_id)` 数 |
 | `week_change_rate` | float \| null | ✓ | `(本周-上周)/上周`;上周为 0 时 null(客户端显示"暂无对比") |
-| `weekly_goal` | int | ✓ | V2.5 服务端派生:`daily_learning_goal × 7`(3.15);不再接受客户端参数 |
+| `weekly_goal` | int | ✓ | 账号看板兼容字段；项目周统计按（每日新学 + 每日巩固）× 7 派生 |
 | `weekly_goal_progress` | float | ✓ | `min(weekly_completed_count / weekly_goal, 1)` |
 | `updated_at` | datetime | ✓ | 聚合快照生成时间(PRD 6.6:客户端据此判断缓存是否过期) |
 | `recall_accuracy` | float \| null | ✓ | 周期内 GOOD 事件 / 全部事件 |
@@ -383,7 +383,7 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | --- | --- | --- | --- |
 | `default_coverage_mode` | enum | ✓ | `COMPACT` / `BALANCED` / `EXTENSIVE`,默认 `BALANCED` |
 | `default_difficulty_ratio` | object | ✓ | `basic/understanding/deep_question` 为 0~100 的 10% 整数档,合计 100,允许任一档为 0;默认 `40/40/20` |
-| `daily_learning_goal` | int | ✓ | 10~200,10 的倍数,默认 50 |
+| `daily_learning_goal` | int | ✓ | 旧账号兼容偏好；新项目计划使用 ProjectStudySettings 的每日新学/巩固双目标 |
 | `learning_timezone` | string | ✓ | 有效 IANA 时区,账号级权威(1.2) |
 | `current_project_id` | uuid \| null | ✓ | 当前学习项目;项目删除时服务端置空 |
 | `updated_at` | datetime | ✓ | 最后成功保存时间 |
@@ -419,7 +419,7 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | `actions` | string[] | ✓ | `ABANDON_AND_RETRY` / `WAIT_FOR_TERMINAL` / `VIEW_TASKS` |
 | `impact` | object | ✓ | 资源数量与当前项目状态;仅展示用途,不作为删除授权 |
 
-预检是只读建议;实际删除必须在同一写事务内重新检查并用 CAS 放弃可放弃任务。正式生成中不可强制终止。
+预检是只读建议;实际删除必须在同一写事务内重新检查。项目/牌组确认删除后服务端自动取消全部关联活跃任务（含正式生成中任务），并用租约 fencing 使迟到 worker 写入失效。
 
 ### 3.17 ProjectStudySettings(项目学习设置,V2.5 新增)
 
@@ -427,9 +427,24 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | --- | --- | --- | --- |
 | `selected_new_card_chapter_ids` | uuid[] | ✓ | 只限制新卡;空数组表示暂无新卡范围 |
 | `include_unassigned` | bool | ✓ | 是否包含 `chapter_id = null` 的新卡 |
+| `selected_deck_ids` | uuid[] | ✓ | 今日计划选中的卡组范围;新卡与到期卡均受此范围约束 |
+| `daily_new_goal` | int | ✓ | 每日新学目标,0~200 且为 10 的倍数 |
+| `daily_review_goal` | int | ✓ | 每日巩固目标,0~200 且为 10 的倍数 |
 | `updated_at` | datetime | ✓ | |
 
-规则:一项目一行;到期卡覆盖当前项目全部已学习卡,不受本章范围限制。
+规则:一项目一行;今日计划使用卡组关联表保存范围,同一范围同时约束新卡与到期卡;到期卡不再跨选中卡组读取。
+
+### 3.17.1 StudyPlan(今日学习计划配置)
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `configured` | bool | ✓ | 是否已保存有效计划 |
+| `current_project_id` | uuid \| null | ✓ | 当前项目;未选择时为 null |
+| `selected_deck_ids` | uuid[] | ✓ | 至少一个当前项目卡组 |
+| `daily_new_goal` / `daily_review_goal` | int | ✓ | 0~200,10 的倍数,不可同时为 0 |
+| `updated_at` | datetime \| null | ✗ | 最近一次保存时间 |
+
+`PUT /study/plan` 一次原子替换项目、卡组范围和双目标;失败不改变原计划。
 
 ### 3.18 CardDeletionBatch(卡片删除批次,V2.5 新增)
 
@@ -463,14 +478,54 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | `timezone` | string | ✓ | 账号学习时区 |
 | `study_date` | string | ✓ | 账号学习时区下的学习日期 |
 | `current_project` | LearningProject \| null | ✓ | 无当前项目时返回 null(空态) |
-| `daily_goal` | int | ✓ | 服务端偏好 |
+| `daily_goal` | int | ✓ | 当天实际核心队列目标(新学 + 巩固);可用卡不足时按实际队列收敛 |
 | `today_completed_count` | int | ✓ | 今日去重完成数(同一 `(账号学习日期, card_id)` 只计一次) |
 | `due_count` | int | ✓ | 到期总数 |
 | `main_plan_remaining` | int | ✓ | 主计划剩余数 |
 | `backlog_count` | int | ✓ | 积压数 |
 | `cards` | TodayPlanCard[] | ✓ | 有序卡片列表 |
+| `daily_new_goal` / `daily_review_goal` | int | ✗ | 新卡与巩固软目标 |
+| `new_completed_count` / `review_completed_count` | int | ✗ | 今日按卡去重的双目标完成数 |
+| `new_remaining_count` / `review_remaining_count` | int | ✗ | 双目标剩余数 |
+| `core_target_count` | int | ✗ | 实际可用队列的合计目标,不足目标时按实际队列收敛 |
+| `plan_configured` | bool | ✗ | 是否已配置卡组计划 |
+| `selected_deck_ids` | uuid[] | ✗ | 今日计划使用的卡组 |
 
-主计划(4.5):当前项目全部已学习且到期的可见卡 → 按 `遗忘风险 DESC → 逾期时长 DESC → card_id` 稳定排序取到每日目标 → 仍有余额时从项目学习范围中的 `NEW` 卡按章节顺序、position、card_id 补足。遗忘风险由统一 FSRS 适配器按服务端 `now` 计算;无法计算时风险置 0,再按逾期与稳定键排序。
+主计划(4.5):选中卡组中的到期可见卡最多取 `daily_review_goal` 张,再取最多 `daily_new_goal` 张 NEW 卡;巩固目标为软目标,超出部分经 `/study/today/backlog` 分页继续。到期卡按遗忘风险、逾期时长、`card_id` 排序,新卡按 `deck_id`、`position`、`card_id` 排序。遗忘风险由统一 FSRS 适配器按服务端 `now` 计算;无法计算时风险置 0。
+
+### 3.22 ProgressSummary(进度投影,V2.5 学习闭环增量)
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `card_count` | int | ✓ | 可见卡总数;统一使用卡片可见谓词(3.9) |
+| `not_started_count` | int | ✓ | `ReviewState.state = NEW` |
+| `learning_count` | int | ✓ | `LEARNING` |
+| `relearning_count` | int | ✓ | `RELEARNING` |
+| `consolidating_count` | int | ✓ | `REVIEW` 且尚未达到掌握阈值 |
+| `mastered_count` | int | ✓ | `REVIEW` 且 `stability >= 21` 天(5.3) |
+| `due_count` | int | ✓ | 当前到期卡,单独统计,不并入阶段分布 |
+| `review_event_count` | int | ✓ | 该范围内不可变 `ReviewEvent` 总数 |
+| `last_studied_at` | datetime \| null | ✓ | 最近一次评分服务端时间;无事件为 null |
+
+项目进度接口按路径中的项目 ID 聚合该项目全部可见卡,牌组进度接口按牌组 ID 聚合;两者均不得混入其他项目或独立牌组。缺失统计在客户端显示 `—`,不得用本地估算或固定百分比。
+
+### 3.23 ProjectWeeklyStats(项目周统计,V2.5 学习闭环增量)
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `project_id` | uuid | ✓ | 项目 ID |
+| `timezone` | string | ✓ | 账号学习时区 |
+| `period_start` / `period_end` | datetime | ✓ | 周一开始、下周一结束的 UTC 边界 |
+| `weekly_activity` | int[7] | ✓ | 周一至周日,按计划卡组范围统计评分事件 |
+| `weekly_total` | int | ✓ | 本周计划范围内评分次数 |
+| `weekly_new_goal` / `weekly_review_goal` | int | ✓ | 新学/巩固每日目标乘以 7;未配置为 0 |
+| `weekly_goal` | int | ✓ | `weekly_new_goal + weekly_review_goal`;未配置为 0 |
+| `weekly_goal_progress` | float \| null | ✓ | `weekly_completed_count / weekly_goal` 上限 1;目标为 0 时 null |
+| `weekly_completed_count` | int | ✓ | 本周不同学习日期与卡片的去重完成数 |
+| `new_completed_count` / `review_completed_count` | int | ✓ | 本周按首次事件与后续事件划分的去重卡片数 |
+| `updated_at` | datetime | ✓ | 聚合计算时间 |
+
+项目周统计只查询当前项目计划所选卡组;账号总体活动仍由 `StatsDashboard`(3.12) 提供,不受项目目标过滤。
 
 ### 3.15 AuthSessionResponse(会话,V2.2 新增)
 
@@ -507,7 +562,7 @@ FAILED ──retry──→ 新任务 DRAFT(retry_of_task_id 指向原任务;正
 - **失败重试**:`POST /tasks/{task_id}/retry` 只允许失败任务,创建关联新任务(复制已确认配置;正式生成失败可沿用已确认样卡),原失败任务保留并显示关联(PRD 5.13)。
 - **用户侧无暂停/取消**:`PAUSED`/`resume`/`cancel` 用户 API 全部删除;执行器内部恢复经同一状态的租约/心跳重新抢占,不暴露用户状态。历史 `PAUSED` 任务迁为 `FAILED` 并写 `LEGACY_PAUSED_TASK`(5.2)。
 - **abandon**:`POST /tasks/{task_id}/abandon` 只允许 `DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION`(正式生成前),进入 `ABANDONED` 终态;`SAMPLE_GENERATING` 时后台请求完成后样卡写入无害。
-- **删除保护**:活跃任务(`DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING`)默认不允许删除其项目、引用章节或目标牌组;正式生成前可先 abandon。删除预检会列出任务 ID、阶段与 `can_cancel`；用户在二次确认中显式选择 `cancel_active_tasks=true` 时，服务端在同一写事务内 CAS 取消全部活跃任务（包括 `GENERATING`）后继续删除，旧 worker 的租约/fencing 写入失效。未选择该决策时仍返回 `PROJECT_HAS_ACTIVE_TASK` / `TASK_STATE_CONFLICT`。
+- **删除处理**:项目或牌组删除不再把任务处理选项暴露给用户；服务端在同一写事务内 CAS 取消全部关联活跃任务（`DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING`），并使旧 worker 的租约/fencing 写入失效。删除预检仍为只读诊断接口，不能成为资源锁。
 - `FAILED`:系统级不可恢复错误(如 API Key 失效、上游持续不可用)或 0 张有效卡;`error_code` 用户安全。批次级失败(Schema 重试达上限)不置 `FAILED` —— 该批 `SKIPPED`,任务继续处理其余批次(见 4.2)。
 - 前端页面状态映射:`GENERATING` = 生成中,`COMPLETED` = 完成,`FAILED` = 失败可重试,`ABANDONED` = 已放弃。
 
@@ -565,10 +620,10 @@ Scheduler(
 
 | 评级 | 含义 | 前端文案 |
 | --- | --- | --- |
-| `AGAIN` | 忘记 | 忘记 |
-| `HARD` | 模糊 | 模糊 |
-| `GOOD` | 记得 | 记得 |
-| `EASY` | 简单 | 简单(本期新增按钮) |
+| `AGAIN` | 没想起来 | 没有回忆起来，需要尽快再次学习 |
+| `HARD` | 勉强想起 | 记忆不稳，需要更快巩固 |
+| `GOOD` | 正常想起 | 正常回忆起来 |
+| `EASY` | 轻松想起 | 非常熟悉，可延长间隔 |
 
 - "开始复习"仅返回 `due <= now` 的卡片,按 `due`、`position` 稳定排序。
 - 自由刷题不创建事件、不改变排程;评级接口对到期边界宽容处理(客户端提交任意卡片评级均按 FSRS 计算,决策 C-06)。
@@ -612,12 +667,15 @@ Scheduler(
 | GET | `/v1/projects/{project_id}` | 项目详情(含 file/chapters 摘要与派生计数) | - |
 | GET | `/v1/projects/{project_id}/deletion-preflight?retain_decks=true\|false&cancel_active_tasks=true\|false` | 删除预检:影响范围、阻塞任务与可执行动作;只读 | - |
 | PATCH | `/v1/projects/{project_id}` | 重命名(1~60 字符,去首尾空白) | ✓ |
-| DELETE | `/v1/projects/{project_id}?retain_decks=true\|false&abandon_pre_generation_tasks=true\|false&cancel_active_tasks=true\|false` | 二次确认后可原子取消全部活跃任务(含 GENERATING)并删除;默认仍保护 | ✓ |
+| DELETE | `/v1/projects/{project_id}?retain_decks=true\|false` | 二次确认后自动取消全部关联活跃任务(含 GENERATING)并删除;仅保留或删除卡组两种选择 | ✓ |
 | POST | `/v1/projects/{project_id}/replace-pdf` | 仅解析失败项目可替换并重新解析(原子替换 PDF) | ✓ |
 | PATCH | `/v1/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页 | ✓ |
 | DELETE | `/v1/projects/{project_id}/chapters/{chapter_id}?delete_cards=false` | 活跃任务保护;保留卡时 `chapter_id` 置空 | ✓ |
 | POST | `/v1/projects/{project_id}/confirm-chapters` | 确认目录,使项目进入 READY | ✓ |
 | GET/PATCH | `/v1/projects/{project_id}/study-settings` | 新卡章节范围与未归属分组(3.17) | PATCH ✓ |
+| GET | `/v1/projects/{project_id}/progress` | 项目真实进度投影(3.22) | - |
+| GET | `/v1/projects/{project_id}/stats/weekly` | 当前项目周统计(按计划卡组范围) | - |
+| POST | `/v1/projects/{project_id}/decks/{deck_id}/attach` | 将本用户独立牌组归入项目 | ✓ |
 
 上传限制继续适用:≤ 100MB、≤ 1000 页;文件魔数 + 扩展名 + MIME 三重检查,不合规 → `400 PDF_UPLOAD_INVALID`。
 兼容路径:旧 `/v1/pdfs*` 在过渡期保留,内部**委托**项目接口同一业务语义,不得创建第二套项目/任务状态。
@@ -645,7 +703,7 @@ Scheduler(
 | POST | `/v1/tasks/{task_id}/retry` | 失败任务创建关联新任务(可沿用已确认样卡) | ✓ |
 | DELETE | `/v1/tasks/{task_id}?delete_generated_cards=false` | 终态任务;按参数保留或删除已发布卡 | ✓ |
 
-删除用户侧 `/resume`、`/cancel`、暂停状态与按钮;执行器内部恢复经租约/心跳,不暴露 `PAUSED`。
+删除用户侧 `/resume`、`/cancel`、暂停状态与按钮;执行器内部恢复经租约/心跳,不暴露 `PAUSED`。删除确认只表达保留或删除卡组，任务处理由服务端默认完成。
 
 ### 6.5 牌组、卡片与撤销(V2.5 目标 4.4)
 
@@ -656,7 +714,7 @@ Scheduler(
 | PATCH | `/v1/decks/{deck_id}` | 牌组改名;`version` 递增供缓存刷新;返回含真实进度 | ✓ |
 | GET | `/v1/decks/{deck_id}` | 详情 + 进度(card_count / due_count / mastered / review_count / mastery_ratio) | - |
 | GET | `/v1/decks/{deck_id}/deletion-preflight?cancel_active_tasks=true\|false` | 删除预检:影响范围、阻塞任务与可执行动作;只读 | - |
-| DELETE | `/v1/decks/{deck_id}?abandon_pre_generation_tasks=true\|false&cancel_active_tasks=true\|false` | 二次确认后可原子取消全部活跃任务(含 GENERATING)并删除;默认仍保护 | ✓ |
+| DELETE | `/v1/decks/{deck_id}` | 二次确认后自动取消全部关联活跃任务并一并删除卡片与学习记录 | ✓ |
 | GET | `/v1/decks/{deck_id}/cards` | 自由刷题:支持 order、content_difficulty、mastery 过滤 | - |
 | POST | `/v1/decks/{deck_id}/cards` | 手动新增卡片 `{ front, back }`,分配 position | ✓ |
 | POST | `/v1/decks/{deck_id}/cards/import` | 批量导入 `{ cards: [{ front, back }] }`,原子写入,返回逐张结果 | ✓ |
@@ -677,6 +735,9 @@ Scheduler(
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |
 | GET | `/v1/study/today` | 当前项目今日计划(服务端账号时区、去重;3.20) | - |
+| GET | `/v1/study/plan` | 读取当前项目、计划卡组与新学/巩固双目标 | - |
+| PUT | `/v1/study/plan` | 原子保存计划配置;目标为 0~200 的 10 倍数且不可同时为 0 | ✓ |
+| GET | `/v1/study/today/backlog?offset=&limit=` | 读取超过巩固软目标的到期卡 | - |
 | GET | `/v1/decks/{deck_id}/review` | 独立牌组或指定牌组到期复习队列(due <= now,按 due、position 排序) | - |
 | POST | `/v1/review-events` | 提交评级 `{ card_id, rating, client_event_id }`(不再要求 device_timezone),返回更新后的 ReviewState 与本次学习日期 | ✓(client_event_id) |
 

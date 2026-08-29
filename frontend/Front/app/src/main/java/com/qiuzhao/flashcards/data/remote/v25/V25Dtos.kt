@@ -30,6 +30,7 @@ import com.qiuzhao.flashcards.domain.v25.V25InternalStage
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25PdfFile
 import com.qiuzhao.flashcards.domain.v25.V25PlanCard
+import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStudySettings
@@ -41,6 +42,8 @@ import com.qiuzhao.flashcards.domain.v25.V25ReviewState
 import com.qiuzhao.flashcards.domain.v25.V25RewriteStatus
 import com.qiuzhao.flashcards.domain.v25.V25SampleCard
 import com.qiuzhao.flashcards.domain.v25.V25StatsDashboard
+import com.qiuzhao.flashcards.domain.v25.V25StudyPlan
+import com.qiuzhao.flashcards.domain.v25.V25StudyPlanUpdate
 import com.qiuzhao.flashcards.domain.v25.V25StudySettingsPatch
 import com.qiuzhao.flashcards.domain.v25.V25TaskConfigPatch
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
@@ -212,7 +215,19 @@ internal fun parseStudySettings(projectId: String, value: JSONObject): V25Projec
         selectedNewCardChapterIds = stringList(value, "selected_new_card_chapter_ids"),
         includeUnassigned = requiredBoolean(value, "include_unassigned"),
         updatedAt = requiredInstant(value, "updated_at"),
+        selectedDeckIds = optionalStringList(value, "selected_deck_ids"),
+        dailyNewGoal = optionalInt(value, "daily_new_goal") ?: 10,
+        dailyReviewGoal = optionalInt(value, "daily_review_goal") ?: 40,
     )
+
+internal fun parseStudyPlan(value: JSONObject): V25StudyPlan = V25StudyPlan(
+    configured = requiredBoolean(value, "configured"),
+    currentProjectId = optionalString(value, "current_project_id"),
+    selectedDeckIds = stringList(value, "selected_deck_ids"),
+    dailyNewGoal = requiredInt(value, "daily_new_goal"),
+    dailyReviewGoal = requiredInt(value, "daily_review_goal"),
+    updatedAt = optionalInstant(value, "updated_at"),
+)
 
 internal fun parseSampleCard(value: JSONObject): V25SampleCard = V25SampleCard(
     front = requiredString(value, "front"),
@@ -288,6 +303,13 @@ internal fun parseDeck(value: JSONObject): V25Deck = V25Deck(
     masteredCards = requiredInt(value, "mastered_card_count"),
     reviewCount = requiredInt(value, "review_count"),
     masteryRatio = optionalFloat(value, "mastery_ratio"),
+    notStartedCount = optionalInt(value, "not_started_count") ?: 0,
+    learningCount = optionalInt(value, "learning_count") ?: 0,
+    relearningCount = optionalInt(value, "relearning_count") ?: 0,
+    consolidatingCount = optionalInt(value, "consolidating_count") ?: 0,
+    masteredCount = optionalInt(value, "mastered_count") ?: 0,
+    reviewEventCount = optionalInt(value, "review_event_count") ?: 0,
+    lastStudiedAt = optionalInstant(value, "last_studied_at"),
 )
 
 internal fun parseCard(value: JSONObject): V25Card = V25Card(
@@ -352,6 +374,7 @@ internal fun parsePlanCard(value: JSONObject): V25PlanCard = V25PlanCard(
     card = parseCard(value),
     isNew = value.optJSONObject("review_state")?.optString("state") == "NEW",
     reviewState = value.optJSONObject("review_state")?.let(::parseReviewState),
+    planKind = optionalString(value, "plan_kind"),
 )
 
 internal fun parseTodayPlan(value: JSONObject): V25TodayPlan = V25TodayPlan(
@@ -369,12 +392,58 @@ internal fun parseTodayPlan(value: JSONObject): V25TodayPlan = V25TodayPlan(
     planRemaining = requiredInt(value, "main_plan_remaining"),
     backlogCount = requiredInt(value, "backlog_count"),
     cards = requiredArray(value, "cards").map(::parsePlanCard),
+    dailyNewGoal = optionalInt(value, "daily_new_goal") ?: 0,
+    dailyReviewGoal = optionalInt(value, "daily_review_goal") ?: 0,
+    newCompletedCount = optionalInt(value, "new_completed_count") ?: 0,
+    reviewCompletedCount = optionalInt(value, "review_completed_count") ?: 0,
+    newRemainingCount = optionalInt(value, "new_remaining_count") ?: 0,
+    reviewRemainingCount = optionalInt(value, "review_remaining_count") ?: 0,
+    coreTargetCount = optionalInt(value, "core_target_count") ?: 0,
+    planConfigured = optionalBoolean(value, "plan_configured") ?: false,
+    selectedDeckIds = optionalStringList(value, "selected_deck_ids"),
 )
 
 internal fun parseRatingResult(value: JSONObject): V25RatingResult = V25RatingResult(
     reviewState = parseReviewState(requiredObject(value, "review_state")),
     studyDate = requiredDate(value, "study_date"),
 )
+
+internal fun parseProgressSummary(
+    value: JSONObject,
+    scopeId: String,
+    scopeName: String = "",
+    isProject: Boolean = true,
+): V25ProgressSummary {
+    val cardCount = requiredInt(value, "card_count")
+    val notStarted = optionalInt(value, "not_started_count")
+        ?: optionalInt(value, "new_count")
+        ?: 0
+    return V25ProgressSummary(
+        scopeId = scopeId,
+        scopeName = scopeName,
+        isProject = isProject,
+        cardCount = cardCount,
+        newCount = notStarted,
+        learnedCount = (cardCount - notStarted).coerceAtLeast(0),
+        dueCount = requiredInt(value, "due_count"),
+        masteredCount = optionalInt(value, "mastered_count")
+            ?: optionalInt(value, "mastered_card_count")
+            ?: 0,
+        masteryRatio = if (cardCount > 0) {
+            (optionalInt(value, "mastered_count")
+                ?: optionalInt(value, "mastered_card_count")
+                ?: 0).toFloat() / cardCount
+        } else {
+            null
+        },
+        notStartedCount = notStarted,
+        learningCount = optionalInt(value, "learning_count") ?: 0,
+        relearningCount = optionalInt(value, "relearning_count") ?: 0,
+        consolidatingCount = optionalInt(value, "consolidating_count") ?: 0,
+        reviewEventCount = optionalInt(value, "review_event_count") ?: 0,
+        lastStudiedAt = optionalInstant(value, "last_studied_at"),
+    )
+}
 
 internal fun parseStatsDashboard(value: JSONObject): V25StatsDashboard {
     val period = requiredObject(value, "period")
@@ -477,6 +546,13 @@ internal fun studySettingsPatchBody(patch: V25StudySettingsPatch): String = JSON
         patch.selectedNewCardChapterIds?.let { put("selected_new_card_chapter_ids", JSONArray(it)) }
         patch.includeUnassigned?.let { put("include_unassigned", it) }
     }
+    .toString()
+
+internal fun studyPlanBody(plan: V25StudyPlanUpdate): String = JSONObject()
+    .put("project_id", plan.currentProjectId)
+    .put("selected_deck_ids", JSONArray(plan.selectedDeckIds))
+    .put("daily_new_goal", plan.dailyNewGoal)
+    .put("daily_review_goal", plan.dailyReviewGoal)
     .toString()
 
 internal fun difficultyRatioObject(ratio: V25DifficultyRatio): JSONObject = JSONObject()

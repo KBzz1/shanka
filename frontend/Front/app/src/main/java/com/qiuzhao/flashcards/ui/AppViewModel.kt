@@ -40,11 +40,14 @@ import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25MasteryFilter
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
+import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25Rating
 import com.qiuzhao.flashcards.domain.v25.V25Repository
 import com.qiuzhao.flashcards.domain.v25.V25Result
 import com.qiuzhao.flashcards.domain.v25.V25SampleCard
 import com.qiuzhao.flashcards.domain.v25.V25StatsDashboard
+import com.qiuzhao.flashcards.domain.v25.V25StudyPlan
+import com.qiuzhao.flashcards.domain.v25.V25StudyPlanUpdate
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.domain.v25.V25TodayPlan
 import com.qiuzhao.flashcards.domain.v25.isAuthFailure
@@ -192,6 +195,27 @@ data class TodayPlanUiState(
     val completedCount: Int = 0,
     val dueCount: Int = 0,
     val remainingCount: Int = 0,
+    val planConfigured: Boolean = false,
+    val selectedDeckIds: List<String> = emptyList(),
+    val dailyNewGoal: Int = 10,
+    val dailyReviewGoal: Int = 40,
+    val newCompletedCount: Int = 0,
+    val reviewCompletedCount: Int = 0,
+    val newRemainingCount: Int = 0,
+    val reviewRemainingCount: Int = 0,
+    val coreTargetCount: Int = 0,
+    val backlogCount: Int = 0,
+)
+
+/** Server-backed study-plan form state. The form itself stays local until save is pressed. */
+data class StudyPlanUiState(
+    val loaded: Boolean = false,
+    val saving: Boolean = false,
+    val configured: Boolean = false,
+    val currentProjectId: String? = null,
+    val selectedDeckIds: List<String> = emptyList(),
+    val dailyNewGoal: Int = 10,
+    val dailyReviewGoal: Int = 40,
 )
 
 /** Pending deletion stays server-authoritative and expires at its returned undo deadline. */
@@ -271,6 +295,12 @@ class AppViewModel(
     val weeklyActivity: StateFlow<WeeklyActivityData> = _weeklyActivity.asStateFlow()
     private val _todayPlan = MutableStateFlow(TodayPlanUiState())
     val todayPlan: StateFlow<TodayPlanUiState> = _todayPlan.asStateFlow()
+    private val _studyPlan = MutableStateFlow(StudyPlanUiState())
+    val studyPlan: StateFlow<StudyPlanUiState> = _studyPlan.asStateFlow()
+    private var studyPlanIdempotencyKey: String? = null
+    private var studyPlanRequestFingerprint: String? = null
+    private val _projectProgress = MutableStateFlow<Map<String, V25ProgressSummary>>(emptyMap())
+    val projectProgress: StateFlow<Map<String, V25ProgressSummary>> = _projectProgress.asStateFlow()
 
     private val _apiKeyStatus = MutableStateFlow<ApiKeyStatus?>(null)
     val apiKeyStatus: StateFlow<ApiKeyStatus?> = _apiKeyStatus.asStateFlow()
@@ -385,6 +415,7 @@ class AppViewModel(
     fun refreshAll() {
         refreshProjects()
         refreshDecks()
+        refreshStudyPlan()
         refreshTodayPlan()
         viewModelScope.launch {
             delay(1_100)
@@ -494,6 +525,76 @@ class AppViewModel(
         when (val result = v25Repository.todayPlan()) {
             is V25Result.Success -> setTodayPlan(result.value)
             is V25Result.Failure -> handleFailure("today_plan", result)
+        }
+    }
+
+    fun refreshStudyPlan(): Job = viewModelScope.launch {
+        when (val result = v25Repository.getStudyPlan()) {
+            is V25Result.Success -> setStudyPlan(result.value)
+            is V25Result.Failure -> handleFailure("study_plan", result)
+        }
+    }
+
+    /** Loads the server-computed lifecycle aggregate for a project detail page. */
+    fun refreshProjectProgress(projectId: String): Job = viewModelScope.launch {
+        when (val result = v25Repository.projectProgress(projectId)) {
+            is V25Result.Success -> {
+                _projectProgress.value = _projectProgress.value + (projectId to result.value)
+            }
+            is V25Result.Failure -> handleFailure("project_progress", result, surface = false)
+        }
+    }
+
+    /** Saves the whole plan once; a failed response leaves the caller's local form untouched. */
+    fun saveStudyPlan(
+        currentProjectId: String,
+        selectedDeckIds: List<String>,
+        dailyNewGoal: Int,
+        dailyReviewGoal: Int,
+        onSuccess: () -> Unit = {},
+    ): Job = viewModelScope.launch {
+        if (_studyPlan.value.saving) return@launch
+        _studyPlan.value = _studyPlan.value.copy(saving = true)
+        val fingerprint = listOf(
+            currentProjectId,
+            selectedDeckIds.joinToString(","),
+            dailyNewGoal.toString(),
+            dailyReviewGoal.toString(),
+        ).joinToString("|")
+        val key = if (studyPlanIdempotencyKey == null || studyPlanRequestFingerprint != fingerprint) {
+            UUID.randomUUID().toString().also {
+                studyPlanIdempotencyKey = it
+                studyPlanRequestFingerprint = fingerprint
+            }
+        } else {
+            studyPlanIdempotencyKey!!
+        }
+        val result = v25Repository.updateStudyPlan(
+            V25StudyPlanUpdate(currentProjectId, selectedDeckIds, dailyNewGoal, dailyReviewGoal),
+            idempotencyKey = key,
+        )
+        when (result) {
+            is V25Result.Success -> {
+                studyPlanIdempotencyKey = null
+                studyPlanRequestFingerprint = null
+                setStudyPlan(result.value)
+                refreshDecks()
+                refreshTodayPlan()
+                onSuccess()
+            }
+            is V25Result.Failure -> handleFailure("update_study_plan", result)
+        }
+        _studyPlan.value = _studyPlan.value.copy(saving = false)
+    }
+
+    fun attachDeckToProject(projectId: String, deckId: String, onSuccess: () -> Unit = {}): Job = viewModelScope.launch {
+        when (val result = v25Repository.attachDeckToProject(projectId, deckId, UUID.randomUUID().toString())) {
+            is V25Result.Success -> {
+                refreshDecks()
+                refreshStudyPlan()
+                onSuccess()
+            }
+            is V25Result.Failure -> handleFailure("attach_deck_to_project", result)
         }
     }
 
@@ -920,6 +1021,7 @@ class AppViewModel(
                     succeeded = true
                     projectsById.remove(projectId)
                     _projectTasks.value = _projectTasks.value - projectId
+                    _projectProgress.value = _projectProgress.value - projectId
                     _deletionPreflights.value = _deletionPreflights.value
                         .filterKeys { !it.startsWith("project:$projectId:") }
                     if (_activePdfProject.value?.projectId == projectId) clearPdfFlow()
@@ -929,9 +1031,6 @@ class AppViewModel(
                     onResult(true)
                 }
                 is V25Result.Failure -> {
-                    if (result.code == V25ErrorCodes.PROJECT_HAS_ACTIVE_TASK) {
-                        refreshProjectDeletionPreflight(projectId, retainDecks, allowCancel = true)
-                    }
                     handleFailure("delete_project", result)
                     onResult(false)
                 }
@@ -1311,6 +1410,38 @@ class AppViewModel(
         }
     }
 
+    /** Loads the server-computed core queue for the single today-study route. */
+    fun startTodayStudy() = viewModelScope.launch {
+        // Never render a previous deck/today queue while the server computes the current plan.
+        _studyCards.value = emptyList()
+        when (val result = v25Repository.todayPlan()) {
+            is V25Result.Success -> {
+                setTodayPlan(result.value)
+                _studyCards.value = result.value.cards.map { toFlashcard(it.card) }
+            }
+            is V25Result.Failure -> handleFailure("load_today_study", result)
+        }
+    }
+
+    /** Loads the optional overflow queue after the core daily review target is complete. */
+    fun startTodayBacklogStudy(onLoaded: (Boolean) -> Unit = {}) = viewModelScope.launch {
+        // Do not let a failed backlog request repopulate the just-completed core queue through
+        // StudyScreen's cards observer.  The caller will keep the completion state visible until
+        // a fresh server response arrives.
+        _studyCards.value = emptyList()
+        val succeeded = when (val result = v25Repository.studyPlanBacklog()) {
+            is V25Result.Success -> {
+                _studyCards.value = result.value.map { toFlashcard(it.card) }
+                true
+            }
+            is V25Result.Failure -> {
+                handleFailure("load_today_backlog", result)
+                false
+            }
+        }
+        onLoaded(succeeded)
+    }
+
     /**
      * Submits one user rating through the review coordinator. A success fires [onSuccess] (queue
      * advance, counters) only after the server committed the event; a failure keeps the card and
@@ -1319,10 +1450,11 @@ class AppViewModel(
     fun rate(cardId: String, rating: Rating, onSuccess: () -> Unit = {}) = viewModelScope.launch {
         when (val result = reviewCoordinator.submit(cardId, V25Rating.valueOf(rating.name))) {
             is V25Result.Success -> {
-                _studyCards.value = _studyCards.value.filterNot { it.id == cardId }
                 refreshDecks()
                 refreshDashboard()
+                refreshStudyPlan()
                 refreshTodayPlan()
+                _studyPlan.value.currentProjectId?.let(::refreshProjectProgress)
                 onSuccess()
             }
             is V25Result.Failure -> {
@@ -1434,8 +1566,6 @@ class AppViewModel(
             onFailure()
             return@launch
         }
-        val previousDecks = _decks.value
-        _decks.value = previousDecks.filterNot { it.id == deckId }
         var succeeded = false
         try {
             when (
@@ -1455,12 +1585,6 @@ class AppViewModel(
                     onSuccess()
                 }
                 is V25Result.Failure -> {
-                    if (result.code == "TASK_IN_PROGRESS") {
-                        refreshDeckDeletionPreflight(deckId, allowCancel = true)
-                    }
-                    // Roll back only when no refresh has already observed the deck.  This keeps
-                    // a late failure from resurrecting a deck that another action removed.
-                    if (_decks.value.none { it.id == deckId }) _decks.value = previousDecks
                     handleFailure("delete_deck", result)
                     onFailure()
                 }
@@ -1564,6 +1688,28 @@ class AppViewModel(
             completedCount = value.completedCount,
             dueCount = value.dueCount,
             remainingCount = value.planRemaining,
+            planConfigured = value.planConfigured,
+            selectedDeckIds = value.selectedDeckIds,
+            dailyNewGoal = value.dailyNewGoal,
+            dailyReviewGoal = value.dailyReviewGoal,
+            newCompletedCount = value.newCompletedCount,
+            reviewCompletedCount = value.reviewCompletedCount,
+            newRemainingCount = value.newRemainingCount,
+            reviewRemainingCount = value.reviewRemainingCount,
+            coreTargetCount = value.coreTargetCount,
+            backlogCount = value.backlogCount,
+        )
+    }
+
+    private fun setStudyPlan(value: V25StudyPlan) {
+        _studyPlan.value = StudyPlanUiState(
+            loaded = true,
+            saving = _studyPlan.value.saving,
+            configured = value.configured,
+            currentProjectId = value.currentProjectId,
+            selectedDeckIds = value.selectedDeckIds,
+            dailyNewGoal = value.dailyNewGoal,
+            dailyReviewGoal = value.dailyReviewGoal,
         )
     }
 
@@ -1657,6 +1803,7 @@ class AppViewModel(
         _projects.value = emptyList()
         projectsById.clear()
         _projectTasks.value = emptyMap()
+        _projectProgress.value = emptyMap()
         _deletionPreflights.value = emptyMap()
         taskRefreshGeneration.clear()
         inFlightWrites.clear()
@@ -1667,6 +1814,9 @@ class AppViewModel(
         _dashboard.value = null
         _weeklyActivity.value = WeeklyActivityData()
         _todayPlan.value = TodayPlanUiState()
+        _studyPlan.value = StudyPlanUiState()
+        studyPlanIdempotencyKey = null
+        studyPlanRequestFingerprint = null
         _apiKeyStatus.value = null
         cardFlows.clear()
         clearPdfFlow()
@@ -1739,6 +1889,13 @@ class AppViewModel(
         masteredCards = deck.masteredCards,
         reviewCount = deck.reviewCount,
         masteryRatio = deck.masteryRatio,
+        notStartedCount = deck.notStartedCount,
+        learningCount = deck.learningCount,
+        relearningCount = deck.relearningCount,
+        consolidatingCount = deck.consolidatingCount,
+        masteredLifecycleCount = deck.masteredCount,
+        reviewEventCount = deck.reviewEventCount,
+        lastStudiedAt = deck.lastStudiedAt?.toString(),
         projectId = deck.projectId,
     )
 

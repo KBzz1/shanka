@@ -59,6 +59,13 @@ class PdfFile(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)  # PENDING/PARSING/PARSED/FAILED
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    # 解析租约：解析在事务外执行，完成发布前必须匹配令牌和版本，防止删除/替换后的
+    # 迟到扫描结果重新写入章节与文本块。
+    parse_lease_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    parse_lease_until: Mapped[str | None] = mapped_column(String, nullable=True)
+    parse_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
@@ -648,9 +655,27 @@ class UserPreferences(Base):
 
 
 class ProjectStudySettings(Base):
-    """2.19 project_study_settings（V2.5 新增）：项目学习设置，一项目一行。"""
+    """2.19 project_study_settings：项目学习设置，一项目一行。
+
+    旧章节字段保留用于已有生成/接口数据的读取兼容；新的今日学习计划使用双目标和
+    ``project_study_decks`` 关联表，前端不再写章节范围。
+    """
 
     __tablename__ = "project_study_settings"
+    __table_args__ = (
+        CheckConstraint(
+            "daily_new_goal BETWEEN 0 AND 200 AND daily_new_goal % 10 = 0",
+            name="ck_project_study_settings_daily_new_goal",
+        ),
+        CheckConstraint(
+            "daily_review_goal BETWEEN 0 AND 200 AND daily_review_goal % 10 = 0",
+            name="ck_project_study_settings_daily_review_goal",
+        ),
+        CheckConstraint(
+            "daily_new_goal + daily_review_goal > 0",
+            name="ck_project_study_settings_daily_goal_nonzero",
+        ),
+    )
 
     project_id: Mapped[str] = mapped_column(
         String, ForeignKey("learning_projects.project_id", ondelete="CASCADE"), primary_key=True
@@ -661,7 +686,31 @@ class ProjectStudySettings(Base):
     include_unassigned: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )  # 是否包含 chapter_id=null 的新卡（0/1）
+    daily_new_goal: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10, server_default=text("10")
+    )
+    daily_review_goal: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=40, server_default=text("40")
+    )
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ProjectStudyDeck(Base):
+    """今日计划纳入的卡组（一个项目可选择多个卡组）。"""
+
+    __tablename__ = "project_study_decks"
+    __table_args__ = (
+        PrimaryKeyConstraint("project_id", "deck_id", name="pk_project_study_decks"),
+        Index("ix_project_study_decks_deck_id", "deck_id"),
+    )
+
+    project_id: Mapped[str] = mapped_column(
+        String, ForeignKey("learning_projects.project_id", ondelete="CASCADE"), nullable=False
+    )
+    deck_id: Mapped[str] = mapped_column(
+        String, ForeignKey("decks.deck_id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
 class CardDeletionBatch(Base):

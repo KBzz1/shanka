@@ -46,8 +46,8 @@ object ErrorMessages {
         "GENERATION_ITEM_CONFLICT" to "生成项冲突，请刷新重试",
         "IMPORT_PARSE_ERROR" to "导入内容解析失败，请检查格式",
         "REWRITE_SCHEMA_INVALID" to "改写结果不符合要求，请重试",
-        "REVIEW_EVENT_INVALID" to "复习记录无效",
-        "REVIEW_EVENT_CONFLICT" to "复习记录冲突，请刷新重试",
+        "REVIEW_EVENT_INVALID" to "学习记录无效",
+        "REVIEW_EVENT_CONFLICT" to "学习记录冲突，请刷新重试",
     )
 
     fun forCode(code: String?): String = code?.let { byCode[it] } ?: UNKNOWN_ERROR_MESSAGE

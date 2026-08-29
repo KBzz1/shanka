@@ -25,6 +25,10 @@ internal data class ProjectDeckAggregate(
     val masteredCount: Int,
     val dueCount: Int,
     val reviewCount: Int,
+    val notStartedCount: Int,
+    val learningCount: Int,
+    val relearningCount: Int,
+    val consolidatingCount: Int,
 )
 
 /** Sums the real per-deck counts of one project. */
@@ -33,4 +37,8 @@ internal fun projectDeckAggregate(decks: List<DeckSummary>): ProjectDeckAggregat
     masteredCount = decks.sumOf { it.masteredCards },
     dueCount = decks.sumOf { it.dueCount },
     reviewCount = decks.sumOf { it.reviewCount },
+    notStartedCount = decks.sumOf { it.notStartedCount },
+    learningCount = decks.sumOf { it.learningCount },
+    relearningCount = decks.sumOf { it.relearningCount },
+    consolidatingCount = decks.sumOf { it.consolidatingCount },
 )

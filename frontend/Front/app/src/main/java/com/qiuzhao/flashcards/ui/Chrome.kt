@@ -163,11 +163,11 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val decks by viewModel.decks.collectAsState()
     val projects by viewModel.projects.collectAsState()
     val projectTasks by viewModel.projectTasks.collectAsState()
-    val deletionPreflights by viewModel.deletionPreflights.collectAsState()
     val dueCount by viewModel.dueCount.collectAsState()
     val dashboard by viewModel.dashboard.collectAsState()
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
     val todayPlan by viewModel.todayPlan.collectAsState()
+    val projectProgress by viewModel.projectProgress.collectAsState()
     val accountBootstrap by viewModel.accountBootstrap.collectAsState()
     val account = accountBootstrap.account
     var projectSearchQuery by remember { mutableStateOf("") }
@@ -185,6 +185,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
 
     val typedEntryProvider = entryProvider {
         entry<AppRoute.Home> { HomeScreen(decks, projects, dueCount, account?.nickname, todayPlan, dashboard?.streakDays, navigator) }
+        entry<AppRoute.StudyPlan> { StudyPlanScreen(viewModel, navigator) }
         entry<AppRoute.Project> { ProjectScreen(projects, decks, projectSearchQuery, viewModel, navigator) }
         entry<AppRoute.ProjectCreate> { ProjectCreateScreen(viewModel, navigator) }
         entry<AppRoute.ProjectEdit> { route ->
@@ -201,43 +202,25 @@ fun FlashcardsApp(viewModel: AppViewModel) {
         entry<AppRoute.ProjectDetail> { route ->
             LaunchedEffect(route.id) {
                 viewModel.refreshProjectTasks(route.id)
-                viewModel.refreshProjectDeletionPreflight(route.id, retainDecks = true, allowCancel = true)
+                viewModel.refreshProjectProgress(route.id)
             }
             val project = projects.firstOrNull { it.id == route.id }
             if (project == null) LoadingScreen() else ProjectDetailScreen(
                 project,
                 decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id },
                 navigator,
-                onDeleteDeck = { viewModel.deleteDeck(it) },
-                onDeleteProject = { retainDecks, onResult ->
-                    viewModel.deleteProject(project.id, retainDecks, onResult)
-                },
-                tasks = projectTasks[route.id].orEmpty(),
-                deletionPreflight = deletionPreflights[viewModel.projectDeletionPreflightKey(route.id, true)],
-                onDeleteProjectWithAbandon = { retainDecks, abandon, cancel, onResult ->
-                    viewModel.deleteProject(
-                        project.id,
-                        retainDecks,
-                        abandonPreGenerationTasks = abandon,
-                        onResult = onResult,
-                        cancelActiveTasks = cancel,
-                    )
-                },
-                deckDeletionPreflight = { deckId ->
-                    deletionPreflights[viewModel.deckDeletionPreflightKey(deckId)]
-                },
-                onRefreshDeckDeletionPreflight = { deckId ->
-                    viewModel.refreshDeckDeletionPreflight(deckId, allowCancel = true)
-                },
-                onDeleteDeckWithAbandon = { deckId, abandon, cancel, onResult ->
+                onDeleteDeck = { deckId, onResult ->
                     viewModel.deleteDeck(
                         deckId,
                         onSuccess = { onResult(true) },
                         onFailure = { onResult(false) },
-                        abandonPreGenerationTasks = abandon,
-                        cancelActiveTasks = cancel,
                     )
                 },
+                onDeleteProject = { retainDecks, onResult ->
+                    viewModel.deleteProject(project.id, retainDecks, onResult)
+                },
+                tasks = projectTasks[route.id].orEmpty(),
+                progress = projectProgress[route.id],
             )
         }
         entry<AppRoute.DeckGeneration> { route ->
@@ -270,6 +253,9 @@ fun FlashcardsApp(viewModel: AppViewModel) {
         }
         entry<AppRoute.Study> { route ->
             StudyScreen(viewModel, navigator, route.deckId, route.reviewMode)
+        }
+        entry<AppRoute.StudyToday> {
+            StudyScreen(viewModel, navigator, deckId = "", reviewMode = true, todayMode = true)
         }
         entry<AppRoute.Import> { ImportScreen(viewModel, navigator) }
         entry<AppRoute.AddCard> { route -> AddCardScreen(route.deckId, viewModel, navigator) }

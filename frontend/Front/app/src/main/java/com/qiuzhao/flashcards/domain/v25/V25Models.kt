@@ -223,6 +223,28 @@ data class V25ProjectStudySettings(
     val selectedNewCardChapterIds: List<String>,
     val includeUnassigned: Boolean,
     val updatedAt: Instant,
+    /** Deck-scoped daily plan fields; optional on legacy responses during rollout. */
+    val selectedDeckIds: List<String> = emptyList(),
+    val dailyNewGoal: Int = 10,
+    val dailyReviewGoal: Int = 40,
+)
+
+/** Atomic, current-project study plan returned by GET/PUT /study/plan. */
+data class V25StudyPlan(
+    val configured: Boolean,
+    val currentProjectId: String?,
+    val selectedDeckIds: List<String>,
+    val dailyNewGoal: Int,
+    val dailyReviewGoal: Int,
+    val updatedAt: Instant? = null,
+)
+
+/** Request payload for the single-save study-plan form. */
+data class V25StudyPlanUpdate(
+    val currentProjectId: String,
+    val selectedDeckIds: List<String>,
+    val dailyNewGoal: Int,
+    val dailyReviewGoal: Int,
 )
 
 /** Partial study-settings update; at least one field is required. */
@@ -338,6 +360,13 @@ data class V25Deck(
     val masteredCards: Int,
     val reviewCount: Int,
     val masteryRatio: Float?,
+    val notStartedCount: Int = 0,
+    val learningCount: Int = 0,
+    val relearningCount: Int = 0,
+    val consolidatingCount: Int = 0,
+    val masteredCount: Int = 0,
+    val reviewEventCount: Int = 0,
+    val lastStudiedAt: Instant? = null,
 )
 
 /** A visible (PUBLISHED) card; `chapterId == null` is the unassigned group, not a fake chapter. */
@@ -431,6 +460,7 @@ data class V25PlanCard(
     val card: V25Card,
     val isNew: Boolean,
     val reviewState: V25ReviewState?,
+    val planKind: String? = null,
 )
 
 /**
@@ -447,6 +477,15 @@ data class V25TodayPlan(
     val planRemaining: Int,
     val backlogCount: Int,
     val cards: List<V25PlanCard>,
+    val dailyNewGoal: Int = 0,
+    val dailyReviewGoal: Int = 0,
+    val newCompletedCount: Int = 0,
+    val reviewCompletedCount: Int = 0,
+    val newRemainingCount: Int = 0,
+    val reviewRemainingCount: Int = 0,
+    val coreTargetCount: Int = 0,
+    val planConfigured: Boolean = false,
+    val selectedDeckIds: List<String> = emptyList(),
 )
 
 /** Review submission outcome: the updated FSRS state and the account-timezone study date. */
@@ -467,11 +506,18 @@ data class V25ProgressSummary(
     val scopeName: String,
     val isProject: Boolean,
     val cardCount: Int,
-    val newCount: Int,
-    val learnedCount: Int,
+    val newCount: Int = 0,
+    val learnedCount: Int = 0,
     val dueCount: Int,
     val masteredCount: Int,
     val masteryRatio: Float?,
+    /** Lifecycle projection from the server; no client-side state inference is allowed. */
+    val notStartedCount: Int = 0,
+    val learningCount: Int = 0,
+    val relearningCount: Int = 0,
+    val consolidatingCount: Int = 0,
+    val reviewEventCount: Int = 0,
+    val lastStudiedAt: Instant? = null,
 )
 
 /**

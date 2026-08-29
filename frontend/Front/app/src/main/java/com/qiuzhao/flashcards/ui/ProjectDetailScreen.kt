@@ -27,7 +27,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -52,8 +51,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
-import com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight
 import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
+import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 
@@ -63,14 +62,10 @@ internal fun ProjectDetailScreen(
     project: ProjectSummary,
     decks: List<DeckSummary>,
     nav: ScreenNavigator,
-    onDeleteDeck: (String) -> Unit,
+    onDeleteDeck: (String, (Boolean) -> Unit) -> Unit,
     onDeleteProject: (retainDecks: Boolean, onResult: (Boolean) -> Unit) -> Unit,
     tasks: List<V25GenerationTask> = emptyList(),
-    deletionPreflight: V25DeletionPreflight? = null,
-    onDeleteProjectWithAbandon: ((Boolean, Boolean, Boolean, (Boolean) -> Unit) -> Unit)? = null,
-    deckDeletionPreflight: (String) -> V25DeletionPreflight? = { null },
-    onRefreshDeckDeletionPreflight: (String) -> Unit = {},
-    onDeleteDeckWithAbandon: ((String, Boolean, Boolean, (Boolean) -> Unit) -> Unit)? = null,
+    progress: V25ProgressSummary? = null,
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val theme = deckTheme(project)
@@ -79,7 +74,6 @@ internal fun ProjectDetailScreen(
     var projectDeletionInFlight by rememberSaveable(project.id) { mutableStateOf(false) }
     var deckPendingDeletion by rememberSaveable { mutableStateOf<String?>(null) }
     var deckDeletionInFlight by rememberSaveable { mutableStateOf(false) }
-    var cancelActiveDeckTasks by rememberSaveable { mutableStateOf(false) }
     // The coloured project canvas uses the family Background token; every
     // project-owned deck card then lifts to that family's Surface token.
     Box(Modifier.fillMaxSize().background(theme.background)) {
@@ -98,7 +92,14 @@ internal fun ProjectDetailScreen(
         ) {
             ProjectSectionSwitcher(section, { section = it }, theme = deckTheme(project))
             when (section) {
-                ProjectDetailSection.STATISTICS -> ProjectStatisticsContent(decks, tasks, theme, scale, Modifier.weight(1f))
+                ProjectDetailSection.STATISTICS -> ProjectStatisticsContent(
+                    decks,
+                    tasks,
+                    progress,
+                    theme,
+                    scale,
+                    Modifier.weight(1f),
+                )
                 ProjectDetailSection.DECKS -> ProjectDecksContent(
                     project,
                     decks,
@@ -106,8 +107,6 @@ internal fun ProjectDetailScreen(
                     nav,
                     onRequestDeleteDeck = {
                         deckPendingDeletion = it
-                        cancelActiveDeckTasks = false
-                        onRefreshDeckDeletionPreflight(it)
                     },
                     modifier = Modifier.weight(1f),
                 )
@@ -139,151 +138,61 @@ internal fun ProjectDetailScreen(
                     }
                 }
             },
-            preflight = deletionPreflight,
-            onConfirmWithAbandon = { retainDecks, abandon, cancel ->
-                if (projectDeletionInFlight) return@ProjectDeletionDialog
-                projectDeletionInFlight = true
-                val finish: (Boolean) -> Unit = { succeeded ->
-                    projectDeletionInFlight = false
-                    if (succeeded) {
-                        showProjectDeletionConfirmation = false
-                        nav.returnToTopLevel()
-                    }
-                }
-                if (onDeleteProjectWithAbandon != null) {
-                    onDeleteProjectWithAbandon(retainDecks, abandon, cancel, finish)
-                } else {
-                    onDeleteProject(retainDecks, finish)
-                }
-            },
             onDismiss = { if (!projectDeletionInFlight) showProjectDeletionConfirmation = false }
         )
     }
     deckPendingDeletion?.let { deckId ->
         val deck = decks.firstOrNull { it.id == deckId }
         if (deck != null) {
-            val preflight = deckDeletionPreflight(deckId)
-            val canConfirm = if (onDeleteDeckWithAbandon == null) {
-                true
-            } else {
-                // A preflight is advisory.  If it failed (for example while an older
-                // backend is still being deployed), the DELETE endpoint remains the
-                // authority and will repeat the check atomically.
-                preflight == null || !preflight.hasUncancellableTasks || preflight.canCancel
-            }
-            AlertDialog(
-                onDismissRequest = { if (!deckDeletionInFlight) deckPendingDeletion = null },
-                title = { Text("删除卡片组", fontFamily = AppFonts.MiSansSemibold) },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            "“${displayDeckTitle(deck)}”及其中的卡片、复习记录将被删除。此操作不可恢复。",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        when {
-                            preflight == null && onDeleteDeckWithAbandon != null -> Text(
-                                "预检暂未返回；确认后由服务器再次检查，准备阶段任务会自动放弃。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            preflight?.hasUncancellableTasks == true -> Text(
-                                if (preflight.canCancel) {
-                                    "存在正式生成中的任务；可在下方选择同时取消后删除。"
-                                } else {
-                                    "存在正式生成中的任务，请等待任务结束后再删除。"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                            preflight != null && preflight.abandonableTaskIds.isNotEmpty() -> Text(
-                                "检测到 ${preflight.abandonableTaskIds.size} 个准备阶段任务；确认后会先标记为已放弃。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            preflight?.canDelete == true -> Text(
-                                "当前没有进行中的任务。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        if (preflight?.canCancel == true) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(
-                                    checked = cancelActiveDeckTasks,
-                                    onCheckedChange = { cancelActiveDeckTasks = it },
-                                    enabled = !deckDeletionInFlight,
-                                )
-                                Text(
-                                    "同时取消进行中的制卡任务",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                            Text(
-                                "会取消该卡片组关联的正式生成与准备阶段任务，并继续删除卡片组。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        preflight?.blockers?.take(3)?.forEach { blocker ->
-                            Text(
-                                "任务 ${blocker.taskId.take(8)}：${taskStatusLabel(blocker.status)}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+            CompactDeckDeletionDialog(
+                deleting = deckDeletionInFlight,
+                onConfirm = {
+                    if (!deckDeletionInFlight) {
+                        deckDeletionInFlight = true
+                        onDeleteDeck(deckId) { succeeded ->
+                            deckDeletionInFlight = false
+                            if (succeeded) deckPendingDeletion = null
                         }
                     }
                 },
-                confirmButton = {
-                    TextButton(
-                        enabled = canConfirm && !deckDeletionInFlight,
-                        onClick = {
-                            // Unknown preflight is intentionally fail-safe for the UI: the
-                            // backend performs the authoritative atomic check and can reject
-                            // a truly non-interruptible generation task.
-                            val abandon = if (cancelActiveDeckTasks) {
-                                false
-                            } else {
-                                preflight?.let {
-                                    it.blockers.isNotEmpty() && it.blockers.all { blocker -> blocker.canAbandon }
-                                } ?: (onDeleteDeckWithAbandon != null)
-                            }
-                            if (onDeleteDeckWithAbandon != null) {
-                                deckDeletionInFlight = true
-                                onDeleteDeckWithAbandon(deckId, abandon, cancelActiveDeckTasks) { succeeded ->
-                                    deckDeletionInFlight = false
-                                    if (succeeded) deckPendingDeletion = null
-                                }
-                            } else {
-                                deckPendingDeletion = null
-                                onDeleteDeck(deckId)
-                            }
-                        },
-                    ) { Text(if (deckDeletionInFlight) "正在删除" else "确认删除", color = MaterialTheme.colorScheme.error) }
-                },
-                dismissButton = {
-                    TextButton(
-                        enabled = !deckDeletionInFlight,
-                        onClick = { deckPendingDeletion = null },
-                    ) { Text("取消") }
-                },
+                onDismiss = { if (!deckDeletionInFlight) deckPendingDeletion = null },
             )
         }
     }
 }
 
 @Composable
+private fun CompactDeckDeletionDialog(
+    deleting: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { if (!deleting) onDismiss() },
+        title = { Text("删除卡组？", fontFamily = AppFonts.MiSansSemibold) },
+        text = { Text("卡组、卡片和学习记录将一并删除。") },
+        confirmButton = {
+            TextButton(enabled = !deleting, onClick = onConfirm) {
+                Text(if (deleting) "正在删除" else "删除", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = { TextButton(enabled = !deleting, onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
 private fun ProjectStatisticsContent(
     decks: List<DeckSummary>,
     tasks: List<V25GenerationTask>,
+    progress: V25ProgressSummary?,
     theme: DeckTheme,
     scale: Float,
     modifier: Modifier,
 ) {
     var showToday by rememberSaveable { mutableStateOf(true) }
-    // There is no project-statistics endpoint: the only real numbers are the sums of this
-    // project's decks (all served by GET /decks). Every other slot keeps its Figma layout
-    // and shows an honest dash instead of a fabricated value.
-    val aggregate = projectDeckAggregate(decks)
+    // The project endpoint is the source of truth.  Until it returns, every metric stays an
+    // honest dash instead of being recomputed from the visible deck list.
+    val learnedCards = progress?.let { (it.cardCount - it.notStartedCount).coerceAtLeast(0) }
     LazyColumn(
         modifier = modifier.fillMaxWidth().clip(RoundedCornerShape((AppScrollableContentClipRadius * scale).dp)),
         // Statistics has no fixed bottom action bar. A 32dp tail places the
@@ -294,10 +203,13 @@ private fun ProjectStatisticsContent(
         item { ProjectTaskStatusCard(tasks, theme, scale) }
         item {
             LearningDataProgressCard(
-                // Today's project review data has no server source; keep the layout, show dashes.
-                reviewedCards = null,
-                totalCards = null,
-                progressPercent = null,
+                // The overview tab is backed by the server-derived lifecycle aggregate. The
+                // today tab has no project-scoped daily endpoint in this screen, so it remains
+                // an honest dash without changing the card geometry.
+                reviewedCards = if (showToday) null else learnedCards,
+                totalCards = if (showToday) null else progress?.cardCount?.takeIf { it > 0 },
+                progressPercent = if (showToday || progress == null || progress.cardCount == 0) null
+                    else (learnedCards!! * 100 / progress.cardCount),
                 todaySelected = showToday,
                 onTodaySelected = { showToday = it },
                 theme = theme,
@@ -307,15 +219,16 @@ private fun ProjectStatisticsContent(
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * scale).dp)) {
                 StatisticsMetricCard(
-                    // No learning-time source exists; never borrow a different metric.
-                    value = "—",
-                    kind = StatisticsMetricKind.LearningTime,
+                    // The existing metric slot now shows the server-derived due count; no local
+                    // estimate or additional card is introduced.
+                    value = honestCount(progress?.dueCount),
+                    kind = StatisticsMetricKind.DueCards,
                     surface = StatisticsMetricSurface.White,
                     designScale = scale,
                     modifier = Modifier.weight(1f)
                 )
                 StatisticsMetricCard(
-                    value = honestCount(aggregate.masteredCount),
+                    value = honestCount(progress?.masteredCount),
                     kind = StatisticsMetricKind.MasteredCards,
                     surface = StatisticsMetricSurface.White,
                     designScale = scale,
@@ -323,7 +236,7 @@ private fun ProjectStatisticsContent(
                 )
             }
         }
-        item { ProjectProgressDistribution(scale) }
+        item { ProjectProgressDistribution(scale, progress) }
         item { ProjectStreakMetrics(scale) }
     }
 }
@@ -413,18 +326,24 @@ private fun taskStatusColor(status: V25TaskStatus, theme: DeckTheme): Color = wh
 }
 
 @Composable
-private fun ProjectProgressDistribution(scale: Float) = ReviewProgressCard(
-    entries = listOf(
-        // The review-state bucket distribution is not served for a project either; every
-        // column keeps its Figma slot and shows the honest dash.
-        ReviewProgressEntry("熟识", AppColors.ReviewKnown, null, 0),
-        ReviewProgressEntry("认识", AppColors.ReviewRecognised, null, 0),
-        ReviewProgressEntry("模糊", AppColors.ReviewUncertain, null, 0),
-        ReviewProgressEntry("陌生", AppColors.ReviewUnfamiliar, null, 0),
-        ReviewProgressEntry("没学", AppColors.ReviewUnseen, null, 0)
-    ),
-    designScale = scale
-)
+private fun ProjectProgressDistribution(scale: Float, progress: V25ProgressSummary?) {
+    val total = progress?.cardCount ?: 0
+    fun entry(label: String, color: Color, count: Int): ReviewProgressEntry {
+        val percentage = if (total > 0) (count * 100f / total).toInt() else null
+        val height = if (total > 0) (count * 116f / total).toInt() else 0
+        return ReviewProgressEntry(label, color, percentage, height)
+    }
+    ReviewProgressCard(
+        entries = listOf(
+            entry("未开始", AppColors.ReviewUnseen, progress?.notStartedCount ?: 0),
+            entry("初学中", AppColors.ReviewRecognised, progress?.learningCount ?: 0),
+            entry("需重学", AppColors.ReviewUncertain, progress?.relearningCount ?: 0),
+            entry("巩固中", AppColors.ReviewUnfamiliar, progress?.consolidatingCount ?: 0),
+            entry("已掌握", AppColors.ReviewKnown, progress?.masteredCount ?: 0),
+        ),
+        designScale = scale,
+    )
+}
 
 /** Figma 540:4661, the lower pair of project-only summary cards. */
 @Composable

@@ -64,16 +64,19 @@ interface V25Repository {
     /** GET /projects/{project_id} — project detail. */
     suspend fun getProject(projectId: String): V25Result<V25LearningProject>
 
+    /** GET /projects/{project_id}/progress — server-derived project lifecycle aggregate. */
+    suspend fun projectProgress(projectId: String): V25Result<V25ProgressSummary> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "项目进度暂不可用")
+
     /** PATCH /projects/{project_id} — rename the project (1..60 trimmed characters). */
     suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject>
 
-    /** DELETE /projects/{project_id}?retain_decks= — protect active states; keep or delete decks. */
+    /** DELETE /projects/{project_id}?retain_decks= — server cancels active tasks; keep or delete decks. */
     suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit>
 
     /**
-     * DELETE with an explicit decision to atomically abandon DRAFT/sample-stage tasks first.
-     * The default delegates to the legacy two-argument method so existing fakes remain source
-     * compatible while the remote implementation can carry the new query and idempotency key.
+     * Compatibility overload retaining the retry key for existing callers.  Task handling is
+     * server-side; the legacy abandon/cancel flags are intentionally ignored on the wire.
      */
     suspend fun deleteProject(
         projectId: String,
@@ -176,13 +179,20 @@ interface V25Repository {
     /** GET /decks/{deck_id} — deck detail with counts. */
     suspend fun getDeck(deckId: String): V25Result<V25Deck>
 
+    /** POST /projects/{project_id}/decks/{deck_id}/attach — move an independent deck into a project. */
+    suspend fun attachDeckToProject(
+        projectId: String,
+        deckId: String,
+        idempotencyKey: String? = null,
+    ): V25Result<V25Deck> = V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "归入项目暂不可用")
+
     /** PATCH /decks/{deck_id} — rename the deck. */
     suspend fun renameDeck(deckId: String, name: String): V25Result<V25Deck>
 
-    /** DELETE /decks/{deck_id} — protected while an active task references the deck. */
+    /** DELETE /decks/{deck_id} — server cancels active tasks before cascading the deck delete. */
     suspend fun deleteDeck(deckId: String): V25Result<Unit>
 
-    /** DELETE with an explicit decision to atomically abandon DRAFT/sample-stage tasks first. */
+    /** Compatibility overload; task handling is server-side and the legacy flags are ignored. */
     suspend fun deleteDeck(
         deckId: String,
         abandonPreGenerationTasks: Boolean = false,
@@ -237,8 +247,26 @@ interface V25Repository {
 
     // --- study and review (Architecture 4.5) ------------------------------------------------------
 
+    /** GET /study/plan — current project's atomic deck-scoped plan. */
+    suspend fun getStudyPlan(): V25Result<V25StudyPlan> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "学习计划暂不可用")
+
+    /** PUT /study/plan — atomically save the project, deck scope and two daily quotas. */
+    suspend fun updateStudyPlan(
+        plan: V25StudyPlanUpdate,
+        idempotencyKey: String? = null,
+    ): V25Result<V25StudyPlan> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "学习计划暂不可用")
+
     /** GET /study/today — server-computed today plan in the account learning timezone. */
     suspend fun todayPlan(): V25Result<V25TodayPlan>
+
+    /** GET /study/today/backlog — due cards beyond the soft review target. */
+    suspend fun studyPlanBacklog(
+        offset: Int = 0,
+        limit: Int = 50,
+    ): V25Result<List<V25PlanCard>> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "积压卡片暂不可用")
 
     /** GET /decks/{deck_id}/review — due review for an independent deck or a specific deck. */
     suspend fun deckReviewQueue(deckId: String): V25Result<List<V25ReviewCard>>

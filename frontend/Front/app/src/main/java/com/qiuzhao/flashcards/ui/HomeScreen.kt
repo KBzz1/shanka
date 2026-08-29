@@ -187,7 +187,7 @@ internal fun HomeScreen(
                         contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * compactScale).dp),
                         verticalArrangement = Arrangement.spacedBy((12 * compactScale).dp)
                     ) {
-                    item { DailyGoalCard(compactScale, todayPlan, streakDays) }
+                    item { DailyGoalCard(compactScale, todayPlan, streakDays) { nav.navigate(AppRoute.StudyPlan) } }
                     item {
                         if (activeDeck == null) {
                             EmptyHomeCard(compactScale, onGoImport = { nav.navigate(AppRoute.Import) })
@@ -220,7 +220,7 @@ internal fun HomeScreen(
                                             button = AppColors.Orange.primary, textColor = AppColors.Orange.ink,
                                             iconBackground = AppColors.Orange.primarySecondary,
                                             icon = "star_shine", iconTint = AppColors.Orange.ink,
-                                            label = "随机复习",
+                                            label = "随机学习",
                                             compactScale = compactScale, onClick = { nav.navigate(AppRoute.Study(activeDeck.id, false)) }
                                         )
                                     }
@@ -279,14 +279,14 @@ private fun EmptyHomeCard(compactScale: Float, onGoImport: () -> Unit) {
 }
 
 @Composable
-private fun DailyGoalCard(compactScale: Float, todayPlan: TodayPlanUiState, streakDays: Int?) {
+private fun DailyGoalCard(compactScale: Float, todayPlan: TodayPlanUiState, streakDays: Int?, onClick: () -> Unit) {
     val goal = todayPlan.dailyGoal.coerceAtLeast(0)
     val completed = todayPlan.completedCount.coerceAtLeast(0)
     val percent = if (goal == 0) 0f else ((completed.toFloat() / goal).coerceIn(0f, 1f))
     Card(
         shape = RoundedCornerShape(AppShapeRadius.dp),
         colors = CardDefaults.cardColors(containerColor = AppColors.Blue.primary),
-        modifier = Modifier.fillMaxWidth().height((196 * compactScale).dp)
+        modifier = Modifier.fillMaxWidth().height((196 * compactScale).dp).clickable(onClick = onClick)
     ) {
         Column(
             Modifier.fillMaxSize().padding((24 * compactScale).dp),
@@ -299,7 +299,7 @@ private fun DailyGoalCard(compactScale: Float, todayPlan: TodayPlanUiState, stre
                 ) {
                     MaterialSymbol("local_fire_department", null, tint = AppColors.TextIconLight, size = fixedSp(28 * compactScale), filled = true)
                     Spacer(Modifier.width((8 * compactScale).dp))
-                    AppText("今日目标", AppTextRole.SectionTitle, color = AppColors.TextIconLight, designScale = compactScale)
+                    AppText("今日学习", AppTextRole.SectionTitle, color = AppColors.TextIconLight, designScale = compactScale)
                 }
                 Surface(
                     shape = RoundedCornerShape(999.dp),
@@ -324,12 +324,18 @@ private fun DailyGoalCard(compactScale: Float, todayPlan: TodayPlanUiState, stre
                     }
                 }
             }
-            Row(Modifier.fillMaxWidth().height((48 * compactScale).dp), verticalAlignment = Alignment.Bottom) {
-                Text("$completed", modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(48 * compactScale), lineHeight = fixedSp(48 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight, letterSpacing = fixedSp(-2.4f * compactScale))
-                Text("/ $goal", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight.copy(alpha = .75f))
-                Text("卡片已复习", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), color = AppColors.TextIconLight.copy(alpha = .75f), fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale))
-                Spacer(Modifier.weight(1f))
-                Text(homeGoalPercent(completed, goal), modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(47 * compactScale), lineHeight = fixedSp(36 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight)
+            if (todayPlan.planConfigured) {
+                Row(Modifier.fillMaxWidth().height((48 * compactScale).dp), verticalAlignment = Alignment.Bottom) {
+                    Text("$completed", modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(48 * compactScale), lineHeight = fixedSp(48 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight, letterSpacing = fixedSp(-2.4f * compactScale))
+                    Text("/ $goal", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight.copy(alpha = .75f))
+                    Text("张卡片已学习", modifier = Modifier.padding(start = (4 * compactScale).dp).alignByBaseline(), color = AppColors.TextIconLight.copy(alpha = .75f), fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(20 * compactScale), lineHeight = fixedSp(28 * compactScale))
+                    Spacer(Modifier.weight(1f))
+                    Text(homeGoalPercent(completed, goal), modifier = Modifier.alignByBaseline(), fontFamily = AppFonts.GoogleSansFlexBold, fontSize = fixedSp(47 * compactScale), lineHeight = fixedSp(36 * compactScale), fontWeight = FontWeight.Normal, color = AppColors.TextIconLight)
+                }
+            } else {
+                Box(Modifier.fillMaxWidth().height((48 * compactScale).dp), contentAlignment = Alignment.CenterStart) {
+                    Text("点击设置学习计划", color = AppColors.TextIconLight, fontFamily = AppFonts.MiSansSemibold, fontSize = fixedSp(22 * compactScale), lineHeight = fixedSp(28 * compactScale))
+                }
             }
             Row(Modifier.fillMaxWidth().height((20 * compactScale).dp), horizontalArrangement = Arrangement.spacedBy((5 * compactScale).dp)) {
                 // Weight must stay positive even at 0% / 100% (e.g. an unset daily goal);
@@ -363,7 +369,7 @@ private fun ContinueLearningCard(
         variant = ProjectThemedCardVariant.BASE_PAGE,
         designScale = compactScale,
         onClick = onOpenDeck,
-        actionLabel = "继续复习",
+        actionLabel = "继续学习",
         onAction = onContinue
     )
 }

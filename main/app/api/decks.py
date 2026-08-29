@@ -148,15 +148,10 @@ def delete_deck_endpoint(
     request: Request,
     deck_id: str,
     session: Annotated[Session, Depends(get_db_session)],
-    abandon_pre_generation_tasks: Annotated[bool, Query()] = False,
-    cancel_active_tasks: Annotated[bool, Query()] = False,
 ) -> Response:
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
-    path = (
-        f"/decks/{deck_id}?abandon_pre_generation_tasks={str(abandon_pre_generation_tasks).lower()}"
-        f"&cancel_active_tasks={str(cancel_active_tasks).lower()}"
-    )
+    path = f"/decks/{deck_id}"
     body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
@@ -164,8 +159,6 @@ def delete_deck_endpoint(
             session,
             user_id=user_id,
             deck_id=deck_id,
-            abandon_pre_generation_tasks=abandon_pre_generation_tasks,
-            cancel_active_tasks=cancel_active_tasks,
             now=_now(),
         )
         return 204, {}

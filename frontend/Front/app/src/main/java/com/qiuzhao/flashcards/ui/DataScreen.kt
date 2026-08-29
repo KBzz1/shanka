@@ -169,7 +169,7 @@ internal fun DataScreen(dueCount: Int, dashboard: DashboardUiState?, weeklyActiv
                     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * designScale).dp), verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)) {
                         item { WeeklyActivityCard(designScale, weeklyActivity) }
                         item { DataStreakCards(designScale, dashboard) }
-                        item { DataLearningCards(designScale, dashboard) }
+                        item { DataLearningCards(designScale, dashboard, dueCount) }
                         item { MasteryCard(designScale, dashboard) }
                     }
                 }
@@ -207,7 +207,7 @@ private fun WeeklyActivityCard(designScale: Float, weeklyActivity: WeeklyActivit
                         designScale = designScale
                     )
                     MixedLanguageText(
-                        text = "已复习${weeklyActivity.total} cards",
+                        text = "已巩固${weeklyActivity.total} cards",
                         color = AppColors.TextIconDark.copy(alpha = .5f),
                         chineseFont = AppFonts.MiSansSemibold,
                         latinFont = AppFonts.GoogleSansFlexSemibold,
@@ -339,7 +339,7 @@ private fun WeeklyGoalRing(designScale: Float, dashboard: DashboardUiState?) {
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("${(progress * 100).roundToInt()}%", color = AppColors.TextIconDark, fontFamily = AppFonts.GoogleSansFlexBold, fontWeight = FontWeight.Normal, fontSize = fixedSp(40 * designScale), lineHeight = fixedSp(40 * designScale), letterSpacing = fixedSp(-.6f * designScale))
-            Text("本周复习目标", color = AppColors.Blue.ink, fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(21 * designScale))
+            Text("本周巩固目标", color = AppColors.Blue.ink, fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal, fontSize = fixedSp(16 * designScale), lineHeight = fixedSp(21 * designScale))
         }
     }
 }
@@ -390,13 +390,13 @@ private fun DataStreakCards(designScale: Float, dashboard: DashboardUiState?) {
 }
 
 @Composable
-private fun DataLearningCards(designScale: Float, dashboard: DashboardUiState?) {
+private fun DataLearningCards(designScale: Float, dashboard: DashboardUiState?, dueCount: Int) {
     val masteredCount = dashboard?.masteredCards
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * designScale).dp)) {
         StatisticsMetricCard(
             modifier = Modifier.weight(1f),
-            value = "—",
-            kind = StatisticsMetricKind.LearningTime,
+            value = dueCount.toString(),
+            kind = StatisticsMetricKind.DueCards,
             surface = StatisticsMetricSurface.Tinted,
             designScale = designScale
         )
