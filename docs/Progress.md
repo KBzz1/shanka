@@ -42,7 +42,7 @@
 
 共同约束：
 
-1. 两个 Agent 必须使用隔离工作树/分支，不在同一个 nested `frontend-app` 工作树并发编辑。
+1. 并行开发仍需使用隔离工作树/分支；前端与后端最终统一回本仓库 `main`，不在同一工作树并发编辑。
 2. `ui/AppViewModel.kt` 归视觉 Agent；非视觉 Agent 不修改它。
 3. `domain/v25/**` 归非视觉 Agent；接口修改需通知视觉 Agent，禁止视觉侧复制 DTO。
 4. PRD、Architecture 和本 Progress 由主集成者维护；执行 Agent 不自行改写需求或宣布总版本完成。
@@ -89,8 +89,8 @@
 | NV-08 平台回归与交付证据 | `TODO` | NV-02～NV-07 + V-LANE 合入 | 后端四工具、迁移、质量、签名/哈希/安装/30 分钟稳定性 |
 
 非视觉计划采用 Superpowers 风险分级执行：NV-00～NV-08 分解为 Task 1～15；只有契约/迁移原子转正与
-整批发布使用完整修复复审闭环，其余任务使用轻量验证或一次合并审查。外层后端仓库与 nested Android
-仓库分别维护 Git worktree、SDD ledger 和最终审查包，不做跨仓库提交或跨仓库 diff。
+整批发布使用完整修复复审闭环，其余任务使用轻量验证或一次合并审查。前端与后端现在同属一个 Git
+仓库，分别维护目录级所有权，最终从统一 `main` 生成 Release。
 
 ---
 
@@ -126,7 +126,7 @@
 
 | ID | 状态 | 风险 | 处理 |
 | --- | --- | --- | --- |
-| R25-01 | `OPEN` | `frontend-app` 是 nested Git，当前 `.gitignore`、`Front/app/build.gradle.kts` 有用户脏改动 | 两 Agent 使用独立工作树；NV-07 逐行三方合并，不覆盖或冒领 |
+| R25-01 | `CLOSED` | 前端曾是 nested Git，导致前后端主线分叉 | 已将前端 `main`（`ff37935`）以保留历史的 subtree 合入统一仓库 `main`（`9cc5988`）；后续仅维护统一主线 |
 | R25-02 | `ACCEPTED` | 当前机器契约仍为 V2.4，而 PRD/目标 Architecture 已为 V2.5 | NV-01 一次性同步 Schema/OpenAPI/ORM/迁移；在此之前目标字段不得称已部署 |
 | R25-03 | `OPEN` | 当前生成路径可能在任务完成前写入普通 Cards | NV-03 引入 STAGED/PUBLISHED 和统一可见谓词，失败任务全隔离 |
 | R25-04 | `OPEN` | 当前难度校验要求三档均大于 0，且仍使用 APPLICATION | NV-01/NV-03 迁移为允许 0 的整数比例和 DEEP_QUESTION |
