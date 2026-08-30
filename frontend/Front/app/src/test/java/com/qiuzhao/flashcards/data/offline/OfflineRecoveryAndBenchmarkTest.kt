@@ -69,19 +69,33 @@ class OfflineRecoveryAndBenchmarkTest {
     private class RecordingBackend(private val clock: Clock) : Dispatcher() {
         @Volatile var offline = false
         val reviewEvents = CopyOnWriteArrayList<Pair<String, String>>()
+        val ratedCardIds = CopyOnWriteArrayList<String>()
+        val todayRequests = CopyOnWriteArrayList<Unit>()
+        val decksRequests = CopyOnWriteArrayList<Unit>()
+        val dashboardRequests = CopyOnWriteArrayList<Unit>()
 
         override fun dispatch(request: RecordedRequest): MockResponse {
             if (offline) throw IOException("airplane mode")
             val path = request.path ?: return MockResponse().setResponseCode(404)
             return when {
-                path == "/study/today" -> ok(todayBody(LocalDate.now(clock)))
-                path.startsWith("/decks") -> ok("""{"items": []}""")
-                path == "/stats/dashboard" -> ok(dashboardBody())
+                path == "/study/today" -> {
+                    todayRequests += Unit
+                    ok(todayBody(LocalDate.now(clock)))
+                }
+                path.startsWith("/decks") -> {
+                    decksRequests += Unit
+                    ok("""{"items": []}""")
+                }
+                path == "/stats/dashboard" -> {
+                    dashboardRequests += Unit
+                    ok(dashboardBody())
+                }
                 path == "/review-events" -> {
                     val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
                     reviewEvents += (
                         body["client_event_id"]!!.jsonPrimitive.content to request.getHeader("Idempotency-Key")!!
                         )
+                    ratedCardIds += body["card_id"]!!.jsonPrimitive.content
                     ok(
                         """{"review_state": {"state": "REVIEW", "due": "2026-09-01T00:00:00Z"},
                             "study_date": "${LocalDate.now(clock)}"}""",
@@ -95,9 +109,12 @@ class OfflineRecoveryAndBenchmarkTest {
 
         private fun todayBody(studyDate: LocalDate): String {
             val cards = (1..10).joinToString(",") { index ->
+                // A card the server has already rated reports its post-rating state, so a
+                // post-drain today revalidation never resets local facts to stale NEW ones.
+                val state = if ("c-$index" in ratedCardIds) "REVIEW" else "NEW"
                 """{"card_id": "c-$index", "deck_id": "d-1", "position": $index,
                     "front": "问题$index", "back": "答案$index", "card_type": "QUESTION",
-                    "review_state": {"state": "NEW", "due": null}}"""
+                    "review_state": {"state": "$state", "due": null}}"""
             }
             return """{"timezone": "UTC", "study_date": "$studyDate", "daily_goal": 10,
                 "today_completed_count": 0, "due_count": 10, "main_plan_remaining": 10, "backlog_count": 0,
@@ -245,6 +262,57 @@ class OfflineRecoveryAndBenchmarkTest {
         assertEquals(1, workSpecs.size)
         val otherUser = workManager.getWorkInfosForUniqueWork(ReviewSyncWorker.uniqueName("u-2")).get()
         assertEquals(1, otherUser.size)
+    }
+
+    @Test
+    fun `a drained outbox triggers one merged refresh, not a per-card fan-out`() = runBlocking {
+        val stack = buildProcess(dbFile)
+        stack.repository.todayPlan() // hydrate: baseline today=1, decks=0, dashboard=0
+
+        backend.offline = true
+        repeat(10) { index ->
+            assertTrue(stack.repository.rateCard("c-${index + 1}", V25Rating.GOOD) is V25Result.Success)
+        }
+        // Let the in-process kicks discover the offline state (their transient failures schedule
+        // per-row backoff), then restore the network and clear every backoff via virtual time.
+        Thread.sleep(300)
+        backend.offline = false
+
+        // Drain: each pass that sends >= 1 event fires ONE merged refresh. A straggler row on
+        // backoff may cost an extra pass, so refresh counts scale with passes, never with cards.
+        repeat(8) {
+            stack.repository.reviewSync.syncOnce()
+            if (stack.cache.allOutbox("u-1").all { it.status == "COMPLETED" }) return@repeat
+            clock.nowMs += 120_000
+        }
+        val drained = stack.cache.allOutbox("u-1")
+        assertTrue("outbox never drained: " + drained.map { it.status }, drained.all { it.status == "COMPLETED" })
+
+        // Wait for the final pass's merged refresh (3 background GETs) to reach the server.
+        val deadline = System.currentTimeMillis() + 10_000
+        while (backend.decksRequests.isEmpty() || backend.dashboardRequests.isEmpty()) {
+            assertTrue("merged refresh never arrived", System.currentTimeMillis() < deadline)
+            Thread.sleep(50)
+        }
+        // Settle window: a per-card fan-out (the removed behavior) would keep adding requests.
+        Thread.sleep(500)
+
+        assertEquals("exactly one server event per swipe", 10, backend.reviewEvents.size)
+        // Baselines: decks 0, dashboard 0, today 1 (hydrate). Allowed: one refresh per sending
+        // pass — at most 3 passes here. The old per-card fan-out produced one set per CARD (10+).
+        assertTrue(
+            "decks refreshes must scale with passes, not cards: ${backend.decksRequests.size}",
+            backend.decksRequests.size in 1..3,
+        )
+        assertTrue(
+            "today refreshes beyond the hydrate must scale with passes: ${backend.todayRequests.size}",
+            backend.todayRequests.size in 2..4,
+        )
+        assertTrue(
+            "dashboard refreshes must scale with passes, not cards: ${backend.dashboardRequests.size}",
+            backend.dashboardRequests.size in 1..3,
+        )
+        stack.database.close()
     }
 
     // --- benchmarks (JVM/Robolectric, development machine; not device evidence) --------------------
