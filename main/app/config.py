@@ -32,8 +32,11 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./shanka.db"
     storage_path: Path = Path("./storage")
     # 限流阈值（structure-contract 1.6；可运维调整，客户端不得硬编码）
+    # IP 总闸门：rate_limit_ip_per_second = 持续 refill 速率（不变）；
+    # rate_limit_ip_burst = 桶容量（同 IP 初始可立即消费的短突发上限）。两者必须为正。
     rate_limit_write_per_minute: int = 60
-    rate_limit_ip_per_second: int = 5
+    rate_limit_ip_per_second: float = Field(default=5, gt=0)
+    rate_limit_ip_burst: int = Field(default=10, gt=0)
     rate_limit_api_key_per_hour: int = 10
     rate_limit_samples_per_hour: int = 20
     rate_limit_pdf_per_hour: int = 10

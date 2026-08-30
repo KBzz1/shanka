@@ -17,6 +17,7 @@ def test_settings_defaults() -> None:
     assert settings.storage_path == Path("./storage")
     assert settings.rate_limit_write_per_minute == 60
     assert settings.rate_limit_ip_per_second == 5
+    assert settings.rate_limit_ip_burst == 10
     assert settings.rate_limit_api_key_per_hour == 10
     assert settings.rate_limit_samples_per_hour == 20
     assert settings.rate_limit_pdf_per_hour == 10

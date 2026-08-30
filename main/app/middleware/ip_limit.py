@@ -6,10 +6,13 @@ Auth 移出 RateLimit 外层后（P4-3），未认证流量（缺失/无效/撤�
 未认证流量），运行于 Auth 外层；业务维度（write/api_key/samples/pdf/auth）仍归
 rate_limit.py（Auth 内层，键=principal.user_id 或 IP）。
 
-实现：内存固定窗口（单实例 MVP；多实例演进时换共享存储，业务逻辑不变——见契约 4.4
-定式）。超限：429 RATE_LIMITED + Retry-After 响应头 + scope="ip" 指标（契约 8.3）。
+实现：内存 token bucket（持续 refill + 短突发，见 token_bucket.py）——默认
+rate_limit_ip_per_second=5（每 0.2 秒补 1 token）+ rate_limit_ip_burst=10（同 IP
+初始可立即消耗的桶容量）；任务包契约文字由主 Goal 集成，实现为「单实例 MVP；多实例
+演进时换共享存储，业务逻辑不变——见契约 4.4 定式」。超限：429 RATE_LIMITED +
+Retry-After 响应头 + scope="ip" 指标（契约 8.3）。
 
-时钟：构造可注入 clock（RateLimiter 透传）——测试侧固定时钟消除 1 秒窗口边界
+时钟：构造可注入 clock（TokenBucket 透传）——测试侧固定时钟消除 refill 边界
 flakiness；生产装配不传（默认 time.monotonic）。
 """
 
@@ -25,13 +28,18 @@ from starlette.types import ASGIApp
 from app.api.metrics import RATE_LIMIT_HIT_TOTAL
 from app.config import Settings
 from app.errors import AppError, ErrorCode, http_status
-from app.middleware.rate_limit import ClockLike, RateLimiter
+from app.middleware.rate_limit import ClockLike
+from app.middleware.token_bucket import TokenBucket
 
 logger = logging.getLogger(__name__)
 
 
 class IpRateLimitMiddleware(BaseHTTPMiddleware):
-    """IP 5 req/s 总闸门（1.6「全部接口」）：运行于 Auth 外层，未认证流量同样限流。"""
+    """IP 总闸门（1.6「全部接口」）：运行于 Auth 外层，未认证流量同样限流。
+
+    token bucket：持续 rate_limit_ip_per_second req/s 防护，短突发
+    rate_limit_ip_burst 个请求可立即消费。
+    """
 
     def __init__(
         self,
@@ -41,9 +49,9 @@ class IpRateLimitMiddleware(BaseHTTPMiddleware):
         clock: Callable[[], float] | ClockLike | None = None,
     ) -> None:
         super().__init__(app)
-        self._ip_limiter = RateLimiter(
-            limit=settings.rate_limit_ip_per_second,
-            window_seconds=1,
+        self._ip_limiter = TokenBucket(
+            rate_per_second=settings.rate_limit_ip_per_second,
+            capacity=settings.rate_limit_ip_burst,
             clock=clock if clock is not None else time.monotonic,
         )
 
