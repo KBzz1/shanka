@@ -41,11 +41,30 @@ class ReleaseConfigTest {
     @Test
     fun `debug carries an explicit local base URL override`() {
         val debugBlock = extractBlock(buildFileText(), "buildTypes", "debug")
-        val debugUrl = requireNotNull(buildConfigFieldValue(debugBlock, "API_BASE_URL")) {
-            "Debug 块必须声明 API_BASE_URL 本地覆盖"
-        }
-        assertNotEquals("Debug 覆盖必须不同于正式环境", releaseBaseUrl, debugUrl)
-        assertTrue("Debug 覆盖必须是显式本地地址（http），而非正式环境", debugUrl.startsWith("http://"))
+        assertTrue(
+            "Debug 块必须声明 API_BASE_URL 本地覆盖",
+            "API_BASE_URL" in buildConfigFieldNames(debugBlock),
+        )
+        // 覆盖默认值仍是模拟器 loopback 字面量（property 未传时的回退）。
+        assertTrue(
+            "Debug 默认地址必须是模拟器 loopback 字面量",
+            debugBlock.contains("http://10.0.2.2:8000"),
+        )
+        assertFalse("Debug 块不得硬编码正式环境", releaseBaseUrl in debugBlock)
+    }
+
+    @Test
+    fun `the debug property override never leaks into release`() {
+        val releaseBlock = extractBlock(buildFileText(), "buildTypes", "release")
+        assertFalse(
+            "Release 块不得读取 shankaDebugApiBaseUrl（正式地址编译期固定）",
+            "shankaDebugApiBaseUrl" in releaseBlock,
+        )
+        val debugBlock = extractBlock(buildFileText(), "buildTypes", "debug")
+        assertTrue(
+            "shankaDebugApiBaseUrl 覆盖只应出现在 debug 块",
+            "shankaDebugApiBaseUrl" in debugBlock,
+        )
     }
 
     @Test

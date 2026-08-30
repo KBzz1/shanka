@@ -16,6 +16,17 @@ val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) load(FileInputStream(keystorePropsFile))
 }
 
+// Debug-only base URL 覆盖（非敏感）：USB 真机经 `adb reverse tcp:<port> tcp:<port>` 访问
+// 宿主侧隔离后端时传入 `http://127.0.0.1:<port>`；不传保持模拟器 loopback 默认值。
+// 仅接受纯 http(s) URL——引号、空白或换行会破坏 BuildConfig 字符串字面量，配置期拒绝。
+// Release 永不读取该 property（正式地址编译期固定）。
+val shankaDebugApiBaseUrl: String? = providers.gradleProperty("shankaDebugApiBaseUrl").orNull
+if (shankaDebugApiBaseUrl != null) {
+    require(shankaDebugApiBaseUrl.matches(Regex("""^https?://[A-Za-z0-9.\-]+(:[0-9]{1,5})?(/[A-Za-z0-9._\-/~]*)?$"""))) {
+        "shankaDebugApiBaseUrl 必须是不含引号/空白/换行的合法 http(s) URL，实际收到：$shankaDebugApiBaseUrl"
+    }
+}
+
 android {
     namespace = "com.qiuzhao.flashcards"
     compileSdk = 36
@@ -46,8 +57,14 @@ android {
             // Android signs this variant with the local debug keystore automatically.
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            // Debug-only 显式本地环境覆盖（模拟器 loopback）；Release 编译期不可达。
-            buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:8000\"")
+            // Debug-only 显式本地环境覆盖：默认模拟器 loopback；USB 真机用
+            // -PshankaDebugApiBaseUrl=http://127.0.0.1:<port> 配合 adb reverse。
+            // Release 编译期不可达（正式地址在 release 块固定，不读该 property）。
+            buildConfigField(
+                "String",
+                "API_BASE_URL",
+                "\"${shankaDebugApiBaseUrl ?: "http://10.0.2.2:8000"}\"",
+            )
         }
         release {
             // Release 编译期固定正式 base URL；无服务器编辑、测试模式或演示数据开关。

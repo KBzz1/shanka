@@ -6,7 +6,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SDK_DIR="${SDK_DIR:-$HOME/android-sdk}"
 GRADLE_DIR="${GRADLE_DIR:-$HOME/gradle-dist/gradle-9.6.1}"
-PROJECT="${PROJECT:-$REPO_ROOT/frontend-app/Front}"
+# 统一仓库后前端工程位于 frontend/Front（旧独立仓库路径 frontend-app/Front 已不存在）。
+PROJECT="${PROJECT:-$REPO_ROOT/frontend/Front}"
 
 while [ $# -gt 0 ]; do
   case "$1" in

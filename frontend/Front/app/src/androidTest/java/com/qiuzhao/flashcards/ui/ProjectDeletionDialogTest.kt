@@ -4,12 +4,17 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import com.qiuzhao.flashcards.deviceacceptance.RequiresOwnActivityLaunch
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 
 class ProjectDeletionDialogTest {
-    @get:Rule val rule = createComposeRule()
+    private val rule = createComposeRule()
+
+    // Canary before the compose rule's activity launch; see RequiresOwnActivityLaunch.
+    @get:Rule val chain = RuleChain.outerRule(RequiresOwnActivityLaunch()).around(rule)
 
     @Test fun deletionConfirmationOffersOnlyTheTwoDeckRetentionChoices() {
         var retainDecks: Boolean? = null

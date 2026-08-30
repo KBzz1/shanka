@@ -4,7 +4,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-APK="${APK:-$REPO_ROOT/frontend-app/Front/app/build/outputs/apk/debug/app-debug.apk}"
+# 统一仓库后前端工程位于 frontend/Front；debug 包名为 com.qiuzhao.flashcards.debug。
+APK="${APK:-$REPO_ROOT/frontend/Front/app/build/outputs/apk/debug/app-debug.apk}"
 ADB=""
 
 while [ $# -gt 0 ]; do
