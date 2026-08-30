@@ -29,7 +29,7 @@ sealed interface AuthState {
 const val NETWORK_ERROR_MESSAGE = "网络错误，请稍后重试"
 
 /**
- * Transport failures (no HTTP response at all — BackendClient.unavailableResult produces
+ * Transport failures (no HTTP response at all — the unified OkHttp stack maps them to
  * code NETWORK_UNAVAILABLE) show the network message; every real server error code goes
  * through the full [ErrorMessages] table, unknown codes included (generic fallback).
  */
