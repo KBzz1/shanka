@@ -207,7 +207,9 @@ internal data class SampleCardDto(
     @SerialName("front") val front: String,
     @SerialName("back") val back: String,
     @SerialName("card_type") val cardType: String,
-    @SerialName("target_difficulty") val targetDifficulty: String,
+    // openapi SampleCard.target_difficulty 为 nullable 且非 required；非空假设会让
+    // 服务端缺省/为 null 时整个 task 载荷降级为 INVALID_RESPONSE。
+    @SerialName("target_difficulty") val targetDifficulty: String? = null,
 )
 
 @Serializable
@@ -585,8 +587,7 @@ internal fun SampleCardDto.toDomain(): V25SampleCard = V25SampleCard(
     front = front,
     back = back,
     cardType = enumValueOf<V25CardType>(cardType),
-    // Persisted samples are one per enabled tier, so the target difficulty is always present.
-    targetDifficulty = enumValueOf<V25Difficulty>(targetDifficulty),
+    targetDifficulty = targetDifficulty?.let { enumValueOf<V25Difficulty>(it) },
 )
 
 internal fun TaskDto.toDomain(): V25GenerationTask = V25GenerationTask(
@@ -686,7 +687,8 @@ internal fun CardDto.toReviewCard(): V25ReviewCard =
 
 internal fun CardDto.toPlanCard(): V25PlanCard = V25PlanCard(
     card = toCard(),
-    isNew = reviewState?.state == "NEW",
+    // plan_kind 是服务端的权威判定；仅当 wire 未携带（null）时回落到本地状态推断。
+    isNew = planKind?.let { it == "NEW" } ?: (reviewState?.state == "NEW"),
     reviewState = reviewState?.toDomain(),
     planKind = planKind,
 )

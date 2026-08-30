@@ -412,12 +412,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Deck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
 
   /projects/{project_id}/replace-pdf:
     parameters:
@@ -2929,7 +2929,7 @@ components:
 
     ProjectStudySettings:
       type: object
-      required: [selected_new_card_chapter_ids, include_unassigned, updated_at]
+      required: [selected_new_card_chapter_ids, include_unassigned, selected_deck_ids, daily_new_goal, daily_review_goal, updated_at]
       properties:
         selected_new_card_chapter_ids:
           type: array
@@ -3027,6 +3027,7 @@ components:
           items:
             type: string
             format: uuid
+          minItems: 1
         daily_new_goal:
           type: integer
           minimum: 0
@@ -3040,7 +3041,7 @@ components:
 
     ProgressSummary:
       type: object
-      required: [card_count, not_started_count, learning_count, relearning_count, consolidating_count, mastered_count, due_count, review_event_count]
+      required: [card_count, not_started_count, learning_count, relearning_count, consolidating_count, mastered_count, due_count, review_event_count, last_studied_at]
       properties:
         card_count:
           type: integer

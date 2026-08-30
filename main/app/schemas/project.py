@@ -30,9 +30,9 @@ class ProjectStudySettings(BaseModel):
 
     selected_new_card_chapter_ids: list[str]  # 旧章节范围读取兼容
     include_unassigned: bool  # 旧章节范围读取兼容
-    selected_deck_ids: list[str] = []  # 今日计划完整卡组范围
-    daily_new_goal: int = 10
-    daily_review_goal: int = 40
+    selected_deck_ids: list[str]  # 今日计划完整卡组范围
+    daily_new_goal: int
+    daily_review_goal: int
     updated_at: str
 
 

@@ -7,7 +7,7 @@
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
@@ -56,15 +56,11 @@ def progress_summary(
         _owned_project(session, user_id=user_id, project_id=project_id)
         deck_ids = list(
             session.scalars(
-                select(Deck.deck_id).where(
-                    Deck.user_id == user_id, Deck.project_id == project_id
-                )
+                select(Deck.deck_id).where(Deck.user_id == user_id, Deck.project_id == project_id)
             ).all()
         )
     else:
-        deck = session.scalar(
-            select(Deck).where(Deck.deck_id == deck_id, Deck.user_id == user_id)
-        )
+        deck = session.scalar(select(Deck).where(Deck.deck_id == deck_id, Deck.user_id == user_id))
         if deck is None:
             raise AppError(ErrorCode.DECK_NOT_FOUND, "牌组不存在")
         deck_ids = [deck.deck_id]
@@ -96,23 +92,23 @@ def progress_summary(
         # currently due.
         if state is not None and state != "NEW" and due is not None and due <= now:
             due_count += 1
-    events_query = (
-        select(ReviewEvent.reviewed_at)
-        .join(Card, Card.card_id == ReviewEvent.card_id)
+    # 聚合下推：只取 count 与 max，不把全部事件日期串拉进内存。
+    event_count, last_studied = session.execute(
+        select(func.count(ReviewEvent.review_event_id), func.max(ReviewEvent.reviewed_at))
+        .join(Card, (Card.card_id == ReviewEvent.card_id) & (Card.user_id == user_id))
         .where(
             ReviewEvent.user_id == user_id,
             Card.user_id == user_id,
             Card.deck_id.in_(deck_ids) if deck_ids else text("0 = 1"),
             visible,
         )
-    )
-    event_dates = list(session.scalars(events_query).all())
+    ).one()
     return {
         "card_count": len(rows),
         **counts,
         "due_count": due_count,
-        "review_event_count": len(event_dates),
-        "last_studied_at": max(event_dates) if event_dates else None,
+        "review_event_count": int(event_count),
+        "last_studied_at": last_studied,
     }
 
 
@@ -148,44 +144,50 @@ def project_weekly_stats(
             session.scalars(select(Deck.deck_id).where(Deck.project_id == project_id)).all()
         )
     visible = text(VISIBLE_PREDICATE_SQL)
-    rows = list(
+    card_join = (Card.card_id == ReviewEvent.card_id) & (Card.user_id == user_id)
+    deck_filter = Card.deck_id.in_(selected) if selected else text("0 = 1")
+    start_str, end_str = format_utc(start.astimezone(UTC)), format_utc(end.astimezone(UTC))
+    # 窗口内事件 + 活跃卡片首条评分：周分类只需要本周活跃卡片各自的第一个事件，
+    # 全历史扫描会让仪表盘的内存与延迟随账号历史线性放大。
+    week_rows = list(
         session.execute(
-            select(
-                ReviewEvent.review_event_id,
-                ReviewEvent.card_id,
-                ReviewEvent.rating,
-                ReviewEvent.reviewed_at,
-            )
-            .join(Card, Card.card_id == ReviewEvent.card_id)
+            select(ReviewEvent.review_event_id, ReviewEvent.card_id, ReviewEvent.reviewed_at)
+            .join(Card, card_join)
             .where(
                 ReviewEvent.user_id == user_id,
-                Card.user_id == user_id,
-                Card.deck_id.in_(selected) if selected else text("0 = 1"),
+                deck_filter,
                 visible,
+                ReviewEvent.reviewed_at >= start_str,
+                ReviewEvent.reviewed_at < end_str,
+            )
+        ).all()
+    )
+    first_seen: dict[str, str] = {}
+    if week_rows:
+        history = session.execute(
+            select(ReviewEvent.review_event_id, ReviewEvent.card_id)
+            .join(Card, card_join)
+            .where(
+                ReviewEvent.user_id == user_id,
+                deck_filter,
+                visible,
+                ReviewEvent.card_id.in_({event.card_id for event in week_rows}),
             )
             .order_by(ReviewEvent.card_id, ReviewEvent.reviewed_at, ReviewEvent.created_at)
         ).all()
-    )
-    start_str, end_str = format_utc(start.astimezone(UTC)), format_utc(end.astimezone(UTC))
-    week = [row for row in rows if start_str <= row.reviewed_at < end_str]
+        # Event ids disambiguate same-millisecond ratings; using reviewed_at alone could count
+        # two events for one card as its first (new-card) completion.
+        for event in history:
+            first_seen.setdefault(event.card_id, event.review_event_id)
+    week = week_rows
     weekly_activity = [0] * 7
     for row in week:
         weekly_activity[date.fromisoformat(learning_date(row.reviewed_at, timezone)).weekday()] += 1
-    # Event ids disambiguate same-millisecond ratings; using reviewed_at alone could count two
-    # events for one card as its first (new-card) completion.
-    first_seen: dict[str, str] = {}
-    for row in rows:
-        first_seen.setdefault(row.card_id, row.review_event_id)
-    new_done = {
-        row.card_id
-        for row in week
-        if row.review_event_id == first_seen.get(row.card_id)
-    }
+    new_done = {row.card_id for row in week if row.review_event_id == first_seen.get(row.card_id)}
     review_done = {
         row.card_id
         for row in week
-        if row.review_event_id != first_seen.get(row.card_id)
-        and row.card_id not in new_done
+        if row.review_event_id != first_seen.get(row.card_id) and row.card_id not in new_done
     }
     configured = bool(selected) and settings is not None
     new_goal = int(settings.daily_new_goal) * 7 if configured and settings else 0

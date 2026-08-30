@@ -539,6 +539,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 | learning_projects | 3.16 LearningProject(V2.5 新增) |
 | user_preferences | 3.15 UserPreferences(V2.5 新增) |
 | project_study_settings | 3.17 ProjectStudySettings(V2.5 新增) |
+| project_study_decks | 3.17.1 卡组计划选择(2.19.1;由 `f7a2b3c4d5e6` 迁移创建) |
 | card_deletion_batches | 3.18 CardDeletionBatch(V2.5 新增) |
 | card_rewrite_previews | 3.19 CardRewritePreview(V2.5 新增) |
 

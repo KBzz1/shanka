@@ -273,7 +273,8 @@ data class V25SampleCard(
     val front: String,
     val back: String,
     val cardType: V25CardType,
-    val targetDifficulty: V25Difficulty,
+    /** openapi：nullable 且非 required——服务端可能不发送。 */
+    val targetDifficulty: V25Difficulty? = null,
 )
 
 /** A generation task with its frozen chapter snapshot and persisted samples (Architecture 3.4). */

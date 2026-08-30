@@ -51,18 +51,17 @@ def _overdue_seconds(now_dt: datetime, due: str) -> float:
     return (now_dt - _parse_utc(due)).total_seconds()
 
 
-def _due_plan_cards(
+def _due_queue(
     session: Session,
     *,
     user_id: str,
     deck_ids: list[str],
     now: str,
     now_dt: datetime,
-    goal: int,
-) -> tuple[list[tuple[Card, ReviewState]], int]:
-    """已学习且到期可见卡（state != NEW、due <= now）→ 排序 → 取到每日目标。
+) -> list[tuple[Card, ReviewState]]:
+    """已学习且到期可见卡（state != NEW、due <= now）全量队列，排序键：(-遗忘风险, -逾期时长, card_id)。
 
-    返回 (计划内到期卡, 到期总数)。排序键：(-遗忘风险, -逾期时长, card_id)。
+    主计划与 backlog 共用同一排序来源，避免 risk 排序长成第二套实现。
     """
     rows = list(
         session.execute(
@@ -77,18 +76,31 @@ def _due_plan_cards(
             )
         ).all()
     )
-
-    def risk_of(card: Card, rs: ReviewState) -> float:
-        return forgetting_risk(rs.stability, rs.last_review, now_dt)
-
     rows.sort(
         key=lambda row: (
-            -risk_of(row[0], row[1]),
+            -forgetting_risk(row[1].stability, row[1].last_review, now_dt),
             -_overdue_seconds(now_dt, row[1].due),
             row[0].card_id,
         )
     )
-    return [(row[0], row[1]) for row in rows[:goal]], len(rows)
+    return [(row[0], row[1]) for row in rows]
+
+
+def _due_plan_cards(
+    session: Session,
+    *,
+    user_id: str,
+    deck_ids: list[str],
+    now: str,
+    now_dt: datetime,
+    goal: int,
+) -> tuple[list[tuple[Card, ReviewState]], int]:
+    """已学习且到期可见卡 → 排序 → 取到每日目标。
+
+    返回 (计划内到期卡, 到期总数)。
+    """
+    queue = _due_queue(session, user_id=user_id, deck_ids=deck_ids, now=now, now_dt=now_dt)
+    return queue[:goal], len(queue)
 
 
 def _new_fill_cards(
@@ -191,29 +203,50 @@ def _today_completed_by_kind(
     day_start: str,
     day_end: str,
 ) -> tuple[int, int]:
-    """返回今日已完成的新卡数、巩固卡数（同卡同日去重）。"""
+    """返回今日已完成的新卡数、巩固卡数（同卡同日去重）。
+
+    只取窗口内事件 + 今日活跃卡片的全量首条评分：新卡/巩固的判定只需要今天活跃
+    卡片各自的第一条事件，而全历史扫描会让每次 /study/today 的内存与延迟随账号
+    历史线性放大。
+    """
     if not deck_ids:
         return 0, 0
-    all_events = session.execute(
-        select(ReviewEvent.review_event_id, ReviewEvent.card_id, ReviewEvent.reviewed_at)
-        .join(Card, (Card.card_id == ReviewEvent.card_id) & (Card.user_id == user_id))
+    visible = text(VISIBLE_PREDICATE_SQL)
+    card_join = (Card.card_id == ReviewEvent.card_id) & (Card.user_id == user_id)
+    today_rows = list(
+        session.execute(
+            select(ReviewEvent.review_event_id, ReviewEvent.card_id)
+            .join(Card, card_join)
+            .where(
+                ReviewEvent.user_id == user_id,
+                Card.deck_id.in_(deck_ids),
+                visible,
+                ReviewEvent.reviewed_at >= day_start,
+                ReviewEvent.reviewed_at < day_end,
+            )
+        ).all()
+    )
+    if not today_rows:
+        return 0, 0
+    history = session.execute(
+        select(ReviewEvent.review_event_id, ReviewEvent.card_id)
+        .join(Card, card_join)
         .where(
             ReviewEvent.user_id == user_id,
             Card.deck_id.in_(deck_ids),
-            text(VISIBLE_PREDICATE_SQL),
+            visible,
+            ReviewEvent.card_id.in_({row.card_id for row in today_rows}),
         )
         .order_by(ReviewEvent.card_id, ReviewEvent.reviewed_at, ReviewEvent.created_at)
     ).all()
     # Keep the event id rather than only reviewed_at: two ratings can legitimately share the
     # same millisecond, and timestamp equality alone would classify both as a card's first event.
     first_seen: dict[str, str] = {}
-    for row in all_events:
+    for row in history:
         first_seen.setdefault(row.card_id, row.review_event_id)
     new_cards: set[str] = set()
     review_cards: set[str] = set()
-    for row in all_events:
-        if not (day_start <= row.reviewed_at < day_end):
-            continue
+    for row in today_rows:
         if row.review_event_id == first_seen.get(row.card_id):
             new_cards.add(row.card_id)
         else:
@@ -487,14 +520,16 @@ def update_study_plan(
     )
     if {deck.deck_id for deck in decks} != set(unique_ids):
         raise AppError(ErrorCode.DECK_NOT_FOUND, "所选卡组不存在或不属于当前项目")
-    eligible = session.scalar(
-        select(func.count(Card.card_id))
-        .where(
-            Card.user_id == user_id,
-            Card.deck_id.in_(unique_ids),
-            text(VISIBLE_PREDICATE_SQL),
+    eligible = (
+        session.scalar(
+            select(func.count(Card.card_id)).where(
+                Card.user_id == user_id,
+                Card.deck_id.in_(unique_ids),
+                text(VISIBLE_PREDICATE_SQL),
+            )
         )
-    ) or 0
+        or 0
+    )
     if eligible == 0:
         raise AppError(ErrorCode.VALIDATION_ERROR, "所选卡组暂无可学习卡片")
     now_dt = _parse_utc(now)
@@ -561,27 +596,8 @@ def study_plan_backlog(
     )
     settings = session.get(ProjectStudySettings, project_id)
     goal = int(settings.daily_review_goal) if settings else 40
-    # 重新取完整队列再切掉核心目标，避免将 risk 排序逻辑复制成第二套。
-    all_rows = list(
-        session.execute(
-            select(Card, ReviewState)
-            .join(ReviewState, ReviewState.card_id == Card.card_id)
-            .where(
-                Card.user_id == user_id,
-                Card.deck_id.in_(selected),
-                ReviewState.state != "NEW",
-                ReviewState.due <= now,
-                text(VISIBLE_PREDICATE_SQL),
-            )
-        ).all()
-    )
-    all_rows.sort(
-        key=lambda row: (
-            -forgetting_risk(row[1].stability, row[1].last_review, now_dt),
-            -_overdue_seconds(now_dt, row[1].due),
-            row[0].card_id,
-        )
-    )
+    # 与主计划共用同一排序来源（_due_queue），再切掉核心目标，避免 risk 排序复制成第二套。
+    all_rows = _due_queue(session, user_id=user_id, deck_ids=selected, now=now, now_dt=now_dt)
     due_count = len(all_rows)
     # Core slots already completed today are consumed even though those cards may no longer be
     # due.  Slice after the remaining core slots so the optional backlog stays addressable after

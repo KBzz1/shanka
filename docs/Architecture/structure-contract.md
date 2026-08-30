@@ -257,6 +257,9 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `mastered_card_count` | int | ✓ | 派生:掌握判定见 5.3 |
 | `review_count` | int | ✓ | 派生:累计复习事件数 |
 | `mastery_ratio` | float | ✓ | 派生:`mastered_card_count / card_count`,为 0 时返回 0 |
+| `not_started_count` / `learning_count` / `relearning_count` / `consolidating_count` / `mastered_count` | int | ✗ | 派生:按 ReviewState 阶段的五分计数(掌握判定见 5.3);openapi 可选,缺省 0 |
+| `review_event_count` | int | ✗ | 派生:累计复习事件数(openapi 可选) |
+| `last_studied_at` | datetime/null | ✗ | 派生:最近一次评分时间,无事件为 `null` |
 | `created_at` / `updated_at` / `version` | - | ✓ | `version` 供客户端刷新缓存 |
 
 ### 3.9 Card(V2.5 增量)
@@ -485,7 +488,7 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | `due_count` | int | ✓ | 到期总数 |
 | `main_plan_remaining` | int | ✓ | 主计划剩余数 |
 | `backlog_count` | int | ✓ | 积压数 |
-| `cards` | TodayPlanCard[] | ✓ | 有序卡片列表 |
+| `cards` | TodayPlanCard[] | ✓ | 有序卡片列表;TodayPlanCard 的 `plan_kind`(`DUE`/`NEW`/null)是服务端对卡片入队原因的权威判定,客户端 `is_new` 应由它推导 |
 | `daily_new_goal` / `daily_review_goal` | int | ✗ | 新卡与巩固软目标 |
 | `new_completed_count` / `review_completed_count` | int | ✗ | 今日按卡去重的双目标完成数 |
 | `new_remaining_count` / `review_remaining_count` | int | ✗ | 双目标剩余数 |

@@ -31,14 +31,6 @@ data class DeckSummary(
     val lastStudiedAt: String? = null,
     /** Null is a legacy standalone deck until the server migration assigns a project. */
     val projectId: String? = null,
-    /** Explicit source selections; a deck never implicitly reads every project material. */
-    val materialScopes: List<DeckMaterialScope> = emptyList()
-)
-
-data class DeckMaterialScope(
-    val materialId: String,
-    val chapterIds: List<String> = emptyList(),
-    val sourceLocator: String? = null
 )
 
 data class ProjectSummary(
@@ -50,7 +42,6 @@ data class ProjectSummary(
 )
 
 const val LEGACY_UNASSIGNED_PROJECT_ID = "legacy-unassigned"
-internal const val LEGACY_UNASSIGNED_PROJECT_NAME = "未归类项目"
 
 data class DeckProgress(
     val cardCount: Int,
