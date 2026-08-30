@@ -19,10 +19,6 @@ import com.qiuzhao.flashcards.data.remote.FlashcardEntity
 import com.qiuzhao.flashcards.data.remote.PdfChapter
 import com.qiuzhao.flashcards.data.remote.PdfFile
 import com.qiuzhao.flashcards.data.remote.Rating
-import com.qiuzhao.flashcards.data.remote.RemoteFlashcardRepository
-import com.qiuzhao.flashcards.data.remote.v25.BackendV25Transport
-import com.qiuzhao.flashcards.data.remote.v25.RemoteV25Repository
-import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
 import com.qiuzhao.flashcards.data.session.SessionStore
 import com.qiuzhao.flashcards.domain.v25.V25ApiKeyState
 import com.qiuzhao.flashcards.domain.v25.V25BrowseFilter
@@ -235,22 +231,30 @@ class AppViewModel(
     private val sessionStore: SessionStore,
     /** Kept as `repository` for the existing auth-injection test seam; used only for auth. */
     private val repository: AuthRepository,
-    private val v25Repository: V25Repository = RemoteV25Repository.create(application),
+    v25Repository: V25Repository,
+    /** Process-level session hooks (WorkManager backstop, sync resume/pause). */
+    private val onSignedIn: () -> Unit = {},
+    private val onSignedOut: () -> Unit = {},
+    /** Live deck cache projection; null in JVM tests that inject a plain repository. */
+    private val deckUpdates: (() -> Flow<List<V25Deck>>)? = null,
 ) : AndroidViewModel(application) {
+    private val v25Repository: V25Repository = v25Repository
     companion object {
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY]!!
-                val store = KeystoreSessionStore(app)
-                val authRepository = RemoteFlashcardRepository(app, sessionStore = store)
-                val v25Repository = RemoteV25Repository(
-                    store,
-                    BackendV25Transport(
-                        com.qiuzhao.flashcards.data.remote.BackendClient(app, sessionStore = store),
-                        store,
-                    ),
+                // Process-level assembly (one OkHttp stack, one shanka-v25.db, one sync
+                // coordinator) lives in AppContainer; the ViewModel only picks its members.
+                val container = (app as com.qiuzhao.flashcards.FlashcardsApplication).container
+                AppViewModel(
+                    application = app,
+                    sessionStore = container.sessionStore,
+                    repository = container.authRepository,
+                    v25Repository = container.v25Repository,
+                    onSignedIn = container::onUserSignedIn,
+                    onSignedOut = container::onUserSignedOut,
+                    deckUpdates = container.v25Repository::observeDecks,
                 )
-                AppViewModel(app, store, authRepository, v25Repository)
             }
         }
 
@@ -361,15 +365,29 @@ class AppViewModel(
                 .collect { loggedIn ->
                     if (loggedIn == null) {
                         _accountBootstrap.value = AccountBootstrap(loaded = true)
+                        onSignedOut()
                         clearAuthenticatedState()
                     } else {
                         _accountBootstrap.value = AccountBootstrap(
                             loaded = true,
                             account = LocalAccount(loggedIn.user.username, ""),
                         )
+                        onSignedIn()
+                        observeDeckCache()
                         refreshAll()
                     }
                 }
+        }
+    }
+
+    /**
+     * The Room deck projection is the live source: the merged refresh after an outbox drain
+     * re-emits new due counts here without any per-rating network fan-out.
+     */
+    private fun observeDeckCache() {
+        val source = deckUpdates ?: return
+        viewModelScope.launch {
+            source().collect { decks -> _decks.value = decks.map(::toDeckSummary) }
         }
     }
 
@@ -1443,20 +1461,16 @@ class AppViewModel(
     }
 
     /**
-     * Submits one user rating through the review coordinator. A success fires [onSuccess] (queue
-     * advance, counters) only after the server committed the event; a failure keeps the card and
-     * the attempt so a retry replays the identical event with the same dedupe identifiers.
+     * Submits one user rating through the local outbox. The swipe transaction commits the
+     * event (fixed client_event_id + Idempotency-Key) and hides the card from the local queue,
+     * so [onSuccess] (queue advance) fires as soon as the local write is durable — never after
+     * a network round-trip. The sync coordinator replays the event and the merged refresh
+     * (decks / today plan / dashboard, once per drained pass) updates the Room projections;
+     * there is deliberately no per-rating multi-endpoint fan-out anymore.
      */
     fun rate(cardId: String, rating: Rating, onSuccess: () -> Unit = {}) = viewModelScope.launch {
         when (val result = reviewCoordinator.submit(cardId, V25Rating.valueOf(rating.name))) {
-            is V25Result.Success -> {
-                refreshDecks()
-                refreshDashboard()
-                refreshStudyPlan()
-                refreshTodayPlan()
-                _studyPlan.value.currentProjectId?.let(::refreshProjectProgress)
-                onSuccess()
-            }
+            is V25Result.Success -> onSuccess()
             is V25Result.Failure -> {
                 if (result.code != ReviewCoordinator.IN_FLIGHT_CODE) handleFailure("submit_review", result)
             }

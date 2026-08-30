@@ -58,6 +58,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlin { jvmToolchain(17) }
+    testOptions {
+        // Robolectric runs the Room/outbox persistence suite on the JVM against a real
+        // file-backed SQLite; those unit tests stay in the JVM source set.
+        unitTests { isIncludeAndroidResources = true }
+    }
+}
+
+kapt {
+    arguments {
+        // shanka-v25.db schema export: every version bump must land a new exported schema
+        // and an explicit migration (destructive fallback is banned in the database builder).
+        arg("room.schemaLocation", "$projectDir/schemas")
+        arg("room.incremental", "true")
+    }
 }
 
 dependencies {
@@ -77,11 +91,20 @@ dependencies {
     implementation("androidx.room:room-ktx:2.7.2")
     kapt("androidx.room:room-compiler:2.7.2")
     implementation("androidx.datastore:datastore-preferences:1.1.7")
+    implementation("androidx.work:work-runtime-ktx:2.10.4")
+    implementation("com.squareup.retrofit2:retrofit:2.11.0")
+    implementation("com.squareup.retrofit2:converter-kotlinx-serialization:2.11.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
-    // Real org.json for JVM tests: android.jar only ships throwing stubs.
-    testImplementation("org.json:json:20240303")
+    // MockWebServer is a JVM artifact: full Retrofit/OkHttp contract fixtures run on the JVM.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    // Room/outbox persistence suites run on Robolectric's real file-backed SQLite on the JVM.
+    testImplementation("org.robolectric:robolectric:4.15.1")
+    testImplementation("androidx.test:core:1.7.0")
+    testImplementation("androidx.work:work-testing:2.10.4")
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.02.01"))
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")

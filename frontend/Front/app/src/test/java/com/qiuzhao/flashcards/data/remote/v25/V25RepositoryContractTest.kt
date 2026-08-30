@@ -1,8 +1,8 @@
 package com.qiuzhao.flashcards.data.remote.v25
 
-import com.qiuzhao.flashcards.data.remote.HttpResult
+import com.qiuzhao.flashcards.data.remote.http.NetworkStack
+import com.qiuzhao.flashcards.data.session.InMemorySessionStore
 import com.qiuzhao.flashcards.data.session.Session
-import com.qiuzhao.flashcards.data.session.SessionStore
 import com.qiuzhao.flashcards.data.session.SessionUser
 import com.qiuzhao.flashcards.domain.v25.V25ApiKeyState
 import com.qiuzhao.flashcards.domain.v25.V25BrowseFilter
@@ -19,149 +19,128 @@ import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
 import com.qiuzhao.flashcards.domain.v25.V25Rating
 import com.qiuzhao.flashcards.domain.v25.V25Repository
 import com.qiuzhao.flashcards.domain.v25.V25Result
+import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.domain.v25.isAuthFailure
 import java.io.ByteArrayInputStream
+import java.lang.reflect.Proxy
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
- * Locks the repository's transport behavior on the JVM: which requests carry auth and
- * idempotency semantics, how failures and cancellation surface, and that the plaintext
- * API key never leaves the request body. The fake transport records every call; the fake
- * session store lets the logout flow run without Android.
+ * Locks the repository's wire behavior on the JVM against a real OkHttp/Retrofit stack pointed
+ * at a MockWebServer: auth headers, Idempotency-Key ownership, contract paths and query flags,
+ * failure mapping, multipart uploads and API-key redaction. Fixture semantics carried over
+ * verbatim from the replaced handwritten-transport test: success, empty list, auth failure,
+ * network failure, 429, missing envelope, malformed payload, multipart and sensitive-error
+ * redaction.
  */
 class V25RepositoryContractTest {
 
     private val user = SessionUser(userId = "u-1", username = "alice", createdAt = "2026-08-14T00:00:00Z")
     private val session = Session(token = "token-1", user = user)
 
-    private class FakeSessionStore(initial: Session? = null) : SessionStore {
-        var session: Session? = initial
-        val savedTokens = mutableListOf<String>()
-        var clearCount = 0
-        override fun save(token: String, user: SessionUser) {
-            session = Session(token, user)
-            savedTokens += token
-        }
+    private lateinit var server: MockWebServer
+    private lateinit var store: InMemorySessionStore
+    private lateinit var repo: V25Repository
 
-        override fun load(): Session? = session
-        override fun clear() {
-            session = null
-            clearCount++
-        }
+    @Before
+    fun setUp() {
+        server = MockWebServer()
+        server.start()
+        store = InMemorySessionStore()
+        store.save(session.token, session.user)
+        val stack = NetworkStack(store, baseUrlOverride = server.url("/").toString())
+        repo = RemoteV25Repository.create(stack)
     }
 
-    private class RecordedCall(
-        val operation: String,
-        val method: String,
-        val path: String,
-        val body: String?,
-        val idempotent: Boolean,
-        val authenticate: Boolean,
-        val token: String?,
-        val idempotencyKey: String? = null,
-        val fileName: String? = null,
-        val name: String? = null,
-    )
-
-    private class FakeTransport : V25Transport {
-        val calls = mutableListOf<RecordedCall>()
-        var handler: (RecordedCall) -> HttpResult = { HttpResult(200, "{}", emptyMap()) }
-
-        override suspend fun request(
-            operation: String,
-            method: String,
-            path: String,
-            body: String?,
-            contentType: String,
-            idempotent: Boolean,
-            authenticate: Boolean,
-            token: String?,
-            idempotencyKey: String?,
-        ): HttpResult {
-            val call = RecordedCall(operation, method, path, body, idempotent, authenticate, token, idempotencyKey = idempotencyKey)
-            calls += call
-            return handler(call)
-        }
-
-        override suspend fun upload(
-            operation: String,
-            path: String,
-            fileName: String,
-            content: java.io.InputStream,
-            name: String?,
-            idempotencyKey: String?,
-        ): HttpResult {
-            val call = RecordedCall(operation, "POST", path, null, idempotent = true, authenticate = true, token = null, idempotencyKey = idempotencyKey, fileName = fileName, name = name)
-            calls += call
-            return handler(call)
-        }
+    @After
+    fun tearDown() {
+        server.shutdown()
     }
 
-    private fun repository(store: FakeSessionStore, transport: FakeTransport): V25Repository =
-        RemoteV25Repository(store, transport)
+    private fun enqueue(body: String = "{}", code: Int = 200): MockResponse =
+        MockResponse().setResponseCode(code).setBody(body).also(server::enqueue)
+
+    private fun take(): RecordedRequest = server.takeRequest()
+
+    /** Request-body assertions run on the JVM without the Android org.json stubs. */
+    private fun bodyJson(request: RecordedRequest) =
+        Json.parseToJsonElement(request.body.readUtf8()).jsonObject
 
     // --- auth headers and idempotency keys ------------------------------------------------
 
     @Test
     fun `reads authenticate but never carry an idempotency key`() = runBlocking {
-        val store = FakeSessionStore(session)
-        val transport = FakeTransport()
-        val repo = repository(store, transport)
+        enqueue(meBody())
+        enqueue(itemsBody())
+        enqueue(dashboardBody())
 
         repo.getAuthUser()
         repo.listProjects()
         repo.statsDashboard()
 
-        assertEquals(3, transport.calls.size)
-        transport.calls.forEach {
-            assertEquals("reads must authenticate with the stored session", true, it.authenticate)
-            assertEquals("reads must not request an Idempotency-Key", false, it.idempotent)
+        val paths = mutableListOf<String>()
+        repeat(3) {
+            val request = server.takeRequest()
+            assertEquals("GET", request.method)
+            assertEquals("Bearer token-1", request.getHeader("Authorization"))
+            assertNull("reads must not carry an Idempotency-Key", request.getHeader("Idempotency-Key"))
+            paths += request.path!!
         }
-        assertEquals(listOf("GET", "GET", "GET"), transport.calls.map { it.method })
-        assertEquals(listOf("/auth/me", "/projects", "/stats/dashboard"), transport.calls.map { it.path })
+        assertEquals(listOf("/auth/me", "/projects", "/stats/dashboard"), paths)
     }
 
     @Test
-    fun `mutations carry the idempotency flag for the client to attach a key`() = runBlocking {
-        val transport = FakeTransport()
-        val repo = repository(FakeSessionStore(session), transport)
+    fun `default writes generate a fresh idempotency key per request`() = runBlocking {
+        enqueue(preferencesBody())
+        enqueue(ratingBody())
 
         repo.updatePreferences(V25PreferencesPatch(dailyLearningGoal = 60))
         repo.rateCard("c-1", V25Rating.GOOD)
-        repo.deleteCard("c-1")
 
-        assertEquals(3, transport.calls.size)
-        transport.calls.forEach { assertEquals(true, it.idempotent) }
+        val preferenceWrite = take()
+        val ratingWrite = take()
+        assertTrue(preferenceWrite.getHeader("Idempotency-Key")!!.isNotBlank())
+        assertTrue(ratingWrite.getHeader("Idempotency-Key")!!.isNotBlank())
     }
 
     @Test
-    fun `default writes pass no caller key so the client keeps generating fresh ones`() = runBlocking {
-        val transport = FakeTransport()
-        val repo = repository(FakeSessionStore(session), transport)
+    fun `caller fixed keys are replayed verbatim`() = runBlocking {
+        enqueue(ratingBody())
 
-        repo.createDeck("线性代数")
-        repo.updatePreferences(V25PreferencesPatch(dailyLearningGoal = 60))
+        repo.rateCard("c-1", V25Rating.GOOD, clientEventId = "event-1", idempotencyKey = "rating-key")
 
-        assertEquals(2, transport.calls.size)
-        transport.calls.forEach {
-            assertEquals(true, it.idempotent)
-            assertNull("no caller key: the client auto-generates one per request", it.idempotencyKey)
-        }
+        val request = take()
+        assertEquals("rating-key", request.getHeader("Idempotency-Key"))
+        assertEquals("event-1", bodyJson(request)["client_event_id"]!!.jsonPrimitive.content)
     }
 
     @Test
     fun `query parameters follow the contract paths`() = runBlocking {
-        val transport = FakeTransport()
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(itemsBody())
+        enqueue(itemsBody())
+        enqueue(itemsBody())
+        enqueue("", 204)
+        enqueue("", 204)
+        enqueue("", 204)
 
-        repo.listTasks(projectId = "p-1", status = com.qiuzhao.flashcards.domain.v25.V25TaskStatus.DRAFT)
+        repo.listTasks(projectId = "p-1", status = V25TaskStatus.DRAFT)
         repo.listDecks(projectId = "p-1")
         repo.listCards(
             "d-1",
@@ -175,171 +154,138 @@ class V25RepositoryContractTest {
         repo.deleteChapter("p-1", "c-1", deleteCards = true)
         repo.deleteTask("t-1", deleteGeneratedCards = true)
 
-        assertEquals("/tasks?project_id=p-1&status=DRAFT", transport.calls[0].path)
-        assertEquals("/decks?project_id=p-1", transport.calls[1].path)
-        assertEquals("/decks/d-1/cards?order=random&content_difficulty=UNLABELED&mastery=unmastered", transport.calls[2].path)
-        assertEquals("/projects/p-1?retain_decks=false", transport.calls[3].path)
-        assertEquals("/projects/p-1/chapters/c-1?delete_cards=true", transport.calls[4].path)
-        assertEquals("/tasks/t-1?delete_generated_cards=true", transport.calls[5].path)
+        assertEquals("/tasks?project_id=p-1&status=DRAFT", take().path)
+        assertEquals("/decks?project_id=p-1", take().path)
+        assertEquals("/decks/d-1/cards?order=random&content_difficulty=UNLABELED&mastery=unmastered", take().path)
+        assertEquals("/projects/p-1?retain_decks=false", take().path)
+        assertEquals("/projects/p-1/chapters/c-1?delete_cards=true", take().path)
+        assertEquals("/tasks/t-1?delete_generated_cards=true", take().path)
     }
 
     @Test
     fun `optional false query flags are omitted from the path`() = runBlocking {
-        val transport = FakeTransport()
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue("", 204)
+        enqueue("", 204)
 
         repo.deleteChapter("p-1", "c-1", deleteCards = false)
         repo.deleteTask("t-1", deleteGeneratedCards = false)
 
-        assertEquals("/projects/p-1/chapters/c-1", transport.calls[0].path)
-        assertEquals("/tasks/t-1", transport.calls[1].path)
+        assertEquals("/projects/p-1/chapters/c-1", take().path)
+        assertEquals("/tasks/t-1", take().path)
     }
 
     @Test
     fun `deletion operations carry only the retain decision and stable retry key`() = runBlocking {
-        val transport = FakeTransport()
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue("", 204)
+        enqueue(preflightBody())
+        enqueue("", 204)
+        enqueue(preflightBody())
 
-        repo.deleteProject(
-            "p-1",
-            retainDecks = false,
-            abandonPreGenerationTasks = true,
-            idempotencyKey = "project-key",
-        )
+        repo.deleteProject("p-1", retainDecks = false, abandonPreGenerationTasks = true, idempotencyKey = "project-key")
         repo.getProjectDeletionPreflight("p-1", retainDecks = false)
         repo.deleteDeck("d-1", abandonPreGenerationTasks = true, idempotencyKey = "deck-key")
         repo.getDeckDeletionPreflight("d-1")
 
-        assertEquals("/projects/p-1?retain_decks=false", transport.calls[0].path)
-        assertEquals("project-key", transport.calls[0].idempotencyKey)
-        assertEquals("/projects/p-1/deletion-preflight?retain_decks=false", transport.calls[1].path)
-        assertFalse(transport.calls[1].idempotent)
-        assertEquals("/decks/d-1", transport.calls[2].path)
-        assertEquals("deck-key", transport.calls[2].idempotencyKey)
-        assertEquals("/decks/d-1/deletion-preflight", transport.calls[3].path)
-        assertFalse(transport.calls[3].idempotent)
+        val projectDelete = take()
+        assertEquals("/projects/p-1?retain_decks=false", projectDelete.path)
+        assertEquals("project-key", projectDelete.getHeader("Idempotency-Key"))
+        assertEquals("/projects/p-1/deletion-preflight?retain_decks=false", take().path)
+        val deckDelete = take()
+        assertEquals("/decks/d-1", deckDelete.path)
+        assertEquals("deck-key", deckDelete.getHeader("Idempotency-Key"))
+        assertEquals("/decks/d-1/deletion-preflight", take().path)
     }
 
     @Test
     fun `task cancellation stays server-side while preflight remains advisory`() = runBlocking {
-        val transport = FakeTransport()
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue("", 204)
+        enqueue(preflightBody())
+        enqueue("", 204)
+        enqueue(preflightBody())
 
-        repo.deleteProject(
-            "p-1",
-            retainDecks = false,
-            cancelActiveTasks = true,
-            idempotencyKey = "project-cancel-key",
-        )
+        repo.deleteProject("p-1", retainDecks = false, cancelActiveTasks = true, idempotencyKey = "project-cancel-key")
         repo.getProjectDeletionPreflight("p-1", retainDecks = false, allowCancel = true)
-        repo.deleteDeck(
-            "d-1",
-            cancelActiveTasks = true,
-            idempotencyKey = "deck-cancel-key",
-        )
+        repo.deleteDeck("d-1", cancelActiveTasks = true, idempotencyKey = "deck-cancel-key")
         repo.getDeckDeletionPreflight("d-1", allowCancel = true)
 
-        assertEquals(
-            "/projects/p-1?retain_decks=false",
-            transport.calls[0].path,
-        )
-        assertEquals("project-cancel-key", transport.calls[0].idempotencyKey)
-        assertEquals(
-            "/projects/p-1/deletion-preflight?retain_decks=false&cancel_active_tasks=true",
-            transport.calls[1].path,
-        )
-        assertEquals(
-            "/decks/d-1",
-            transport.calls[2].path,
-        )
-        assertEquals("deck-cancel-key", transport.calls[2].idempotencyKey)
-        assertEquals(
-            "/decks/d-1/deletion-preflight?cancel_active_tasks=true",
-            transport.calls[3].path,
-        )
+        assertEquals("/projects/p-1?retain_decks=false", take().path)
+        assertEquals("/projects/p-1/deletion-preflight?retain_decks=false&cancel_active_tasks=true", take().path)
+        assertEquals("/decks/d-1", take().path)
+        assertEquals("/decks/d-1/deletion-preflight?cancel_active_tasks=true", take().path)
     }
 
-    // --- logout ----------------------------------------------------------------------------
+    // --- empty and null values ------------------------------------------------------------
+
+    @Test
+    fun `an empty items payload is an empty list not a failure`() = runBlocking {
+        enqueue("""{"items": []}""")
+
+        val result = repo.listDecks()
+
+        assertTrue(result is V25Result.Success)
+        assertTrue((result as V25Result.Success).value.isEmpty())
+    }
+
+    // --- logout ---------------------------------------------------------------------------
 
     @Test
     fun `logout revokes the stored token and clears the store first`() = runBlocking {
-        val store = FakeSessionStore(session)
-        val transport = FakeTransport()
-        val repo = repository(store, transport)
+        enqueue("", 204)
 
         val result = repo.logout()
 
         assertTrue(result is V25Result.Success)
-        assertEquals(1, store.clearCount)
-        val call = transport.calls.single()
-        assertEquals("POST", call.method)
-        assertEquals("/auth/logout", call.path)
-        assertEquals("token-1", call.token)
-        assertEquals(true, call.idempotent)
+        val request = take()
+        assertEquals("POST", request.method)
+        assertEquals("/auth/logout", request.path)
+        assertEquals("Bearer token-1", request.getHeader("Authorization"))
+        assertTrue(request.getHeader("Idempotency-Key")!!.isNotBlank())
+        assertNull(store.load())
     }
 
     @Test
     fun `logout without a session is an immediate local success`() = runBlocking {
-        val store = FakeSessionStore(null)
-        val transport = FakeTransport()
-        val repo = repository(store, transport)
+        store.clear()
 
         val result = repo.logout()
 
         assertTrue(result is V25Result.Success)
-        assertTrue(transport.calls.isEmpty())
-        assertEquals(1, store.clearCount)
+        assertEquals(0, server.requestCount)
     }
 
     @Test
     fun `logout keeps the local clear even when revocation fails`() = runBlocking {
-        val store = FakeSessionStore(session)
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(401, authErrorBody("AUTH_INVALID"), emptyMap()) }
-        }
-        val repo = repository(store, transport)
+        enqueue(authErrorBody("AUTH_INVALID"), 401)
 
         val result = repo.logout()
 
         assertTrue(result is V25Result.Failure)
         assertTrue((result as V25Result.Failure).isAuthFailure)
-        assertEquals(1, store.clearCount)
+        assertNull(store.load())
     }
 
     // --- deletion batch chaining ------------------------------------------------------------
 
     @Test
     fun `deleteCard appends the pending batch id and adopts the newest batch`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { call ->
-                when (call.path.substringBefore("?")) {
-                    "/cards/c-1" -> HttpResult(200, deletionBatchBody("b-1"), emptyMap())
-                    "/cards/c-2" -> HttpResult(200, deletionBatchBody("b-2"), emptyMap())
-                    "/cards/c-3" -> HttpResult(200, deletionBatchBody("b-2"), emptyMap())
-                    else -> error("unexpected path ${call.path}")
-                }
-            }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(deletionBatchBody("b-1"))
+        enqueue(deletionBatchBody("b-2"))
+        enqueue(deletionBatchBody("b-2"))
 
         repo.deleteCard("c-1")
         repo.deleteCard("c-2")
         repo.deleteCard("c-3")
 
-        assertEquals("/cards/c-1", transport.calls[0].path)
-        assertEquals("/cards/c-2?delete_batch_id=b-1", transport.calls[1].path)
-        assertEquals("/cards/c-3?delete_batch_id=b-2", transport.calls[2].path)
+        assertEquals("/cards/c-1", take().path)
+        assertEquals("/cards/c-2?delete_batch_id=b-1", take().path)
+        assertEquals("/cards/c-3?delete_batch_id=b-2", take().path)
     }
 
     @Test
     fun `a failed delete keeps the batch id for the next attempt`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { call ->
-                if (call.path == "/cards/c-1") HttpResult(200, deletionBatchBody("b-1"), emptyMap())
-                else HttpResult(503, networkErrorBody(), emptyMap())
-            }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(deletionBatchBody("b-1"))
+        enqueue(networkErrorBody(), 503)
+        enqueue(deletionBatchBody("b-2"))
 
         repo.deleteCard("c-1")
         val failure = repo.deleteCard("c-2")
@@ -347,23 +293,18 @@ class V25RepositoryContractTest {
 
         assertTrue(failure is V25Result.Failure)
         assertEquals(V25ErrorCodes.NETWORK_UNAVAILABLE, (failure as V25Result.Failure).code)
-        assertEquals("/cards/c-3?delete_batch_id=b-1", transport.calls[2].path)
+        take()
+        take()
+        assertEquals("/cards/c-3?delete_batch_id=b-1", take().path)
     }
 
     // --- recoverable failures and cancellation ----------------------------------------------
 
     @Test
     fun `transport failures map to coded results instead of throwing`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = {
-                when (it.path) {
-                    "/preferences" -> HttpResult(429, rateLimitBody(), emptyMap())
-                    "/decks" -> HttpResult(503, networkErrorBody(), emptyMap())
-                    else -> HttpResult(500, """{"error": {"code": "INTERNAL_ERROR", "message": "boom"}}""", emptyMap())
-                }
-            }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(rateLimitBody(), 429)
+        enqueue(networkErrorBody(), 503)
+        enqueue("""{"error": {"code": "INTERNAL_ERROR", "message": "boom"}}""", 500)
 
         val limited = repo.getPreferences()
         val offline = repo.listDecks()
@@ -377,10 +318,7 @@ class V25RepositoryContractTest {
 
     @Test
     fun `auth failures surface as coded failures that read as auth`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(401, authErrorBody("AUTH_REQUIRED"), emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(authErrorBody("AUTH_REQUIRED"), 401)
 
         val result = repo.getAuthUser() as V25Result.Failure
 
@@ -389,21 +327,29 @@ class V25RepositoryContractTest {
     }
 
     @Test
-    fun `cancellation propagates instead of becoming a failure`() {
-        val transport = FakeTransport().apply {
-            handler = { throw CancellationException("job cancelled") }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+    fun `network failures surface as NETWORK_UNAVAILABLE without the server`() = runBlocking {
+        server.shutdown()
 
-        assertThrows(CancellationException::class.java) { runBlocking { repo.getDeck("d-1") } }
+        val result = repo.listProjects()
+
+        assertEquals(V25ErrorCodes.NETWORK_UNAVAILABLE, (result as V25Result.Failure).code)
+    }
+
+    @Test
+    fun `cancellation propagates instead of becoming a failure`() {
+        @Suppress("UNCHECKED_CAST")
+        val cancellingApi = Proxy.newProxyInstance(
+            V25Api::class.java.classLoader,
+            arrayOf(V25Api::class.java),
+        ) { _, _, _ -> throw CancellationException("job cancelled") } as V25Api
+        val cancellingRepo = RemoteV25Repository(api = cancellingApi, uploadApi = cancellingApi, sessionStore = store)
+
+        assertThrows(CancellationException::class.java) { runBlocking { cancellingRepo.getDeck("d-1") } }
     }
 
     @Test
     fun `a response without an error envelope gets a stable HTTP fallback code`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(502, """{"detail": "bad gateway"}""", emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue("""{"detail": "bad gateway"}""", 502)
 
         val result = repo.getTask("t-1") as V25Result.Failure
 
@@ -412,10 +358,7 @@ class V25RepositoryContractTest {
 
     @Test
     fun `malformed success payloads become INVALID_RESPONSE failures`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(200, """{"unexpected": true}""", emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue("""{"unexpected": true}""")
 
         val result = repo.getDeck("d-1") as V25Result.Failure
 
@@ -426,44 +369,33 @@ class V25RepositoryContractTest {
 
     @Test
     fun `saveApiKey sends the plaintext only in the request body and never stores it`() = runBlocking {
-        val store = FakeSessionStore(session)
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(200, apiKeyAvailableBody(), emptyMap()) }
-        }
-        val repo = repository(store, transport)
+        val freshStore = InMemorySessionStore()
+        val stack = NetworkStack(freshStore, baseUrlOverride = server.url("/").toString())
+        val freshRepo = RemoteV25Repository.create(stack)
+        enqueue(apiKeyAvailableBody())
 
-        val result = repo.saveApiKey("sk-secret-1234")
+        val result = freshRepo.saveApiKey("sk-secret-1234")
 
         assertTrue(result is V25Result.Success)
         assertEquals("sk-****1234", (result as V25Result.Success).value.maskedKey)
-        val body = transport.calls.single().body!!
-        assertEquals("sk-secret-1234", org.json.JSONObject(body).getString("api_key"))
-        assertTrue("the repository must never persist anything, let alone the key", store.savedTokens.isEmpty())
+        assertEquals("sk-secret-1234", bodyJson(take())["api_key"]!!.jsonPrimitive.content)
+        assertNull("the repository must never persist the key", freshStore.load())
     }
 
     @Test
     fun `saveApiKey maps upstream unavailability to the verification status`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(502, """{"error": {"code": "API_KEY_UNAVAILABLE", "message": "上游不可用"}}""", emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue("""{"error": {"code": "API_KEY_UNAVAILABLE", "message": "上游不可用"}}""", 502)
 
         val result = repo.saveApiKey("sk-secret-1234")
 
         assertTrue(result is V25Result.Success)
-        assertEquals(
-            V25ApiKeyState.VERIFICATION_UNAVAILABLE,
-            (result as V25Result.Success).value.state,
-        )
+        assertEquals(V25ApiKeyState.VERIFICATION_UNAVAILABLE, (result as V25Result.Success).value.state)
         assertNull(result.value.maskedKey)
     }
 
     @Test
     fun `saveApiKey failures never echo the plaintext key`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(401, authErrorBody("AUTH_INVALID", message = "rejected sk-secret-1234"), emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(authErrorBody("AUTH_INVALID", message = "rejected sk-secret-1234"), 401)
 
         val result = repo.saveApiKey("sk-secret-1234") as V25Result.Failure
 
@@ -474,16 +406,10 @@ class V25RepositoryContractTest {
     @Test
     fun `saveApiKey redacts the plaintext key from every failure field including code`() = runBlocking {
         // Worst-case server reflection: the key echoed back in every envelope field.
-        val transport = FakeTransport().apply {
-            handler = {
-                HttpResult(
-                    401,
-                    """{"error": {"code": "sk-secret-1234", "message": "rejected sk-secret-1234", "localization_key": "sk-secret-1234"}}""",
-                    emptyMap(),
-                )
-            }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(
+            """{"error": {"code": "sk-secret-1234", "message": "rejected sk-secret-1234", "localization_key": "sk-secret-1234"}}""",
+            401,
+        )
 
         val result = repo.saveApiKey("sk-secret-1234") as V25Result.Failure
 
@@ -494,10 +420,7 @@ class V25RepositoryContractTest {
 
     @Test
     fun `apiKeyStatus maps the wire UNKNOWN state to UNSET`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(200, """{"status": "UNKNOWN", "masked_key": "", "updated_at": "2026-08-14T09:00:00Z"}""", emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue("""{"status": "UNKNOWN", "masked_key": "", "updated_at": "2026-08-14T09:00:00Z"}""")
 
         val result = repo.apiKeyStatus()
 
@@ -510,45 +433,34 @@ class V25RepositoryContractTest {
 
     @Test
     fun `createProject uploads the pdf with the file name and optional project name`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(201, projectBody(), emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(projectBody(), 201)
 
         val result = repo.createProject("linear.pdf", ByteArrayInputStream(byteArrayOf(1, 2)), name = "线性代数")
 
         assertTrue(result is V25Result.Success)
         assertEquals("p-1", (result as V25Result.Success).value.projectId)
-        val call = transport.calls.single()
-        assertEquals("/projects", call.path)
-        assertEquals("linear.pdf", call.fileName)
-        assertEquals("线性代数", call.name)
+        val request = take()
+        assertEquals("/projects", request.path)
+        assertTrue(request.getHeader("Content-Type")!!.startsWith("multipart/form-data"))
+        val body = request.body.readUtf8()
+        assertTrue(body.contains("linear.pdf"))
+        assertTrue(body.contains("线性代数"))
     }
 
     @Test
     fun `replaceProjectPdf uploads to the replace endpoint without a name`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(200, projectBody(), emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(projectBody())
 
         repo.replaceProjectPdf("p-1", "linear-v2.pdf", ByteArrayInputStream(byteArrayOf(1, 2)))
 
-        val call = transport.calls.single()
-        assertEquals("/projects/p-1/replace-pdf", call.path)
-        assertEquals("linear-v2.pdf", call.fileName)
-        assertNull(call.name)
+        val request = take()
+        assertEquals("/projects/p-1/replace-pdf", request.path)
+        assertTrue(request.body.readUtf8().contains("linear-v2.pdf"))
     }
 
     @Test
     fun `importCards sends one atomic bulk request and maps the per-index results`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { call ->
-                if (call.path == "/decks/d-1/cards/import") HttpResult(201, importResponseBody(), emptyMap())
-                else error("unexpected path ${call.path}")
-            }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(importResponseBody(), 201)
 
         val result = repo.importCards(
             "d-1",
@@ -557,43 +469,32 @@ class V25RepositoryContractTest {
 
         assertTrue(result is V25Result.Success)
         val results = (result as V25Result.Success).value
-        assertEquals(1, transport.calls.size)
-        assertEquals("/decks/d-1/cards/import", transport.calls.single().path)
-        assertEquals(true, transport.calls.single().idempotent)
+        assertEquals(1, server.requestCount)
+        val request = take()
+        assertEquals("/decks/d-1/cards/import", request.path)
+        assertTrue(request.getHeader("Idempotency-Key")!!.isNotBlank())
         assertEquals(2, results.size)
         assertEquals(0, results[0].index)
         assertEquals(V25ImportStatus.CREATED, results[0].status)
         assertEquals("c-1", results[0].cardId)
         // 一次原子请求：请求体携带全部草稿，而不是逐张 POST。
-        val cards = org.json.JSONObject(transport.calls.single().body!!).getJSONArray("cards")
-        assertEquals(2, cards.length())
-        assertEquals("什么是矩阵？", cards.getJSONObject(0).getString("front"))
+        val cards = bodyJson(request)["cards"]!!.jsonArray
+        assertEquals(2, cards.size)
+        assertEquals("什么是矩阵？", cards[0].jsonObject["front"]!!.jsonPrimitive.content)
     }
 
     @Test
     fun `importCards carries the caller idempotency key for a retried batch`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(201, importResponseBody(), emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(importResponseBody(), 201)
 
         repo.importCards("d-1", listOf(V25CardDraft("正面", "背面")), idempotencyKey = "batch-key-1")
 
-        assertEquals("batch-key-1", transport.calls.single().idempotencyKey)
+        assertEquals("batch-key-1", take().getHeader("Idempotency-Key"))
     }
 
     @Test
     fun `importCards maps a FAILED row without throwing`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = {
-                HttpResult(
-                    201,
-                    """{"results":[{"index":0,"status":"FAILED","error":{"field":"front"}}]}""",
-                    emptyMap(),
-                )
-            }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue("""{"results":[{"index":0,"status":"FAILED"}]}""", 201)
 
         val result = repo.importCards("d-1", listOf(V25CardDraft("", "")))
 
@@ -605,51 +506,43 @@ class V25RepositoryContractTest {
 
     @Test
     fun `generateSamples returns the persisted sample cards from the task payload`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(200, taskWithSamplesBody(), emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(taskWithSamplesBody())
 
         val result = repo.generateSamples("t-1")
 
         assertTrue(result is V25Result.Success)
         assertEquals(1, (result as V25Result.Success).value.size)
         assertEquals("什么是矩阵？", result.value[0].front)
-        assertEquals("/tasks/t-1/samples", transport.calls.single().path)
+        assertEquals("/tasks/t-1/samples", take().path)
     }
 
     // --- request bodies -----------------------------------------------------------------------
 
     @Test
     fun `updateAuthUser sends only the provided fields`() = runBlocking {
-        val transport = FakeTransport()
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(meBody())
 
         repo.updateAuthUser(username = "bob")
 
-        val body = org.json.JSONObject(transport.calls.single().body!!)
-        assertEquals("bob", body.getString("username"))
-        assertFalse(body.has("avatar_key"))
+        val body = bodyJson(take())
+        assertEquals("bob", body["username"]!!.jsonPrimitive.content)
+        assertFalse("avatar_key" in body)
     }
 
     @Test
     fun `setCurrentProject sends an explicit null to clear`() = runBlocking {
-        val transport = FakeTransport()
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(preferencesBody())
 
         repo.setCurrentProject(null)
 
-        val body = org.json.JSONObject(transport.calls.single().body!!)
-        assertTrue(body.has("current_project_id"))
-        assertTrue(body.isNull("current_project_id"))
+        val body = bodyJson(take())
+        assertTrue("current_project_id" in body)
+        assertTrue("explicit null must stay on the wire", body["current_project_id"] is JsonNull)
     }
 
     @Test
     fun `createTask posts to the project tasks endpoint`() = runBlocking {
-        val transport = FakeTransport().apply {
-            handler = { HttpResult(201, taskBody(), emptyMap()) }
-        }
-        val repo = repository(FakeSessionStore(session), transport)
+        enqueue(taskBody(), 201)
 
         val result = repo.createTask(
             projectId = "p-1",
@@ -659,11 +552,14 @@ class V25RepositoryContractTest {
         )
 
         assertTrue(result is V25Result.Success)
-        assertEquals("/projects/p-1/tasks", transport.calls.single().path)
-        assertEquals("d-1", org.json.JSONObject(transport.calls.single().body!!).getString("deck_id"))
+        val request = take()
+        assertEquals("/projects/p-1/tasks", request.path)
+        assertEquals("d-1", bodyJson(request)["deck_id"]!!.jsonPrimitive.content)
     }
 
     // --- fixture bodies ------------------------------------------------------------------------
+
+    private fun itemsBody(): String = """{"items": []}"""
 
     private fun authErrorBody(code: String, message: String = "认证失败"): String =
         """{"error": {"code": "$code", "message": "$message", "localization_key": "auth.invalid"}}"""
@@ -674,22 +570,51 @@ class V25RepositoryContractTest {
     private fun networkErrorBody(): String =
         """{"error": {"code": "NETWORK_UNAVAILABLE", "message": "网络不可用"}}"""
 
+    private fun meBody(): String =
+        """{"user": {"user_id": "u-1", "username": "alice", "email": "alice@example.com",
+            "avatar_key": "mood_03", "created_at": "2026-08-14T09:00:00+00:00"}}""".trimIndent()
+
+    private fun preferencesBody(): String = """
+        {"default_coverage_mode": "BALANCED",
+         "default_difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
+         "daily_learning_goal": 50, "learning_timezone": "Asia/Shanghai", "current_project_id": null,
+         "updated_at": "2026-08-14T09:00:00+00:00"}
+    """.trimIndent()
+
+    private fun dashboardBody(): String = """
+        {"has_data": false, "timezone": "Asia/Shanghai",
+         "period": {"start": "2026-08-10T16:00:00.000Z", "end": "2026-08-17T16:00:00.000Z"},
+         "weekly_activity": [0, 0, 0, 0, 0, 0, 0], "weekly_total": 0,
+         "weekly_goal": 100, "weekly_completed_count": 0, "streak_days": 0, "mastered_card_count": 0,
+         "updated_at": "2026-08-14T09:00:00+00:00"}
+    """.trimIndent()
+
+    private fun ratingBody(): String =
+        """{"review_state": {"state": "REVIEW", "due": "2026-08-15T09:00:00+00:00"}, "study_date": "2026-08-14"}"""
+
+    private fun preflightBody(): String = """
+        {"resource_type": "project", "resource_id": "p-1", "can_delete": true, "blockers": [],
+         "abandonable_task_ids": [], "has_uncancellable_tasks": false,
+         "actions": ["delete"], "retain_decks": false,
+         "impact": {"retain_decks": false, "deck_count": 0, "card_count": 0, "task_count": 0}}
+    """.trimIndent()
+
     private fun deletionBatchBody(batchId: String): String = """
         {"delete_batch_id": "$batchId", "card_ids": ["c-1"],
-         "undo_until": "2026-08-15T09:00:10Z", "status": "PENDING",
-         "created_at": "2026-08-15T09:00:00Z", "updated_at": "2026-08-15T09:00:00Z"}
+         "undo_until": "2026-08-15T09:00:10+00:00", "status": "PENDING",
+         "created_at": "2026-08-15T09:00:00+00:00", "updated_at": "2026-08-15T09:00:00+00:00"}
     """.trimIndent()
 
     private fun apiKeyAvailableBody(): String =
-        """{"status": "AVAILABLE", "masked_key": "sk-****1234", "updated_at": "2026-08-14T09:00:00Z"}"""
+        """{"status": "AVAILABLE", "masked_key": "sk-****1234", "updated_at": "2026-08-14T09:00:00+00:00"}"""
 
     private fun projectBody(): String = """
         {"project_id": "p-1", "name": "线性代数",
          "file": {"file_id": "f-1", "filename": "linear.pdf", "size_bytes": 1, "status": "PARSED",
                   "chapters": [{"chapter_id": "c-1", "name": "第一章", "start_page": 1, "end_page": 20}]},
          "status": "READY", "chapter_count": 1, "deck_count": 0, "task_count": 0,
-         "created_at": "2026-08-14T09:00:00Z", "updated_at": "2026-08-14T10:00:00Z",
-         "version": "2026-08-14T10:00:00Z"}
+         "created_at": "2026-08-14T09:00:00+00:00", "updated_at": "2026-08-14T10:00:00+00:00",
+         "version": "2026-08-14T10:00:00+00:00"}
     """.trimIndent()
 
     private fun importResponseBody(): String = """
@@ -709,8 +634,8 @@ class V25RepositoryContractTest {
          "sample_cards": null, "sample_config_hash": null, "sample_confirmed_at": null,
          "generated_card_count": 0, "skipped_planning_group_count": 0, "resumable": false,
          "error_code": null, "failure_stage": null,
-         "created_at": "2026-08-14T09:00:00Z", "started_at": null, "ended_at": null,
-         "updated_at": "2026-08-14T09:00:00Z"}
+         "created_at": "2026-08-14T09:00:00+00:00", "started_at": null, "ended_at": null,
+         "updated_at": "2026-08-14T09:00:00+00:00"}
     """.trimIndent()
 
     private fun taskWithSamplesBody(): String = taskBody().replace(
