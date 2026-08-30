@@ -12,6 +12,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.CardDraft
 import com.qiuzhao.flashcards.data.remote.ApiKeyStatus
+import com.qiuzhao.flashcards.data.remote.AuthApi
 import com.qiuzhao.flashcards.data.remote.AuthRepository
 import com.qiuzhao.flashcards.data.remote.DeckProgress
 import com.qiuzhao.flashcards.data.remote.DeckSummary
@@ -19,8 +20,9 @@ import com.qiuzhao.flashcards.data.remote.FlashcardEntity
 import com.qiuzhao.flashcards.data.remote.PdfChapter
 import com.qiuzhao.flashcards.data.remote.PdfFile
 import com.qiuzhao.flashcards.data.remote.Rating
-import com.qiuzhao.flashcards.data.remote.RemoteFlashcardRepository
-import com.qiuzhao.flashcards.data.remote.v25.BackendV25Transport
+import com.qiuzhao.flashcards.data.remote.RemoteAuthRepository
+import com.qiuzhao.flashcards.data.remote.http.NetworkEvidence
+import com.qiuzhao.flashcards.data.remote.http.NetworkStack
 import com.qiuzhao.flashcards.data.remote.v25.RemoteV25Repository
 import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
 import com.qiuzhao.flashcards.data.session.SessionStore
@@ -235,21 +237,21 @@ class AppViewModel(
     private val sessionStore: SessionStore,
     /** Kept as `repository` for the existing auth-injection test seam; used only for auth. */
     private val repository: AuthRepository,
-    private val v25Repository: V25Repository = RemoteV25Repository.create(application),
+    v25Repository: V25Repository = RemoteV25Repository.create(
+        NetworkStack(sessionStore, evidence = NetworkEvidence(application)),
+    ),
 ) : AndroidViewModel(application) {
+    private val v25Repository: V25Repository = v25Repository
     companion object {
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY]!!
                 val store = KeystoreSessionStore(app)
-                val authRepository = RemoteFlashcardRepository(app, sessionStore = store)
-                val v25Repository = RemoteV25Repository(
-                    store,
-                    BackendV25Transport(
-                        com.qiuzhao.flashcards.data.remote.BackendClient(app, sessionStore = store),
-                        store,
-                    ),
-                )
+                // One shared OkHttp stack (pool, dispatcher, bearer session, 429 policy, evidence)
+                // serves both the auth surface and the V2.5 repository.
+                val stack = NetworkStack(store, evidence = NetworkEvidence(app))
+                val authRepository = RemoteAuthRepository(stack.retrofit().create(AuthApi::class.java), store)
+                val v25Repository = RemoteV25Repository.create(stack)
                 AppViewModel(app, store, authRepository, v25Repository)
             }
         }

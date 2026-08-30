@@ -1,9 +1,6 @@
 package com.qiuzhao.flashcards.data.remote.v25
 
-import android.content.Context
-import com.qiuzhao.flashcards.data.remote.BackendClient
-import com.qiuzhao.flashcards.data.remote.HttpResult
-import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
+import com.qiuzhao.flashcards.data.remote.http.ErrorEnvelope
 import com.qiuzhao.flashcards.data.session.SessionStore
 import com.qiuzhao.flashcards.data.session.loadQuietly
 import com.qiuzhao.flashcards.domain.v25.V25ApiKeyState
@@ -42,17 +39,24 @@ import com.qiuzhao.flashcards.domain.v25.V25TaskConfigPatch
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.domain.v25.V25TodayPlan
 import com.qiuzhao.flashcards.domain.v25.V25UserPreferences
+import java.io.IOException
 import java.io.InputStream
-import org.json.JSONObject
+import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.SerializationException
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import retrofit2.HttpException
 
 private const val REDACTED = "[REDACTED]"
 
 /**
  * The remote implementation of [V25Repository] (Architecture §8 `data/remote/v25`): every
- * method maps to exactly one endpoint of the committed OpenAPI contract, and every payload
- * or error becomes a typed [V25Result] — the visual lane never sees a DTO, HTTP status or
- * JSON object. It reuses the existing bearer-session and Idempotency-Key mechanisms through
- * [V25Transport] / [BackendClient] unchanged.
+ * method maps to exactly one typed endpoint of [V25Api], and every payload or error becomes a
+ * typed [V25Result] — the visual lane never sees a DTO, HTTP status or JSON object. Transport
+ * concerns (bearer session, connection reuse, 429 Retry-After with the caller's fixed
+ * Idempotency-Key, evidence) live in the shared OkHttp stack, not here.
  *
  * Task 1 adjudication bindings honored here:
  * - [saveApiKey] receives the plaintext key (the upload flow requires it); the key travels
@@ -60,45 +64,38 @@ private const val REDACTED = "[REDACTED]"
  *   any failure text before it crosses the boundary.
  * - [logout] has no token parameter: the implementation reads the stored session, clears it
  *   local-first, then revokes that explicit token server-side.
- * - `V25Deck.masteryRatio` is nullable; a missing wire ratio maps to null.
- *
- * Known mapping decisions (see V25Dtos.kt):
- * - The wire `version` is a string (`v\d+` or an ISO timestamp); the domain models it as an
- *   Int marker for cache-refresh change detection only.
- * - `V25StatsDashboard.progress` has no wire source yet (V25-STATS-FR-05 is not part of the
- *   StatsDashboard resource); it maps to the honest empty list.
- * - `V25PlanCard.isNew` is derived server-side semantics: `review_state.state == "NEW"`.
+ * - Every write without an explicit caller key generates one fresh key per invocation; a
+ *   retried user operation passes its own key so the replay is identical on the wire.
  */
-class RemoteV25Repository(
+class RemoteV25Repository internal constructor(
+    private val api: V25Api,
+    /** Multipart uploads use the 60s-read-timeout client; JSON calls share the default one. */
+    private val uploadApi: V25Api = api,
+    /** The bearer-session source for the local-first logout path. */
     private val sessionStore: SessionStore,
-    private val transport: V25Transport,
 ) : V25Repository {
 
     companion object {
-        /** Production wiring: one shared session store for the client and the multipart transport. */
-        fun create(context: Context): RemoteV25Repository {
-            val sessionStore = KeystoreSessionStore(context)
-            return RemoteV25Repository(
-                sessionStore,
-                BackendV25Transport(BackendClient(context, sessionStore = sessionStore), sessionStore),
+        /** Production wiring: one shared network stack, two Retrofit proxies of the same API. */
+        fun create(stack: com.qiuzhao.flashcards.data.remote.http.NetworkStack): RemoteV25Repository =
+            RemoteV25Repository(
+                api = stack.retrofit().create(V25Api::class.java),
+                uploadApi = stack.retrofit(stack.uploadClient).create(V25Api::class.java),
+                sessionStore = stack.sessionStore,
             )
-        }
     }
 
     // --- account profile (Architecture 4.1, V25-ACC) ------------------------------------------
 
     override suspend fun getAuthUser(): V25Result<V25AuthUser> =
-        call("get_auth_user", "GET", "/auth/me", idempotent = false) { value ->
-            parseAuthUser(requiredObject(value, "user"))
-        }
+        wire { api.getAuthUser().user.toDomain() }
 
     override suspend fun updateAuthUser(
         username: String?,
         avatarKey: V25AvatarKey?,
-    ): V25Result<V25AuthUser> =
-        call("update_auth_user", "PATCH", "/auth/me", authMeUpdateBody(username, avatarKey)) { value ->
-            parseAuthUser(requiredObject(value, "user"))
-        }
+    ): V25Result<V25AuthUser> = wire {
+        api.updateAuthUser(AuthMeUpdateRequest(username, avatarKey?.name), newKey()).user.toDomain()
+    }
 
     /**
      * Local-first logout: the stored session is cleared before the server call, and the
@@ -109,20 +106,19 @@ class RemoteV25Repository(
         val token = sessionStore.loadQuietly()?.token
         sessionStore.clear()
         if (token == null) return V25Result.Success(Unit)
-        val result = transport.request("logout", "POST", "/auth/logout", token = token)
-        return if (result.status in 200..299) V25Result.Success(Unit) else result.toFailure()
+        return wire { api.logout("Bearer $token", newKey()) }
     }
 
     // --- preferences (Architecture 4.1, V25-SET) ----------------------------------------------
 
     override suspend fun getPreferences(): V25Result<V25UserPreferences> =
-        call("get_preferences", "GET", "/preferences", idempotent = false, map = ::parseUserPreferences)
+        wire { api.getPreferences().toDomain() }
 
     override suspend fun updatePreferences(patch: V25PreferencesPatch): V25Result<V25UserPreferences> =
-        call("update_preferences", "PATCH", "/preferences", preferencesPatchBody(patch), map = ::parseUserPreferences)
+        wire { api.updatePreferences(patch.toWire(), newKey()).toDomain() }
 
     override suspend fun setCurrentProject(projectId: String?): V25Result<V25UserPreferences> =
-        call("set_current_project", "PATCH", "/preferences", setCurrentProjectBody(projectId), map = ::parseUserPreferences)
+        wire { api.setCurrentProject(SetCurrentProjectRequest(projectId), newKey()).toDomain() }
 
     // --- learning projects and chapters (Architecture 4.2) -------------------------------------
 
@@ -131,32 +127,28 @@ class RemoteV25Repository(
         content: InputStream,
         name: String?,
         idempotencyKey: String?,
-    ): V25Result<V25LearningProject> =
-        upload("create_project", "/projects", fileName, content, name, idempotencyKey, map = ::parseLearningProject)
+    ): V25Result<V25LearningProject> = wire {
+        uploadApi.createProject(
+            idempotencyKey = idempotencyKey ?: newKey(),
+            file = pdfPart(fileName, content),
+            name = name?.toPlainPart(),
+        ).toDomain()
+    }
 
     override suspend fun listProjects(): V25Result<List<V25LearningProject>> =
-        call("list_projects", "GET", "/projects", idempotent = false) { value ->
-            requiredArray(value, "items").map(::parseLearningProject)
-        }
+        wire { api.listProjects().items.map { it.toDomain() } }
 
     override suspend fun getProject(projectId: String): V25Result<V25LearningProject> =
-        call("get_project", "GET", "/projects/$projectId", idempotent = false, map = ::parseLearningProject)
+        wire { api.getProject(projectId).toDomain() }
 
     override suspend fun projectProgress(projectId: String): V25Result<V25ProgressSummary> =
-        call(
-            "project_progress",
-            "GET",
-            "/projects/$projectId/progress",
-            idempotent = false,
-        ) { value ->
-            parseProgressSummary(value, scopeId = projectId, isProject = true)
-        }
+        wire { api.projectProgress(projectId).toDomain(scopeId = projectId, scopeName = "", isProject = true) }
 
     override suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject> =
-        call("rename_project", "PATCH", "/projects/$projectId", renameBody(name), map = ::parseLearningProject)
+        wire { api.renameProject(projectId, RenameRequest(name), newKey()).toDomain() }
 
     override suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit> =
-        call("delete_project", "DELETE", "/projects/$projectId?retain_decks=$retainDecks") { Unit }
+        wire { api.deleteProject(projectId, retainDecks, newKey()) }
 
     override suspend fun deleteProject(
         projectId: String,
@@ -164,66 +156,59 @@ class RemoteV25Repository(
         abandonPreGenerationTasks: Boolean,
         idempotencyKey: String?,
         cancelActiveTasks: Boolean,
-    ): V25Result<Unit> = call(
-        "delete_project",
-        "DELETE",
-        "/projects/$projectId?retain_decks=$retainDecks",
-        idempotencyKey = idempotencyKey,
-    ) { Unit }
+    ): V25Result<Unit> = wire { api.deleteProject(projectId, retainDecks, idempotencyKey ?: newKey()) }
 
     override suspend fun getProjectDeletionPreflight(
         projectId: String,
         retainDecks: Boolean,
         allowCancel: Boolean,
-    ): V25Result<V25DeletionPreflight> = call(
-        "project_deletion_preflight",
-        "GET",
-        queryPath(
-            "/projects/$projectId/deletion-preflight",
-            "retain_decks" to if (retainDecks) null else "false",
-            "cancel_active_tasks" to if (allowCancel) "true" else null,
-        ),
-        idempotent = false,
-        map = ::parseDeletionPreflight,
-    )
+    ): V25Result<V25DeletionPreflight> = wire {
+        api.projectDeletionPreflight(
+            projectId,
+            retainDecks = if (retainDecks) null else false,
+            cancelActiveTasks = if (allowCancel) true else null,
+        ).toDomain()
+    }
 
     override suspend fun replaceProjectPdf(
         projectId: String,
         fileName: String,
         content: InputStream,
         idempotencyKey: String?,
-    ): V25Result<V25LearningProject> =
-        upload("replace_project_pdf", "/projects/$projectId/replace-pdf", fileName, content, name = null, idempotencyKey = idempotencyKey, map = ::parseLearningProject)
+    ): V25Result<V25LearningProject> = wire {
+        uploadApi.replaceProjectPdf(projectId, idempotencyKey ?: newKey(), pdfPart(fileName, content)).toDomain()
+    }
 
     override suspend fun updateChapter(
         projectId: String,
         chapterId: String,
         edit: V25ChapterEdit,
-    ): V25Result<V25Chapter> =
-        call("update_chapter", "PATCH", "/projects/$projectId/chapters/$chapterId", chapterEditBody(edit), map = ::parseChapter)
+    ): V25Result<V25Chapter> = wire {
+        api.updateChapter(projectId, chapterId, ChapterEditRequest(edit.name, edit.startPage, edit.endPage), newKey()).toDomain()
+    }
 
     override suspend fun deleteChapter(
         projectId: String,
         chapterId: String,
         deleteCards: Boolean,
-    ): V25Result<Unit> =
-        call("delete_chapter", "DELETE", "/projects/$projectId/chapters/$chapterId" + if (deleteCards) "?delete_cards=true" else "") { Unit }
+    ): V25Result<Unit> = wire { api.deleteChapter(projectId, chapterId, if (deleteCards) true else null, newKey()) }
 
     override suspend fun confirmChapters(projectId: String): V25Result<V25LearningProject> =
-        call("confirm_chapters", "POST", "/projects/$projectId/confirm-chapters", map = ::parseLearningProject)
+        wire { api.confirmChapters(projectId, newKey()).toDomain() }
 
     override suspend fun getStudySettings(projectId: String): V25Result<V25ProjectStudySettings> =
-        call("get_study_settings", "GET", "/projects/$projectId/study-settings", idempotent = false) { value ->
-            parseStudySettings(projectId, value)
-        }
+        wire { api.getStudySettings(projectId).toDomain(projectId) }
 
     override suspend fun updateStudySettings(
         projectId: String,
         patch: V25StudySettingsPatch,
-    ): V25Result<V25ProjectStudySettings> =
-        call("update_study_settings", "PATCH", "/projects/$projectId/study-settings", studySettingsPatchBody(patch)) { value ->
-            parseStudySettings(projectId, value)
-        }
+    ): V25Result<V25ProjectStudySettings> = wire {
+        api.updateStudySettings(
+            projectId,
+            StudySettingsPatchRequest(patch.selectedNewCardChapterIds, patch.includeUnassigned),
+            newKey(),
+        ).toDomain(projectId)
+    }
 
     // --- generation tasks (Architecture 4.3) ---------------------------------------------------
 
@@ -232,105 +217,84 @@ class RemoteV25Repository(
         deckId: String,
         chapterIds: List<String>,
         config: V25GenerationConfig,
-    ): V25Result<V25GenerationTask> =
-        call("create_task", "POST", "/projects/$projectId/tasks", taskCreateBody(deckId, chapterIds, config), map = ::parseGenerationTask)
+    ): V25Result<V25GenerationTask> = wire {
+        api.createTask(projectId, TaskCreateRequest(deckId, chapterIds, config.toWire()), newKey()).toDomain()
+    }
 
     override suspend fun listTasks(
         projectId: String?,
         status: V25TaskStatus?,
-    ): V25Result<List<V25GenerationTask>> =
-        call("list_tasks", "GET", queryPath("/tasks", "project_id" to projectId, "status" to status?.name), idempotent = false) { value ->
-            requiredArray(value, "items").map(::parseGenerationTask)
-        }
+    ): V25Result<List<V25GenerationTask>> = wire {
+        api.listTasks(projectId, status?.name).items.map { it.toDomain() }
+    }
 
     override suspend fun getTask(taskId: String): V25Result<V25GenerationTask> =
-        call("get_task", "GET", "/tasks/$taskId", idempotent = false, map = ::parseGenerationTask)
+        wire { api.getTask(taskId).toDomain() }
 
     override suspend fun updateTaskConfig(
         taskId: String,
         patch: V25TaskConfigPatch,
-    ): V25Result<V25GenerationTask> =
-        call("update_task", "PATCH", "/tasks/$taskId", taskConfigPatchBody(patch), map = ::parseGenerationTask)
+    ): V25Result<V25GenerationTask> = wire { api.updateTaskConfig(taskId, patch.toWire(), newKey()).toDomain() }
 
     /** The samples endpoint returns the updated task; its persisted sample cards are the payload. */
     override suspend fun generateSamples(taskId: String): V25Result<List<V25SampleCard>> =
-        call("generate_samples", "POST", "/tasks/$taskId/samples", map = ::parseGenerationTask)
-            .mapSuccess { it.sampleCards }
+        wire { api.generateSamples(taskId, newKey()).toDomain().sampleCards }
 
     override suspend fun startTask(taskId: String): V25Result<V25GenerationTask> =
-        call("start_task", "POST", "/tasks/$taskId/start", map = ::parseGenerationTask)
+        wire { api.startTask(taskId, newKey()).toDomain() }
 
     override suspend fun abandonTask(taskId: String): V25Result<V25GenerationTask> =
-        call("abandon_task", "POST", "/tasks/$taskId/abandon", map = ::parseGenerationTask)
+        wire { api.abandonTask(taskId, newKey()).toDomain() }
 
     override suspend fun retryTask(taskId: String): V25Result<V25GenerationTask> =
-        call("retry_task", "POST", "/tasks/$taskId/retry", map = ::parseGenerationTask)
+        wire { api.retryTask(taskId, newKey()).toDomain() }
 
     override suspend fun deleteTask(taskId: String, deleteGeneratedCards: Boolean): V25Result<Unit> =
-        call("delete_task", "DELETE", "/tasks/$taskId" + if (deleteGeneratedCards) "?delete_generated_cards=true" else "") { Unit }
+        wire { api.deleteTask(taskId, if (deleteGeneratedCards) true else null, newKey()) }
 
     // --- decks and cards (Architecture 4.4) -----------------------------------------------------
 
     override suspend fun listDecks(projectId: String?): V25Result<List<V25Deck>> =
-        call("list_decks", "GET", queryPath("/decks", "project_id" to projectId), idempotent = false) { value ->
-            requiredArray(value, "items").map(::parseDeck)
-        }
+        wire { api.listDecks(projectId).items.map { it.toDomain() } }
 
     override suspend fun createDeck(name: String, projectId: String?, idempotencyKey: String?): V25Result<V25Deck> =
-        call("create_deck", "POST", "/decks", createDeckBody(name, projectId), idempotencyKey = idempotencyKey, map = ::parseDeck)
+        wire { api.createDeck(CreateDeckRequest(name, projectId), idempotencyKey ?: newKey()).toDomain() }
 
     override suspend fun getDeck(deckId: String): V25Result<V25Deck> =
-        call("get_deck", "GET", "/decks/$deckId", idempotent = false, map = ::parseDeck)
+        wire { api.getDeck(deckId).toDomain() }
 
     override suspend fun attachDeckToProject(
         projectId: String,
         deckId: String,
         idempotencyKey: String?,
-    ): V25Result<V25Deck> =
-        call(
-            "attach_deck_to_project",
-            "POST",
-            "/projects/$projectId/decks/$deckId/attach",
-            idempotencyKey = idempotencyKey,
-            map = ::parseDeck,
-        )
+    ): V25Result<V25Deck> = wire {
+        api.attachDeckToProject(projectId, deckId, idempotencyKey ?: newKey()).toDomain()
+    }
 
     override suspend fun renameDeck(deckId: String, name: String): V25Result<V25Deck> =
-        call("rename_deck", "PATCH", "/decks/$deckId", renameBody(name), map = ::parseDeck)
+        wire { api.renameDeck(deckId, RenameRequest(name), newKey()).toDomain() }
 
     override suspend fun deleteDeck(deckId: String): V25Result<Unit> =
-        call("delete_deck", "DELETE", "/decks/$deckId") { Unit }
+        wire { api.deleteDeck(deckId, newKey()) }
 
     override suspend fun deleteDeck(
         deckId: String,
         abandonPreGenerationTasks: Boolean,
         idempotencyKey: String?,
         cancelActiveTasks: Boolean,
-    ): V25Result<Unit> = call(
-        "delete_deck",
-        "DELETE",
-        "/decks/$deckId",
-        idempotencyKey = idempotencyKey,
-    ) { Unit }
+    ): V25Result<Unit> = wire { api.deleteDeck(deckId, idempotencyKey ?: newKey()) }
 
     override suspend fun getDeckDeletionPreflight(
         deckId: String,
         allowCancel: Boolean,
-    ): V25Result<V25DeletionPreflight> =
-        call(
-            "deck_deletion_preflight",
-            "GET",
-            queryPath(
-                "/decks/$deckId/deletion-preflight",
-                "cancel_active_tasks" to if (allowCancel) "true" else null,
-            ),
-            idempotent = false,
-            map = ::parseDeletionPreflight,
-        )
+    ): V25Result<V25DeletionPreflight> = wire {
+        api.deckDeletionPreflight(deckId, cancelActiveTasks = if (allowCancel) true else null).toDomain()
+    }
 
     override suspend fun listCards(deckId: String, filter: V25BrowseFilter): V25Result<List<V25Card>> =
-        call("list_cards", "GET", "/decks/$deckId/cards" + browseCardsQuery(filter), idempotent = false) { value ->
-            requiredArray(value, "items").map(::parseCard)
+        wire {
+            api.listCards(deckId, filter.order.name, filter.contentDifficulty?.name, filter.mastery.name)
+                .items.map { it.toCard() }
         }
 
     /**
@@ -339,11 +303,20 @@ class RemoteV25Repository(
      * replays as the original result — a network retry can never create a second copy of a
      * partial batch (the legacy per-card loop could).
      */
-    override suspend fun importCards(deckId: String, drafts: List<V25CardDraft>, idempotencyKey: String?): V25Result<List<V25ImportResult>> =
-        call("import_cards", "POST", "/decks/$deckId/cards/import", cardsImportBody(drafts), idempotencyKey = idempotencyKey, map = ::parseImportResponse)
+    override suspend fun importCards(
+        deckId: String,
+        drafts: List<V25CardDraft>,
+        idempotencyKey: String?,
+    ): V25Result<List<V25ImportResult>> = wire {
+        api.importCards(
+            deckId,
+            CardsImportRequest(drafts.map { CardDraftDto(it.front, it.back) }),
+            idempotencyKey ?: newKey(),
+        ).results.map { it.toDomain() }
+    }
 
     override suspend fun updateCard(cardId: String, front: String, back: String): V25Result<V25Card> =
-        call("update_card", "PATCH", "/cards/$cardId", cardDraftBody(front, back), map = ::parseCard)
+        wire { api.updateCard(cardId, CardPatchRequest(front, back), newKey()).toCard() }
 
     /**
      * The delete_batch_id of the last successful deletion is remembered and appended to the
@@ -352,91 +325,78 @@ class RemoteV25Repository(
      * next successful attempt still joins the same still-pending batch.
      */
     override suspend fun deleteCard(cardId: String): V25Result<V25CardDeletionBatch> {
-        val path = lastDeleteBatchId?.let { "/cards/$cardId?delete_batch_id=$it" } ?: "/cards/$cardId"
-        return call("delete_card", "DELETE", path, map = ::parseDeletionBatch)
-            .also { if (it is V25Result.Success) lastDeleteBatchId = it.value.deleteBatchId }
+        val result = wire { api.deleteCard(cardId, lastDeleteBatchId, newKey()).toDomain() }
+        if (result is V25Result.Success) lastDeleteBatchId = result.value.deleteBatchId
+        return result
     }
 
     // --- deletion undo (Architecture 4.4 / 3.7) --------------------------------------------------
 
     override suspend fun pendingDeletionBatches(): V25Result<List<V25CardDeletionBatch>> =
-        call("pending_deletion_batches", "GET", "/card-deletion-batches/pending", idempotent = false) { value ->
-            requiredArray(value, "items").map(::parseDeletionBatch)
-        }
+        wire { api.pendingDeletionBatches().items.map { it.toDomain() } }
 
     override suspend fun undoDeletionBatch(deleteBatchId: String): V25Result<Unit> =
-        call("undo_deletion_batch", "POST", "/card-deletion-batches/$deleteBatchId/undo") { Unit }
+        wire { api.undoDeletionBatch(deleteBatchId, newKey()) }
 
     // --- AI rewrite previews (Architecture 4.4 / 3.8) --------------------------------------------
 
     override suspend fun createRewritePreview(
         cardId: String,
         customRequirements: String?,
-    ): V25Result<V25CardRewritePreview> =
-        call("create_rewrite_preview", "POST", "/cards/$cardId/rewrite-previews", rewritePreviewBody(customRequirements), map = ::parseRewritePreview)
+    ): V25Result<V25CardRewritePreview> = wire {
+        api.createRewritePreview(cardId, RewritePreviewRequest(customRequirements), newKey()).toDomain()
+    }
 
     override suspend fun applyRewritePreview(cardId: String, rewriteId: String): V25Result<V25Card> =
-        call("apply_rewrite_preview", "POST", "/cards/$cardId/rewrite-previews/$rewriteId/apply", map = ::parseCard)
+        wire { api.applyRewritePreview(cardId, rewriteId, newKey()).toCard() }
 
     override suspend fun cancelRewritePreview(cardId: String, rewriteId: String): V25Result<Unit> =
-        call("cancel_rewrite_preview", "DELETE", "/cards/$cardId/rewrite-previews/$rewriteId") { Unit }
+        wire { api.cancelRewritePreview(cardId, rewriteId, newKey()) }
 
     // --- study and review (Architecture 4.5) ------------------------------------------------------
 
     override suspend fun getStudyPlan(): V25Result<V25StudyPlan> =
-        call("get_study_plan", "GET", "/study/plan", idempotent = false, map = ::parseStudyPlan)
+        wire { api.getStudyPlan().toDomain() }
 
     override suspend fun updateStudyPlan(
         plan: V25StudyPlanUpdate,
         idempotencyKey: String?,
-    ): V25Result<V25StudyPlan> =
-        call(
-            "update_study_plan",
-            "PUT",
-            "/study/plan",
-            studyPlanBody(plan),
-            idempotencyKey = idempotencyKey,
-            map = ::parseStudyPlan,
-        )
+    ): V25Result<V25StudyPlan> = wire { api.updateStudyPlan(plan.toWire(), idempotencyKey ?: newKey()).toDomain() }
 
     override suspend fun todayPlan(): V25Result<V25TodayPlan> =
-        call("today_plan", "GET", "/study/today", idempotent = false, map = ::parseTodayPlan)
+        wire { api.todayPlan().toDomain() }
 
     override suspend fun studyPlanBacklog(
         offset: Int,
         limit: Int,
-    ): V25Result<List<V25PlanCard>> =
-        call(
-            "study_plan_backlog",
-            "GET",
-            queryPath("/study/today/backlog", "offset" to offset.toString(), "limit" to limit.toString()),
-            idempotent = false,
-        ) { value ->
-            requiredArray(value, "items").map(::parsePlanCard)
-        }
+    ): V25Result<List<V25PlanCard>> = wire { api.studyPlanBacklog(offset, limit).items.map { it.toPlanCard() } }
 
     override suspend fun deckReviewQueue(deckId: String): V25Result<List<V25ReviewCard>> =
-        call("review_queue", "GET", "/decks/$deckId/review", idempotent = false) { value ->
-            requiredArray(value, "items").map(::parseReviewCard)
-        }
+        wire { api.deckReviewQueue(deckId).items.map { it.toReviewCard() } }
 
     override suspend fun rateCard(
         cardId: String,
         rating: V25Rating,
         clientEventId: String?,
         idempotencyKey: String?,
-    ): V25Result<V25RatingResult> =
-        call("submit_review", "POST", "/review-events", rateCardBody(cardId, rating, clientEventId), idempotencyKey = idempotencyKey, map = ::parseRatingResult)
+    ): V25Result<V25RatingResult> = wire {
+        api.submitReview(
+            // client_event_id is the device-unique offline-retry idempotency identity: a retrying
+            // submission reuses its original id so the server's fallback dedupe sees one event.
+            ReviewEventRequest(cardId, rating.name, clientEventId ?: UUID.randomUUID().toString()),
+            idempotencyKey ?: newKey(),
+        ).toDomain()
+    }
 
     // --- statistics (Architecture 4.5) ------------------------------------------------------------
 
     override suspend fun statsDashboard(): V25Result<V25StatsDashboard> =
-        call("dashboard", "GET", "/stats/dashboard", idempotent = false, map = ::parseStatsDashboard)
+        wire { api.statsDashboard().toDomain() }
 
     // --- AI service key (V25-SET-FR-05) -------------------------------------------------------------
 
     override suspend fun apiKeyStatus(): V25Result<V25ApiKeyStatus> =
-        call("api_key_status", "GET", "/api-key/status", idempotent = false, map = ::parseApiKeyStatus)
+        wire { api.apiKeyStatus().toDomain() }
 
     /**
      * The plaintext key travels only inside the PUT /api-key request body over TLS. This
@@ -448,13 +408,12 @@ class RemoteV25Repository(
      * server-side (structure-contract 6.2).
      */
     override suspend fun saveApiKey(apiKey: String): V25Result<V25ApiKeyStatus> {
-        val result = transport.request("save_api_key", "PUT", "/api-key", apiKeyBody(apiKey))
-        if (result.status == 502 && parseError(result.body)?.code == "API_KEY_UNAVAILABLE") {
+        val result = wire { api.saveApiKey(ApiKeyRequest(apiKey), newKey()).toDomain() }
+        val failure = result as? V25Result.Failure ?: return result
+        if (failure.code == "API_KEY_UNAVAILABLE") {
             return V25Result.Success(V25ApiKeyStatus(V25ApiKeyState.VERIFICATION_UNAVAILABLE, null))
         }
-        if (result.status !in 200..299) return result.toFailure().withoutKey(apiKey)
-        return runCatching { V25Result.Success(parseApiKeyStatus(jsonObject(result.body))) }
-            .getOrElse { V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, it.message) }
+        return failure.withoutKey(apiKey)
     }
 
     // --- plumbing -----------------------------------------------------------------------------------
@@ -462,44 +421,32 @@ class RemoteV25Repository(
     /** Tracks the last pending deletion batch so consecutive deletes merge (see [deleteCard]). */
     private var lastDeleteBatchId: String? = null
 
-    private suspend fun <T> call(
-        operation: String,
-        method: String,
-        path: String,
-        body: String? = null,
-        idempotent: Boolean = true,
-        idempotencyKey: String? = null,
-        map: (JSONObject) -> T,
-    ): V25Result<T> {
-        val result = transport.request(operation, method, path, body, idempotent = idempotent, idempotencyKey = idempotencyKey)
-        if (result.status !in 200..299) return result.toFailure()
-        return runCatching { V25Result.Success(map(jsonObject(result.body))) }
-            .getOrElse { V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, it.message) }
+    private fun newKey(): String = UUID.randomUUID().toString()
+
+    private suspend fun <T> wire(call: suspend () -> T): V25Result<T> = try {
+        V25Result.Success(call())
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Throwable) {
+        failure.toFailure()
     }
 
-    private suspend fun <T> upload(
-        operation: String,
-        path: String,
-        fileName: String,
-        content: InputStream,
-        name: String?,
-        idempotencyKey: String? = null,
-        map: (JSONObject) -> T,
-    ): V25Result<T> {
-        val result = transport.upload(operation, path, fileName, content, name, idempotencyKey)
-        if (result.status !in 200..299) return result.toFailure()
-        return runCatching { V25Result.Success(map(jsonObject(result.body))) }
-            .getOrElse { V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, it.message) }
-    }
-
-    private fun HttpResult.toFailure(): V25Result.Failure {
-        val envelope = parseError(body)
-        return V25Result.Failure(
-            code = envelope?.code ?: "HTTP_$status",
-            localizationKey = envelope?.localizationKey,
-            message = envelope?.message,
-            actions = envelope?.actions.orEmpty(),
-        )
+    private fun Throwable.toFailure(): V25Result.Failure = when (this) {
+        is HttpException -> {
+            val envelope = runCatching { response()?.errorBody()?.string() }
+                .getOrNull()?.let { ErrorEnvelope.parse(it) }
+            V25Result.Failure(
+                code = envelope?.code?.takeIf { it.isNotBlank() } ?: "HTTP_${code()}",
+                localizationKey = envelope?.localizationKey,
+                message = envelope?.message,
+                actions = envelope?.actions.orEmpty(),
+            )
+        }
+        is IOException -> V25Result.Failure(V25ErrorCodes.NETWORK_UNAVAILABLE)
+        is SerializationException -> V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = message)
+        // Contract violations (unknown enum, blank required value) surface as INVALID_RESPONSE.
+        is IllegalArgumentException -> V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = message)
+        else -> V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = message)
     }
 
     /** Defense in depth for [saveApiKey]: never let the plaintext cross the boundary in text. */
@@ -510,21 +457,16 @@ class RemoteV25Repository(
             message = message?.replace(key, REDACTED),
             actions = actions,
         )
-
-    private fun <T, R> V25Result<T>.mapSuccess(transform: (T) -> R): V25Result<R> = when (this) {
-        is V25Result.Success -> V25Result.Success(transform(value))
-        is V25Result.Failure -> this
-    }
-
-    private fun queryPath(base: String, vararg pairs: Pair<String, String?>): String = buildString {
-        append(base)
-        var first = true
-        for ((key, value) in pairs) {
-            if (value == null) continue
-            append(if (first) "?" else "&")
-            first = false
-            append(key).append("=").append(value)
-        }
-    }
-
 }
+
+/** Frames the PDF part; the file name must never break the multipart Content-Disposition line. */
+internal fun pdfPart(fileName: String, content: InputStream): MultipartBody.Part {
+    val bytes = content.use { it.readBytes() }
+    return MultipartBody.Part.createFormData(
+        "file",
+        fileName,
+        bytes.toRequestBody("application/pdf".toMediaType()),
+    )
+}
+
+internal fun String.toPlainPart() = toRequestBody("text/plain; charset=utf-8".toMediaType())

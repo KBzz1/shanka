@@ -4,14 +4,11 @@ import com.qiuzhao.flashcards.domain.v25.V25ApiKeyState
 import com.qiuzhao.flashcards.domain.v25.V25ApiKeyStatus
 import com.qiuzhao.flashcards.domain.v25.V25AuthUser
 import com.qiuzhao.flashcards.domain.v25.V25AvatarKey
-import com.qiuzhao.flashcards.domain.v25.V25BrowseFilter
 import com.qiuzhao.flashcards.domain.v25.V25Card
 import com.qiuzhao.flashcards.domain.v25.V25CardDeletionBatch
-import com.qiuzhao.flashcards.domain.v25.V25CardDraft
 import com.qiuzhao.flashcards.domain.v25.V25CardRewritePreview
 import com.qiuzhao.flashcards.domain.v25.V25CardType
 import com.qiuzhao.flashcards.domain.v25.V25Chapter
-import com.qiuzhao.flashcards.domain.v25.V25ChapterEdit
 import com.qiuzhao.flashcards.domain.v25.V25CoverageMode
 import com.qiuzhao.flashcards.domain.v25.V25CurrentProject
 import com.qiuzhao.flashcards.domain.v25.V25DailyActivity
@@ -30,8 +27,8 @@ import com.qiuzhao.flashcards.domain.v25.V25InternalStage
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25PdfFile
 import com.qiuzhao.flashcards.domain.v25.V25PlanCard
-import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
+import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStudySettings
 import com.qiuzhao.flashcards.domain.v25.V25PublicationState
@@ -44,7 +41,6 @@ import com.qiuzhao.flashcards.domain.v25.V25SampleCard
 import com.qiuzhao.flashcards.domain.v25.V25StatsDashboard
 import com.qiuzhao.flashcards.domain.v25.V25StudyPlan
 import com.qiuzhao.flashcards.domain.v25.V25StudyPlanUpdate
-import com.qiuzhao.flashcards.domain.v25.V25StudySettingsPatch
 import com.qiuzhao.flashcards.domain.v25.V25TaskConfigPatch
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.domain.v25.V25TodayPlan
@@ -53,371 +49,700 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.OffsetDateTime
 import java.time.ZoneId
-import java.util.UUID
-import org.json.JSONArray
-import org.json.JSONObject
-import org.json.JSONTokener
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 
 /**
- * Wire layer of the V2.5 remote data tier (Architecture §8 `data/remote/v25`). Every function
- * here maps one OpenAPI payload — or builds one request body — against the committed backend
- * contract (`openapi.yaml` + `structure-contract.md` section 3). Nothing in this file is visible
- * to the visual lane: it consumes only [com.qiuzhao.flashcards.domain.v25.V25Repository] and the
- * typed models.
+ * Wire layer of the V2.5 remote data tier (Architecture §8 `data/remote/v25`). Every DTO maps
+ * one OpenAPI payload — or builds one request body — against the committed backend contract
+ * (`openapi.yaml` + `structure-contract.md` section 3). Nothing in this file is visible to the
+ * visual lane: it consumes only the typed domain models.
  *
  * Contract rules enforced here:
- * - Required fields (per the OpenAPI `required` sets) are strict: missing, blank or mistyped
- *   values throw and surface as `INVALID_RESPONSE` in the repository.
- * - Optional/nullable fields map to null; the wire `""` (e.g. an unset `masked_key`) is null.
- * - Enum values are the exact wire strings; unknown values throw (contract violation).
+ * - Required fields (per the OpenAPI `required` sets) are non-nullable without defaults, so a
+ *   missing, null or mistyped value fails decoding and surfaces as `INVALID_RESPONSE` in the
+ *   repository.
+ * - Optional/nullable fields carry `= null` defaults and map to null; the wire `""` (e.g. an
+ *   unset `masked_key`) maps to null.
+ * - Unknown added fields are tolerated (`ignoreUnknownKeys`); unknown enum values fail decode
+ *   (contract violation).
  * - Timestamps are ISO-8601; `period.start` may carry a non-UTC offset (account learning
  *   timezone), so week-day derivation goes through [OffsetDateTime].
- * - `version` on the wire is a string (`v\d+` from the rewrite CAS or an ISO timestamp from
+ * - Wire `version` is a string (`v\d+` from the rewrite CAS or an ISO timestamp from
  *   `version=now`); the boundary models it as an Int marker that only serves cache-refresh
  *   change detection — `updated_at` / `base_card_version` stay authoritative.
  */
 
-// --- JSON helpers --------------------------------------------------------------------------
+// --- shared wire types --------------------------------------------------------------------------
 
-internal fun jsonObject(body: String): JSONObject {
-    if (body.isBlank()) return JSONObject()
-    return JSONTokener(body).nextValue() as? JSONObject
-        ?: throw IllegalArgumentException("response is not a JSON object")
-}
+/** The list envelope used by every collection endpoint (`{"items": [...]}`). */
+@Serializable
+internal data class ItemsResponse<T>(@SerialName("items") val items: List<T>)
 
-internal fun requiredArray(value: JSONObject, key: String): List<JSONObject> {
-    val array = value.optJSONArray(key) ?: throw IllegalArgumentException("missing array '$key'")
-    return List(array.length()) { index -> array.getJSONObject(index) }
-}
-
-internal fun optionalArray(value: JSONObject, key: String): List<JSONObject> {
-    val array = value.optJSONArray(key) ?: return emptyList()
-    return List(array.length()) { index -> array.getJSONObject(index) }
-}
-
-internal fun requiredString(value: JSONObject, key: String): String =
-    value.optString(key).takeIf { it.isNotBlank() }
-        ?: throw IllegalArgumentException("missing or blank '$key'")
-
-internal fun optionalString(value: JSONObject, key: String): String? =
-    // Android's org.json renders a JSON null as the literal "null" through optString.
-    // Check the token first so nullable V2.5 fields remain nullable on real devices.
-    if (!value.has(key) || value.isNull(key)) null
-    else value.optString(key).takeIf { it.isNotBlank() }
-
-internal fun requiredInt(value: JSONObject, key: String): Int {
-    if (!value.has(key) || value.isNull(key)) throw IllegalArgumentException("missing int '$key'")
-    return value.getInt(key)
-}
-
-internal fun optionalInt(value: JSONObject, key: String): Int? =
-    if (value.has(key) && !value.isNull(key)) value.getInt(key) else null
-
-internal fun optionalLong(value: JSONObject, key: String): Long? =
-    if (value.has(key) && !value.isNull(key)) value.getLong(key) else null
-
-internal fun requiredInstant(value: JSONObject, key: String): Instant =
-    parseIsoInstant(requiredString(value, key), key)
-
-internal fun optionalInstant(value: JSONObject, key: String): Instant? =
-    optionalString(value, key)?.let { parseIsoInstant(it, key) }
-
-/** The backend serializes UTC datetimes with a `+00:00` offset; tolerate `Z` and sub-second precision. */
-internal fun parseIsoInstant(wire: String, key: String): Instant =
-    runCatching { Instant.parse(wire) }
-        .getOrElse { runCatching { OffsetDateTime.parse(wire).toInstant() }.getOrElse { throw IllegalArgumentException("invalid $key timestamp '$wire'") } }
-
-internal fun requiredDate(value: JSONObject, key: String): LocalDate =
-    LocalDate.parse(requiredString(value, key))
-
-internal inline fun <reified T : Enum<T>> requiredEnum(value: JSONObject, key: String): T =
-    parseEnum(requiredString(value, key), key)
-
-internal inline fun <reified T : Enum<T>> optionalEnum(value: JSONObject, key: String): T? =
-    optionalString(value, key)?.let { java.lang.Enum.valueOf(T::class.java, it) }
-
-/** Enum entry names are the exact wire values (V25Models.kt contract); unknown values throw. */
-internal inline fun <reified T : Enum<T>> parseEnum(wire: String, key: String): T =
-    java.lang.Enum.valueOf(T::class.java, wire)
-
-/** Wire `version` is a string: `v\d+` (rewrite CAS) or an ISO timestamp (`version=now`). */
-internal fun parseVersion(wire: String?): Int = when {
-    wire == null -> 0
-    wire.startsWith("v") -> wire.drop(1).toIntOrNull() ?: 0
-    else -> runCatching { Instant.parse(wire).epochSecond.toInt() }.getOrDefault(0)
-}
-
-// --- payload mappers (wire JSON → domain models) ----------------------------------------------
-
-internal fun parseAuthUser(value: JSONObject): V25AuthUser = V25AuthUser(
-    userId = requiredString(value, "user_id"),
-    username = requiredString(value, "username"),
-    email = requiredString(value, "email"),
-    avatarKey = requiredEnum<V25AvatarKey>(value, "avatar_key"),
-    createdAt = requiredInstant(value, "created_at"),
+@Serializable
+internal data class DifficultyRatioDto(
+    @SerialName("basic") val basic: Int,
+    @SerialName("understanding") val understanding: Int,
+    @SerialName("deep_question") val deepQuestion: Int,
 )
 
-internal fun parseDifficultyRatio(value: JSONObject): V25DifficultyRatio = V25DifficultyRatio(
-    basic = requiredInt(value, "basic"),
-    understanding = requiredInt(value, "understanding"),
-    deepQuestion = requiredInt(value, "deep_question"),
+@Serializable
+internal data class GenerationConfigDto(
+    @SerialName("coverage_mode") val coverageMode: String,
+    @SerialName("difficulty_ratio") val difficultyRatio: DifficultyRatioDto,
+    @SerialName("custom_requirements") val customRequirements: String? = null,
 )
 
-internal fun parseGenerationConfig(value: JSONObject): V25GenerationConfig = V25GenerationConfig(
-    coverageMode = requiredEnum<V25CoverageMode>(value, "coverage_mode"),
-    difficultyRatio = parseDifficultyRatio(requiredObject(value, "difficulty_ratio")),
-    customRequirements = optionalString(value, "custom_requirements").orEmpty(),
+@Serializable
+internal data class ChapterDto(
+    @SerialName("chapter_id") val chapterId: String,
+    @SerialName("name") val name: String,
+    @SerialName("start_page") val startPage: Int,
+    @SerialName("end_page") val endPage: Int,
 )
 
-internal fun parseUserPreferences(value: JSONObject): V25UserPreferences = V25UserPreferences(
-    defaultCoverageMode = requiredEnum<V25CoverageMode>(value, "default_coverage_mode"),
-    difficultyRatio = parseDifficultyRatio(requiredObject(value, "default_difficulty_ratio")),
-    dailyLearningGoal = requiredInt(value, "daily_learning_goal"),
-    learningTimezone = requiredString(value, "learning_timezone"),
-    currentProjectId = optionalString(value, "current_project_id"),
-    updatedAt = requiredInstant(value, "updated_at"),
+@Serializable
+internal data class ReviewStateDto(
+    @SerialName("state") val state: String,
+    @SerialName("due") val due: String? = null,
 )
 
-internal fun parseChapter(value: JSONObject): V25Chapter = V25Chapter(
-    id = requiredString(value, "chapter_id"),
-    name = requiredString(value, "name"),
-    startPage = requiredInt(value, "start_page"),
-    endPage = requiredInt(value, "end_page"),
+/**
+ * One card wire shape shared by list-cards items, review-queue items and today-plan cards:
+ * the card fields are flattened next to the optional `review_state` (and plan metadata).
+ */
+@Serializable
+internal data class CardDto(
+    @SerialName("card_id") val cardId: String,
+    @SerialName("deck_id") val deckId: String,
+    @SerialName("front") val front: String,
+    @SerialName("back") val back: String,
+    @SerialName("card_type") val cardType: String,
+    @SerialName("position") val position: Int,
+    @SerialName("target_difficulty") val targetDifficulty: String? = null,
+    @SerialName("chapter_id") val chapterId: String? = null,
+    @SerialName("source_task_id") val sourceTaskId: String? = null,
+    @SerialName("publication_state") val publicationState: String? = null,
+    @SerialName("version") val version: String? = null,
+    @SerialName("review_state") val reviewState: ReviewStateDto? = null,
+    @SerialName("plan_kind") val planKind: String? = null,
 )
 
-internal fun parsePdfFile(value: JSONObject): V25PdfFile = V25PdfFile(
-    id = requiredString(value, "file_id"),
-    name = requiredString(value, "filename"),
-    sizeBytes = optionalLong(value, "size_bytes"),
-    status = optionalString(value, "status"),
-    errorCode = optionalString(value, "error_code"),
-    chapters = optionalArray(value, "chapters").map(::parseChapter),
-    createdAt = optionalInstant(value, "created_at"),
+// --- account and preferences ---------------------------------------------------------------------
+
+@Serializable
+internal data class AuthUserDto(
+    @SerialName("user_id") val userId: String,
+    @SerialName("username") val username: String,
+    @SerialName("email") val email: String,
+    @SerialName("avatar_key") val avatarKey: String,
+    @SerialName("created_at") val createdAt: String,
 )
 
-internal fun parseLearningProject(value: JSONObject): V25LearningProject = V25LearningProject(
-    projectId = requiredString(value, "project_id"),
-    name = requiredString(value, "name"),
-    file = parsePdfFile(requiredObject(value, "file")),
-    status = requiredEnum<V25ProjectStatus>(value, "status"),
-    chapterCount = requiredInt(value, "chapter_count"),
-    deckCount = requiredInt(value, "deck_count"),
-    taskCount = requiredInt(value, "task_count"),
-    createdAt = requiredInstant(value, "created_at"),
-    updatedAt = requiredInstant(value, "updated_at"),
-    version = parseVersion(optionalString(value, "version")),
-    tasks = optionalArray(value, "tasks").map(::parseGenerationTask),
+@Serializable
+internal data class AuthUserResponse(@SerialName("user") val user: AuthUserDto)
+
+@Serializable
+internal data class PreferencesDto(
+    @SerialName("default_coverage_mode") val defaultCoverageMode: String,
+    @SerialName("default_difficulty_ratio") val difficultyRatio: DifficultyRatioDto,
+    @SerialName("daily_learning_goal") val dailyLearningGoal: Int,
+    @SerialName("learning_timezone") val learningTimezone: String,
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("current_project_id") val currentProjectId: String? = null,
 )
 
-internal fun parseStudySettings(projectId: String, value: JSONObject): V25ProjectStudySettings =
+// --- projects -------------------------------------------------------------------------------------
+
+@Serializable
+internal data class PdfFileDto(
+    @SerialName("file_id") val fileId: String,
+    @SerialName("filename") val filename: String,
+    @SerialName("size_bytes") val sizeBytes: Long? = null,
+    @SerialName("status") val status: String? = null,
+    @SerialName("error_code") val errorCode: String? = null,
+    @SerialName("chapters") val chapters: List<ChapterDto>? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+)
+
+@Serializable
+internal data class ProjectDto(
+    @SerialName("project_id") val projectId: String,
+    @SerialName("name") val name: String,
+    @SerialName("file") val file: PdfFileDto,
+    @SerialName("status") val status: String,
+    @SerialName("chapter_count") val chapterCount: Int,
+    @SerialName("deck_count") val deckCount: Int,
+    @SerialName("task_count") val taskCount: Int,
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("version") val version: String? = null,
+    @SerialName("tasks") val tasks: List<TaskDto>? = null,
+)
+
+@Serializable
+internal data class StudySettingsDto(
+    @SerialName("selected_new_card_chapter_ids") val selectedNewCardChapterIds: List<String>,
+    @SerialName("include_unassigned") val includeUnassigned: Boolean,
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("selected_deck_ids") val selectedDeckIds: List<String>? = null,
+    @SerialName("daily_new_goal") val dailyNewGoal: Int? = null,
+    @SerialName("daily_review_goal") val dailyReviewGoal: Int? = null,
+)
+
+@Serializable
+internal data class StudyPlanDto(
+    @SerialName("configured") val configured: Boolean,
+    @SerialName("daily_new_goal") val dailyNewGoal: Int,
+    @SerialName("daily_review_goal") val dailyReviewGoal: Int,
+    @SerialName("selected_deck_ids") val selectedDeckIds: List<String>,
+    @SerialName("current_project_id") val currentProjectId: String? = null,
+    @SerialName("updated_at") val updatedAt: String? = null,
+)
+
+// --- generation tasks ------------------------------------------------------------------------------
+
+@Serializable
+internal data class SampleCardDto(
+    @SerialName("front") val front: String,
+    @SerialName("back") val back: String,
+    @SerialName("card_type") val cardType: String,
+    @SerialName("target_difficulty") val targetDifficulty: String,
+)
+
+@Serializable
+internal data class TaskDto(
+    @SerialName("task_id") val taskId: String,
+    @SerialName("status") val status: String,
+    @SerialName("selected_chapters") val selectedChapters: List<ChapterDto>,
+    @SerialName("generation_config") val generationConfig: GenerationConfigDto,
+    @SerialName("generated_card_count") val generatedCardCount: Int,
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("project_id") val projectId: String? = null,
+    @SerialName("file_id") val fileId: String? = null,
+    @SerialName("deck_id") val deckId: String? = null,
+    @SerialName("retry_of_task_id") val retryOfTaskId: String? = null,
+    @SerialName("internal_stage") val internalStage: String? = null,
+    @SerialName("sample_cards") val sampleCards: List<SampleCardDto>? = null,
+    @SerialName("sample_config_hash") val sampleConfigHash: String? = null,
+    @SerialName("sample_confirmed_at") val sampleConfirmedAt: String? = null,
+    @SerialName("error_code") val errorCode: String? = null,
+    @SerialName("failure_stage") val failureStage: String? = null,
+    @SerialName("started_at") val startedAt: String? = null,
+    @SerialName("ended_at") val endedAt: String? = null,
+)
+
+@Serializable
+internal data class TaskBlockerDto(
+    @SerialName("task_id") val taskId: String,
+    @SerialName("status") val status: String,
+    @SerialName("can_abandon") val canAbandon: Boolean,
+    @SerialName("allowed_actions") val allowedActions: List<String>,
+    @SerialName("internal_stage") val internalStage: String? = null,
+    @SerialName("project_id") val projectId: String? = null,
+    @SerialName("deck_id") val deckId: String? = null,
+    @SerialName("can_cancel") val canCancel: Boolean? = null,
+)
+
+@Serializable
+internal data class DeletionImpactDto(
+    @SerialName("retain_decks") val retainDecks: Boolean? = null,
+    @SerialName("deck_count") val deckCount: Int? = null,
+    @SerialName("card_count") val cardCount: Int? = null,
+    @SerialName("task_count") val taskCount: Int? = null,
+    @SerialName("project_status") val projectStatus: String? = null,
+    @SerialName("deck_name") val deckName: String? = null,
+)
+
+@Serializable
+internal data class DeletionPreflightDto(
+    @SerialName("resource_type") val resourceType: String,
+    @SerialName("resource_id") val resourceId: String,
+    @SerialName("can_delete") val canDelete: Boolean,
+    @SerialName("blockers") val blockers: List<TaskBlockerDto>,
+    @SerialName("abandonable_task_ids") val abandonableTaskIds: List<String>,
+    @SerialName("has_uncancellable_tasks") val hasUncancellableTasks: Boolean,
+    @SerialName("actions") val actions: List<String>,
+    @SerialName("impact") val impact: DeletionImpactDto,
+    @SerialName("cancelable_task_ids") val cancelableTaskIds: List<String>? = null,
+    @SerialName("can_cancel") val canCancel: Boolean? = null,
+)
+
+// --- decks / cards / deletion batches / rewrites ----------------------------------------------------
+
+@Serializable
+internal data class DeckDto(
+    @SerialName("deck_id") val deckId: String,
+    @SerialName("name") val name: String,
+    @SerialName("card_count") val cardCount: Int,
+    @SerialName("due_count") val dueCount: Int,
+    @SerialName("mastered_card_count") val masteredCardCount: Int,
+    @SerialName("review_count") val reviewCount: Int,
+    @SerialName("project_id") val projectId: String? = null,
+    @SerialName("mastery_ratio") val masteryRatio: Double? = null,
+    @SerialName("not_started_count") val notStartedCount: Int? = null,
+    @SerialName("learning_count") val learningCount: Int? = null,
+    @SerialName("relearning_count") val relearningCount: Int? = null,
+    @SerialName("consolidating_count") val consolidatingCount: Int? = null,
+    @SerialName("mastered_count") val masteredCount: Int? = null,
+    @SerialName("review_event_count") val reviewEventCount: Int? = null,
+    @SerialName("last_studied_at") val lastStudiedAt: String? = null,
+)
+
+@Serializable
+internal data class ImportResultDto(
+    @SerialName("index") val index: Int,
+    @SerialName("status") val status: String,
+    @SerialName("card_id") val cardId: String? = null,
+)
+
+@Serializable
+internal data class ImportResponse(@SerialName("results") val results: List<ImportResultDto>)
+
+@Serializable
+internal data class DeletionBatchDto(
+    @SerialName("delete_batch_id") val deleteBatchId: String,
+    @SerialName("undo_until") val undoUntil: String,
+    @SerialName("status") val status: String,
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("card_ids") val cardIds: List<String>,
+)
+
+@Serializable
+internal data class RewritePreviewDto(
+    @SerialName("rewrite_id") val rewriteId: String,
+    @SerialName("card_id") val cardId: String,
+    @SerialName("base_card_version") val baseCardVersion: String,
+    @SerialName("front") val front: String,
+    @SerialName("back") val back: String,
+    @SerialName("card_type") val cardType: String,
+    @SerialName("status") val status: String,
+    @SerialName("expires_at") val expiresAt: String,
+    @SerialName("target_difficulty") val targetDifficulty: String? = null,
+    @SerialName("custom_requirements") val customRequirements: String? = null,
+)
+
+// --- today plan / progress / stats -------------------------------------------------------------------
+
+@Serializable
+internal data class CurrentProjectDto(
+    @SerialName("project_id") val projectId: String,
+    @SerialName("name") val name: String,
+)
+
+@Serializable
+internal data class TodayPlanDto(
+    @SerialName("timezone") val timezone: String,
+    @SerialName("study_date") val studyDate: String,
+    @SerialName("daily_goal") val dailyGoal: Int,
+    @SerialName("today_completed_count") val completedCount: Int,
+    @SerialName("due_count") val dueCount: Int,
+    @SerialName("main_plan_remaining") val planRemaining: Int,
+    @SerialName("backlog_count") val backlogCount: Int,
+    @SerialName("cards") val cards: List<CardDto>,
+    @SerialName("current_project") val currentProject: CurrentProjectDto? = null,
+    @SerialName("daily_new_goal") val dailyNewGoal: Int? = null,
+    @SerialName("daily_review_goal") val dailyReviewGoal: Int? = null,
+    @SerialName("new_completed_count") val newCompletedCount: Int? = null,
+    @SerialName("review_completed_count") val reviewCompletedCount: Int? = null,
+    @SerialName("new_remaining_count") val newRemainingCount: Int? = null,
+    @SerialName("review_remaining_count") val reviewRemainingCount: Int? = null,
+    @SerialName("core_target_count") val coreTargetCount: Int? = null,
+    @SerialName("plan_configured") val planConfigured: Boolean? = null,
+    @SerialName("selected_deck_ids") val selectedDeckIds: List<String>? = null,
+)
+
+@Serializable
+internal data class ProgressDto(
+    @SerialName("card_count") val cardCount: Int,
+    @SerialName("due_count") val dueCount: Int,
+    @SerialName("not_started_count") val notStartedCount: Int? = null,
+    @SerialName("new_count") val newCount: Int? = null,
+    @SerialName("mastered_count") val masteredCount: Int? = null,
+    @SerialName("mastered_card_count") val masteredCardCount: Int? = null,
+    @SerialName("learning_count") val learningCount: Int? = null,
+    @SerialName("relearning_count") val relearningCount: Int? = null,
+    @SerialName("consolidating_count") val consolidatingCount: Int? = null,
+    @SerialName("review_event_count") val reviewEventCount: Int? = null,
+    @SerialName("last_studied_at") val lastStudiedAt: String? = null,
+)
+
+@Serializable
+internal data class DashboardPeriodDto(
+    @SerialName("start") val start: String,
+)
+
+@Serializable
+internal data class DashboardDto(
+    @SerialName("period") val period: DashboardPeriodDto,
+    @SerialName("timezone") val timezone: String,
+    @SerialName("weekly_activity") val weeklyActivity: List<Int>,
+    @SerialName("weekly_total") val weeklyTotal: Int,
+    @SerialName("weekly_completed_count") val weeklyCompletedCount: Int,
+    @SerialName("weekly_goal") val weeklyGoal: Int,
+    @SerialName("streak_days") val streakDays: Int,
+    @SerialName("mastered_card_count") val masteredCardCount: Int,
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("has_data") val hasData: Boolean,
+    @SerialName("week_change_rate") val weekChangeRate: Double? = null,
+    @SerialName("weekly_goal_progress") val weeklyGoalProgress: Double? = null,
+    @SerialName("recall_accuracy") val recallAccuracy: Double? = null,
+    @SerialName("first_answer_accuracy") val firstAnswerAccuracy: Double? = null,
+    @SerialName("retention_rate") val retentionRate: Double? = null,
+)
+
+@Serializable
+internal data class RatingResultDto(
+    @SerialName("review_state") val reviewState: ReviewStateDto,
+    @SerialName("study_date") val studyDate: String,
+)
+
+@Serializable
+internal data class ApiKeyStatusDto(
+    @SerialName("status") val status: String,
+    @SerialName("masked_key") val maskedKey: String? = null,
+)
+
+// --- request bodies ---------------------------------------------------------------------------------
+// Fields that mean "omit when unset" carry `= null` defaults (encodeDefaults=false omits them);
+// `SetCurrentProjectRequest` / `RewritePreviewRequest` have no default so an explicit JSON null
+// is encoded (the wire field is `[string, 'null']`).
+
+@Serializable
+internal data class AuthMeUpdateRequest(
+    @SerialName("username") val username: String? = null,
+    @SerialName("avatar_key") val avatarKey: String? = null,
+)
+
+@Serializable
+internal data class PreferencesPatchRequest(
+    @SerialName("default_coverage_mode") val defaultCoverageMode: String? = null,
+    @SerialName("default_difficulty_ratio") val difficultyRatio: DifficultyRatioDto? = null,
+    @SerialName("daily_learning_goal") val dailyLearningGoal: Int? = null,
+    @SerialName("learning_timezone") val learningTimezone: String? = null,
+)
+
+@Serializable
+internal data class SetCurrentProjectRequest(@SerialName("current_project_id") val currentProjectId: String?)
+
+@Serializable
+internal data class ChapterEditRequest(
+    @SerialName("name") val name: String,
+    @SerialName("start_page") val startPage: Int,
+    @SerialName("end_page") val endPage: Int,
+)
+
+@Serializable
+internal data class StudySettingsPatchRequest(
+    @SerialName("selected_new_card_chapter_ids") val selectedNewCardChapterIds: List<String>? = null,
+    @SerialName("include_unassigned") val includeUnassigned: Boolean? = null,
+)
+
+@Serializable
+internal data class StudyPlanRequest(
+    @SerialName("project_id") val projectId: String,
+    @SerialName("selected_deck_ids") val selectedDeckIds: List<String>,
+    @SerialName("daily_new_goal") val dailyNewGoal: Int,
+    @SerialName("daily_review_goal") val dailyReviewGoal: Int,
+)
+
+@Serializable
+internal data class GenerationConfigRequest(
+    @SerialName("coverage_mode") val coverageMode: String,
+    @SerialName("difficulty_ratio") val difficultyRatio: DifficultyRatioDto,
+    @SerialName("custom_requirements") val customRequirements: String? = null,
+)
+
+@Serializable
+internal data class TaskCreateRequest(
+    @SerialName("deck_id") val deckId: String,
+    @SerialName("chapter_ids") val chapterIds: List<String>,
+    @SerialName("generation_config") val generationConfig: GenerationConfigRequest,
+)
+
+@Serializable
+internal data class TaskConfigPatchRequest(
+    @SerialName("deck_id") val deckId: String? = null,
+    @SerialName("chapter_ids") val chapterIds: List<String>? = null,
+    @SerialName("generation_config") val generationConfig: GenerationConfigRequest? = null,
+)
+
+@Serializable
+internal data class CreateDeckRequest(
+    @SerialName("name") val name: String,
+    @SerialName("project_id") val projectId: String? = null,
+)
+
+@Serializable
+internal data class RenameRequest(@SerialName("name") val name: String)
+
+@Serializable
+internal data class CardPatchRequest(
+    @SerialName("front") val front: String,
+    @SerialName("back") val back: String,
+)
+
+@Serializable
+internal data class CardDraftDto(
+    @SerialName("front") val front: String,
+    @SerialName("back") val back: String,
+)
+
+@Serializable
+internal data class CardsImportRequest(@SerialName("cards") val cards: List<CardDraftDto>)
+
+@Serializable
+internal data class ReviewEventRequest(
+    @SerialName("card_id") val cardId: String,
+    @SerialName("rating") val rating: String,
+    @SerialName("client_event_id") val clientEventId: String,
+)
+
+@Serializable
+internal data class ApiKeyRequest(@SerialName("api_key") val apiKey: String)
+
+@Serializable
+internal data class RewritePreviewRequest(@SerialName("custom_requirements") val customRequirements: String?)
+
+// --- wire → domain mappers --------------------------------------------------------------------------
+
+internal fun DifficultyRatioDto.toDomain(): V25DifficultyRatio =
+    V25DifficultyRatio(basic = basic, understanding = understanding, deepQuestion = deepQuestion)
+
+internal fun GenerationConfigDto.toDomain(): V25GenerationConfig = V25GenerationConfig(
+    coverageMode = enumValueOf<V25CoverageMode>(coverageMode),
+    difficultyRatio = difficultyRatio.toDomain(),
+    customRequirements = customRequirements.orEmpty(),
+)
+
+internal fun ChapterDto.toDomain(): V25Chapter =
+    V25Chapter(id = chapterId, name = name, startPage = startPage, endPage = endPage)
+
+internal fun AuthUserDto.toDomain(): V25AuthUser = V25AuthUser(
+    userId = userId,
+    username = username,
+    email = email,
+    avatarKey = enumValueOf<V25AvatarKey>(avatarKey),
+    createdAt = parseIsoInstant(createdAt, "created_at"),
+)
+
+internal fun PreferencesDto.toDomain(): V25UserPreferences = V25UserPreferences(
+    defaultCoverageMode = enumValueOf<V25CoverageMode>(defaultCoverageMode),
+    difficultyRatio = difficultyRatio.toDomain(),
+    dailyLearningGoal = dailyLearningGoal,
+    learningTimezone = learningTimezone,
+    currentProjectId = currentProjectId,
+    updatedAt = parseIsoInstant(updatedAt, "updated_at"),
+)
+
+internal fun PdfFileDto.toDomain(): V25PdfFile = V25PdfFile(
+    id = fileId,
+    name = filename,
+    sizeBytes = sizeBytes,
+    status = status,
+    errorCode = errorCode,
+    chapters = chapters.orEmpty().map { it.toDomain() },
+    createdAt = createdAt?.let { parseIsoInstant(it, "created_at") },
+)
+
+internal fun ProjectDto.toDomain(): V25LearningProject = V25LearningProject(
+    projectId = projectId,
+    name = name,
+    file = file.toDomain(),
+    status = enumValueOf<V25ProjectStatus>(status),
+    chapterCount = chapterCount,
+    deckCount = deckCount,
+    taskCount = taskCount,
+    createdAt = parseIsoInstant(createdAt, "created_at"),
+    updatedAt = parseIsoInstant(updatedAt, "updated_at"),
+    version = parseVersion(version),
+    tasks = tasks.orEmpty().map { it.toDomain() },
+)
+
+internal fun StudySettingsDto.toDomain(projectId: String): V25ProjectStudySettings =
     V25ProjectStudySettings(
         projectId = projectId,
-        selectedNewCardChapterIds = stringList(value, "selected_new_card_chapter_ids"),
-        includeUnassigned = requiredBoolean(value, "include_unassigned"),
-        updatedAt = requiredInstant(value, "updated_at"),
-        selectedDeckIds = optionalStringList(value, "selected_deck_ids"),
-        dailyNewGoal = optionalInt(value, "daily_new_goal") ?: 10,
-        dailyReviewGoal = optionalInt(value, "daily_review_goal") ?: 40,
+        selectedNewCardChapterIds = selectedNewCardChapterIds,
+        includeUnassigned = includeUnassigned,
+        updatedAt = parseIsoInstant(updatedAt, "updated_at"),
+        selectedDeckIds = selectedDeckIds.orEmpty(),
+        dailyNewGoal = dailyNewGoal ?: 10,
+        dailyReviewGoal = dailyReviewGoal ?: 40,
     )
 
-internal fun parseStudyPlan(value: JSONObject): V25StudyPlan = V25StudyPlan(
-    configured = requiredBoolean(value, "configured"),
-    currentProjectId = optionalString(value, "current_project_id"),
-    selectedDeckIds = stringList(value, "selected_deck_ids"),
-    dailyNewGoal = requiredInt(value, "daily_new_goal"),
-    dailyReviewGoal = requiredInt(value, "daily_review_goal"),
-    updatedAt = optionalInstant(value, "updated_at"),
+internal fun StudyPlanDto.toDomain(): V25StudyPlan = V25StudyPlan(
+    configured = configured,
+    currentProjectId = currentProjectId,
+    selectedDeckIds = selectedDeckIds,
+    dailyNewGoal = dailyNewGoal,
+    dailyReviewGoal = dailyReviewGoal,
+    updatedAt = updatedAt?.let { parseIsoInstant(it, "updated_at") },
 )
 
-internal fun parseSampleCard(value: JSONObject): V25SampleCard = V25SampleCard(
-    front = requiredString(value, "front"),
-    back = requiredString(value, "back"),
-    cardType = requiredEnum<V25CardType>(value, "card_type"),
+internal fun SampleCardDto.toDomain(): V25SampleCard = V25SampleCard(
+    front = front,
+    back = back,
+    cardType = enumValueOf<V25CardType>(cardType),
     // Persisted samples are one per enabled tier, so the target difficulty is always present.
-    targetDifficulty = requiredEnum<V25Difficulty>(value, "target_difficulty"),
+    targetDifficulty = enumValueOf<V25Difficulty>(targetDifficulty),
 )
 
-internal fun parseGenerationTask(value: JSONObject): V25GenerationTask = V25GenerationTask(
-    taskId = requiredString(value, "task_id"),
-    projectId = optionalString(value, "project_id"),
-    fileId = optionalString(value, "file_id"),
-    deckId = optionalString(value, "deck_id"),
-    retryOfTaskId = optionalString(value, "retry_of_task_id"),
-    status = requiredEnum<V25TaskStatus>(value, "status"),
-    internalStage = optionalEnum<V25InternalStage>(value, "internal_stage"),
-    selectedChapters = requiredArray(value, "selected_chapters").map(::parseChapter),
-    generationConfig = parseGenerationConfig(requiredObject(value, "generation_config")),
-    sampleCards = optionalArray(value, "sample_cards").map(::parseSampleCard),
-    sampleConfigHash = optionalString(value, "sample_config_hash"),
-    sampleConfirmedAt = optionalInstant(value, "sample_confirmed_at"),
-    generatedCardCount = requiredInt(value, "generated_card_count"),
-    errorCode = optionalString(value, "error_code"),
-    failureStage = optionalString(value, "failure_stage"),
-    createdAt = requiredInstant(value, "created_at"),
-    startedAt = optionalInstant(value, "started_at"),
-    endedAt = optionalInstant(value, "ended_at"),
-    updatedAt = requiredInstant(value, "updated_at"),
+internal fun TaskDto.toDomain(): V25GenerationTask = V25GenerationTask(
+    taskId = taskId,
+    projectId = projectId,
+    fileId = fileId,
+    deckId = deckId,
+    retryOfTaskId = retryOfTaskId,
+    status = enumValueOf<V25TaskStatus>(status),
+    internalStage = internalStage?.let { enumValueOf<V25InternalStage>(it) },
+    selectedChapters = selectedChapters.map { it.toDomain() },
+    generationConfig = generationConfig.toDomain(),
+    sampleCards = sampleCards.orEmpty().map { it.toDomain() },
+    sampleConfigHash = sampleConfigHash,
+    sampleConfirmedAt = sampleConfirmedAt?.let { parseIsoInstant(it, "sample_confirmed_at") },
+    generatedCardCount = generatedCardCount,
+    errorCode = errorCode,
+    failureStage = failureStage,
+    createdAt = parseIsoInstant(createdAt, "created_at"),
+    startedAt = startedAt?.let { parseIsoInstant(it, "started_at") },
+    endedAt = endedAt?.let { parseIsoInstant(it, "ended_at") },
+    updatedAt = parseIsoInstant(updatedAt, "updated_at"),
 )
 
-internal fun parseDeletionTaskBlocker(value: JSONObject): V25DeletionTaskBlocker =
-    V25DeletionTaskBlocker(
-        taskId = requiredString(value, "task_id"),
-        status = requiredEnum<V25TaskStatus>(value, "status"),
-        internalStage = optionalEnum<V25InternalStage>(value, "internal_stage"),
-        projectId = optionalString(value, "project_id"),
-        deckId = optionalString(value, "deck_id"),
-        canAbandon = requiredBoolean(value, "can_abandon"),
-        allowedActions = stringList(value, "allowed_actions"),
-        canCancel = optionalBoolean(value, "can_cancel") ?: false,
-    )
-
-internal fun parseDeletionPreflight(value: JSONObject): V25DeletionPreflight {
-    val impact = requiredObject(value, "impact")
-    return V25DeletionPreflight(
-        resourceType = requiredString(value, "resource_type"),
-        resourceId = requiredString(value, "resource_id"),
-        canDelete = requiredBoolean(value, "can_delete"),
-        blockers = requiredArray(value, "blockers").map(::parseDeletionTaskBlocker),
-        abandonableTaskIds = stringList(value, "abandonable_task_ids"),
-        hasUncancellableTasks = requiredBoolean(value, "has_uncancellable_tasks"),
-        actions = stringList(value, "actions"),
-        impact = V25DeletionImpact(
-            retainDecks = optionalBoolean(impact, "retain_decks"),
-            deckCount = optionalInt(impact, "deck_count") ?: 0,
-            cardCount = optionalInt(impact, "card_count") ?: 0,
-            taskCount = optionalInt(impact, "task_count") ?: 0,
-            projectStatus = optionalEnum<V25ProjectStatus>(impact, "project_status"),
-            deckName = optionalString(impact, "deck_name"),
-        ),
-        cancelableTaskIds = optionalStringList(value, "cancelable_task_ids"),
-        canCancel = optionalBoolean(value, "can_cancel") ?: false,
-    )
-}
-
-internal fun parseDeck(value: JSONObject): V25Deck = V25Deck(
-    deckId = requiredString(value, "deck_id"),
-    name = requiredString(value, "name"),
-    projectId = optionalString(value, "project_id"),
-    cardCount = requiredInt(value, "card_count"),
-    dueCount = requiredInt(value, "due_count"),
-    masteredCards = requiredInt(value, "mastered_card_count"),
-    reviewCount = requiredInt(value, "review_count"),
-    masteryRatio = optionalFloat(value, "mastery_ratio"),
-    notStartedCount = optionalInt(value, "not_started_count") ?: 0,
-    learningCount = optionalInt(value, "learning_count") ?: 0,
-    relearningCount = optionalInt(value, "relearning_count") ?: 0,
-    consolidatingCount = optionalInt(value, "consolidating_count") ?: 0,
-    masteredCount = optionalInt(value, "mastered_count") ?: 0,
-    reviewEventCount = optionalInt(value, "review_event_count") ?: 0,
-    lastStudiedAt = optionalInstant(value, "last_studied_at"),
+internal fun TaskBlockerDto.toDomain(): V25DeletionTaskBlocker = V25DeletionTaskBlocker(
+    taskId = taskId,
+    status = enumValueOf<V25TaskStatus>(status),
+    internalStage = internalStage?.let { enumValueOf<V25InternalStage>(it) },
+    projectId = projectId,
+    deckId = deckId,
+    canAbandon = canAbandon,
+    allowedActions = allowedActions,
+    canCancel = canCancel ?: false,
 )
 
-internal fun parseCard(value: JSONObject): V25Card = V25Card(
-    cardId = requiredString(value, "card_id"),
-    deckId = requiredString(value, "deck_id"),
-    front = requiredString(value, "front"),
-    back = requiredString(value, "back"),
-    cardType = requiredEnum<V25CardType>(value, "card_type"),
-    targetDifficulty = optionalEnum<V25Difficulty>(value, "target_difficulty"),
-    position = requiredInt(value, "position"),
-    chapterId = optionalString(value, "chapter_id"),
-    sourceTaskId = optionalString(value, "source_task_id"),
-    publicationState = optionalEnum<V25PublicationState>(value, "publication_state") ?: V25PublicationState.PUBLISHED,
-    version = parseVersion(optionalString(value, "version")),
+internal fun DeletionPreflightDto.toDomain(): V25DeletionPreflight = V25DeletionPreflight(
+    resourceType = resourceType,
+    resourceId = resourceId,
+    canDelete = canDelete,
+    blockers = blockers.map { it.toDomain() },
+    abandonableTaskIds = abandonableTaskIds,
+    hasUncancellableTasks = hasUncancellableTasks,
+    actions = actions,
+    impact = V25DeletionImpact(
+        retainDecks = impact.retainDecks,
+        deckCount = impact.deckCount ?: 0,
+        cardCount = impact.cardCount ?: 0,
+        taskCount = impact.taskCount ?: 0,
+        projectStatus = impact.projectStatus?.let { enumValueOf<V25ProjectStatus>(it) },
+        deckName = impact.deckName,
+    ),
+    cancelableTaskIds = cancelableTaskIds.orEmpty(),
+    canCancel = canCancel ?: false,
 )
 
-/** One row of `ImportResponse.results`; `card_id` is present only for a CREATED card. */
-internal fun parseImportResult(value: JSONObject): V25ImportResult = V25ImportResult(
-    index = requiredInt(value, "index"),
-    status = requiredEnum<V25ImportStatus>(value, "status"),
-    cardId = optionalString(value, "card_id"),
+internal fun DeckDto.toDomain(): V25Deck = V25Deck(
+    deckId = deckId,
+    name = name,
+    projectId = projectId,
+    cardCount = cardCount,
+    dueCount = dueCount,
+    masteredCards = masteredCardCount,
+    reviewCount = reviewCount,
+    masteryRatio = masteryRatio?.toFloat(),
+    notStartedCount = notStartedCount ?: 0,
+    learningCount = learningCount ?: 0,
+    relearningCount = relearningCount ?: 0,
+    consolidatingCount = consolidatingCount ?: 0,
+    masteredCount = masteredCount ?: 0,
+    reviewEventCount = reviewEventCount ?: 0,
+    lastStudiedAt = lastStudiedAt?.let { parseIsoInstant(it, "last_studied_at") },
 )
 
-/** `POST /decks/{deck_id}/cards/import` response: `results` is required. */
-internal fun parseImportResponse(value: JSONObject): List<V25ImportResult> =
-    requiredArray(value, "results").map(::parseImportResult)
-
-internal fun parseReviewState(value: JSONObject): V25ReviewState = V25ReviewState(
-    state = requiredString(value, "state"),
-    due = optionalInstant(value, "due"),
+internal fun ReviewStateDto.toDomain(): V25ReviewState = V25ReviewState(
+    state = state,
+    due = due?.let { parseIsoInstant(it, "due") },
 )
 
 /** ReviewQueueItem / TodayPlanCard: the card fields are flattened next to review_state. */
-internal fun parseReviewCard(value: JSONObject): V25ReviewCard = V25ReviewCard(
-    card = parseCard(value),
-    reviewState = value.optJSONObject("review_state")?.let(::parseReviewState),
+internal fun CardDto.toCard(): V25Card = V25Card(
+    cardId = cardId,
+    deckId = deckId,
+    front = front,
+    back = back,
+    cardType = enumValueOf<V25CardType>(cardType),
+    targetDifficulty = targetDifficulty?.let { enumValueOf<V25Difficulty>(it) },
+    position = position,
+    chapterId = chapterId,
+    sourceTaskId = sourceTaskId,
+    publicationState = publicationState?.let { enumValueOf<V25PublicationState>(it) }
+        ?: V25PublicationState.PUBLISHED,
+    version = parseVersion(version),
 )
 
-internal fun parseDeletionBatch(value: JSONObject): V25CardDeletionBatch = V25CardDeletionBatch(
-    deleteBatchId = requiredString(value, "delete_batch_id"),
-    cardIds = stringList(value, "card_ids"),
-    undoUntil = requiredInstant(value, "undo_until"),
-    status = requiredEnum<V25DeletionBatchStatus>(value, "status"),
-    createdAt = requiredInstant(value, "created_at"),
-    updatedAt = requiredInstant(value, "updated_at"),
+internal fun CardDto.toReviewCard(): V25ReviewCard =
+    V25ReviewCard(card = toCard(), reviewState = reviewState?.toDomain())
+
+internal fun CardDto.toPlanCard(): V25PlanCard = V25PlanCard(
+    card = toCard(),
+    isNew = reviewState?.state == "NEW",
+    reviewState = reviewState?.toDomain(),
+    planKind = planKind,
 )
 
-internal fun parseRewritePreview(value: JSONObject): V25CardRewritePreview = V25CardRewritePreview(
-    rewriteId = requiredString(value, "rewrite_id"),
-    cardId = requiredString(value, "card_id"),
-    baseCardVersion = requiredString(value, "base_card_version"),
-    front = requiredString(value, "front"),
-    back = requiredString(value, "back"),
-    cardType = requiredEnum<V25CardType>(value, "card_type"),
-    targetDifficulty = optionalEnum<V25Difficulty>(value, "target_difficulty"),
-    customRequirements = optionalString(value, "custom_requirements"),
-    status = requiredEnum<V25RewriteStatus>(value, "status"),
-    expiresAt = requiredInstant(value, "expires_at"),
+internal fun ImportResultDto.toDomain(): V25ImportResult = V25ImportResult(
+    index = index,
+    status = enumValueOf<V25ImportStatus>(status),
+    cardId = cardId,
 )
 
-internal fun parsePlanCard(value: JSONObject): V25PlanCard = V25PlanCard(
-    card = parseCard(value),
-    isNew = value.optJSONObject("review_state")?.optString("state") == "NEW",
-    reviewState = value.optJSONObject("review_state")?.let(::parseReviewState),
-    planKind = optionalString(value, "plan_kind"),
+internal fun DeletionBatchDto.toDomain(): V25CardDeletionBatch = V25CardDeletionBatch(
+    deleteBatchId = deleteBatchId,
+    cardIds = cardIds,
+    undoUntil = parseIsoInstant(undoUntil, "undo_until"),
+    status = enumValueOf<V25DeletionBatchStatus>(status),
+    createdAt = parseIsoInstant(createdAt, "created_at"),
+    updatedAt = parseIsoInstant(updatedAt, "updated_at"),
 )
 
-internal fun parseTodayPlan(value: JSONObject): V25TodayPlan = V25TodayPlan(
-    learningTimezone = requiredString(value, "timezone"),
-    studyDate = requiredDate(value, "study_date"),
-    currentProject = value.optJSONObject("current_project")?.let { project ->
-        V25CurrentProject(
-            projectId = requiredString(project, "project_id"),
-            name = requiredString(project, "name"),
-        )
-    },
-    dailyGoal = requiredInt(value, "daily_goal"),
-    completedCount = requiredInt(value, "today_completed_count"),
-    dueCount = requiredInt(value, "due_count"),
-    planRemaining = requiredInt(value, "main_plan_remaining"),
-    backlogCount = requiredInt(value, "backlog_count"),
-    cards = requiredArray(value, "cards").map(::parsePlanCard),
-    dailyNewGoal = optionalInt(value, "daily_new_goal") ?: 0,
-    dailyReviewGoal = optionalInt(value, "daily_review_goal") ?: 0,
-    newCompletedCount = optionalInt(value, "new_completed_count") ?: 0,
-    reviewCompletedCount = optionalInt(value, "review_completed_count") ?: 0,
-    newRemainingCount = optionalInt(value, "new_remaining_count") ?: 0,
-    reviewRemainingCount = optionalInt(value, "review_remaining_count") ?: 0,
-    coreTargetCount = optionalInt(value, "core_target_count") ?: 0,
-    planConfigured = optionalBoolean(value, "plan_configured") ?: false,
-    selectedDeckIds = optionalStringList(value, "selected_deck_ids"),
+internal fun RewritePreviewDto.toDomain(): V25CardRewritePreview = V25CardRewritePreview(
+    rewriteId = rewriteId,
+    cardId = cardId,
+    baseCardVersion = baseCardVersion,
+    front = front,
+    back = back,
+    cardType = enumValueOf<V25CardType>(cardType),
+    targetDifficulty = targetDifficulty?.let { enumValueOf<V25Difficulty>(it) },
+    customRequirements = customRequirements,
+    status = enumValueOf<V25RewriteStatus>(status),
+    expiresAt = parseIsoInstant(expiresAt, "expires_at"),
 )
 
-internal fun parseRatingResult(value: JSONObject): V25RatingResult = V25RatingResult(
-    reviewState = parseReviewState(requiredObject(value, "review_state")),
-    studyDate = requiredDate(value, "study_date"),
+internal fun TodayPlanDto.toDomain(): V25TodayPlan = V25TodayPlan(
+    learningTimezone = timezone,
+    studyDate = LocalDate.parse(studyDate),
+    currentProject = currentProject?.let { V25CurrentProject(it.projectId, it.name) },
+    dailyGoal = dailyGoal,
+    completedCount = completedCount,
+    dueCount = dueCount,
+    planRemaining = planRemaining,
+    backlogCount = backlogCount,
+    cards = cards.map { it.toPlanCard() },
+    dailyNewGoal = dailyNewGoal ?: 0,
+    dailyReviewGoal = dailyReviewGoal ?: 0,
+    newCompletedCount = newCompletedCount ?: 0,
+    reviewCompletedCount = reviewCompletedCount ?: 0,
+    newRemainingCount = newRemainingCount ?: 0,
+    reviewRemainingCount = reviewRemainingCount ?: 0,
+    coreTargetCount = coreTargetCount ?: 0,
+    planConfigured = planConfigured ?: false,
+    selectedDeckIds = selectedDeckIds.orEmpty(),
 )
 
-internal fun parseProgressSummary(
-    value: JSONObject,
-    scopeId: String,
-    scopeName: String = "",
-    isProject: Boolean = true,
-): V25ProgressSummary {
-    val cardCount = requiredInt(value, "card_count")
-    val notStarted = optionalInt(value, "not_started_count")
-        ?: optionalInt(value, "new_count")
-        ?: 0
+internal fun ProgressDto.toDomain(scopeId: String, scopeName: String, isProject: Boolean): V25ProgressSummary {
+    val notStarted = notStartedCount ?: newCount ?: 0
+    val mastered = masteredCount ?: masteredCardCount ?: 0
     return V25ProgressSummary(
         scopeId = scopeId,
         scopeName = scopeName,
@@ -425,60 +750,58 @@ internal fun parseProgressSummary(
         cardCount = cardCount,
         newCount = notStarted,
         learnedCount = (cardCount - notStarted).coerceAtLeast(0),
-        dueCount = requiredInt(value, "due_count"),
-        masteredCount = optionalInt(value, "mastered_count")
-            ?: optionalInt(value, "mastered_card_count")
-            ?: 0,
-        masteryRatio = if (cardCount > 0) {
-            (optionalInt(value, "mastered_count")
-                ?: optionalInt(value, "mastered_card_count")
-                ?: 0).toFloat() / cardCount
-        } else {
-            null
-        },
+        dueCount = dueCount,
+        masteredCount = mastered,
+        masteryRatio = if (cardCount > 0) mastered.toFloat() / cardCount else null,
         notStartedCount = notStarted,
-        learningCount = optionalInt(value, "learning_count") ?: 0,
-        relearningCount = optionalInt(value, "relearning_count") ?: 0,
-        consolidatingCount = optionalInt(value, "consolidating_count") ?: 0,
-        reviewEventCount = optionalInt(value, "review_event_count") ?: 0,
-        lastStudiedAt = optionalInstant(value, "last_studied_at"),
+        learningCount = learningCount ?: 0,
+        relearningCount = relearningCount ?: 0,
+        consolidatingCount = consolidatingCount ?: 0,
+        reviewEventCount = reviewEventCount ?: 0,
+        lastStudiedAt = lastStudiedAt?.let { parseIsoInstant(it, "last_studied_at") },
     )
 }
 
-internal fun parseStatsDashboard(value: JSONObject): V25StatsDashboard {
-    val period = requiredObject(value, "period")
+internal fun DashboardDto.toDomain(): V25StatsDashboard {
     // Backend format_utc always emits period bounds in UTC ("...T16:00:00.000Z"); the
     // dashboard's required timezone field names the actual bucketing zone (openapi: 实际分桶
     // 时区 = 账号学习时区). period.start is Monday midnight in that zone, so project the
     // instant through it — reading the raw UTC instant would shift every studyDate back a day
     // for UTC+ zones.
-    val zoneId = ZoneId.of(requiredString(value, "timezone"))
-    val weekStart = Instant.parse(requiredString(period, "start")).atZone(zoneId).toLocalDate()
-    val activityArray = value.optJSONArray("weekly_activity")
-        ?: throw IllegalArgumentException("missing array 'weekly_activity'")
-    val activity = List(activityArray.length()) { index ->
-        V25DailyActivity(studyDate = weekStart.plusDays(index.toLong()), ratingCount = activityArray.getInt(index))
-    }
+    val zoneId = ZoneId.of(timezone)
+    val weekStart = parseIsoInstant(period.start, "period.start").atZone(zoneId).toLocalDate()
     return V25StatsDashboard(
-        hasData = requiredBoolean(value, "has_data"),
-        weeklyActivity = activity,
-        weeklyTotalRatings = requiredInt(value, "weekly_total"),
-        weeklyChangeRate = optionalFloat(value, "week_change_rate"),
-        weeklyGoal = requiredInt(value, "weekly_goal"),
-        weeklyGoalCompleted = requiredInt(value, "weekly_completed_count"),
-        weeklyGoalRate = optionalFloat(value, "weekly_goal_progress"),
-        recallAccuracy = optionalFloat(value, "recall_accuracy"),
-        firstAttemptAccuracy = optionalFloat(value, "first_answer_accuracy"),
-        retentionRate = optionalFloat(value, "retention_rate"),
-        streakDays = requiredInt(value, "streak_days"),
-        masteredCards = requiredInt(value, "mastered_card_count"),
+        hasData = hasData,
+        weeklyActivity = weeklyActivity.mapIndexed { index, ratingCount ->
+            V25DailyActivity(studyDate = weekStart.plusDays(index.toLong()), ratingCount = ratingCount)
+        },
+        weeklyTotalRatings = weeklyTotal,
+        weeklyChangeRate = weekChangeRate?.toFloat(),
+        weeklyGoal = weeklyGoal,
+        weeklyGoalCompleted = weeklyCompletedCount,
+        weeklyGoalRate = weeklyGoalProgress?.toFloat(),
+        recallAccuracy = recallAccuracy?.toFloat(),
+        firstAttemptAccuracy = firstAnswerAccuracy?.toFloat(),
+        retentionRate = retentionRate?.toFloat(),
+        streakDays = streakDays,
+        masteredCards = masteredCardCount,
         // The dashboard wire carries no per-scope progress summaries (V25-STATS-FR-05 is not
         // part of the StatsDashboard resource yet); keep the honest empty list instead of
         // fabricating numbers. Project/deck progress is derivable from decks + cards instead.
         progress = emptyList(),
-        updatedAt = requiredInstant(value, "updated_at"),
+        updatedAt = parseIsoInstant(updatedAt, "updated_at"),
     )
 }
+
+internal fun RatingResultDto.toDomain(): V25RatingResult = V25RatingResult(
+    reviewState = reviewState.toDomain(),
+    studyDate = LocalDate.parse(studyDate),
+)
+
+internal fun ApiKeyStatusDto.toDomain(): V25ApiKeyStatus = V25ApiKeyStatus(
+    state = apiKeyState(status),
+    maskedKey = maskedKey?.takeIf { it.isNotBlank() },
+)
 
 internal fun apiKeyState(wire: String): V25ApiKeyState = when (wire) {
     "AVAILABLE" -> V25ApiKeyState.AVAILABLE
@@ -489,167 +812,50 @@ internal fun apiKeyState(wire: String): V25ApiKeyState = when (wire) {
     else -> throw IllegalArgumentException("unknown api key status '$wire'")
 }
 
-internal fun parseApiKeyStatus(value: JSONObject): V25ApiKeyStatus = V25ApiKeyStatus(
-    state = apiKeyState(requiredString(value, "status")),
-    maskedKey = optionalString(value, "masked_key"),
+// --- domain → request mappers -------------------------------------------------------------------------
+
+internal fun V25DifficultyRatio.toWire(): DifficultyRatioDto =
+    DifficultyRatioDto(basic = basic, understanding = understanding, deepQuestion = deepQuestion)
+
+internal fun V25GenerationConfig.toWire(): GenerationConfigRequest = GenerationConfigRequest(
+    coverageMode = coverageMode.name,
+    difficultyRatio = difficultyRatio.toWire(),
+    customRequirements = customRequirements.takeIf { it.isNotBlank() },
 )
 
-// --- error envelope (structure-contract 1.4) ---------------------------------------------------
-
-internal data class V25ErrorEnvelope(
-    val code: String?,
-    val localizationKey: String?,
-    val message: String?,
-    val actions: List<String>,
+internal fun V25PreferencesPatch.toWire(): PreferencesPatchRequest = PreferencesPatchRequest(
+    defaultCoverageMode = defaultCoverageMode?.name,
+    difficultyRatio = difficultyRatio?.toWire(),
+    dailyLearningGoal = dailyLearningGoal,
+    learningTimezone = learningTimezone,
 )
 
-internal fun parseError(body: String): V25ErrorEnvelope? = runCatching {
-    val error = jsonObject(body).optJSONObject("error") ?: return null
-    V25ErrorEnvelope(
-        code = error.optString("code").takeIf { it.isNotBlank() },
-        localizationKey = error.optString("localization_key").takeIf { it.isNotBlank() },
-        message = error.optString("message").takeIf { it.isNotBlank() },
-        actions = optionalStringList(error, "actions"),
-    )
-}.getOrNull()
+internal fun V25StudyPlanUpdate.toWire(): StudyPlanRequest = StudyPlanRequest(
+    projectId = currentProjectId,
+    selectedDeckIds = selectedDeckIds,
+    dailyNewGoal = dailyNewGoal,
+    dailyReviewGoal = dailyReviewGoal,
+)
 
-// --- request bodies -----------------------------------------------------------------------------
+internal fun V25TaskConfigPatch.toWire(): TaskConfigPatchRequest = TaskConfigPatchRequest(
+    deckId = deckId,
+    chapterIds = chapterIds,
+    generationConfig = generationConfig?.toWire(),
+)
 
-internal fun authMeUpdateBody(username: String?, avatarKey: V25AvatarKey?): String = JSONObject()
-    .apply {
-        if (username != null) put("username", username)
-        if (avatarKey != null) put("avatar_key", avatarKey.name)
-    }
-    .toString()
+// --- wire primitives -----------------------------------------------------------------------------------
 
-internal fun preferencesPatchBody(patch: V25PreferencesPatch): String = JSONObject()
-    .apply {
-        patch.defaultCoverageMode?.let { put("default_coverage_mode", it.name) }
-        patch.difficultyRatio?.let { put("default_difficulty_ratio", difficultyRatioObject(it)) }
-        patch.dailyLearningGoal?.let { put("daily_learning_goal", it) }
-        patch.learningTimezone?.let { put("learning_timezone", it) }
-    }
-    .toString()
+/** The backend serializes UTC datetimes with a `+00:00` offset; tolerate `Z` and sub-second precision. */
+internal fun parseIsoInstant(wire: String, key: String): Instant =
+    runCatching { Instant.parse(wire) }
+        .getOrElse {
+            runCatching { OffsetDateTime.parse(wire).toInstant() }
+                .getOrElse { throw IllegalArgumentException("invalid $key timestamp '$wire'") }
+        }
 
-/** The wire field is `[string, 'null']`; a cleared project must serialize as an explicit null. */
-internal fun setCurrentProjectBody(projectId: String?): String =
-    JSONObject().put("current_project_id", projectId ?: JSONObject.NULL).toString()
-
-internal fun chapterEditBody(edit: V25ChapterEdit): String = JSONObject()
-    .put("name", edit.name)
-    .put("start_page", edit.startPage)
-    .put("end_page", edit.endPage)
-    .toString()
-
-internal fun studySettingsPatchBody(patch: V25StudySettingsPatch): String = JSONObject()
-    .apply {
-        patch.selectedNewCardChapterIds?.let { put("selected_new_card_chapter_ids", JSONArray(it)) }
-        patch.includeUnassigned?.let { put("include_unassigned", it) }
-    }
-    .toString()
-
-internal fun studyPlanBody(plan: V25StudyPlanUpdate): String = JSONObject()
-    .put("project_id", plan.currentProjectId)
-    .put("selected_deck_ids", JSONArray(plan.selectedDeckIds))
-    .put("daily_new_goal", plan.dailyNewGoal)
-    .put("daily_review_goal", plan.dailyReviewGoal)
-    .toString()
-
-internal fun difficultyRatioObject(ratio: V25DifficultyRatio): JSONObject = JSONObject()
-    .put("basic", ratio.basic)
-    .put("understanding", ratio.understanding)
-    .put("deep_question", ratio.deepQuestion)
-
-internal fun generationConfigObject(config: V25GenerationConfig): JSONObject = JSONObject()
-    .put("coverage_mode", config.coverageMode.name)
-    .put("difficulty_ratio", difficultyRatioObject(config.difficultyRatio))
-    .apply { if (config.customRequirements.isNotBlank()) put("custom_requirements", config.customRequirements) }
-
-internal fun taskCreateBody(deckId: String, chapterIds: List<String>, config: V25GenerationConfig): String =
-    JSONObject()
-        .put("deck_id", deckId)
-        .put("chapter_ids", JSONArray(chapterIds))
-        .put("generation_config", generationConfigObject(config))
-        .toString()
-
-internal fun taskConfigPatchBody(patch: V25TaskConfigPatch): String = JSONObject()
-    .apply {
-        patch.deckId?.let { put("deck_id", it) }
-        patch.chapterIds?.let { put("chapter_ids", JSONArray(it)) }
-        patch.generationConfig?.let { put("generation_config", generationConfigObject(it)) }
-    }
-    .toString()
-
-internal fun createDeckBody(name: String, projectId: String?): String = JSONObject()
-    .put("name", name)
-    .apply { if (projectId != null) put("project_id", projectId) }
-    .toString()
-
-internal fun renameBody(name: String): String = JSONObject().put("name", name).toString()
-
-internal fun cardDraftBody(front: String, back: String): String =
-    JSONObject().put("front", front).put("back", back).toString()
-
-/** Bulk import body: `{"cards": [{"front", "back"}...]}` — the backend imports atomically. */
-internal fun cardsImportBody(drafts: List<V25CardDraft>): String = JSONObject()
-    .put(
-        "cards",
-        JSONArray().apply {
-            drafts.forEach { draft -> put(JSONObject().put("front", draft.front).put("back", draft.back)) }
-        },
-    )
-    .toString()
-
-/**
- * ReviewEventRequest: client_event_id is the device-unique offline-retry idempotency key. A
- * retrying submission reuses its original `clientEventId` so the server's fallback dedupe sees
- * the same event; a fresh submission generates one.
- */
-internal fun rateCardBody(cardId: String, rating: V25Rating, clientEventId: String? = null): String = JSONObject()
-    .put("card_id", cardId)
-    .put("rating", rating.name)
-    .put("client_event_id", clientEventId ?: UUID.randomUUID().toString())
-    .toString()
-
-internal fun apiKeyBody(apiKey: String): String = JSONObject().put("api_key", apiKey).toString()
-
-/** The wire field is `[string, 'null']`; no requirements still serialize as an explicit null. */
-internal fun rewritePreviewBody(customRequirements: String?): String = JSONObject()
-    .put("custom_requirements", customRequirements ?: JSONObject.NULL)
-    .toString()
-
-/** Free-browse query (Architecture 4.4): lowercase wire values, optional content-difficulty filter. */
-internal fun browseCardsQuery(filter: V25BrowseFilter): String = buildString {
-    append("?order=").append(filter.order.name)
-    filter.contentDifficulty?.let { append("&content_difficulty=").append(it.name) }
-    append("&mastery=").append(filter.mastery.name)
-}
-
-// --- misc helpers -------------------------------------------------------------------------------
-
-/** A primitive-string array (e.g. `selected_new_card_chapter_ids`, `card_ids`). */
-internal fun stringList(value: JSONObject, key: String): List<String> {
-    val array = value.optJSONArray(key) ?: throw IllegalArgumentException("missing array '$key'")
-    return List(array.length()) { index -> array.getString(index) }
-}
-
-internal fun optionalStringList(value: JSONObject, key: String): List<String> {
-    val array = value.optJSONArray(key) ?: return emptyList()
-    return List(array.length()) { index -> array.getString(index) }
-}
-
-internal fun requiredObject(value: JSONObject, key: String): JSONObject =
-    value.optJSONObject(key) ?: throw IllegalArgumentException("missing object '$key'")
-
-internal fun requiredBoolean(value: JSONObject, key: String): Boolean {
-    if (!value.has(key) || value.isNull(key)) throw IllegalArgumentException("missing boolean '$key'")
-    return value.getBoolean(key)
-}
-
-internal fun optionalBoolean(value: JSONObject, key: String): Boolean? =
-    if (!value.has(key) || value.isNull(key)) null else value.getBoolean(key)
-
-internal fun optionalFloat(value: JSONObject, key: String): Float? {
-    if (!value.has(key) || value.isNull(key)) return null
-    return value.getDouble(key).toFloat()
+/** Wire `version` is a string: `v\d+` (rewrite CAS) or an ISO timestamp (`version=now`). */
+internal fun parseVersion(wire: String?): Int = when {
+    wire == null -> 0
+    wire.startsWith("v") -> wire.drop(1).toIntOrNull() ?: 0
+    else -> runCatching { Instant.parse(wire).epochSecond.toInt() }.getOrDefault(0)
 }
