@@ -42,6 +42,10 @@ android {
 
     buildTypes {
         debug {
+            // Keep development installs isolated from the existing release app and its data.
+            // Android signs this variant with the local debug keystore automatically.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
             // Debug-only 显式本地环境覆盖（模拟器 loopback）；Release 编译期不可达。
             buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:8000\"")
         }
