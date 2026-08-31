@@ -66,6 +66,10 @@ internal fun ProjectDetailScreen(
     onDeleteProject: (retainDecks: Boolean, onResult: (Boolean) -> Unit) -> Unit,
     tasks: List<V25GenerationTask> = emptyList(),
     progress: V25ProgressSummary? = null,
+    /** Server status EMPTY: the project has no materials yet and shows the add-material guide. */
+    isEmptyProject: Boolean = false,
+    onAddPdfMaterial: () -> Unit = {},
+    onAddTextMaterial: () -> Unit = {},
 ) {
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val theme = deckTheme(project)
@@ -86,40 +90,54 @@ internal fun ProjectDetailScreen(
             onSecondaryTrailingAction = { showProjectDeletionConfirmation = true },
             secondaryTrailingActionDescription = "删除项目"
         )
-        Column(
-            modifier = Modifier.fillMaxSize().statusBarsPadding().padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp),
-            verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
-        ) {
-            ProjectSectionSwitcher(section, { section = it }, theme = deckTheme(project))
-            when (section) {
-                ProjectDetailSection.STATISTICS -> ProjectStatisticsContent(
-                    decks,
-                    tasks,
-                    progress,
-                    theme,
-                    scale,
-                    Modifier.weight(1f),
-                )
-                ProjectDetailSection.DECKS -> ProjectDecksContent(
-                    project,
-                    decks,
-                    scale,
-                    nav,
-                    onRequestDeleteDeck = {
-                        deckPendingDeletion = it
-                    },
-                    modifier = Modifier.weight(1f),
+        if (isEmptyProject) {
+            ProjectEmptyContent(
+                scale = scale,
+                theme = theme,
+                onAddPdfMaterial = onAddPdfMaterial,
+                onAddTextMaterial = onAddTextMaterial,
+                onRequestDeletion = { showProjectDeletionConfirmation = true },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp),
+            )
+        } else {
+            Column(
+                modifier = Modifier.fillMaxSize().statusBarsPadding().padding(start = (16 * scale).dp, top = (88 * scale).dp, end = (16 * scale).dp),
+                verticalArrangement = Arrangement.spacedBy((16 * scale).dp)
+            ) {
+                ProjectSectionSwitcher(section, { section = it }, theme = deckTheme(project))
+                when (section) {
+                    ProjectDetailSection.STATISTICS -> ProjectStatisticsContent(
+                        decks,
+                        tasks,
+                        progress,
+                        theme,
+                        scale,
+                        Modifier.weight(1f),
+                    )
+                    ProjectDetailSection.DECKS -> ProjectDecksContent(
+                        project,
+                        decks,
+                        scale,
+                        nav,
+                        onRequestDeleteDeck = {
+                            deckPendingDeletion = it
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            if (section == ProjectDetailSection.DECKS) {
+                BottomContentFade(scale, Modifier.align(Alignment.BottomCenter), color = theme.background)
+                ProjectDeckActions(
+                    theme = deckTheme(project),
+                    scale = scale,
+                    onAddDeck = { nav.navigate(AppRoute.DeckGeneration(project.id)) },
+                    modifier = Modifier.align(Alignment.BottomCenter).zIndex(1f)
                 )
             }
-        }
-        if (section == ProjectDetailSection.DECKS) {
-            BottomContentFade(scale, Modifier.align(Alignment.BottomCenter), color = theme.background)
-            ProjectDeckActions(
-                theme = deckTheme(project),
-                scale = scale,
-                onAddDeck = { nav.navigate(AppRoute.DeckGeneration(project.id)) },
-                modifier = Modifier.align(Alignment.BottomCenter).zIndex(1f)
-            )
         }
     }
     if (showProjectDeletionConfirmation) {
@@ -157,6 +175,64 @@ internal fun ProjectDetailScreen(
                 },
                 onDismiss = { if (!deckDeletionInFlight) deckPendingDeletion = null },
             )
+        }
+    }
+}
+
+/**
+ * The EMPTY-project guide (contract V25-D-29): a just-created project owns no materials, so the
+ * page offers the two add-material entries and the destructive project exit. Generation and
+ * chapter features stay hidden — there is nothing to generate from yet.
+ */
+@Composable
+private fun ProjectEmptyContent(
+    scale: Float,
+    theme: DeckTheme,
+    onAddPdfMaterial: () -> Unit,
+    onAddTextMaterial: () -> Unit,
+    onRequestDeletion: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy((16 * scale).dp),
+        contentPadding = PaddingValues(bottom = (NaturalScrollTail * scale).dp),
+    ) {
+        item {
+            Surface(color = theme.cardPanel, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding((24 * scale).dp), verticalArrangement = Arrangement.spacedBy((8 * scale).dp)) {
+                    AppText("这是一个空项目", AppTextRole.SectionTitle, color = theme.text, designScale = scale)
+                    AppText(
+                        "先添加学习资料（PDF 或粘贴文本），添加完成后即可开始制卡。",
+                        AppTextRole.CardSubtitle,
+                        color = theme.text.copy(alpha = .65f),
+                        designScale = scale,
+                    )
+                }
+            }
+        }
+        item {
+            ProjectMaterialActionCard(
+                icon = "picture_as_pdf",
+                title = "添加 PDF 资料",
+                subtitle = "上传 PDF 文件，服务端解析章节",
+                theme = theme,
+                scale = scale,
+                onClick = onAddPdfMaterial,
+            )
+        }
+        item {
+            ProjectMaterialActionCard(
+                icon = "file_copy",
+                title = "粘贴文本资料",
+                subtitle = "粘贴文本，30000 字以内，即时就绪",
+                theme = theme,
+                scale = scale,
+                onClick = onAddTextMaterial,
+            )
+        }
+        item {
+            ProjectDeletionEntry(scale = scale, onRequestDeletion = onRequestDeletion)
         }
     }
 }

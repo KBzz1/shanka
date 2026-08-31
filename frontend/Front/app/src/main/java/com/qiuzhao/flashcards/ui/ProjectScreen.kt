@@ -167,6 +167,7 @@ internal fun ProjectCreateScreen(
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val materials by viewModel.projectCreationMaterials.collectAsState()
     val pdfUploading by viewModel.pdfUploading.collectAsState()
+    val projectCreating by viewModel.projectCreating.collectAsState()
     val projectId = editingProject?.id
     var name by rememberSaveable(projectId) { mutableStateOf(editingProject?.name.orEmpty()) }
     var selectedTheme by rememberSaveable(projectId) { mutableStateOf(editingProject?.themeKey ?: "violet") }
@@ -200,7 +201,10 @@ internal fun ProjectCreateScreen(
                 item {
                     Surface(color = theme.cardPanel, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth()) {
                         Box(Modifier.padding((24 * scale).dp), contentAlignment = Alignment.CenterStart) {
-                            AppText("可编辑主题色、名称，以及添加文件", AppTextRole.CardSubtitle, color = theme.text, designScale = scale)
+                            AppText(
+                                if (editingProject == null) "填写名称创建项目，再添加 PDF 或文本资料" else "可编辑主题色、名称，以及管理资料",
+                                AppTextRole.CardSubtitle, color = theme.text, designScale = scale
+                            )
                         }
                     }
                 }
@@ -258,7 +262,13 @@ internal fun ProjectCreateScreen(
                         title = "管理添加的文本资料", icon = "description", theme = theme, scale = scale,
                         materials = materials.filter { it.type == ProjectDraftMaterialType.TEXT },
                         onEditFile = { editingFile = it },
-                        onEditText = { material -> nav.navigate(AppRoute.ProjectTextEditor(material.id, selectedTheme, editorTitle = "编辑文本资料")) },
+                        onEditText = { material ->
+                            nav.navigate(AppRoute.ProjectTextEditor(material.id, selectedTheme, editorTitle = "编辑文本资料"))
+                        },
+                        onAddText = {
+                            val draftId = viewModel.stageProjectDraftText()
+                            nav.navigate(AppRoute.ProjectTextEditor(draftId, selectedTheme, editorTitle = "导入文本"))
+                        },
                         onDelete = { viewModel.deleteProjectDraftMaterial(it.id) }
                     )
                 }
@@ -301,14 +311,18 @@ internal fun ProjectCreateScreen(
             Surface(
             onClick = {
                 if (editingProject == null) {
-                    // Creation success lands directly on the deck-generation entry: the parse
-                    // wait is non-blocking now, so the user should not re-click three levels.
+                    // Two-step creation (V25-D-29): the wizard's single "完成设置" runs both
+                    // network steps — POST /projects (JSON name), then materials/* per draft.
+                    val hadMaterials = materials.isNotEmpty()
                     viewModel.createProjectFromDraft(name, selectedTheme) { projectId, error ->
                         message = error
-                        if (error == null && projectId != null) {
-                            nav.replaceTop(AppRoute.DeckGeneration(projectId))
-                        } else if (error == null) {
-                            nav.goBack()
+                        when {
+                            error != null -> Unit
+                            // Materials on board → straight to the parse-wait/chapter flow.
+                            projectId != null && hadMaterials -> nav.replaceTop(AppRoute.DeckGeneration(projectId))
+                            // An EMPTY project lands on its own guide (add material / delete).
+                            projectId != null -> nav.replaceTop(AppRoute.ProjectDetail(projectId))
+                            else -> nav.goBack()
                         }
                     }
                 } else {
@@ -320,7 +334,7 @@ internal fun ProjectCreateScreen(
             },
             // A submission in flight is already idempotently owned; a second tap would
             // turn one upload into two requests with fresh keys.
-            enabled = !pdfUploading,
+            enabled = !pdfUploading && !projectCreating,
             color = theme.primary, contentColor = theme.onPrimary,
             shape = RoundedCornerShape((24 * scale).dp),
             modifier = Modifier.weight(1f).height((60 * scale).dp)
@@ -369,7 +383,7 @@ internal fun ProjectCreateScreen(
  * settings. The second, modal confirmation chooses the backend's retain_decks contract value.
  */
 @Composable
-private fun ProjectDeletionEntry(scale: Float, onRequestDeletion: () -> Unit) = Surface(
+internal fun ProjectDeletionEntry(scale: Float, onRequestDeletion: () -> Unit) = Surface(
     color = AppColors.WarningSecondary,
     shape = RoundedCornerShape((AppShapeRadius * scale).dp),
     modifier = Modifier.fillMaxWidth()
@@ -442,7 +456,7 @@ internal fun ProjectDeletionDialog(
 }
 
 @Composable
-private fun CompactDeletionButton(
+internal fun CompactDeletionButton(
     label: String,
     theme: DeckTheme,
     deleting: Boolean,
@@ -477,7 +491,7 @@ private fun ProjectSectionLabel(icon: String, label: String, theme: DeckTheme, s
 }
 
 @Composable
-private fun ProjectMaterialActionCard(icon: String, title: String, subtitle: String, theme: DeckTheme, scale: Float, onClick: () -> Unit) = Surface(
+internal fun ProjectMaterialActionCard(icon: String, title: String, subtitle: String, theme: DeckTheme, scale: Float, onClick: () -> Unit) = Surface(
     onClick = onClick, color = theme.primary, contentColor = theme.onPrimary,
     shape = RoundedCornerShape((AppButtonShapeRadius * scale).dp), modifier = Modifier.fillMaxWidth().height((80 * scale).dp)
 ) {
@@ -506,7 +520,8 @@ private fun ProjectCreationMaterialsPanel(
     materials: List<ProjectDraftMaterial>,
     onEditFile: (ProjectDraftMaterial) -> Unit,
     onEditText: (ProjectDraftMaterial) -> Unit,
-    onDelete: (ProjectDraftMaterial) -> Unit
+    onDelete: (ProjectDraftMaterial) -> Unit,
+    onAddText: (() -> Unit)? = null,
 ) = ProjectCreationPanel(theme, scale) {
     Row(Modifier.padding(horizontal = (8 * scale).dp), horizontalArrangement = Arrangement.spacedBy((10 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
         MaterialSymbol(icon, null, tint = theme.text, size = fixedSp(24 * scale), filled = true)
@@ -514,7 +529,7 @@ private fun ProjectCreationMaterialsPanel(
     }
     Surface(color = AppColors.Card, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth()) {
         AppText(
-            if (materials.isEmpty()) "暂无资料。点击下方“导入资料”按钮来添加资料" else "右滑卡片可编辑文件名称/删除文件",
+            if (materials.isEmpty()) "暂无资料。可通过“导入资料”添加，或点击“添加文本资料”" else "右滑卡片可编辑名称/删除资料",
             AppTextRole.Supporting,
             modifier = Modifier.padding((24 * scale).dp), color = theme.text, designScale = scale
         )
@@ -526,6 +541,34 @@ private fun ProjectCreationMaterialsPanel(
             ProjectDraftTextCard(material, theme, scale, onEdit = { onEditText(material) }, onDelete = { onDelete(material) })
         }
     }
+    onAddText?.let { action ->
+        Surface(
+            onClick = action,
+            color = theme.secondary, contentColor = theme.text,
+            shape = RoundedCornerShape((AppButtonShapeRadius * scale).dp),
+            modifier = Modifier.fillMaxWidth().height((60 * scale).dp)
+        ) {
+            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                MaterialSymbol("add_note", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
+                Spacer(Modifier.width((8 * scale).dp))
+                AppText("添加文本资料", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
+            }
+        }
+    }
+}
+
+/**
+ * Contract status line for server-backed materials (解析中 / 解析失败 / 就绪, TEXT shows the
+ * character count); null for creation-flow drafts that have no server status yet.
+ */
+internal fun materialStatusLine(material: ProjectDraftMaterial): String? = when {
+    material.serverStatus == null -> null
+    material.type == ProjectDraftMaterialType.TEXT ->
+        if (material.charCount != null) "就绪 · ${material.charCount}字" else "就绪"
+    material.serverStatus == "FAILED" ->
+        "解析失败" + (material.errorCode?.let { " · $it" } ?: "")
+    material.serverStatus == "PENDING" || material.serverStatus == "PARSING" -> "解析中"
+    else -> "就绪"
 }
 
 @Composable
@@ -576,14 +619,19 @@ internal fun ProjectDraftFileCard(
                     horizontalArrangement = Arrangement.spacedBy((4 * scale).dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    AppText(
-                        material.extension.orEmpty().trimStart('.').uppercase(),
-                        AppTextRole.CardSubtitle,
-                        color = theme.text,
-                        designScale = scale
-                    )
-                    AppText(formatImportDate(material.importedAt), AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
-                    AppText("导入", AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
+                    val statusLine = materialStatusLine(material)
+                    if (statusLine != null) {
+                        AppText(statusLine, AppTextRole.CardSubtitle, color = theme.text, designScale = scale)
+                    } else {
+                        AppText(
+                            material.extension.orEmpty().trimStart('.').uppercase(),
+                            AppTextRole.CardSubtitle,
+                            color = theme.text,
+                            designScale = scale
+                        )
+                        AppText(formatImportDate(material.importedAt), AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
+                        AppText("导入", AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .5f), designScale = scale)
+                    }
                 }
             }
         }
@@ -701,7 +749,16 @@ internal fun ProjectDraftTextCard(
                     shape = RoundedCornerShape((32 * scale).dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    AppText(material.title, AppTextRole.Body, modifier = Modifier.padding((24 * scale).dp), color = theme.text, designScale = scale, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(
+                        Modifier.padding((24 * scale).dp),
+                        horizontalArrangement = Arrangement.spacedBy((8 * scale).dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        AppText(material.title, AppTextRole.Body, color = theme.text, designScale = scale, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        materialStatusLine(material)?.let { status ->
+                            AppText(status, AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .6f), designScale = scale, maxLines = 1)
+                        }
+                    }
                 }
             }
             Surface(color = palette.body, shape = RoundedCornerShape((24 * scale).dp), modifier = Modifier.fillMaxWidth().weight(1f)) {
@@ -925,18 +982,17 @@ internal fun ProjectTextEditorScreen(route: AppRoute.ProjectTextEditor, viewMode
         BottomContentFade(scale, Modifier.align(Alignment.BottomCenter), color = AppColors.BaseBackground)
         Surface(
             onClick = {
+                if (title.isBlank()) {
+                    return@Surface
+                }
                 if (route.stageForMaterialImport) {
                     viewModel.upsertMaterialImportText(route.materialId, title, content)
                 } else if (route.projectId == null) {
                     viewModel.upsertProjectDraftText(route.materialId, title, content)
                 } else {
-                    val material = ProjectDraftMaterial(
-                        id = route.materialId ?: "project-text-${System.currentTimeMillis()}",
-                        type = ProjectDraftMaterialType.TEXT,
-                        title = title,
-                        content = content
-                    )
-                    viewModel.upsertProjectMaterial(route.projectId, material)
+                    // A living project receives the text directly: POST materials/text, and the
+                    // dialog-less result reports through the shared UI message.
+                    viewModel.addTextMaterialToProject(route.projectId, route.materialId, title, content)
                 }
                 nav.goBack()
             }, color = theme.primary, contentColor = theme.onPrimary,

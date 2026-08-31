@@ -16,12 +16,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -34,6 +32,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.zIndex
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
@@ -41,7 +40,9 @@ import com.qiuzhao.flashcards.ui.navigation.AppRoute
 /**
  * Figma 781:4012 / 781:3846. This is a Blue/white materials workflow even
  * when it was opened from a coloured project: material type is its own visual
- * semantic, while the project id only scopes the stored entries.
+ * semantic, while the project id only scopes the stored entries. Server-backed
+ * materials delete through DELETE /materials/{material_id} with the user's
+ * retain-cards decision; creation drafts still delete locally in place.
  */
 @Composable
 internal fun MaterialManagementScreen(project: ProjectSummary?, viewModel: AppViewModel, nav: ScreenNavigator) {
@@ -49,35 +50,19 @@ internal fun MaterialManagementScreen(project: ProjectSummary?, viewModel: AppVi
     val theme = DeckThemes.first { it.key == "azure" }
     val drafts by viewModel.projectCreationMaterials.collectAsState()
     val projectMats by viewModel.projectMaterials.collectAsState()
-    // Global entry (project == null) is the app-wide materials library: every
-    // project's bound PDF plus any unbound creation drafts. Project creation
-    // clears its drafts on success, so the created project's PDF must come from
-    // projectMaterials[projectId] or the page would stay empty after a save.
+    // Global entry (project == null) is the app-wide materials library: every project's
+    // server-backed materials plus any unbound creation drafts.
     val list = project?.let { projectMats[it.id] }
         ?: (projectMats.values.flatten() + drafts)
     var query by rememberSaveable { mutableStateOf("") }
     var editingFile by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
-    // V2.5 contract: a project's PDF has no standalone delete. Right-swiping a server-backed
-    // material therefore requests the *project* deletion flow (preflight + confirm), matching
-    // the backend's single delete entry; local creation drafts delete in place.
-    var pendingProjectDeletion by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
-    var projectDeletionInFlight by remember { mutableStateOf(false) }
-    var deletionPreflight by remember { mutableStateOf<com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight?>(null) }
-    val projectSummaries by viewModel.projects.collectAsState()
+    /** Server-backed material awaiting its deletion confirmation (three-tier delete). */
+    var pendingMaterialDeletion by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
+    var materialDeletionInFlight by remember { mutableStateOf(false) }
     val filtered = list.filter { material -> query.isBlank() || material.title.contains(query, true) || material.content.contains(query, true) }
     val textItems = filtered.filter { it.type == ProjectDraftMaterialType.TEXT }
     val fileItems = filtered.filter { it.type == ProjectDraftMaterialType.FILE }
     val hasMaterials = list.isNotEmpty()
-
-    // Advisory impact for the confirmation dialog; the server re-checks inside the delete
-    // transaction, so a failed preflight only hides the impact line, never blocks the flow.
-    LaunchedEffect(pendingProjectDeletion?.projectId) {
-        deletionPreflight = null
-        val targetId = pendingProjectDeletion?.projectId ?: return@LaunchedEffect
-        viewModel.refreshProjectDeletionPreflight(targetId, retainDecks = true, allowCancel = false) { result ->
-            deletionPreflight = result
-        }
-    }
 
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
         ScreenTopInformationBar(
@@ -96,8 +81,8 @@ internal fun MaterialManagementScreen(project: ProjectSummary?, viewModel: AppVi
                     title = "文件资料", icon = "files", materials = fileItems, theme = theme, scale = scale,
                     onEditFile = { editingFile = it }, onEditText = {},
                     onDelete = { material ->
-                        if (material.projectId == null) viewModel.deleteProjectDraftMaterial(material.id)
-                        else pendingProjectDeletion = material
+                        if (material.projectId == null || material.materialId == null) viewModel.deleteProjectDraftMaterial(material.id)
+                        else pendingMaterialDeletion = material
                     }
                 )
             }
@@ -107,8 +92,8 @@ internal fun MaterialManagementScreen(project: ProjectSummary?, viewModel: AppVi
                     onEditFile = { editingFile = it },
                     onEditText = { material -> nav.navigate(AppRoute.ProjectTextEditor(material.id, theme.key, project?.id, editorTitle = "编辑文本资料")) },
                     onDelete = { material ->
-                        if (material.projectId == null) viewModel.deleteProjectDraftMaterial(material.id)
-                        else pendingProjectDeletion = material
+                        if (material.projectId == null || material.materialId == null) viewModel.deleteProjectDraftMaterial(material.id)
+                        else pendingMaterialDeletion = material
                     }
                 )
             }
@@ -139,7 +124,7 @@ internal fun MaterialManagementScreen(project: ProjectSummary?, viewModel: AppVi
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                 MaterialSymbol("folder_open", null, tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
                 Spacer(Modifier.width((8 * scale).dp))
-                AppText("导入资料", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
+                AppText("添加资料", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
             }
         }
     }
@@ -148,33 +133,63 @@ internal fun MaterialManagementScreen(project: ProjectSummary?, viewModel: AppVi
             theme = theme, initialTitle = material.title,
             onConfirm = { updatedTitle ->
                 if (project == null) viewModel.renameProjectDraftFile(material.id, updatedTitle)
-                else viewModel.renameProjectFile(project.id, material.id, updatedTitle)
+                else viewModel.renameProjectFile(material.id, updatedTitle)
                 editingFile = null
             },
             onDismiss = { editingFile = null }
         )
     }
-    pendingProjectDeletion?.let { material ->
-        val targetId = material.projectId
-        val projectName = projectSummaries.firstOrNull { it.id == targetId }?.name ?: material.title
-        val impact = deletionPreflight?.impact
-        ProjectDeletionDialog(
-            projectName = projectName,
+    pendingMaterialDeletion?.let { material ->
+        MaterialDeletionDialog(
+            materialName = material.title,
             theme = theme,
-            deleting = projectDeletionInFlight,
-            impactText = impact?.let {
-                "影响范围：${it.deckCount} 个牌组、${it.cardCount} 张卡片、${it.taskCount} 条制卡任务记录"
-            },
-            onConfirm = { retainDecks ->
-                if (projectDeletionInFlight || targetId == null) return@ProjectDeletionDialog
-                projectDeletionInFlight = true
-                viewModel.deleteProject(targetId, retainDecks) { succeeded ->
-                    projectDeletionInFlight = false
-                    pendingProjectDeletion = null
+            deleting = materialDeletionInFlight,
+            onConfirm = { retainCards ->
+                val targetId = material.projectId
+                val materialId = material.materialId
+                if (materialDeletionInFlight || targetId == null || materialId == null) return@MaterialDeletionDialog
+                materialDeletionInFlight = true
+                viewModel.deleteMaterial(targetId, materialId, retainCards) { succeeded ->
+                    materialDeletionInFlight = false
+                    if (succeeded) pendingMaterialDeletion = null
                 }
             },
-            onDismiss = { if (!projectDeletionInFlight) pendingProjectDeletion = null }
+            onDismiss = { if (!materialDeletionInFlight) pendingMaterialDeletion = null }
         )
+    }
+}
+
+/**
+ * The three-tier material deletion confirmation (V25-D-30): the destructive action plus the
+ * card-retention decision. No per-material preflight endpoint exists, so the impact line states
+ * the contract honestly — the generated cards are kept or removed with the material, and tasks
+ * still referencing it are cancelled silently by the server.
+ */
+@Composable
+internal fun MaterialDeletionDialog(
+    materialName: String,
+    theme: DeckTheme,
+    deleting: Boolean = false,
+    onConfirm: (retainCards: Boolean) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = { if (!deleting) onDismiss() }) {
+        Surface(
+            color = theme.background,
+            shape = RoundedCornerShape(36.dp),
+            modifier = Modifier.width(331.dp),
+        ) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                AppText("删除资料“$materialName”吗？", AppTextRole.SectionTitle, color = theme.text, maxLines = 2)
+                AppText(
+                    "该资料将从项目中移除；引用它的进行中任务会被取消。该资料生成的卡片可以选择保留或一并删除。",
+                    AppTextRole.CardSubtitle,
+                    color = theme.text.copy(alpha = .6f),
+                )
+                CompactDeletionButton("删除资料，保留卡片", theme, deleting) { onConfirm(true) }
+                CompactDeletionButton("删除资料及卡片", theme, deleting, destructive = true) { onConfirm(false) }
+            }
+        }
     }
 }
 

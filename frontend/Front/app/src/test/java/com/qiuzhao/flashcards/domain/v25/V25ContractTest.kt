@@ -23,8 +23,9 @@ class V25ContractTest {
 
     @Test
     fun `project and task status enums carry the exact V2-5 values`() {
+        // Contract 3.16: EMPTY leads the aggregate (a project without materials is alive).
         assertEquals(
-            listOf("PARSING", "PARSE_FAILED", "AWAITING_CHAPTER_CONFIRMATION", "READY"),
+            listOf("EMPTY", "PARSING", "PARSE_FAILED", "AWAITING_CHAPTER_CONFIRMATION", "READY"),
             V25ProjectStatus.entries.map { it.name },
         )
         assertEquals(
@@ -38,6 +39,17 @@ class V25ContractTest {
         assertEquals(
             listOf("STAGED", "PUBLISHED"),
             V25PublicationState.entries.map { it.name },
+        )
+    }
+
+    @Test
+    fun `material enums carry the exact V2-5 values`() {
+        // structure-contract 3.2a: LINK is reserved and not modelled; PDF uses the parse
+        // lifecycle while TEXT is always READY.
+        assertEquals(listOf("PDF", "TEXT"), V25MaterialType.entries.map { it.name })
+        assertEquals(
+            listOf("PENDING", "PARSING", "PARSED", "FAILED", "READY"),
+            V25MaterialStatus.entries.map { it.name },
         )
     }
 
@@ -210,6 +222,55 @@ class V25ContractTest {
     }
 
     @Test
+    fun `two-step creation starts from an EMPTY project and materials attach afterwards`() = runBlocking {
+        val repository = StubV25Repository()
+
+        // Step one: POST /projects with only the JSON name → the EMPTY project.
+        val created = repository.createProject("概率论")
+        assertTrue(created is V25Result.Success)
+        val project = (created as V25Result.Success).value
+        assertEquals(V25ProjectStatus.EMPTY, project.status)
+        assertTrue("a fresh project owns no materials", project.materials.isEmpty())
+
+        // Step two: materials attach to the living project with their own endpoints.
+        val pdf = repository.addProjectMaterialPdf("project-1", "线性代数.pdf", ByteArrayInputStream(ByteArray(0)))
+        assertTrue(pdf is V25Result.Success)
+        assertEquals(V25MaterialType.PDF, (pdf as V25Result.Success).value.type)
+        assertEquals(V25MaterialStatus.PENDING, pdf.value.status)
+
+        val text = repository.addProjectMaterialText("project-1", "课堂笔记", "第一章 绪论")
+        assertTrue(text is V25Result.Success)
+        val textMaterial = (text as V25Result.Success).value
+        assertEquals(V25MaterialType.TEXT, textMaterial.type)
+        assertEquals(V25MaterialStatus.READY, textMaterial.status)
+        assertNull("a TEXT chapter has no page span", textMaterial.chapter?.startPage)
+        assertNull(textMaterial.chapter?.endPage)
+        assertEquals("a TEXT chapter belongs to its material", textMaterial.materialId, textMaterial.chapter?.materialId)
+    }
+
+    @Test
+    fun `text chapter page spans stay null while pdf chapters carry pages`() {
+        val textChapter = V25Chapter(id = "ch-text", materialId = "m-text", name = "全文", startPage = null, endPage = null)
+        val pdfChapter = V25Chapter(id = "ch-pdf", materialId = "m-pdf", name = "第一章", startPage = 1, endPage = 20)
+
+        assertNull(textChapter.pageSpanLabel)
+        assertEquals("1-20 页", pdfChapter.pageSpanLabel)
+    }
+
+    @Test
+    fun `deleting a material carries the retain-cards decision`() = runBlocking {
+        val repository = StubV25Repository()
+
+        val kept = repository.deleteProjectMaterial("project-1", "material-1", retainCards = true)
+        val removed = repository.deleteProjectMaterial("project-1", "material-1", retainCards = false)
+
+        assertTrue(kept is V25Result.Success)
+        assertEquals(V25ProjectStatus.EMPTY, (kept as V25Result.Success).value.status)
+        assertTrue(removed is V25Result.Failure)
+        assertEquals(V25ErrorCodes.MATERIAL_NOT_FOUND, (removed as V25Result.Failure).code)
+    }
+
+    @Test
     fun `every boundary method is callable from a suspend context and returns a typed result`() = runBlocking {
         val repository = StubV25Repository()
         val results: List<V25Result<*>> = listOf(
@@ -219,12 +280,16 @@ class V25ContractTest {
             repository.getPreferences(),
             repository.updatePreferences(V25PreferencesPatch(dailyLearningGoal = 60)),
             repository.setCurrentProject(null),
-            repository.createProject("概率论.pdf", ByteArrayInputStream(ByteArray(0)), name = "概率论"),
+            repository.createProject("概率论"),
+            repository.addProjectMaterialPdf("project-1", "概率论.pdf", ByteArrayInputStream(ByteArray(0))),
+            repository.addProjectMaterialText("project-1", "课堂笔记", "第一章 绪论"),
+            repository.listProjectMaterials("project-1"),
+            repository.deleteProjectMaterial("project-1", "material-1", retainCards = true),
+            repository.replaceProjectMaterialPdf("project-1", "material-1", "概率论-v2.pdf", ByteArrayInputStream(ByteArray(0))),
             repository.listProjects(),
             repository.getProject("project-1"),
             repository.renameProject("project-1", "概率论基础"),
             repository.deleteProject("project-1", retainDecks = true),
-            repository.replaceProjectPdf("project-1", "概率论-v2.pdf", ByteArrayInputStream(ByteArray(0))),
             repository.updateChapter("project-1", "chapter-1", V25ChapterEdit("第一章", 1, 20)),
             repository.deleteChapter("project-1", "chapter-1", deleteCards = false),
             repository.confirmChapters("project-1"),
@@ -308,12 +373,21 @@ private class StubV25Repository : V25Repository {
         difficultyRatio = ratio,
         customRequirements = "来源优先",
     )
-    private val chapter = V25Chapter(id = "chapter-1", name = "引言", startPage = 1, endPage = 12)
-    private val file = V25PdfFile(id = "file-1", name = "概率论", chapters = listOf(chapter))
+    private val chapter = V25Chapter(id = "chapter-1", materialId = "material-1", name = "引言", startPage = 1, endPage = 12)
+    private val material = V25Material(
+        materialId = "material-1",
+        projectId = "project-1",
+        type = V25MaterialType.PDF,
+        name = "概率论.pdf",
+        status = V25MaterialStatus.PARSED,
+        sizeBytes = 1024L,
+        chapter = null,
+        createdAt = now,
+    )
     private val project = V25LearningProject(
         projectId = "project-1",
         name = "概率论",
-        file = file,
+        materials = listOf(material),
         status = V25ProjectStatus.READY,
         chapterCount = 1,
         deckCount = 1,
@@ -321,6 +395,7 @@ private class StubV25Repository : V25Repository {
         createdAt = now,
         updatedAt = now,
         version = 4,
+        chapters = listOf(chapter),
     )
     private val preferences = V25UserPreferences(
         defaultCoverageMode = V25CoverageMode.BALANCED,
@@ -445,13 +520,83 @@ private class StubV25Repository : V25Repository {
     override suspend fun setCurrentProject(projectId: String?): V25Result<V25UserPreferences> =
         V25Result.Success(preferences.copy(currentProjectId = projectId, updatedAt = now))
 
-    override suspend fun createProject(
+    override suspend fun createProject(name: String, idempotencyKey: String?): V25Result<V25LearningProject> =
+        V25Result.Success(
+            V25LearningProject(
+                projectId = "project-new",
+                name = name.trim(),
+                materials = emptyList(),
+                status = V25ProjectStatus.EMPTY,
+                chapterCount = 0,
+                deckCount = 0,
+                taskCount = 0,
+                createdAt = now,
+                updatedAt = now,
+                version = 1,
+            ),
+        )
+
+    override suspend fun addProjectMaterialPdf(
+        projectId: String,
         fileName: String,
         content: java.io.InputStream,
-        name: String?,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = V25Result.Success(
+        V25Material(
+            materialId = "material-new",
+            projectId = projectId,
+            type = V25MaterialType.PDF,
+            name = fileName,
+            status = V25MaterialStatus.PENDING,
+            createdAt = now,
+        ),
+    )
+
+    override suspend fun addProjectMaterialText(
+        projectId: String,
+        name: String,
+        content: String,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = V25Result.Success(
+        V25Material(
+            materialId = "material-text",
+            projectId = projectId,
+            type = V25MaterialType.TEXT,
+            name = name,
+            status = V25MaterialStatus.READY,
+            charCount = content.length,
+            chapter = V25Chapter("chapter-text", "material-text", name, startPage = null, endPage = null),
+            createdAt = now,
+        ),
+    )
+
+    override suspend fun listProjectMaterials(projectId: String): V25Result<List<V25Material>> =
+        V25Result.Success(listOf(material))
+
+    override suspend fun deleteProjectMaterial(
+        projectId: String,
+        materialId: String,
+        retainCards: Boolean,
         idempotencyKey: String?,
     ): V25Result<V25LearningProject> =
-        V25Result.Success(project.copy(name = name ?: fileName.substringBeforeLast('.'), version = 1))
+        if (deletedMaterialIds.add(materialId)) {
+            V25Result.Success(project.copy(materials = emptyList(), status = V25ProjectStatus.EMPTY))
+        } else {
+            V25Result.Failure(V25ErrorCodes.MATERIAL_NOT_FOUND, "material.not_found", "资料不存在")
+        }
+
+    /** Models the server's one-time delete: a second delete of the same id is a 404. */
+    private val deletedMaterialIds = mutableSetOf<String>()
+
+    override suspend fun replaceProjectMaterialPdf(
+        projectId: String,
+        materialId: String,
+        fileName: String,
+        content: java.io.InputStream,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = V25Result.Success(
+        material.copy(materialId = materialId, name = fileName, status = V25MaterialStatus.PENDING),
+    )
 
     override suspend fun listProjects(forceRefresh: Boolean): V25Result<List<V25LearningProject>> = V25Result.Success(emptyList())
 
@@ -466,14 +611,6 @@ private class StubV25Repository : V25Repository {
         idempotencyKey: String?,
     ): V25Result<Unit> =
         V25Result.Failure(V25ErrorCodes.PROJECT_HAS_ACTIVE_TASK, "project.delete.blocked", "存在正式生成中的任务")
-
-    override suspend fun replaceProjectPdf(
-        projectId: String,
-        fileName: String,
-        content: java.io.InputStream,
-        idempotencyKey: String?,
-    ): V25Result<V25LearningProject> =
-        V25Result.Success(project.copy(status = V25ProjectStatus.PARSING, version = project.version + 1))
 
     override suspend fun updateChapter(
         projectId: String,

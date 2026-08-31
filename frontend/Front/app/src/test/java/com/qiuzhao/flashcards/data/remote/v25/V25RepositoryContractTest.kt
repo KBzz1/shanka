@@ -15,7 +15,10 @@ import com.qiuzhao.flashcards.domain.v25.V25ErrorCodes
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
 import com.qiuzhao.flashcards.domain.v25.V25ImportStatus
 import com.qiuzhao.flashcards.domain.v25.V25MasteryFilter
+import com.qiuzhao.flashcards.domain.v25.V25MaterialStatus
+import com.qiuzhao.flashcards.domain.v25.V25MaterialType
 import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
+import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
 import com.qiuzhao.flashcards.domain.v25.V25Rating
 import com.qiuzhao.flashcards.domain.v25.V25Repository
 import com.qiuzhao.flashcards.domain.v25.V25Result
@@ -432,29 +435,100 @@ class V25RepositoryContractTest {
     // --- uploads and card adds ---------------------------------------------------------------
 
     @Test
-    fun `createProject uploads the pdf with the file name and optional project name`() = runBlocking {
-        enqueue(projectBody(), 201)
+    fun `createProject posts the JSON name body without any file part`() = runBlocking {
+        enqueue(emptyProjectBody(), 201)
 
-        val result = repo.createProject("linear.pdf", ByteArrayInputStream(byteArrayOf(1, 2)), name = "线性代数")
+        val result = repo.createProject("线性代数")
 
         assertTrue(result is V25Result.Success)
-        assertEquals("p-1", (result as V25Result.Success).value.projectId)
+        assertEquals(V25ProjectStatus.EMPTY, (result as V25Result.Success).value.status)
+        assertTrue("two-step creation step one owns no materials", result.value.materials.isEmpty())
         val request = take()
         assertEquals("/projects", request.path)
-        assertTrue(request.getHeader("Content-Type")!!.startsWith("multipart/form-data"))
-        val body = request.body.readUtf8()
-        assertTrue(body.contains("linear.pdf"))
-        assertTrue(body.contains("线性代数"))
+        assertEquals("POST", request.method)
+        assertTrue("the JSON body carries only the name", request.getHeader("Content-Type")!!.startsWith("application/json"))
+        assertEquals("线性代数", bodyJson(request)["name"]!!.jsonPrimitive.content)
+        assertTrue(request.getHeader("Idempotency-Key")!!.isNotBlank())
     }
 
     @Test
-    fun `replaceProjectPdf uploads to the replace endpoint without a name`() = runBlocking {
+    fun `addProjectMaterialPdf uploads the file part to the materials endpoint`() = runBlocking {
+        enqueue(materialBody(), 201)
+
+        val result = repo.addProjectMaterialPdf("p-1", "linear.pdf", ByteArrayInputStream(byteArrayOf(1, 2)))
+
+        assertTrue(result is V25Result.Success)
+        val material = (result as V25Result.Success).value
+        assertEquals(V25MaterialType.PDF, material.type)
+        assertEquals(V25MaterialStatus.PENDING, material.status)
+        val request = take()
+        assertEquals("/projects/p-1/materials/pdf", request.path)
+        assertTrue(request.getHeader("Content-Type")!!.startsWith("multipart/form-data"))
+        val body = request.body.readUtf8()
+        assertTrue(body.contains("linear.pdf"))
+        assertTrue(request.getHeader("Idempotency-Key")!!.isNotBlank())
+    }
+
+    @Test
+    fun `addProjectMaterialText posts the JSON name and content body`() = runBlocking {
+        enqueue(textMaterialBody(), 201)
+
+        val result = repo.addProjectMaterialText("p-1", "课堂笔记", "第一章 绪论")
+
+        assertTrue(result is V25Result.Success)
+        val material = (result as V25Result.Success).value
+        assertEquals(V25MaterialType.TEXT, material.type)
+        assertEquals(V25MaterialStatus.READY, material.status)
+        assertEquals(13, material.charCount)
+        assertNull("a TEXT chapter owns no page span", material.chapter?.startPage)
+        assertNull(material.chapter?.endPage)
+        assertEquals("m-text", material.chapter?.materialId)
+        val request = take()
+        assertEquals("/projects/p-1/materials/text", request.path)
+        val body = bodyJson(request)
+        assertEquals("课堂笔记", body["name"]!!.jsonPrimitive.content)
+        assertEquals("第一章 绪论", body["content"]!!.jsonPrimitive.content)
+        assertTrue(request.getHeader("Idempotency-Key")!!.isNotBlank())
+    }
+
+    @Test
+    fun `listProjectMaterials returns the per-material items`() = runBlocking {
+        enqueue("""{"items": [${materialBody()}]}""")
+
+        val result = repo.listProjectMaterials("p-1")
+
+        assertTrue(result is V25Result.Success)
+        assertEquals(1, (result as V25Result.Success).value.size)
+        assertEquals("/projects/p-1/materials", take().path)
+    }
+
+    @Test
+    fun `deleteProjectMaterial carries the retain-cards decision on the query`() = runBlocking {
+        enqueue(projectBody())
         enqueue(projectBody())
 
-        repo.replaceProjectPdf("p-1", "linear-v2.pdf", ByteArrayInputStream(byteArrayOf(1, 2)))
+        repo.deleteProjectMaterial("p-1", "m-1", retainCards = true, idempotencyKey = "keep-key")
+        repo.deleteProjectMaterial("p-1", "m-1", retainCards = false, idempotencyKey = "drop-key")
 
+        val keep = take()
+        assertEquals("/projects/p-1/materials/m-1", keep.path)
+        assertNull("retain=true is the server default and stays off the wire", keep.requestUrl!!.queryParameter("retain_cards"))
+        assertEquals("keep-key", keep.getHeader("Idempotency-Key"))
+        val drop = take()
+        assertEquals("/projects/p-1/materials/m-1?retain_cards=false", drop.path)
+        assertEquals("drop-key", drop.getHeader("Idempotency-Key"))
+    }
+
+    @Test
+    fun `replaceProjectMaterialPdf posts to the per-material replace endpoint`() = runBlocking {
+        enqueue(materialBody().replace("\"status\": \"PENDING\"", "\"status\": \"PARSING\""), 200)
+
+        val result = repo.replaceProjectMaterialPdf("p-1", "m-1", "linear-v2.pdf", ByteArrayInputStream(byteArrayOf(1)))
+
+        assertTrue(result is V25Result.Success)
+        assertEquals(V25MaterialStatus.PARSING, (result as V25Result.Success).value.status)
         val request = take()
-        assertEquals("/projects/p-1/replace-pdf", request.path)
+        assertEquals("/projects/p-1/materials/m-1/replace", request.path)
         assertTrue(request.body.readUtf8().contains("linear-v2.pdf"))
     }
 
@@ -610,11 +684,38 @@ class V25RepositoryContractTest {
 
     private fun projectBody(): String = """
         {"project_id": "p-1", "name": "线性代数",
-         "file": {"file_id": "f-1", "filename": "linear.pdf", "size_bytes": 1, "status": "PARSED",
-                  "chapters": [{"chapter_id": "c-1", "name": "第一章", "start_page": 1, "end_page": 20}]},
+         "materials": [{"material_id": "m-1", "project_id": "p-1", "type": "PDF",
+                        "name": "linear.pdf", "status": "PARSED", "error_code": null,
+                        "size_bytes": 1, "char_count": null, "chapter": null,
+                        "created_at": "2026-08-14T09:00:00+00:00"}],
+         "chapters": [{"chapter_id": "c-1", "material_id": "m-1", "name": "第一章",
+                       "start_page": 1, "end_page": 20}],
          "status": "READY", "chapter_count": 1, "deck_count": 0, "task_count": 0,
          "created_at": "2026-08-14T09:00:00+00:00", "updated_at": "2026-08-14T10:00:00+00:00",
          "version": "2026-08-14T10:00:00+00:00"}
+    """.trimIndent()
+
+    /** POST /projects step one: the empty project (no materials, status EMPTY). */
+    private fun emptyProjectBody(): String = """
+        {"project_id": "p-1", "name": "线性代数", "materials": [],
+         "status": "EMPTY", "chapter_count": 0, "deck_count": 0, "task_count": 0,
+         "created_at": "2026-08-14T09:00:00+00:00", "updated_at": "2026-08-14T09:00:00+00:00"}
+    """.trimIndent()
+
+    /** One PENDING PDF material (openapi Material). */
+    private fun materialBody(): String = """
+        {"material_id": "m-1", "project_id": "p-1", "type": "PDF", "name": "linear.pdf",
+         "status": "PENDING", "error_code": null, "size_bytes": 1, "char_count": null,
+         "chapter": null, "created_at": "2026-08-14T09:00:00+00:00"}
+    """.trimIndent()
+
+    /** One READY TEXT material with its single whole-content chapter (null pages). */
+    private fun textMaterialBody(): String = """
+        {"material_id": "m-text", "project_id": "p-1", "type": "TEXT", "name": "课堂笔记",
+         "status": "READY", "error_code": null, "size_bytes": null, "char_count": 13,
+         "chapter": {"chapter_id": "ch-text", "material_id": "m-text", "name": "课堂笔记",
+                     "start_page": null, "end_page": null},
+         "created_at": "2026-08-14T09:00:00+00:00"}
     """.trimIndent()
 
     private fun importResponseBody(): String = """
@@ -627,7 +728,7 @@ class V25RepositoryContractTest {
     private fun taskBody(): String = """
         {"task_id": "t-1", "project_id": "p-1", "file_id": "f-1", "deck_id": "d-1", "retry_of_task_id": null,
          "status": "DRAFT", "internal_stage": null,
-         "selected_chapters": [{"chapter_id": "c-1", "name": "第一章", "start_page": 1, "end_page": 20}],
+         "selected_chapters": [{"chapter_id": "c-1", "material_id": "m-1", "name": "第一章", "start_page": 1, "end_page": 20}],
          "generation_config": {"coverage_mode": "BALANCED",
                                "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
                                "custom_requirements": null},

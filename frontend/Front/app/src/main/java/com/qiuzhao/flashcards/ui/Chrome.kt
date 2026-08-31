@@ -219,6 +219,23 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                 },
                 tasks = projectTasks[route.id].orEmpty(),
                 progress = projectProgress[route.id],
+                // Contract 3.16: status EMPTY means no materials yet — the guide replaces the
+                // generation surface until the first PDF/text material lands.
+                isEmptyProject = project.status == "EMPTY",
+                onAddPdfMaterial = {
+                    viewModel.beginMaterialImport()
+                    navigator.navigate(AppRoute.MaterialImport(projectId = project.id))
+                },
+                onAddTextMaterial = {
+                    navigator.navigate(
+                        AppRoute.ProjectTextEditor(
+                            materialId = null,
+                            themeKey = project.themeKey,
+                            projectId = project.id,
+                            editorTitle = "导入文本",
+                        )
+                    )
+                },
             )
         }
         entry<AppRoute.DeckGeneration> { route ->

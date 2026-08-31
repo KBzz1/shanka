@@ -88,7 +88,7 @@ class V25SerializationTest {
     }
 
     @Test
-    fun `project payload maps the pdf file chapters and derived counts`() {
+    fun `project payload maps materials chapters and derived counts`() {
         val project = decode<ProjectDto>(projectBody()).toDomain()
 
         assertEquals("p-1", project.projectId)
@@ -97,37 +97,70 @@ class V25SerializationTest {
         assertEquals(1, project.chapterCount)
         assertEquals(2, project.deckCount)
         assertEquals(3, project.taskCount)
-        assertEquals("f-1", project.file.id)
-        assertEquals("linear.pdf", project.file.name)
-        assertEquals(1, project.file.chapters.size)
-        assertEquals("c-1", project.file.chapters[0].id)
-        assertEquals("第一章 矩阵", project.file.chapters[0].name)
-        assertEquals(1, project.file.chapters[0].startPage)
-        assertEquals(20, project.file.chapters[0].endPage)
-        assertEquals(null, project.file.createdAt)
+        assertEquals(1, project.materials.size)
+        val material = project.materials[0]
+        assertEquals("m-1", material.materialId)
+        assertEquals("p-1", material.projectId)
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25MaterialType.PDF, material.type)
+        assertEquals("linear.pdf", material.name)
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25MaterialStatus.PARSED, material.status)
+        assertEquals(1048576L, material.sizeBytes)
+        assertNull(material.charCount)
+        assertNull(material.chapter)
+        assertEquals(Instant.parse("2026-08-14T09:00:00Z"), material.createdAt)
+        // Detail-only chapter summary across materials, each owned by its material.
+        assertEquals(1, project.chapters.size)
+        assertEquals("c-1", project.chapters[0].id)
+        assertEquals("m-1", project.chapters[0].materialId)
+        assertEquals("第一章 矩阵", project.chapters[0].name)
+        assertEquals(1, project.chapters[0].startPage)
+        assertEquals(20, project.chapters[0].endPage)
         assertEquals(Instant.parse("2026-08-14T09:00:00Z"), project.createdAt)
         assertEquals(Instant.parse("2026-08-14T10:00:00Z"), project.updatedAt)
     }
 
     @Test
-    fun `pdf file payload maps created_at as the import time`() {
-        val project = decode<ProjectDto>(projectBody()
-            .replace(
-                "\"size_bytes\": 1048576, \"status\": \"PARSED\"",
-                "\"size_bytes\": 1048576, \"status\": \"PARSED\", \"created_at\": \"2026-08-14T08:30:00Z\"",
-            )).toDomain()
+    fun `empty project payload maps the EMPTY aggregate with no materials`() {
+        val project = decode<ProjectDto>(emptyProjectBody()).toDomain()
 
-        assertEquals(Instant.parse("2026-08-14T08:30:00Z"), project.file.createdAt)
+        assertEquals(V25ProjectStatus.EMPTY, project.status)
+        assertTrue(project.materials.isEmpty())
+        assertEquals(0, project.chapterCount)
     }
 
     @Test
-    fun `project payload maps the parsing status and a file without chapters`() {
-        val project = decode<ProjectDto>(projectBody()
-            .replace("\"status\": \"READY\"", "\"status\": \"PARSING\"")
-            .replace("\"chapters\": [{\"chapter_id\": \"c-1\", \"name\": \"第一章 矩阵\", \"start_page\": 1, \"end_page\": 20}]", "\"chapters\": null")).toDomain()
+    fun `text material payload maps the ready status and the null-page chapter`() {
+        val material = decode<MaterialDto>(textMaterialBody()).toDomain()
+
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25MaterialType.TEXT, material.type)
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25MaterialStatus.READY, material.status)
+        assertEquals(30_000, material.charCount)
+        assertNull("TEXT chapters carry no page span (structure-contract 3.2a)", material.chapter?.startPage)
+        assertNull(material.chapter?.endPage)
+        assertEquals("m-text", material.chapter?.materialId)
+        assertNull(material.chapter!!.pageSpanLabel)
+    }
+
+    @Test
+    fun `material payload maps pdf failure codes and nullable metadata`() {
+        val material = decode<MaterialDto>(materialBody()
+            .replace("\"status\": \"PENDING\"", "\"status\": \"FAILED\"")
+            .replace("\"error_code\": null", "\"error_code\": \"PDF_PARSE_FAILED\"")
+            .replace("\"size_bytes\": 1048576", "\"size_bytes\": null")).toDomain()
+
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25MaterialStatus.FAILED, material.status)
+        assertEquals("PDF_PARSE_FAILED", material.errorCode)
+        assertNull(material.sizeBytes)
+        assertNull(material.charCount)
+    }
+
+    @Test
+    fun `project payload maps the parsing status without chapters`() {
+        val project = decode<ProjectDto>(projectBody(parsing = true)).toDomain()
 
         assertEquals(V25ProjectStatus.PARSING, project.status)
-        assertTrue(project.file.chapters.isEmpty())
+        assertTrue(project.chapters.isEmpty())
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25MaterialStatus.PARSING, project.materials[0].status)
     }
 
     @Test
@@ -539,6 +572,22 @@ class V25SerializationTest {
     }
 
     @Test
+    fun `project creation and text material bodies match the request schemas`() {
+        val created = json.decodeFromString(
+            CreateProjectRequest.serializer(),
+            json.encodeToString(CreateProjectRequest.serializer(), CreateProjectRequest("概率论")),
+        )
+        assertEquals("概率论", created.name)
+
+        val text = json.decodeFromString(
+            TextMaterialCreateRequest.serializer(),
+            json.encodeToString(TextMaterialCreateRequest.serializer(), TextMaterialCreateRequest("课堂笔记", "第一章 绪论")),
+        )
+        assertEquals("课堂笔记", text.name)
+        assertEquals("第一章 绪论", text.content)
+    }
+
+    @Test
     fun `generation config body matches the TaskCreateRequest schema`() {
         val request = TaskCreateRequest(
             deckId = "d-1",
@@ -593,13 +642,50 @@ class V25SerializationTest {
          "current_project_id": null, "updated_at": "2026-08-14T09:00:00Z"}
     """.trimIndent()
 
-    private fun projectBody(): String = """
+    private fun projectBody(parsing: Boolean = false): String = if (parsing) {
+        """
         {"project_id": "p-1", "name": "线性代数",
-         "file": {"file_id": "f-1", "filename": "linear.pdf", "size_bytes": 1048576, "status": "PARSED",
-                  "chapters": [{"chapter_id": "c-1", "name": "第一章 矩阵", "start_page": 1, "end_page": 20}]},
+         "materials": [{"material_id": "m-1", "project_id": "p-1", "type": "PDF",
+                        "name": "linear.pdf", "status": "PARSING", "error_code": null,
+                        "size_bytes": 1048576, "char_count": null, "chapter": null,
+                        "created_at": "2026-08-14T09:00:00Z"}],
+         "status": "PARSING", "chapter_count": 0, "deck_count": 2, "task_count": 3,
+         "created_at": "2026-08-14T09:00:00Z", "updated_at": "2026-08-14T10:00:00Z",
+         "version": "2026-08-14T10:00:00Z"}
+    """.trimIndent()
+    } else {
+        """
+        {"project_id": "p-1", "name": "线性代数",
+         "materials": [{"material_id": "m-1", "project_id": "p-1", "type": "PDF",
+                        "name": "linear.pdf", "status": "PARSED", "error_code": null,
+                        "size_bytes": 1048576, "char_count": null, "chapter": null,
+                        "created_at": "2026-08-14T09:00:00Z"}],
+         "chapters": [{"chapter_id": "c-1", "material_id": "m-1", "name": "第一章 矩阵",
+                       "start_page": 1, "end_page": 20}],
          "status": "READY", "chapter_count": 1, "deck_count": 2, "task_count": 3,
          "created_at": "2026-08-14T09:00:00Z", "updated_at": "2026-08-14T10:00:00Z",
          "version": "2026-08-14T10:00:00Z"}
+    """.trimIndent()
+    }
+
+    private fun emptyProjectBody(): String = """
+        {"project_id": "p-2", "name": "空项目", "materials": [],
+         "status": "EMPTY", "chapter_count": 0, "deck_count": 0, "task_count": 0,
+         "created_at": "2026-08-14T09:00:00Z", "updated_at": "2026-08-14T09:00:00Z"}
+    """.trimIndent()
+
+    private fun materialBody(): String = """
+        {"material_id": "m-1", "project_id": "p-1", "type": "PDF", "name": "linear.pdf",
+         "status": "PENDING", "error_code": null, "size_bytes": 1048576, "char_count": null,
+         "chapter": null, "created_at": "2026-08-14T09:00:00Z"}
+    """.trimIndent()
+
+    private fun textMaterialBody(): String = """
+        {"material_id": "m-text", "project_id": "p-1", "type": "TEXT", "name": "课堂笔记",
+         "status": "READY", "error_code": null, "size_bytes": null, "char_count": 30000,
+         "chapter": {"chapter_id": "ch-text", "material_id": "m-text", "name": "课堂笔记",
+                     "start_page": null, "end_page": null},
+         "created_at": "2026-08-14T09:00:00Z"}
     """.trimIndent()
 
     private fun deletionPreflightBody(): String = """
@@ -625,7 +711,7 @@ class V25SerializationTest {
     private fun taskBody(): String = """
         {"task_id": "t-1", "project_id": "p-1", "file_id": "f-1", "deck_id": "d-1", "retry_of_task_id": null,
          "status": "GENERATING", "internal_stage": "SCORING",
-         "selected_chapters": [{"chapter_id": "c-1", "name": "第一章", "start_page": 1, "end_page": 20}],
+         "selected_chapters": [{"chapter_id": "c-1", "material_id": "m-1", "name": "第一章", "start_page": 1, "end_page": 20}],
          "generation_config": {"coverage_mode": "EXTENSIVE",
                                "difficulty_ratio": {"basic": 40, "understanding": 40, "deep_question": 20},
                                "custom_requirements": null},

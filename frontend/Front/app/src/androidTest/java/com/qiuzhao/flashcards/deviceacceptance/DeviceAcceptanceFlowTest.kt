@@ -151,14 +151,20 @@ class DeviceAcceptanceFlowTest {
         // /study/today is scoped to the current project's configured plan; a standalone
         // deck would legitimately produce an empty plan. Provision the real business shape:
         // project -> deck -> cards -> plan selection.
-        val project = repo.createProject(
-            fileName = "device-acceptance.pdf",
-            content = MINIMAL_PDF.inputStream(),
-            name = "device-acceptance-$suffix",
-        )
+        // Two-step creation (contract V25-D-29): the named EMPTY project first, then the PDF
+        // material through the materials endpoint (asynchronously parsed server-side).
+        val project = repo.createProject(name = "device-acceptance-$suffix")
         assertTrue("createProject failed: ${(project as? V25Result.Failure)?.code}", project is V25Result.Success)
         val projectId = (project as V25Result.Success).value.projectId
         report("provision project_id=$projectId")
+
+        val material = repo.addProjectMaterialPdf(
+            projectId = projectId,
+            fileName = "device-acceptance.pdf",
+            content = MINIMAL_PDF.inputStream(),
+        )
+        assertTrue("addProjectMaterialPdf failed: ${(material as? V25Result.Failure)?.code}", material is V25Result.Success)
+        report("provision material_id=${(material as V25Result.Success).value.materialId}")
 
         val deck = repo.createDeck("device-acceptance-$suffix", projectId)
         assertTrue("createDeck failed: ${(deck as? V25Result.Failure)?.code}", deck is V25Result.Success)

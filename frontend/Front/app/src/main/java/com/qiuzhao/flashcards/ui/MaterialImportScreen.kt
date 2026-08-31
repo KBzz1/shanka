@@ -85,7 +85,18 @@ internal fun MaterialImportScreen(
                 ImportAddPanel(
                     theme = theme,
                     onChooseFile = { filePicker.launch(arrayOf("application/pdf")) },
-                    onEnterText = { viewModel.stageMaterialImportText("", "") }
+                    onEnterText = {
+                        val draftId = viewModel.stageMaterialImportText()
+                        navigator.navigate(
+                            AppRoute.ProjectTextEditor(
+                                materialId = draftId,
+                                themeKey = theme.key,
+                                projectId = route.projectId,
+                                stageForMaterialImport = true,
+                                editorTitle = "导入文本",
+                            )
+                        )
+                    }
                 )
             }
             item {
@@ -100,7 +111,7 @@ internal fun MaterialImportScreen(
                 ImportPreviewGroup(
                     theme = theme, title = "文本资料", icon = "description",
                     materials = materials.filter { it.type == ProjectDraftMaterialType.TEXT },
-                    emptyHint = "当前服务暂不支持文本资料",
+                    emptyHint = "暂无添加",
                     onEditFile = { editingFile = it },
                     onEditText = { material ->
                         navigator.navigate(
@@ -167,8 +178,8 @@ private fun ImportAddPanel(
             AppText("添加学习资料", AppTextRole.SectionTitle, color = theme.text)
         }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            ImportChoice("picture_as_pdf", "选择 PDF", "每个项目仅支持一份 PDF 文件", theme, onChooseFile)
-            ImportChoice("file_copy", "输入文本（暂不支持）", "当前服务仅支持 PDF 资料", theme, onEnterText)
+            ImportChoice("picture_as_pdf", "选择 PDF", "支持多份 PDF 文件，异步解析", theme, onChooseFile)
+            ImportChoice("file_copy", "输入文本", "粘贴文本资料，30000 字以内", theme, onEnterText)
         }
     }
 }

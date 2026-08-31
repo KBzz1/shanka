@@ -74,14 +74,53 @@ internal interface V25Api {
 
     // --- learning projects and chapters (Architecture 4.2) --------------------------------------
 
+    /** Two-step creation step one: the JSON body carries only the project name (contract 6.2). */
     @Headers("X-Shanka-Op: ${ShankaOps.CREATE_PROJECT}")
-    @Multipart
     @POST("projects")
     suspend fun createProject(
+        @Body body: CreateProjectRequest,
+        @Header("Idempotency-Key") idempotencyKey: String,
+    ): ProjectDto
+
+    @Headers("X-Shanka-Op: ${ShankaOps.LIST_MATERIALS}")
+    @GET("projects/{project_id}/materials")
+    suspend fun listProjectMaterials(@Path("project_id") projectId: String): ItemsResponse<MaterialDto>
+
+    @Headers("X-Shanka-Op: ${ShankaOps.ADD_MATERIAL_PDF}")
+    @Multipart
+    @POST("projects/{project_id}/materials/pdf")
+    suspend fun addProjectMaterialPdf(
+        @Path("project_id") projectId: String,
         @Header("Idempotency-Key") idempotencyKey: String,
         @Part file: MultipartBody.Part,
-        @Part("name") name: okhttp3.RequestBody?,
+    ): MaterialDto
+
+    @Headers("X-Shanka-Op: ${ShankaOps.ADD_MATERIAL_TEXT}")
+    @POST("projects/{project_id}/materials/text")
+    suspend fun addProjectMaterialText(
+        @Path("project_id") projectId: String,
+        @Body body: TextMaterialCreateRequest,
+        @Header("Idempotency-Key") idempotencyKey: String,
+    ): MaterialDto
+
+    @Headers("X-Shanka-Op: ${ShankaOps.DELETE_MATERIAL}")
+    @DELETE("projects/{project_id}/materials/{material_id}")
+    suspend fun deleteProjectMaterial(
+        @Path("project_id") projectId: String,
+        @Path("material_id") materialId: String,
+        @Query("retain_cards") retainCards: Boolean?,
+        @Header("Idempotency-Key") idempotencyKey: String,
     ): ProjectDto
+
+    @Headers("X-Shanka-Op: ${ShankaOps.REPLACE_MATERIAL_PDF}")
+    @Multipart
+    @POST("projects/{project_id}/materials/{material_id}/replace")
+    suspend fun replaceProjectMaterialPdf(
+        @Path("project_id") projectId: String,
+        @Path("material_id") materialId: String,
+        @Header("Idempotency-Key") idempotencyKey: String,
+        @Part file: MultipartBody.Part,
+    ): MaterialDto
 
     @Headers("X-Shanka-Op: ${ShankaOps.LIST_PROJECTS}")
     @GET("projects")
@@ -118,15 +157,6 @@ internal interface V25Api {
         @Query("retain_decks") retainDecks: Boolean?,
         @Query("cancel_active_tasks") cancelActiveTasks: Boolean?,
     ): DeletionPreflightDto
-
-    @Headers("X-Shanka-Op: ${ShankaOps.REPLACE_PROJECT_PDF}")
-    @Multipart
-    @POST("projects/{project_id}/replace-pdf")
-    suspend fun replaceProjectPdf(
-        @Path("project_id") projectId: String,
-        @Header("Idempotency-Key") idempotencyKey: String,
-        @Part file: MultipartBody.Part,
-    ): ProjectDto
 
     @Headers("X-Shanka-Op: ${ShankaOps.UPDATE_CHAPTER}")
     @PATCH("projects/{project_id}/chapters/{chapter_id}")

@@ -21,6 +21,7 @@ import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
 import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
 import com.qiuzhao.flashcards.domain.v25.V25ImportResult
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
+import com.qiuzhao.flashcards.domain.v25.V25Material
 import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStudySettings
 import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
@@ -122,17 +123,50 @@ class RemoteV25Repository internal constructor(
 
     // --- learning projects and chapters (Architecture 4.2) -------------------------------------
 
-    override suspend fun createProject(
+    override suspend fun createProject(name: String, idempotencyKey: String?): V25Result<V25LearningProject> =
+        wire { api.createProject(CreateProjectRequest(name.trim()), idempotencyKey ?: newKey()).toDomain() }
+
+    // --- materials (Architecture 4.2, structure-contract 3.2a) -----------------------------------
+
+    override suspend fun addProjectMaterialPdf(
+        projectId: String,
         fileName: String,
         content: InputStream,
-        name: String?,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = wire {
+        uploadApi.addProjectMaterialPdf(projectId, idempotencyKey ?: newKey(), pdfPart(fileName, content)).toDomain()
+    }
+
+    override suspend fun addProjectMaterialText(
+        projectId: String,
+        name: String,
+        content: String,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = wire {
+        api.addProjectMaterialText(projectId, TextMaterialCreateRequest(name.trim(), content), idempotencyKey ?: newKey()).toDomain()
+    }
+
+    override suspend fun listProjectMaterials(projectId: String): V25Result<List<V25Material>> =
+        wire { api.listProjectMaterials(projectId).items.map { it.toDomain() } }
+
+    override suspend fun deleteProjectMaterial(
+        projectId: String,
+        materialId: String,
+        retainCards: Boolean,
         idempotencyKey: String?,
     ): V25Result<V25LearningProject> = wire {
-        uploadApi.createProject(
-            idempotencyKey = idempotencyKey ?: newKey(),
-            file = pdfPart(fileName, content),
-            name = name?.toPlainPart(),
-        ).toDomain()
+        // The retain decision is part of the idempotent operation: a replay must never flip it.
+        api.deleteProjectMaterial(projectId, materialId, if (retainCards) null else false, idempotencyKey ?: newKey()).toDomain()
+    }
+
+    override suspend fun replaceProjectMaterialPdf(
+        projectId: String,
+        materialId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = wire {
+        uploadApi.replaceProjectMaterialPdf(projectId, materialId, idempotencyKey ?: newKey(), pdfPart(fileName, content)).toDomain()
     }
 
     override suspend fun listProjects(forceRefresh: Boolean): V25Result<List<V25LearningProject>> =
@@ -163,15 +197,6 @@ class RemoteV25Repository internal constructor(
             retainDecks = if (retainDecks) null else false,
             cancelActiveTasks = if (allowCancel) true else null,
         ).toDomain()
-    }
-
-    override suspend fun replaceProjectPdf(
-        projectId: String,
-        fileName: String,
-        content: InputStream,
-        idempotencyKey: String?,
-    ): V25Result<V25LearningProject> = wire {
-        uploadApi.replaceProjectPdf(projectId, idempotencyKey ?: newKey(), pdfPart(fileName, content)).toDomain()
     }
 
     override suspend fun updateChapter(
@@ -456,5 +481,3 @@ internal fun pdfPart(fileName: String, content: InputStream): MultipartBody.Part
         bytes.toRequestBody("application/pdf".toMediaType()),
     )
 }
-
-internal fun String.toPlainPart() = toRequestBody("text/plain; charset=utf-8".toMediaType())

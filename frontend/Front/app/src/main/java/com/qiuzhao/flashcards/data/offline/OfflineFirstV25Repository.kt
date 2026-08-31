@@ -406,13 +406,65 @@ class OfflineFirstV25Repository(
             }
         }
 
-    override suspend fun createProject(
+    /**
+     * Two-step creation, step one (contract V25-D-29): the JSON call only creates the named
+     * EMPTY project; materials attach afterwards through the materials endpoints.
+     */
+    override suspend fun createProject(name: String, idempotencyKey: String?): V25Result<V25LearningProject> =
+        remote.createProject(name, idempotencyKey).alsoOnSuccess { project ->
+            userId()?.let { user -> cache.replaceProject(user, project, clock.millis()) }
+        }
+
+    override suspend fun addProjectMaterialPdf(
+        projectId: String,
         fileName: String,
         content: InputStream,
-        name: String?,
+        idempotencyKey: String?,
+    ): V25Result<com.qiuzhao.flashcards.domain.v25.V25Material> =
+        remote.addProjectMaterialPdf(projectId, fileName, content, idempotencyKey).alsoOnSuccess {
+            // Any material add resets the chapter confirmation server-side; drop the cached
+            // project so the next read observes the re-aggregated status.
+            userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_PROJECTS) }
+        }
+
+    override suspend fun addProjectMaterialText(
+        projectId: String,
+        name: String,
+        content: String,
+        idempotencyKey: String?,
+    ): V25Result<com.qiuzhao.flashcards.domain.v25.V25Material> =
+        remote.addProjectMaterialText(projectId, name, content, idempotencyKey).alsoOnSuccess {
+            userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_PROJECTS) }
+        }
+
+    override suspend fun listProjectMaterials(projectId: String): V25Result<List<com.qiuzhao.flashcards.domain.v25.V25Material>> =
+        remote.listProjectMaterials(projectId)
+
+    override suspend fun deleteProjectMaterial(
+        projectId: String,
+        materialId: String,
+        retainCards: Boolean,
         idempotencyKey: String?,
     ): V25Result<V25LearningProject> =
-        remote.createProject(fileName, content, name, idempotencyKey).alsoOnSuccess {
+        remote.deleteProjectMaterial(projectId, materialId, retainCards, idempotencyKey).alsoOnSuccess {
+            // The response carries the re-aggregated project (EMPTY when the last material
+            // went away); fold it in and refresh the derived lists.
+            userId()?.let { user -> cache.replaceProject(user, it, clock.millis()) }
+        }.alsoOnSuccess {
+            userId()?.let { user ->
+                cache.invalidate(user, V25CacheStore.KEY_DECKS)
+                cache.invalidate(user, V25CacheStore.KEY_TODAY_PLAN)
+            }
+        }
+
+    override suspend fun replaceProjectMaterialPdf(
+        projectId: String,
+        materialId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String?,
+    ): V25Result<com.qiuzhao.flashcards.domain.v25.V25Material> =
+        remote.replaceProjectMaterialPdf(projectId, materialId, fileName, content, idempotencyKey).alsoOnSuccess {
             userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_PROJECTS) }
         }
 
@@ -439,16 +491,6 @@ class OfflineFirstV25Repository(
         retainDecks: Boolean,
         allowCancel: Boolean,
     ): V25Result<V25DeletionPreflight> = remote.getProjectDeletionPreflight(projectId, retainDecks, allowCancel)
-
-    override suspend fun replaceProjectPdf(
-        projectId: String,
-        fileName: String,
-        content: InputStream,
-        idempotencyKey: String?,
-    ): V25Result<V25LearningProject> =
-        remote.replaceProjectPdf(projectId, fileName, content, idempotencyKey).alsoOnSuccess {
-            userId()?.let { user -> cache.replaceProject(user, it, clock.millis()) }
-        }
 
     override suspend fun updateChapter(
         projectId: String,

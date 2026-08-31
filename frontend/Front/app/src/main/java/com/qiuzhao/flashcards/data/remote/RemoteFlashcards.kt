@@ -38,7 +38,9 @@ data class ProjectSummary(
     val name: String,
     val themeKey: String = "azure",
     val deckCount: Int = 0,
-    val materialCount: Int = 0
+    val materialCount: Int = 0,
+    /** Server-aggregated lifecycle (EMPTY/PARSING/.../READY); drives the empty-project guide. */
+    val status: String = "READY",
 )
 
 data class DeckProgress(

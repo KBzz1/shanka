@@ -6,17 +6,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * One PDF upload operation. The operation kind captures the server path (create project vs.
- * replace the project's PDF); the retry identity of one user submission is the operation plus the
- * exact file (uri + display name), so an unchanged retry reuses the fixed Idempotency-Key while a
- * new file or a changed name starts a fresh key.
+ * One PDF upload operation. The operation kind captures the server path (attach a new material
+ * to an existing project vs. replace a failed PDF material in place); project *creation* is a
+ * JSON call owned by [ProjectCreationCoordinator]. The retry identity of one user submission is
+ * the operation plus the exact file (uri + display name), so an unchanged retry reuses the fixed
+ * Idempotency-Key while a new file or a changed name starts a fresh key.
  */
 sealed interface PdfUploadOperation {
-    /** POST /projects — a null name lets the server derive the project name from the file name. */
-    data class CreateProject(val name: String?) : PdfUploadOperation
+    /** POST /projects/{project_id}/materials/pdf — attach a PDF to a living project. */
+    data class AddMaterial(val projectId: String) : PdfUploadOperation
 
-    /** POST /projects/{project_id}/replace-pdf — replace the only PDF after a parse failure. */
-    data class ReplacePdf(val projectId: String) : PdfUploadOperation
+    /** POST /projects/{project_id}/materials/{material_id}/replace — re-upload a FAILED PDF material. */
+    data class ReplaceMaterial(val projectId: String, val materialId: String) : PdfUploadOperation
 }
 
 /**

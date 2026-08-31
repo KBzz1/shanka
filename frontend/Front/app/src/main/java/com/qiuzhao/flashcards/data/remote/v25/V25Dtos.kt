@@ -25,7 +25,9 @@ import com.qiuzhao.flashcards.domain.v25.V25ImportResult
 import com.qiuzhao.flashcards.domain.v25.V25ImportStatus
 import com.qiuzhao.flashcards.domain.v25.V25InternalStage
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
-import com.qiuzhao.flashcards.domain.v25.V25PdfFile
+import com.qiuzhao.flashcards.domain.v25.V25Material
+import com.qiuzhao.flashcards.domain.v25.V25MaterialStatus
+import com.qiuzhao.flashcards.domain.v25.V25MaterialType
 import com.qiuzhao.flashcards.domain.v25.V25PlanCard
 import com.qiuzhao.flashcards.domain.v25.V25PreferencesPatch
 import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
@@ -96,9 +98,10 @@ internal data class GenerationConfigDto(
 @Serializable
 internal data class ChapterDto(
     @SerialName("chapter_id") val chapterId: String,
+    @SerialName("material_id") val materialId: String,
     @SerialName("name") val name: String,
-    @SerialName("start_page") val startPage: Int,
-    @SerialName("end_page") val endPage: Int,
+    @SerialName("start_page") val startPage: Int? = null,
+    @SerialName("end_page") val endPage: Int? = null,
 )
 
 @Serializable
@@ -154,22 +157,33 @@ internal data class PreferencesDto(
 
 // --- projects -------------------------------------------------------------------------------------
 
+/**
+ * One learning material wire shape (openapi Material, structure-contract 3.2a). `status` is
+ * required on the wire (PDF rows always carry a pdf_files status; TEXT is always READY).
+ */
 @Serializable
-internal data class PdfFileDto(
-    @SerialName("file_id") val fileId: String,
-    @SerialName("filename") val filename: String,
-    @SerialName("size_bytes") val sizeBytes: Long? = null,
-    @SerialName("status") val status: String? = null,
+internal data class MaterialDto(
+    @SerialName("material_id") val materialId: String,
+    @SerialName("project_id") val projectId: String,
+    @SerialName("type") val type: String,
+    @SerialName("name") val name: String,
+    @SerialName("status") val status: String,
     @SerialName("error_code") val errorCode: String? = null,
-    @SerialName("chapters") val chapters: List<ChapterDto>? = null,
-    @SerialName("created_at") val createdAt: String? = null,
+    @SerialName("size_bytes") val sizeBytes: Long? = null,
+    @SerialName("char_count") val charCount: Int? = null,
+    @SerialName("chapter") val chapter: ChapterDto? = null,
+    @SerialName("created_at") val createdAt: String,
 )
 
+/**
+ * Project detail responses add a cross-material `chapters` summary (backend project_view)
+ * that the openapi LearningProject schema leaves implicit; list responses omit it.
+ */
 @Serializable
 internal data class ProjectDto(
     @SerialName("project_id") val projectId: String,
     @SerialName("name") val name: String,
-    @SerialName("file") val file: PdfFileDto,
+    @SerialName("materials") val materials: List<MaterialDto>,
     @SerialName("status") val status: String,
     @SerialName("chapter_count") val chapterCount: Int,
     @SerialName("deck_count") val deckCount: Int,
@@ -178,6 +192,7 @@ internal data class ProjectDto(
     @SerialName("updated_at") val updatedAt: String,
     @SerialName("version") val version: String? = null,
     @SerialName("tasks") val tasks: List<TaskDto>? = null,
+    @SerialName("chapters") val chapters: List<ChapterDto>? = null,
 )
 
 @Serializable
@@ -429,6 +444,17 @@ internal data class PreferencesPatchRequest(
 @Serializable
 internal data class SetCurrentProjectRequest(@SerialName("current_project_id") val currentProjectId: String?)
 
+/** POST /projects two-step creation, step one: the named EMPTY project (openapi inline body). */
+@Serializable
+internal data class CreateProjectRequest(@SerialName("name") val name: String)
+
+/** POST /projects/{project_id}/materials/text: pasted text material (openapi TextMaterialCreateRequest). */
+@Serializable
+internal data class TextMaterialCreateRequest(
+    @SerialName("name") val name: String,
+    @SerialName("content") val content: String,
+)
+
 @Serializable
 internal data class ChapterEditRequest(
     @SerialName("name") val name: String,
@@ -519,8 +545,41 @@ internal fun GenerationConfigDto.toDomain(): V25GenerationConfig = V25Generation
     customRequirements = customRequirements.orEmpty(),
 )
 
-internal fun ChapterDto.toDomain(): V25Chapter =
-    V25Chapter(id = chapterId, name = name, startPage = startPage, endPage = endPage)
+internal fun ChapterDto.toDomain(): V25Chapter = V25Chapter(
+    id = chapterId,
+    materialId = materialId,
+    name = name,
+    startPage = startPage,
+    endPage = endPage,
+)
+
+internal fun MaterialDto.toDomain(): V25Material = V25Material(
+    materialId = materialId,
+    projectId = projectId,
+    type = enumValueOf<V25MaterialType>(type),
+    name = name,
+    status = enumValueOf<V25MaterialStatus>(status),
+    errorCode = errorCode,
+    sizeBytes = sizeBytes,
+    charCount = charCount,
+    chapter = chapter?.toDomain(),
+    createdAt = parseIsoInstant(createdAt, "created_at"),
+)
+
+internal fun ProjectDto.toDomain(): V25LearningProject = V25LearningProject(
+    projectId = projectId,
+    name = name,
+    materials = materials.map { it.toDomain() },
+    status = enumValueOf<V25ProjectStatus>(status),
+    chapterCount = chapterCount,
+    deckCount = deckCount,
+    taskCount = taskCount,
+    createdAt = parseIsoInstant(createdAt, "created_at"),
+    updatedAt = parseIsoInstant(updatedAt, "updated_at"),
+    version = parseVersion(version),
+    tasks = tasks.orEmpty().map { it.toDomain() },
+    chapters = chapters.orEmpty().map { it.toDomain() },
+)
 
 internal fun AuthUserDto.toDomain(): V25AuthUser = V25AuthUser(
     userId = userId,
@@ -537,30 +596,6 @@ internal fun PreferencesDto.toDomain(): V25UserPreferences = V25UserPreferences(
     learningTimezone = learningTimezone,
     currentProjectId = currentProjectId,
     updatedAt = parseIsoInstant(updatedAt, "updated_at"),
-)
-
-internal fun PdfFileDto.toDomain(): V25PdfFile = V25PdfFile(
-    id = fileId,
-    name = filename,
-    sizeBytes = sizeBytes,
-    status = status,
-    errorCode = errorCode,
-    chapters = chapters.orEmpty().map { it.toDomain() },
-    createdAt = createdAt?.let { parseIsoInstant(it, "created_at") },
-)
-
-internal fun ProjectDto.toDomain(): V25LearningProject = V25LearningProject(
-    projectId = projectId,
-    name = name,
-    file = file.toDomain(),
-    status = enumValueOf<V25ProjectStatus>(status),
-    chapterCount = chapterCount,
-    deckCount = deckCount,
-    taskCount = taskCount,
-    createdAt = parseIsoInstant(createdAt, "created_at"),
-    updatedAt = parseIsoInstant(updatedAt, "updated_at"),
-    version = parseVersion(version),
-    tasks = tasks.orEmpty().map { it.toDomain() },
 )
 
 internal fun StudySettingsDto.toDomain(projectId: String): V25ProjectStudySettings =

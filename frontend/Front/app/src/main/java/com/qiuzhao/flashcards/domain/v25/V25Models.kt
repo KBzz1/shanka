@@ -35,8 +35,20 @@ enum class V25Difficulty { BASIC, UNDERSTANDING, DEEP_QUESTION }
 /** Card shapes rendered through the shared `front/back` view (Architecture 3.5, V25-STUDY-FR-08). */
 enum class V25CardType { QUESTION, TRUE_FALSE }
 
-/** User-visible learning project lifecycle (Architecture 3.2). */
-enum class V25ProjectStatus { PARSING, PARSE_FAILED, AWAITING_CHAPTER_CONFIRMATION, READY }
+/**
+ * User-visible learning project lifecycle (Architecture 3.2, structure-contract 3.16). The
+ * server aggregates the value from every material's status plus the chapter confirmation:
+ * no materials = EMPTY; any PDF pending/parsing = PARSING; all PDFs failed with no usable
+ * chapter source = PARSE_FAILED; usable chapters not confirmed = AWAITING_CHAPTER_CONFIRMATION;
+ * confirmed = READY. The client never re-derives it.
+ */
+enum class V25ProjectStatus { EMPTY, PARSING, PARSE_FAILED, AWAITING_CHAPTER_CONFIRMATION, READY }
+
+/** Learning material kind (structure-contract 3.2a); LINK is reserved and not implemented. */
+enum class V25MaterialType { PDF, TEXT }
+
+/** Material lifecycle: PDF uses PENDING/PARSING/PARSED/FAILED; TEXT is always READY. */
+enum class V25MaterialStatus { PENDING, PARSING, PARSED, FAILED, READY }
 
 /** User-visible generation task lifecycle (Architecture 3.4). */
 enum class V25TaskStatus {
@@ -91,6 +103,7 @@ sealed interface V25Result<out T> {
 /** Exact error codes from Architecture section 6 plus the shared transport-level codes. */
 object V25ErrorCodes {
     const val PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"
+    const val MATERIAL_NOT_FOUND = "MATERIAL_NOT_FOUND"
     const val PROJECT_STATE_CONFLICT = "PROJECT_STATE_CONFLICT"
     const val PROJECT_HAS_ACTIVE_TASK = "PROJECT_HAS_ACTIVE_TASK"
     const val TASK_STATE_CONFLICT = "TASK_STATE_CONFLICT"
@@ -173,13 +186,22 @@ data class V25PreferencesPatch(
 
 // --- learning projects and chapters (Architecture 3.2) -----------------------------------------
 
-/** A PDF-derived chapter with editable page span. */
+/**
+ * A chapter derived from one learning material. PDF chapters carry an editable page span;
+ * TEXT material chapters are the material's single whole-content chapter with null pages.
+ */
 data class V25Chapter(
     val id: String,
+    /** Owning material (structure-contract 3.2a); chapters always belong to one material. */
+    val materialId: String,
     val name: String,
-    val startPage: Int,
-    val endPage: Int,
-)
+    val startPage: Int?,
+    val endPage: Int?,
+) {
+    /** Page-span label for the chapter list; TEXT chapters have no pages. */
+    val pageSpanLabel: String?
+        get() = if (startPage == null || endPage == null) null else "$startPage-$endPage 页"
+}
 
 /** Chapter name/page-span edit (PATCH /projects/{project_id}/chapters/{chapter_id}). */
 data class V25ChapterEdit(
@@ -188,24 +210,34 @@ data class V25ChapterEdit(
     val endPage: Int,
 )
 
-/** The current PDF behind a learning project; list responses may return a summary. */
-data class V25PdfFile(
-    val id: String,
+/**
+ * One learning material inside a project (structure-contract 3.2a): a project is a collection
+ * of materials, and adding/removing any material resets the chapter confirmation server-side.
+ */
+data class V25Material(
+    val materialId: String,
+    val projectId: String,
+    val type: V25MaterialType,
+    /** PDF = uploaded file name; TEXT = the user-titled source (1..60 characters). */
     val name: String,
-    /** Optional file metadata returned by project detail/list endpoints. */
-    val sizeBytes: Long? = null,
-    val status: String? = null,
+    val status: V25MaterialStatus,
+    /** Parse failure code; PDF materials only. */
     val errorCode: String? = null,
-    val chapters: List<V25Chapter> = emptyList(),
-    /** Server record time of the uploaded PDF; shown as the import date in material cards. */
-    val createdAt: Instant? = null,
+    /** PDF file size in bytes; TEXT is null. */
+    val sizeBytes: Long? = null,
+    /** TEXT character count (1..30000); PDF is null. */
+    val charCount: Int? = null,
+    /** The material's own chapter; TEXT carries exactly one with null pages. */
+    val chapter: V25Chapter? = null,
+    val createdAt: Instant,
 )
 
-/** Aggregate root of PDF, chapters, decks and tasks (Architecture 3.2). */
+/** Aggregate root of materials, chapters, decks and tasks (Architecture 3.2, contract 3.16). */
 data class V25LearningProject(
     val projectId: String,
     val name: String,
-    val file: V25PdfFile,
+    /** Material summaries; an empty list is the explicit EMPTY project. */
+    val materials: List<V25Material>,
     val status: V25ProjectStatus,
     val chapterCount: Int,
     val deckCount: Int,
@@ -215,6 +247,11 @@ data class V25LearningProject(
     val version: Int,
     /** Project detail may include the persisted task snapshot; list responses may omit it. */
     val tasks: List<V25GenerationTask> = emptyList(),
+    /**
+     * Chapters across every material (detail responses only; list responses omit them and this
+     * stays empty — the chapter screen always re-reads the detail).
+     */
+    val chapters: List<V25Chapter> = emptyList(),
 )
 
 /** New-card chapter scope for a project (Architecture 3.3). */

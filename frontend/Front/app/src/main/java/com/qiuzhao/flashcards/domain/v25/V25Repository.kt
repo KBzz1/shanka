@@ -50,13 +50,12 @@ interface V25Repository {
 
     // --- learning projects and chapters (Architecture 4.2) -------------------------------------
 
-    /** POST /projects — upload a PDF (multipart) and create the project; name defaults to the file name. */
-    suspend fun createProject(
-        fileName: String,
-        content: InputStream,
-        name: String? = null,
-        idempotencyKey: String? = null,
-    ): V25Result<V25LearningProject>
+    /**
+     * POST /projects — two-step creation, step one: create the named EMPTY project (JSON body,
+     * contract V25-D-29). Materials attach afterwards through [addProjectMaterialPdf] /
+     * [addProjectMaterialText].
+     */
+    suspend fun createProject(name: String, idempotencyKey: String? = null): V25Result<V25LearningProject>
 
     /** GET /projects — the user's projects; empty list is the true empty state. `forceRefresh` bypasses the offline cache. */
     suspend fun listProjects(forceRefresh: Boolean = false): V25Result<List<V25LearningProject>>
@@ -84,13 +83,47 @@ interface V25Repository {
         allowCancel: Boolean = false,
     ): V25Result<V25DeletionPreflight>
 
-    /** POST /projects/{project_id}/replace-pdf — replace and re-parse a failed PDF. */
-    suspend fun replaceProjectPdf(
+    // --- materials (Architecture 4.2, structure-contract 3.2a) -----------------------------------
+
+    /** POST /projects/{project_id}/materials/pdf — attach a PDF; it parses asynchronously. */
+    suspend fun addProjectMaterialPdf(
         projectId: String,
         fileName: String,
         content: InputStream,
         idempotencyKey: String? = null,
+    ): V25Result<V25Material>
+
+    /** POST /projects/{project_id}/materials/text — attach pasted text (≤30000 characters); READY immediately. */
+    suspend fun addProjectMaterialText(
+        projectId: String,
+        name: String,
+        content: String,
+        idempotencyKey: String? = null,
+    ): V25Result<V25Material>
+
+    /** GET /projects/{project_id}/materials — every material with its own status. */
+    suspend fun listProjectMaterials(projectId: String): V25Result<List<V25Material>>
+
+    /**
+     * DELETE /projects/{project_id}/materials/{material_id}?retain_cards= — three-tier delete;
+     * the server silently cancels tasks referencing the material and returns the re-aggregated
+     * project (deleting the last material turns it EMPTY and it stays alive).
+     */
+    suspend fun deleteProjectMaterial(
+        projectId: String,
+        materialId: String,
+        retainCards: Boolean = true,
+        idempotencyKey: String? = null,
     ): V25Result<V25LearningProject>
+
+    /** POST /projects/{project_id}/materials/{material_id}/replace — in-place re-upload of a FAILED PDF material. */
+    suspend fun replaceProjectMaterialPdf(
+        projectId: String,
+        materialId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String? = null,
+    ): V25Result<V25Material>
 
     /** PATCH /projects/{project_id}/chapters/{chapter_id} — edit chapter name and page span. */
     suspend fun updateChapter(

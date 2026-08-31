@@ -55,6 +55,8 @@ class OfflineParseWaitTest {
         /** Status served by GET /projects (list) and GET /projects/{id} (detail) independently. */
         @Volatile var listParsed = false
         @Volatile var detailParsed = false
+        /** Detail verdict: every PDF FAILED with no usable chapter source (PARSE_FAILED). */
+        @Volatile var detailFailed = false
         var listRequestCount = 0
         var detailRequestCount = 0
 
@@ -68,7 +70,7 @@ class OfflineParseWaitTest {
                 }
                 path.startsWith("/projects/") -> {
                     detailRequestCount++
-                    ok(projectBody(parsed = detailParsed))
+                    ok(projectBody(parsed = detailParsed, failed = detailFailed))
                 }
                 else -> notFound()
             }
@@ -161,7 +163,8 @@ class OfflineParseWaitTest {
         assertEquals(V25ProjectStatus.AWAITING_CHAPTER_CONFIRMATION, (forced as V25Result.Success).value.status)
         val projection = cache.readProject("u-1", "p-1")
         assertEquals(V25ProjectStatus.AWAITING_CHAPTER_CONFIRMATION, projection?.status)
-        assertEquals(1, projection?.file?.chapters?.size)
+        assertEquals(1, projection?.chapters?.size)
+        assertEquals("m-1", projection?.materials?.single()?.materialId)
         db.close()
     }
 
@@ -222,27 +225,62 @@ class OfflineParseWaitTest {
         db.close()
     }
 
+    // --- 5. the failed-parse projection is material-driven: FAILED PDF status reaches the cache -----
+
+    @Test
+    fun test_offline_parse_failure_projects_the_failed_material_status() = runBlocking {
+        val db = openDatabase()
+        val repo = buildStack(db, scope())
+        val cache = V25CacheStore(db)
+
+        val priming = repo.getProject("p-1")
+        assertTrue(priming is V25Result.Success)
+        assertEquals(V25ProjectStatus.PARSING, (priming as V25Result.Success).value.status)
+
+        // The server verdict: the PDF parse failed and every PDF is FAILED with no usable
+        // chapter source, so the project aggregates to PARSE_FAILED.
+        backend.detailFailed = true
+        repo.refreshParsingProjects()
+
+        val projection = cache.readProject("u-1", "p-1")
+        assertEquals(V25ProjectStatus.PARSE_FAILED, projection?.status)
+        val material = projection?.materials?.single()
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25MaterialType.PDF, material?.type)
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25MaterialStatus.FAILED, material?.status)
+        assertEquals("PDF_PARSE_FAILED", material?.errorCode)
+        assertTrue("a failed parse owns no chapters", projection?.chapters?.isEmpty() == true)
+        db.close()
+    }
+
     companion object {
-        private fun projectBody(parsed: Boolean): String {
-            val file = if (parsed) {
-                """
-                "file_id": "f-1", "filename": "book.pdf", "size_bytes": 1024,
-                "status": "PARSED", "error_code": null,
-                "chapters": [{"chapter_id": "ch-1", "name": "第一章", "start_page": 1, "end_page": 10}],
-                "created_at": "2026-08-31T00:00:00Z"
-                """.trimIndent()
-            } else {
-                """
-                "file_id": "f-1", "filename": "book.pdf", "size_bytes": 1024,
-                "status": "PARSING", "error_code": null, "chapters": null,
-                "created_at": "2026-08-31T00:00:00Z"
-                """.trimIndent()
+        private fun projectBody(parsed: Boolean): String =
+            projectBody(parsed = parsed, failed = false)
+
+        private fun projectBody(parsed: Boolean, failed: Boolean): String {
+            val materialStatus = when {
+                failed -> "FAILED"
+                parsed -> "PARSED"
+                else -> "PARSING"
             }
-            val status = if (parsed) "AWAITING_CHAPTER_CONFIRMATION" else "PARSING"
+            val errorCode = if (failed) "\"PDF_PARSE_FAILED\"" else "null"
+            val chapters = if (parsed) {
+                """[{"chapter_id": "ch-1", "material_id": "m-1", "name": "第一章", "start_page": 1, "end_page": 10}]"""
+            } else {
+                "[]"
+            }
+            val status = when {
+                failed -> "PARSE_FAILED"
+                parsed -> "AWAITING_CHAPTER_CONFIRMATION"
+                else -> "PARSING"
+            }
             val chapterCount = if (parsed) 1 else 0
             return """
                 {"project_id": "p-1", "name": "测试项目",
-                 "file": {$file},
+                 "materials": [{"material_id": "m-1", "project_id": "p-1", "type": "PDF",
+                                "name": "book.pdf", "status": "$materialStatus", "error_code": $errorCode,
+                                "size_bytes": 1024, "char_count": null, "chapter": null,
+                                "created_at": "2026-08-31T00:00:00Z"}],
+                 "chapters": $chapters,
                  "status": "$status", "chapter_count": $chapterCount,
                  "deck_count": 0, "task_count": 0,
                  "created_at": "2026-08-31T00:00:00Z", "updated_at": "2026-08-31T00:00:00Z"}

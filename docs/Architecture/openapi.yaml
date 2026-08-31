@@ -1884,6 +1884,11 @@ components:
           items:
             $ref: '#/components/schemas/Task'
           description: 项目详情返回的任务快照;列表响应可省略
+        chapters:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Chapter'
+          description: 项目详情返回的跨资料章节列表;列表响应可省略
         created_at:
           type: string
           format: date-time

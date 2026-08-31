@@ -146,8 +146,10 @@ internal fun SmartCardChapterScreen(project: ProjectSummary, nav: ScreenNavigato
     var requestError by remember { mutableStateOf<String?>(null) }
     var replacingPdf by remember { mutableStateOf(false) }
     val active = activeProject?.takeIf { it.projectId == project.id }
-    val chapters = active?.file?.chapters.orEmpty().map { chapter ->
-        SmartChapter(chapter.id, chapter.name, "${chapter.startPage}-${chapter.endPage} 页")
+    // Chapters span every material of the project (contract 3.2a): PDF chapters show their page
+    // span, TEXT material chapters are whole-content with no pages.
+    val chapters = active?.chapters.orEmpty().map { chapter ->
+        SmartChapter(chapter.id, chapter.name, chapter.pageSpanLabel ?: "全文")
     }
     // The ViewModel-owned poller drives the wait; the screen runs no loop of its own, so a
     // slow parse can be left behind instead of freezing the page under a blocking dialog.
@@ -354,7 +356,7 @@ private fun SmartParseWaitCard(theme: DeckTheme, scale: Float) = Surface(
     }
 }
 
-/** Terminal parse failure: shows the backend reason and the contract's replace-pdf way out. */
+/** Terminal parse failure: shows the backend reason and the failed PDF material's in-place replace way out. */
 @Composable
 private fun SmartParseFailedCard(
     errorCode: String?,

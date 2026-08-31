@@ -29,17 +29,29 @@ data class ProjectEntity(
     @ColumnInfo(name = "version") val version: Int,
 )
 
-/** Exactly one PDF per project; replaced in the same transaction as its project row. */
-@Entity(tableName = "project_files", primaryKeys = ["user_id", "project_id"])
-data class ProjectFileEntity(
+/**
+ * One learning material of a project (structure-contract 3.2a). The material id is the cache
+ * key because materials are added and deleted inside one living project; `project_id` scopes
+ * the per-project reads.
+ */
+@Entity(
+    tableName = "project_materials",
+    primaryKeys = ["user_id", "material_id"],
+    indices = [Index(value = ["user_id", "project_id"])],
+)
+data class ProjectMaterialEntity(
     @ColumnInfo(name = "user_id") val userId: String,
+    @ColumnInfo(name = "material_id") val materialId: String,
     @ColumnInfo(name = "project_id") val projectId: String,
-    @ColumnInfo(name = "file_id") val fileId: String,
-    @ColumnInfo(name = "filename") val filename: String,
-    @ColumnInfo(name = "size_bytes") val sizeBytes: Long?,
-    @ColumnInfo(name = "status") val status: String?,
+    /** Wire PDF/TEXT (structure-contract 3.2a). */
+    @ColumnInfo(name = "type") val type: String,
+    @ColumnInfo(name = "name") val name: String,
+    @ColumnInfo(name = "status") val status: String,
     @ColumnInfo(name = "error_code") val errorCode: String?,
-    @ColumnInfo(name = "created_at") val createdAt: Long?,
+    @ColumnInfo(name = "size_bytes") val sizeBytes: Long?,
+    /** TEXT-only character count. */
+    @ColumnInfo(name = "char_count") val charCount: Int?,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
 )
 
 @Entity(tableName = "project_chapters", primaryKeys = ["user_id", "chapter_id"])
@@ -47,9 +59,12 @@ data class ProjectChapterEntity(
     @ColumnInfo(name = "user_id") val userId: String,
     @ColumnInfo(name = "chapter_id") val chapterId: String,
     @ColumnInfo(name = "project_id") val projectId: String,
+    /** Owning material (structure-contract 3.2a); TEXT chapters own their material's single chapter. */
+    @ColumnInfo(name = "material_id") val materialId: String,
     @ColumnInfo(name = "name") val name: String,
-    @ColumnInfo(name = "start_page") val startPage: Int,
-    @ColumnInfo(name = "end_page") val endPage: Int,
+    /** Page spans are PDF-only; TEXT chapters store null. */
+    @ColumnInfo(name = "start_page") val startPage: Int?,
+    @ColumnInfo(name = "end_page") val endPage: Int?,
     @ColumnInfo(name = "position") val position: Int,
 )
 

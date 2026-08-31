@@ -6,7 +6,7 @@ import com.qiuzhao.flashcards.domain.v25.V25Chapter
 import com.qiuzhao.flashcards.domain.v25.V25DailyActivity
 import com.qiuzhao.flashcards.domain.v25.V25Deck
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
-import com.qiuzhao.flashcards.domain.v25.V25PdfFile
+import com.qiuzhao.flashcards.domain.v25.V25Material
 import com.qiuzhao.flashcards.domain.v25.V25PlanCard
 import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25Rating
@@ -50,11 +50,13 @@ class V25CacheStore(private val db: ShankaV25Database) {
     suspend fun replaceProjects(userId: String, projects: List<V25LearningProject>, now: Long) {
         db.withTransaction {
             projectDao.deleteProjects(userId)
-            projectDao.deleteFiles(userId)
+            projectDao.deleteMaterials(userId)
             projectDao.deleteChapters(userId)
             projectDao.insertProjects(projects.map { it.toEntity(userId) })
-            projectDao.insertFiles(projects.map { it.file.toEntity(userId, it.projectId) })
-            projectDao.insertChapters(projects.flatMap { p -> p.file.chapters.toEntities(userId, p.projectId) })
+            projectDao.insertMaterials(projects.flatMap { p -> p.materials.toEntities(userId) })
+            projectDao.insertChapters(
+                projects.flatMap { p -> p.chapters.toEntities(userId, p.projectId) },
+            )
             metadataDao.upsert(
                 CacheMetadataEntity(
                     userId = userId,
@@ -72,29 +74,28 @@ class V25CacheStore(private val db: ShankaV25Database) {
     suspend fun replaceProject(userId: String, project: V25LearningProject, now: Long) {
         db.withTransaction {
             projectDao.deleteProject(userId, project.projectId)
-            projectDao.deleteFile(userId, project.projectId)
+            projectDao.deleteMaterialsOf(userId, project.projectId)
             projectDao.deleteChaptersOf(userId, project.projectId)
             projectDao.insertProjects(listOf(project.toEntity(userId)))
-            projectDao.insertFiles(listOf(project.file.toEntity(userId, project.projectId)))
-            projectDao.insertChapters(project.file.chapters.toEntities(userId, project.projectId))
+            projectDao.insertMaterials(project.materials.toEntities(userId))
+            projectDao.insertChapters(project.chapters.toEntities(userId, project.projectId))
             metadataDao.invalidate(userId, "$KEY_PROJECT:${project.projectId}")
         }
     }
 
-    suspend fun readProjects(userId: String): List<V25LearningProject> {
-        val projects = mutableListOf<V25LearningProject>()
-        for (row in projectDao.getProjectList(userId)) {
-            val file = projectDao.getFile(userId, row.projectId) ?: continue
-            val chapters = projectDao.getChapters(userId, row.projectId)
-            projects += row.toDomain(file, chapters)
-        }
-        return projects
-    }
+    suspend fun readProjects(userId: String): List<V25LearningProject> =
+        projectDao.getProjectList(userId).map { row -> readProjectParts(userId, row) }
 
     suspend fun readProject(userId: String, projectId: String): V25LearningProject? {
         val row = projectDao.getProject(userId, projectId) ?: return null
-        val file = projectDao.getFile(userId, projectId) ?: return null
-        return row.toDomain(file, projectDao.getChapters(userId, projectId))
+        return readProjectParts(userId, row)
+    }
+
+    /** Assembles the domain project from its three projection tables in one consistent read. */
+    private suspend fun readProjectParts(userId: String, row: ProjectEntity): V25LearningProject {
+        val materials = projectDao.getMaterials(userId, row.projectId).map { it.toDomain() }
+        val chapters = projectDao.getChapters(userId, row.projectId)
+        return row.toDomain(materials, chapters)
     }
 
     suspend fun metadata(userId: String, resourceKey: String): CacheMetadataEntity? =
@@ -361,16 +362,20 @@ private fun V25LearningProject.toEntity(userId: String) = ProjectEntity(
     version = version,
 )
 
-private fun V25PdfFile.toEntity(userId: String, projectId: String) = ProjectFileEntity(
-    userId = userId,
-    projectId = projectId,
-    fileId = id,
-    filename = name,
-    sizeBytes = sizeBytes,
-    status = status,
-    errorCode = errorCode,
-    createdAt = createdAt?.toEpochMilli(),
-)
+private fun List<V25Material>.toEntities(userId: String) = map { material ->
+    ProjectMaterialEntity(
+        userId = userId,
+        materialId = material.materialId,
+        projectId = material.projectId,
+        type = material.type.name,
+        name = material.name,
+        status = material.status.name,
+        errorCode = material.errorCode,
+        sizeBytes = material.sizeBytes,
+        charCount = material.charCount,
+        createdAt = material.createdAt.toEpochMilli(),
+    )
+}
 
 private fun List<V25Chapter>.toEntities(userId: String, projectId: String) =
     mapIndexed { index, chapter ->
@@ -378,6 +383,7 @@ private fun List<V25Chapter>.toEntities(userId: String, projectId: String) =
             userId = userId,
             chapterId = chapter.id,
             projectId = projectId,
+            materialId = chapter.materialId,
             name = chapter.name,
             startPage = chapter.startPage,
             endPage = chapter.endPage,
@@ -385,19 +391,24 @@ private fun List<V25Chapter>.toEntities(userId: String, projectId: String) =
         )
     }
 
-private fun ProjectEntity.toDomain(file: ProjectFileEntity, chapters: List<ProjectChapterEntity>) =
+private fun ProjectMaterialEntity.toDomain() = V25Material(
+    materialId = materialId,
+    projectId = projectId,
+    type = enumValueOf(type),
+    name = name,
+    status = enumValueOf(status),
+    errorCode = errorCode,
+    sizeBytes = sizeBytes,
+    charCount = charCount,
+    chapter = null,
+    createdAt = Instant.ofEpochMilli(createdAt),
+)
+
+private fun ProjectEntity.toDomain(materials: List<V25Material>, chapters: List<ProjectChapterEntity>) =
     V25LearningProject(
         projectId = projectId,
         name = name,
-        file = V25PdfFile(
-            id = file.fileId,
-            name = file.filename,
-            sizeBytes = file.sizeBytes,
-            status = file.status,
-            errorCode = file.errorCode,
-            chapters = chapters.map { V25Chapter(it.chapterId, it.name, it.startPage, it.endPage) },
-            createdAt = file.createdAt?.let(Instant::ofEpochMilli),
-        ),
+        materials = materials,
         status = enumValueOf(status),
         chapterCount = chapterCount,
         deckCount = deckCount,
@@ -405,6 +416,9 @@ private fun ProjectEntity.toDomain(file: ProjectFileEntity, chapters: List<Proje
         createdAt = Instant.ofEpochMilli(createdAt),
         updatedAt = Instant.ofEpochMilli(updatedAt),
         version = version,
+        chapters = chapters.map {
+            V25Chapter(it.chapterId, it.materialId, it.name, it.startPage, it.endPage)
+        },
     )
 
 private fun V25Deck.toEntity(userId: String) = DeckEntity(

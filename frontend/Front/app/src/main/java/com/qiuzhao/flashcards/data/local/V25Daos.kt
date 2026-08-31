@@ -25,8 +25,8 @@ interface ProjectDao {
     @Query("SELECT * FROM projects WHERE user_id = :userId AND project_id = :projectId")
     suspend fun getProject(userId: String, projectId: String): ProjectEntity?
 
-    @Query("SELECT * FROM project_files WHERE user_id = :userId AND project_id = :projectId")
-    suspend fun getFile(userId: String, projectId: String): ProjectFileEntity?
+    @Query("SELECT * FROM project_materials WHERE user_id = :userId AND project_id = :projectId ORDER BY created_at")
+    suspend fun getMaterials(userId: String, projectId: String): List<ProjectMaterialEntity>
 
     @Query("SELECT * FROM project_chapters WHERE user_id = :userId AND project_id = :projectId ORDER BY position")
     suspend fun getChapters(userId: String, projectId: String): List<ProjectChapterEntity>
@@ -35,7 +35,7 @@ interface ProjectDao {
     suspend fun insertProjects(projects: List<ProjectEntity>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertFiles(files: List<ProjectFileEntity>)
+    suspend fun insertMaterials(materials: List<ProjectMaterialEntity>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertChapters(chapters: List<ProjectChapterEntity>)
@@ -43,8 +43,8 @@ interface ProjectDao {
     @Query("DELETE FROM projects WHERE user_id = :userId")
     suspend fun deleteProjects(userId: String)
 
-    @Query("DELETE FROM project_files WHERE user_id = :userId")
-    suspend fun deleteFiles(userId: String)
+    @Query("DELETE FROM project_materials WHERE user_id = :userId")
+    suspend fun deleteMaterials(userId: String)
 
     @Query("DELETE FROM project_chapters WHERE user_id = :userId")
     suspend fun deleteChapters(userId: String)
@@ -52,8 +52,8 @@ interface ProjectDao {
     @Query("DELETE FROM projects WHERE user_id = :userId AND project_id = :projectId")
     suspend fun deleteProject(userId: String, projectId: String)
 
-    @Query("DELETE FROM project_files WHERE user_id = :userId AND project_id = :projectId")
-    suspend fun deleteFile(userId: String, projectId: String)
+    @Query("DELETE FROM project_materials WHERE user_id = :userId AND project_id = :projectId")
+    suspend fun deleteMaterialsOf(userId: String, projectId: String)
 
     @Query("DELETE FROM project_chapters WHERE user_id = :userId AND project_id = :projectId")
     suspend fun deleteChaptersOf(userId: String, projectId: String)

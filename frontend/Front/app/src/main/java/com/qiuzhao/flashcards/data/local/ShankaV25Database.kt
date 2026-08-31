@@ -5,6 +5,7 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
  * `shanka-v25.db` — the local-fact projection of server V2.5 state. Schema is exported
@@ -15,7 +16,7 @@ import androidx.room.migration.Migration
 @Database(
     entities = [
         ProjectEntity::class,
-        ProjectFileEntity::class,
+        ProjectMaterialEntity::class,
         ProjectChapterEntity::class,
         DeckEntity::class,
         CardEntity::class,
@@ -46,17 +47,46 @@ abstract class ShankaV25Database : RoomDatabase() {
 
     companion object {
         const val NAME = "shanka-v25.db"
-        const val VERSION = 1
+        const val VERSION = 2
 
         /** Projection schema version written into cache metadata rows. */
-        const val CACHE_SCHEMA_VERSION = 1
+        const val CACHE_SCHEMA_VERSION = 2
 
         /**
          * Explicit migrations only. Bump [VERSION] → add the Migration here → the exported
          * schema lands in `app/schemas` in the same change. Destructive fallback is banned.
          */
         val MIGRATIONS: Array<Migration> = arrayOf(
-            // v1 → v2 (none yet): Migration(1, 2) { db: SupportSQLiteDatabase -> … }
+            // v1 → v2 (multi-material projects, contract V25-D-29~32): `project_files` becomes
+            // the per-material `project_materials`, and chapters gain material ownership plus
+            // nullable page spans. Both are rebuildable projections of the server payload, so
+            // the migration drops and recreates exactly those two tables; every other cached
+            // fact (decks, cards, review states, outbox rows) is preserved.
+            object : Migration(1, 2) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL("DROP TABLE IF EXISTS project_files")
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS `project_materials` (" +
+                            "`user_id` TEXT NOT NULL, `material_id` TEXT NOT NULL, " +
+                            "`project_id` TEXT NOT NULL, `type` TEXT NOT NULL, `name` TEXT NOT NULL, " +
+                            "`status` TEXT NOT NULL, `error_code` TEXT, `size_bytes` INTEGER, " +
+                            "`char_count` INTEGER, `created_at` INTEGER NOT NULL, " +
+                            "PRIMARY KEY(`user_id`, `material_id`))",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_project_materials_user_id_project_id` " +
+                            "ON `project_materials` (`user_id`, `project_id`)",
+                    )
+                    db.execSQL("DROP TABLE IF EXISTS project_chapters")
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS `project_chapters` (" +
+                            "`user_id` TEXT NOT NULL, `chapter_id` TEXT NOT NULL, " +
+                            "`project_id` TEXT NOT NULL, `material_id` TEXT NOT NULL, " +
+                            "`name` TEXT NOT NULL, `start_page` INTEGER, `end_page` INTEGER, " +
+                            "`position` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `chapter_id`))",
+                    )
+                }
+            },
         )
 
         fun build(context: Context): ShankaV25Database =
