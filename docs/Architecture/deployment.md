@@ -1,4 +1,4 @@
-# 部署设计（Cloudflare Tunnel）v2.1
+# 部署设计（Cloudflare Tunnel）v2.5
 
 ## 1. 现状与目标
 域名已在 Cloudflare 管理;无公网 IP / 无服务器;目标:Android 前端经 HTTPS 访问后端 API。

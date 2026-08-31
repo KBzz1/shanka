@@ -1,6 +1,6 @@
 # AGENTS.md
 
-自动化联调验证平台：独立顶层目录，与后端 `main/tests/` 分离，零依赖纯 stdlib（任何 `python3` 可跑，不依赖 main 的 conda 环境）。设计权威：`docs/superpowers/specs/2026-08-12-test-platform-design.md`；账号化扩展权威：`docs/account-auth-test-platform-long-run-v1/DESIGN.md` §8。
+自动化联调验证平台：独立顶层目录，与后端 `main/tests/` 分离，零依赖纯 stdlib（任何 `python3` 可跑，不依赖 main 的 conda 环境）。设计权威：`docs/superpowers/specs/2026-08-12-test-platform-design.md`；账号化扩展权威：`docs/llm-account-long-run-v1/DESIGN.md` §4.2（原 `docs/account-auth-test-platform-long-run-v1/` 目录已随仓库收敛移除，其 §8 测试平台 v2 的节导航由该文件承接）。
 
 ## 分层结构
 
