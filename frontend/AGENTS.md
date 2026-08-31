@@ -22,3 +22,10 @@ implementation guidance for Navigation 3, edge-to-edge, and Compose theming.
 - The installed Compose `styles` skill requires alpha dependencies and
   experimental APIs. Do not enable it unless the user explicitly authorizes an
   experimental Compose/compileSdk upgrade.
+
+## Delivery preferences
+
+- When the user asks for an "安装包", deliver a directly installable,
+  build-verified APK — not just source changes.
+- When a request conflicts with the data model, auth/security boundaries, or
+  the agreed scope, state the conflict and ask; never resolve it silently.

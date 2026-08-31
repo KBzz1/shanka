@@ -11,7 +11,7 @@
 | 前端工程目录 | `frontend/Front/`（Android Jetpack Compose，包名 `com.qiuzhao.flashcards`，自带 gradle wrapper） |
 
 - 前端历史通过 subtree 保留在统一仓库中；前端与后端修改均在本仓库 `main` 上评审、提交和发布。
-- 前端侧联调状态与待核对项见 `frontend/docs/前端对接与联调交接.md`。
+- 客户端数据层为离线优先（Room 投影 + 评分 outbox），契约见 `offline-data-layer.md`；接口对接见 `backend-integration.md`。
 
 ## 2. 联调环境
 
@@ -27,10 +27,10 @@
 | `Authorization: Bearer <token>` | 所有业务接口（除 register/login、探活/metrics） | 注册/登录获得，等同密码，勿写日志 |
 | `Idempotency-Key` | 所有写操作 | UUID v4；新操作新键、重试同键；`POST /samples` 豁免 |
 
-## 4. 当前待办与已知问题
+## 4. 待办与已知问题
 
-- **样卡 400 待核对**（前端 2026-08-12 记录）：`POST /samples` 连续返回 `400 VALIDATION_ERROR`，前端称请求字段齐全。后端按 X-Request-ID 核对：`75301a4cdc2147f5864512c8411f71b9`、`2a5d4b147d42422aa16e7d8890fc7be4`、`fcf6c45a85cc47c58094bf3db644d6fe`（对应日志 `main/data/logs/app.log`）。
-- 更多前端侧遗留项见 `frontend/docs/前端对接与联调交接.md` 的「当前待后端核对」「仍未实现的 UI / 能力」。
+- 2026-08-12 联调期的遗留核对项（样卡 `POST /samples` 连续 400 等）已随 V2.5 接口重设计失效：样卡与任务统一走 projects/tasks 域，历史记录不再保留。
+- 接口行为边界与联调注意事项统一见 `backend-integration.md`。
 
 ## 5. 协作流
 
