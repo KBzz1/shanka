@@ -36,6 +36,7 @@ from infra.db.models import (
     Card,
     CardDeletionBatch,
     LearningProject,
+    Material,
     PdfFile,
     ReviewEvent,
     ReviewState,
@@ -368,10 +369,21 @@ def test_dashboard_account_wide_across_decks_and_projects(
         session.flush()
         for i in range(2):
             session.add(
+                Material(
+                    material_id=f"f-{i}",  # PDF 资料 material_id == file_id（契约 3.2a）
+                    project_id=f"proj-{i}",
+                    type="PDF",
+                    name=f"p{i}.pdf",
+                    status=None,
+                    size_bytes=1,
+                    created_at="2026-01-01T00:00:00.000Z",
+                )
+            )
+        for i in range(2):
+            session.add(
                 LearningProject(
                     project_id=f"proj-{i}",
                     user_id=user,
-                    file_id=f"f-{i}",
                     name=f"P{i}",
                     version="v1",
                     created_at="2026-01-01T00:00:00.000Z",

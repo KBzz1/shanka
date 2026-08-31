@@ -18,9 +18,11 @@
 ```text
 users 1──N auth_sessions
 users 1──1 user_preferences ──current_project── learning_projects
-users 1──N pdf_files 1──N chapters
-                    └──N text_chunks
-users 1──N learning_projects 1──1 pdf_files(file_id 唯一权威)
+users 1──N pdf_files 1──1 materials(PDF) 1──N chapters
+                     └────────────┴──N text_chunks
+users 1──N learning_projects 1──N materials（资料集合权威归属;V25-D-29）
+                            │        └─N chapters / text_chunks
+                            │        └─PDF 资料 material_id == file_id（与 pdf_files 一对一）
                             1──1 project_study_settings
                             1──N project_study_decks ──N decks
                             1──N decks(project_id 可空=独立牌组)
@@ -37,7 +39,7 @@ users 1──1 api_keys（V2.2 主键重建）
 users 1──N idempotency_keys（V2.2 主键重建）
 ```
 
-注(V2.5):`users` 为根、`user_id` 为隔离键;`learning_projects.file_id` 为 PDF↔项目唯一外键权威(PDF 表不重复存 project_id);`Deck.project_id = null` 表示独立牌组;`Card.chapter_id = null` 表示"未归属章节"。
+注(V2.5):`users` 为根、`user_id` 为隔离键;V25-D-29 起项目是**资料集合**,资料归属权威 = `materials.project_id`(PDF 资料 `material_id == file_id`,解析状态/存储仍以 `pdf_files` 为权威;TEXT 资料无 pdf_files 行),`learning_projects` 不再持有 `file_id` 唯一外键,允许空项目(无资料,`EMPTY`);`Deck.project_id = null` 表示独立牌组;`Card.chapter_id = null` 表示"未归属章节"。
 
 ## 2. 表定义
 
@@ -77,12 +79,13 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | chapter_id | TEXT | PK | |
-| file_id | TEXT | NOT NULL, FK → pdf_files ON DELETE CASCADE | |
+| material_id | TEXT | NOT NULL, FK → materials ON DELETE CASCADE | V25-D-29 归属资料;章节随资料删除级联清理 |
+| file_id | TEXT | NULL, FK → pdf_files ON DELETE CASCADE | PDF 资料章节 = material_id;TEXT 资料章节为 NULL |
 | name | TEXT | NOT NULL | 用户可修改 |
-| start_page | INTEGER | NOT NULL | 用户可修改 |
-| end_page | INTEGER | NOT NULL | 用户可修改 |
+| start_page | INTEGER | NULL | 用户可修改;TEXT 章节为 NULL(V25-D-32) |
+| end_page | INTEGER | NULL | 用户可修改;TEXT 章节为 NULL(V25-D-32) |
 
-索引:`(file_id)`。
+索引:`(file_id)`、`(material_id)`。
 
 ### 2.5 tasks
 
@@ -97,7 +100,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | retry_of_task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | V2.5 只指向同用户失败任务 |
 | status | TEXT | NOT NULL | V2.5 `DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING / COMPLETED / FAILED / ABANDONED`(七态) |
 | stage | TEXT | NULL | V2.5 改名 `internal_stage` 语义:`PLANNING / GENERATING / SCORING / PUBLISHING`,仅运行期内部观测 |
-| selected_chapters | TEXT | NOT NULL | 章节快照(JSON),与源 chapter 解耦;开始正式生成前冻结快照 |
+| selected_chapters | TEXT | NOT NULL | 章节快照(JSON,契约 3.4 Chapter[];每项含 `chapter_id/material_id/name/start_page/end_page`,TEXT 章节页码为 null),与源 chapter 解耦;开始正式生成前冻结快照 |
 | generation_config | TEXT | NOT NULL | coverage_mode/难度整数比例/deep_question/自定义要求(JSON,契约 3.5) |
 | sample_cards | TEXT | NULL | V2.5 持久化 1~3 张样卡(JSON);配置变化时清空 |
 | sample_config_hash | TEXT | NULL | V2.5 样卡配置指纹,防止确认过期样卡 |
@@ -305,20 +308,22 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 
 ### 2.13 text_chunks
 
-按文件页码持久化文本(LLM 链路升级工作包新增):scanner PARSED 时完整解析每页文本,**一页一行、与章节解耦**——不保存 `chapter_id`,不在扫描阶段按章节切块;章节名称/页码可在 PARSED 后修改,页文本不随章节编辑、删除而重建。
+按资料持久化文本(LLM 链路升级工作包新增;V25-D-29/32 多资料化):scanner PARSED 时完整解析每页文本,**一页一行、与章节解耦**——不保存 `chapter_id`,不在扫描阶段按章节切块;章节名称/页码可在 PARSED 后修改,页文本不随章节编辑、删除而重建。TEXT 资料(V25-D-32)按段落切分为 `chunk_seq` 1..N 伪页码行。
 
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
-| chunk_id | TEXT | PK | 服务端按 `(file_id, page_number, content_sha256)` 确定性生成;同一 PDF 内容的页标识稳定 |
-| file_id | TEXT | NOT NULL, FK → pdf_files ON DELETE CASCADE | 删除 PDF 时按 file_id 级联清理全文页数据 |
-| page_number | INTEGER | NOT NULL | 页码(一页一行) |
+| chunk_id | TEXT | PK | 服务端按 `(归属ID, 序号, content_sha256)` 确定性生成;同一内容标识稳定 |
+| material_id | TEXT | NOT NULL, FK → materials ON DELETE CASCADE | V25-D-29 权威归属;删除资料时级联清理全文数据 |
+| file_id | TEXT | NULL, FK → pdf_files ON DELETE CASCADE | PDF 资料块 = material_id;TEXT 资料块为 NULL |
+| chunk_seq | INTEGER | NOT NULL | PDF 块 = page_number;TEXT 块 = 1..N 伪页码(V25-D-32) |
+| page_number | INTEGER | NOT NULL | 页码(一页一行;TEXT 资料同 chunk_seq) |
 | char_count | INTEGER | NOT NULL | 页字符数(规划分组/配额依据) |
 | content_sha256 | TEXT | NOT NULL | 页文本摘要(输入指纹/漂移检测依据) |
 | content | TEXT | NOT NULL | 完整页文本(功能数据;完整 PDF 文本/完整 Prompt/原文样例仍禁止写日志、审计与调用账本) |
 | created_at | TEXT | NOT NULL | |
 
-唯一约束:`UNIQUE (file_id, page_number)`。索引:`(file_id, page_number)`。
-重解析幂等:先清理该 file_id 的既有页文本再重建;章节范围内所有页均无有效文本时该章不发 Planner 请求,作为成功空结果处理。
+唯一约束:`UNIQUE (material_id, chunk_seq)`(V25-D-29 取代旧 `(file_id, page_number)`)。索引:`(material_id, chunk_seq)`。
+重解析幂等:先清理该 material_id 的既有页文本再重建;章节范围内所有页均无有效文本时该章不发 Planner 请求,作为成功空结果处理。
 
 ### 2.14 llm_call_attempts
 
@@ -396,13 +401,13 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
 | --- | --- | --- | --- |
 | project_id | TEXT | PK | 服务端生成 |
 | user_id | TEXT | NOT NULL, FK → users | 数据主体隔离键 |
-| file_id | TEXT | NOT NULL, UNIQUE FK → pdf_files | 唯一外键权威(一个项目恰好一份当前 PDF;PDF 表不重复存 project_id) |
-| name | TEXT | NOT NULL | 去首尾空白后 1~60 字符,可重名;默认取上传文件名去扩展名 |
-| chapters_confirmed_at | TEXT | NULL | 目录确认时间;`status` 由 PDF 状态与本列确定(契约 3.16,不建第二套状态列) |
+| name | TEXT | NOT NULL | 去首尾空白后 1~60 字符,可重名;两步创建第一步由请求体 `name` 提供 |
+| chapters_confirmed_at | TEXT | NULL | 目录确认时间;`status` 由全部资料状态与本列聚合派生(契约 3.16,不建第二套状态列) |
 | version | TEXT | NOT NULL | 缓存刷新与并发检查 |
 | created_at / updated_at | TEXT | NOT NULL | |
 
 索引:`(user_id, updated_at)`。
+V25-D-29 起不再持有 `file_id` 唯一外键:资料归属权威 = `materials.project_id`,允许空项目(删最后一份资料后项目存活,status=`EMPTY`);新增/删除任一资料重置 `chapters_confirmed_at`(V25-D-31)。
 
 ### 2.18 user_preferences（V2.5 新增）
 
@@ -477,12 +482,32 @@ V2.4 起 `expires_at` 支持滑动续期(活跃续期至 now+30 天,见 structur
 
 索引:`(user_id, status, expires_at)`(pending expiry 清理)。
 
+### 2.22 materials（V2.5 多资料新增,V25-D-29）
+
+学习项目 = 资料集合(契约 3.2a):本表承载资料归属与摘要。PDF 资料行与 `pdf_files` 一对一(`material_id == file_id`),解析状态/存储/租约以 `pdf_files` 为权威,本表 `status` 置 NULL 防第二套状态漂移;TEXT 资料行(V25-D-32)无 `pdf_files` 行,`status` 恒 `READY`,内容经 chapters + text_chunks(`chunk_seq` 伪页码)承载。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| material_id | TEXT | PK | PDF 资料 = `pdf_files.file_id`;TEXT 资料服务端生成 |
+| project_id | TEXT | NOT NULL, FK → learning_projects ON DELETE CASCADE | 资料归属权威;项目删除级联清理资料 |
+| type | TEXT | NOT NULL | `PDF / TEXT`(LINK 预留) |
+| name | TEXT | NOT NULL | PDF=文件名;TEXT=用户可改标题(1~60 字符) |
+| status | TEXT | NULL | PDF 行恒 NULL(权威在 `pdf_files.status`);TEXT 行恒 `READY` |
+| error_code | TEXT | NULL | 仅 PDF 解析失败码 |
+| size_bytes | INTEGER | NULL | 仅 PDF |
+| char_count | INTEGER | NULL | 仅 TEXT;1~30000 |
+| created_at | TEXT | NOT NULL | |
+
+索引:`(project_id, created_at)`(资料列表与状态聚合)。
+删除语义(V25-D-30):资料级删除走本表行,chapters/text_chunks 经 FK 级联;PDF 资料连带删除 `pdf_files` 行与存储对象;`retain_cards` 决定该资料产出卡片去留。删最后一份资料后项目存活(`EMPTY`),增删均重置 `chapters_confirmed_at`(V25-D-31)。
+
 ## 3. 级联与并发
 
 | 删除对象 | 级联效果 |
 | --- | --- |
 | users | auth_sessions CASCADE(本期无用户删除接口,预留) |
-| learning_projects | project_study_settings/project_study_decks CASCADE;user_preferences.current_project_id SET NULL;decks.project_id SET NULL;tasks.project_id SET NULL |
+| learning_projects | materials CASCADE(chapters/text_chunks 随资料级联);project_study_settings/project_study_decks CASCADE;user_preferences.current_project_id SET NULL;decks.project_id SET NULL;tasks.project_id SET NULL;PDF 资料连带删 pdf_files 行与存储对象,删除确认时服务端先自动 CAS 取消全部活跃任务 |
+| materials | chapters/text_chunks CASCADE;PDF 资料级联删 pdf_files 行;cards.chapter_id 随章节删除 SET NULL 或按用户选择删除;引用该资料的活跃任务静默取消(V25-D-30) |
 | decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL;删除确认时服务端先自动 CAS 取消全部活跃任务 |
 | pdf_files | chapters CASCADE;tasks.file_id SET NULL;项目删除确认时服务端先自动 CAS 取消全部活跃任务 |
 | tasks | knowledge_points、batches CASCADE;cards.source_task_id SET NULL(保留卡)或按用户选择删除其已发布卡(5.3) |
@@ -526,6 +551,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 | api_keys | 3.1 ApiKey |
 | users / auth_sessions | 3.14 AuthUser / 3.15 AuthSessionResponse(V2.2,已随数据地基迁移落地) |
 | pdf_files / chapters | 3.2 PdfFile / 3.3 Chapter |
+| materials | 3.2a Material(V2.5 多资料新增;PDF 资料 material_id == file_id) |
 | tasks / generation_config | 3.4 GenerationTask / 3.5 GenerationConfig |
 | knowledge_points | 3.6 KnowledgePoint(生成单元) |
 | batches | 3.7 Batch |
@@ -609,3 +635,15 @@ V2.5 使用一个**新的不可逆 Alembic revision**;迁移从运行时真实 h
 
 - 选型:**Alembic**(SQLAlchemy 官方迁移工具);P0-2 引入并生成首个迁移。
 - 迁移纪律:与 ORM 模型同 PR 提交;破坏性变更需同步更新 database-design 与契约。
+
+### 7.5 V2.5 多资料落地（V25-D-29~32;revision `b7e4c2a91d50`,不可逆）
+
+项目从"单 PDF"翻面为"资料集合"(契约 3.2a/3.16/6.2);迁移 `downgrade` 抛
+`NotImplementedError`(空项目/纯文本项目无法重建 1:1 `file_id` 归属,回退仅限部署备份恢复)。
+
+- **新表**:`materials`(定义见 2.22);回填自 `learning_projects × pdf_files` 既有 1:1 归属,PDF 资料行 `status` 置 NULL。
+- **chapters**:加 `material_id NOT NULL FK → materials ON DELETE CASCADE`(回填 = `file_id`)、`material_id` 索引;`file_id` 改可空;`start_page`/`end_page` 改可空(TEXT 章节无页码)。
+- **text_chunks**:加 `material_id NOT NULL FK → materials ON DELETE CASCADE`(回填 = `file_id`)与 `chunk_seq NOT NULL`(回填 = `page_number`);`file_id` 改可空;唯一键 `(file_id, page_number)` 与同名索引删除,改 `UNIQUE (material_id, chunk_seq)` + `(material_id, chunk_seq)` 索引。
+- **learning_projects**:删除 `file_id` 列(唯一外键权威移交 `materials.project_id`);允许空项目。
+- **应用层语义**:项目 `status` 聚合派生含 `EMPTY`;新增/删除任一资料重置 `chapters_confirmed_at`;`tasks.selected_chapters` 快照每项含 `material_id`(新写入保证,历史快照只读保留)。
+- §0/§1/§2/§3/§6 与 ORM 同批更新(见 structure-contract v2.5 多资料增量)。

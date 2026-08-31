@@ -38,6 +38,7 @@ from infra.db.models import (
     Deck,
     KnowledgePoint,
     LearningProject,
+    Material,
     PdfFile,
     ReviewEvent,
     ReviewState,
@@ -225,7 +226,6 @@ def _seed_task(
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at=_NOW,
         version=_NOW,
@@ -234,10 +234,28 @@ def _seed_task(
     )
     session.add(project)
     session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            created_at=_NOW,
+        )
+    )
+    session.flush()
     deck = _seed_deck(session, user_id=user_id)
     deck.project_id = project.project_id
     session.flush()
-    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    ch = Chapter(
+        chapter_id=_uuid(),
+        file_id=pdf.file_id,
+        material_id=pdf.file_id,
+        name="第一章",
+        start_page=1,
+        end_page=2,
+    )
     session.add(ch)
     session.flush()
     if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:
@@ -329,7 +347,6 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at=_NOW,
         version=_NOW,
@@ -338,10 +355,28 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     )
     session.add(project)
     session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            created_at=_NOW,
+        )
+    )
+    session.flush()
     deck = _seed_deck(session, user_id=user_id)
     deck.project_id = project.project_id
     session.flush()
-    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    ch = Chapter(
+        chapter_id=_uuid(),
+        file_id=pdf.file_id,
+        material_id=pdf.file_id,
+        name="第一章",
+        start_page=1,
+        end_page=2,
+    )
     session.add(ch)
     session.flush()
     if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:

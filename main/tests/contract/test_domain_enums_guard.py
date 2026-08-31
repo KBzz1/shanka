@@ -103,6 +103,7 @@ def test_visible_predicate_matches_contract_3_9() -> None:
 
 def test_v25_new_resource_enums_match_openapi() -> None:
     assert set(enums.ProjectStatus) == {
+        "EMPTY",
         "PARSING",
         "PARSE_FAILED",
         "AWAITING_CHAPTER_CONFIRMATION",

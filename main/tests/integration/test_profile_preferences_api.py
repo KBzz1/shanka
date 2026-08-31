@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import LearningProject, PdfFile
+from infra.db.models import LearningProject, Material, PdfFile
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 
@@ -90,12 +90,22 @@ def _seed_project(client: TestClient, user_id: str, project_id: str) -> None:
                 created_at=stamp,
             )
         )
-        session.flush()  # 先落 pdf_files（learning_projects.file_id FK 依赖；unit-of-work 不排序裸 FK 插入）
+        session.flush()  # 先落 pdf_files/materials（FK 依赖；unit-of-work 不排序裸 FK 插入）
+        session.add(
+            Material(
+                material_id=f"{project_id}-file",  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project_id,
+                type="PDF",
+                name="seed.pdf",
+                status=None,
+                size_bytes=1,
+                created_at=stamp,
+            )
+        )
         session.add(
             LearningProject(
                 project_id=project_id,
                 user_id=user_id,
-                file_id=f"{project_id}-file",
                 name="seed project",
                 chapters_confirmed_at=None,
                 version="v1",

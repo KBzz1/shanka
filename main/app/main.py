@@ -15,7 +15,6 @@ from app.api import (
     decks,
     metrics,
     observability,
-    pdfs,
     preferences,
     probes,
     projects,
@@ -159,7 +158,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(cards.router_batches)  # V2.5 删除批次（/card-deletion-batches/*）
     app.include_router(review.router)
     app.include_router(stats.router)
-    app.include_router(pdfs.router)
     app.include_router(projects.router)
     app.include_router(preferences.router)
     app.include_router(study.router)  # V2.5 今日学习计划（/study/today）

@@ -57,8 +57,8 @@ def _seed_chapter(db_path: Path, file_id: str) -> str:
     with engine.begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO chapters (chapter_id, file_id, name, start_page, end_page)"
-                " VALUES (:c, :f, '第1章', 1, 1)"
+                "INSERT INTO chapters (chapter_id, file_id, material_id, name, start_page, end_page)"
+                " VALUES (:c, :f, :f, '第1章', 1, 1)"
             ),
             {"c": chapter_id, "f": file_id},
         )
@@ -124,25 +124,29 @@ def test_task_project_deck_user_consistency(client: TestClient, tmp_path: Path) 
     user2 用自己的 project 但挂 user1 的 deck_id → 404。"""
     h1 = _user(client, "user1", "pass-1111")
     h2 = _user(client, "user2", "pass-2222")
-    # 各自上传 PDF 建立学习项目（201；fake bytes 通过三重校验）
+    # 各自两步建项目 + 添加 PDF 资料（201；fake bytes 通过三重校验）
     pdf_bytes = b"%PDF-1.4 fake pdf content for upload validation"
-    r1 = client.post(
-        "/projects",
+    r1 = client.post("/projects", json={"name": "a"}, headers={**h1, **_idem()})
+    assert r1.status_code == 201, r1.text
+    m1 = client.post(
+        f"/projects/{r1.json()['project_id']}/materials/pdf",
         files={"file": ("a.pdf", pdf_bytes, "application/pdf")},
         headers={**h1, **_idem()},
     )
-    assert r1.status_code == 201, r1.text
-    r2 = client.post(
-        "/projects",
+    assert m1.status_code == 201, m1.text
+    r2 = client.post("/projects", json={"name": "b"}, headers={**h2, **_idem()})
+    assert r2.status_code == 201, r2.text
+    m2 = client.post(
+        f"/projects/{r2.json()['project_id']}/materials/pdf",
         files={"file": ("b.pdf", pdf_bytes, "application/pdf")},
         headers={**h2, **_idem()},
     )
-    assert r2.status_code == 201, r2.text
+    assert m2.status_code == 201, m2.text
     project1 = r1.json()["project_id"]
     project2 = r2.json()["project_id"]
     deck1 = _create_deck(client, h1, project_id=project1)
-    chapter1 = _seed_chapter(tmp_path / "iso.db", r1.json()["file"]["file_id"])
-    chapter2 = _seed_chapter(tmp_path / "iso.db", r2.json()["file"]["file_id"])
+    chapter1 = _seed_chapter(tmp_path / "iso.db", m1.json()["material_id"])
+    chapter2 = _seed_chapter(tmp_path / "iso.db", m2.json()["material_id"])
     payload = {
         "deck_id": deck1,
         "chapter_ids": [chapter1],

@@ -27,6 +27,7 @@ from infra.db.models import (
     Deck,
     LearningProject,
     LlmCallAttempt,
+    Material,
     PdfFile,
     Task,
     TextChunk,
@@ -93,7 +94,6 @@ def _seed(session: Session, *, user_id: str) -> dict[str, object]:
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at=_NOW,
         version=_NOW,
@@ -101,6 +101,17 @@ def _seed(session: Session, *, user_id: str) -> dict[str, object]:
         updated_at=_NOW,
     )
     session.add(project)
+    session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            created_at=_NOW,
+        )
+    )
     session.flush()
     deck = Deck(
         deck_id=_uuid(),
@@ -119,6 +130,7 @@ def _seed(session: Session, *, user_id: str) -> dict[str, object]:
         ch = Chapter(
             chapter_id=_uuid(),
             file_id=pdf.file_id,
+            material_id=pdf.file_id,
             name=f"第{i + 1}章",
             start_page=i + 1,
             end_page=i + 2,
@@ -219,7 +231,7 @@ class StubClient:
 
 
 def _seed_file(session: Session) -> str:
-    """User + PdfFile 行（text_chunks FK 前置），返回 file_id。"""
+    """User + 项目 + Material + PdfFile 行（text_chunks FK 前置，V25-D-29 基座）。"""
     user_id = _uuid()
     session.add(
         User(
@@ -232,6 +244,16 @@ def _seed_file(session: Session) -> str:
         )
     )
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        name="样卡项目",
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
+    session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -243,6 +265,18 @@ def _seed_file(session: Session) -> str:
     )
     session.add(pdf)
     session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="b.pdf",
+            status=None,
+            size_bytes=10,
+            created_at=_NOW,
+        )
+    )
+    session.flush()
     return pdf.file_id
 
 
@@ -252,6 +286,8 @@ def _seed_chunks(session: Session, *, file_id: str, pages: int = 3) -> None:
             insert(TextChunk).values(
                 chunk_id=_uuid(),
                 file_id=file_id,
+                material_id=file_id,
+                chunk_seq=page,
                 page_number=page,
                 char_count=20,
                 content_sha256="0" * 64,

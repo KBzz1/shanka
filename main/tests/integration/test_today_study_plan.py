@@ -37,6 +37,7 @@ from infra.db.models import (
     Chapter,
     Deck,
     LearningProject,
+    Material,
     PdfFile,
     ProjectStudySettings,
     ReviewEvent,
@@ -120,10 +121,20 @@ def _seed_project(
     session.flush()
     project_id = _uuid()
     session.add(
+        Material(
+            material_id=file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            size_bytes=100,
+            created_at=_NOW,
+        )
+    )
+    session.add(
         LearningProject(
             project_id=project_id,
             user_id=user_id,
-            file_id=file_id,
             name="种子项目",
             chapters_confirmed_at=_NOW,
             version=_NOW,
@@ -138,6 +149,7 @@ def _seed_project(
             Chapter(
                 chapter_id=cid,
                 file_id=file_id,
+                material_id=file_id,
                 name=f"第{i + 1}章",
                 start_page=i * 10 + 1,
                 end_page=i * 10 + 10,

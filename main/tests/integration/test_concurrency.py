@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Batch, Card, KnowledgePoint, Task, TextChunk, User
+from infra.db.models import Base, Batch, Card, KnowledgePoint, Material, Task, TextChunk, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -96,7 +96,6 @@ def _seed_task(
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at="2026-08-10T00:00:00.000Z",
         version="2026-08-10T00:00:00.000Z",
@@ -105,10 +104,28 @@ def _seed_task(
     )
     session.add(project)
     session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            created_at="2026-08-10T00:00:00.000Z",
+        )
+    )
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now="2026-08-10T00:00:00.000Z")
     deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
-    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    ch = Chapter(
+        chapter_id=_uuid(),
+        file_id=pdf.file_id,
+        material_id=pdf.file_id,
+        name="第一章",
+        start_page=1,
+        end_page=2,
+    )
     session.add(ch)
     session.flush()
     if (
@@ -399,7 +416,6 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at="2026-08-10T00:00:00.000Z",
         version="2026-08-10T00:00:00.000Z",
@@ -408,10 +424,28 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     )
     session.add(project)
     session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            created_at="2026-08-10T00:00:00.000Z",
+        )
+    )
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now="2026-08-10T00:00:00.000Z")
     deck.project_id = project.project_id
     session.flush()
-    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    ch = Chapter(
+        chapter_id=_uuid(),
+        file_id=pdf.file_id,
+        material_id=pdf.file_id,
+        name="第一章",
+        start_page=1,
+        end_page=2,
+    )
     session.add(ch)
     session.flush()
     if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:

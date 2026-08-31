@@ -4,10 +4,13 @@ from pydantic import BaseModel, Field
 
 
 class Chapter(BaseModel):
+    """openapi Chapter（V2.5 多资料）：章节归属 material_id；TEXT 章节页码为 null。"""
+
     chapter_id: str
+    material_id: str
     name: str
-    start_page: int
-    end_page: int
+    start_page: int | None
+    end_page: int | None
 
 
 class PdfFile(BaseModel):

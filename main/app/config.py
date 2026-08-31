@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     max_source_pages_per_unit: int = 8
     generator_max_input_chars: int = 10_000
     # 密度制锚点（V25-D-25）：每 1 万字目标卡数，按覆盖模式；规划目标区间由此推导
+    text_chunk_target_chars: int = 3000  # V25-D-32：粘贴文本段落打包目标块大小
     cards_per_10k_compact: float = 6.0
     cards_per_10k_balanced: float = 12.0
     cards_per_10k_extensive: float = 20.0

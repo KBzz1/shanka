@@ -27,6 +27,7 @@ from infra.db.models import (
     Chapter,
     KnowledgePoint,
     LearningProject,
+    Material,
     PdfFile,
     Task,
     User,
@@ -85,7 +86,6 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at=_NOW,
         version=_NOW,
@@ -93,6 +93,18 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
         updated_at=_NOW,
     )
     session.add(project)
+    session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="b.pdf",
+            status=None,
+            size_bytes=1,
+            created_at=_NOW,
+        )
+    )
     session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
     deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
@@ -103,6 +115,7 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
         ch = Chapter(
             chapter_id=_uuid(),
             file_id=pdf.file_id,
+            material_id=pdf.file_id,
             name=f"第{i + 1}章",
             start_page=i + 1,
             end_page=i + 2,
@@ -113,6 +126,7 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
         chapters.append(
             {
                 "chapter_id": ch.chapter_id,
+                "material_id": pdf.file_id,
                 "name": ch.name,
                 "start_page": ch.start_page,
                 "end_page": ch.end_page,

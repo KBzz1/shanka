@@ -10,7 +10,7 @@ info:
     限流:写接口 60 req/min/user、IP 5 req/s,超限返回 429 + Retry-After(详见 structure-contract.md 1.6)。
     5xx(INTERNAL_ERROR / GENERATION_FAILED)由全局中间件统一处理,未逐操作声明。
     列表接口 MVP 暂不分页;幂等重放返回首次成功结果(2xx,含 204)。
-    旧 /pdfs 兼容路径保留过渡期,内部委托项目接口同一业务语义(structure-contract 6.2)。
+    多资料模型(V2.5 增量):项目是资料集合,旧 /pdfs 路径已移除(structure-contract 6.2)。
 
 servers:
   - url: https://shanka.kbzz1.top
@@ -197,28 +197,26 @@ paths:
   /projects:
     post:
       tags: [projects]
-      summary: 上传 PDF 建立学习项目(可选 name;上传成功即建立,PDF 异步解析)
+      summary: 建立学习项目(两步创建第一步:仅名称的空项目;资料经 materials 端点添加)
       operationId: createProject
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
-          multipart/form-data:
+          application/json:
             schema:
               type: object
-              required: [file]
+              required: [name]
               properties:
-                file:
-                  type: string
-                  format: binary
-                  description: PDF 文件(≤100MB、≤1000 页)
                 name:
                   type: string
-                  description: 可选项目名;缺省取上传文件名去扩展名
+                  minLength: 1
+                  maxLength: 60
+                  description: 去首尾空白后 1~60 字符,可重名
       responses:
         '201':
-          description: 项目已建立,PDF 进入解析
+          description: 空项目已建立(status=EMPTY)
           content:
             application/json:
               schema:
@@ -419,12 +417,143 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /projects/{project_id}/materials:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      tags: [projects]
+      summary: 资料列表(各自状态;TEXT 附单章节)
+      operationId: listProjectMaterials
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Material'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{project_id}/materials/pdf:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [projects]
+      summary: 添加 PDF 资料(≤100MB、≤1000 页;异步解析;重置章节确认)
+      operationId: addProjectMaterialPdf
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PDF 文件(文件魔数+扩展名+MIME 三重检查)
+      responses:
+        '201':
+          description: 资料已添加,PDF 进入解析
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /projects/{project_id}/materials/text:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [projects]
+      summary: 添加粘贴文本资料(≤30000 字;单章节+段落多 chunk;即时就绪;重置章节确认)
+      operationId: addProjectMaterialText
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TextMaterialCreateRequest'
+      responses:
+        '201':
+          description: 资料已添加并就绪(附单一章节)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /projects/{project_id}/materials/{material_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: material_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      tags: [projects]
+      summary: 删除资料(服务端静默取消引用该资料的活跃任务并 fencing;retain_cards 选择保留或一并删除该资料产出卡片;删最后一份资料后项目转 EMPTY)
+      operationId: deleteProjectMaterial
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: retain_cards
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+          description: true=保留该资料生成的卡片(章节归属置空);false=连同卡片与复习记录一并删除
+      responses:
+        '200':
+          description: 已删除;返回更新后的项目(聚合状态)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningProject'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /projects/{project_id}/replace-pdf:
     parameters:
       - $ref: '#/components/parameters/ProjectId'
     post:
       tags: [projects]
-      summary: 仅解析失败项目可替换并重新解析(原子替换 PDF)
+      summary: 仅 FAILED 的 PDF 资料可原位替换并重新解析(不影响项目内其他资料)
       operationId: replaceProjectPdf
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -584,1230 +713,6 @@ paths:
           $ref: '#/components/responses/RateLimited'
 
   # ---------- PDF ----------
-  /pdfs:
-    post:
-      tags: [pdf]
-      summary: 上传 PDF,服务端异步解析(文本层 + 目录结构)
-      operationId: uploadPdf
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              required: [file]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: PDF 文件(HTTPS 传输)
-      responses:
-        '201':
-          description: 已接收,进入 PARSING
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PdfFile'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-    get:
-      tags: [pdf]
-      summary: 最近使用的 PDF 列表
-      operationId: listPdfs
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/PdfFile'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /pdfs/{file_id}:
-    parameters:
-      - $ref: '#/components/parameters/FileId'
-    get:
-      tags: [pdf]
-      summary: PDF 详情与章节列表(解析完成前可轮询)
-      operationId: getPdf
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PdfFile'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-    delete:
-      tags: [pdf]
-      summary: 删除 PDF 元数据(可原子取消活跃制卡任务);无项目旧数据仍返回 TASK_IN_PROGRESS
-      operationId: deletePdf
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - name: abandon_pre_generation_tasks
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-          description: 同一事务内放弃 DRAFT/样卡阶段任务;GENERATING 仍返回冲突
-        - name: cancel_active_tasks
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-          description: 二次确认后同一事务内取消全部活跃制卡任务(含 GENERATING)并继续删除
-      responses:
-        '204':
-          description: 已删除
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /pdfs/{file_id}/chapters/{chapter_id}:
-    parameters:
-      - $ref: '#/components/parameters/FileId'
-      - $ref: '#/components/parameters/ChapterId'
-    delete:
-      tags: [pdf]
-      summary: 删除章节(关联 knowledge_points.chapter_id 置 null;历史任务快照不受影响)
-      operationId: deleteChapter
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '204':
-          description: 已删除
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-    patch:
-      tags: [pdf]
-      summary: 修改章节名称 / 起始页 / 结束页(PRD 4.1 第 3 步、AC-02)
-      operationId: updateChapter
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ChapterUpdateRequest'
-      responses:
-        '200':
-          description: 已更新
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Chapter'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  # ---------- API Key ----------
-  /api-key:
-    put:
-      tags: [api-key]
-      summary: 验证并保存 DeepSeek API Key(仅返回状态与脱敏标识)
-      operationId: saveApiKey
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [api_key]
-              properties:
-                api_key:
-                  type: string
-                  description: DeepSeek API Key,经 TLS 传输,不落日志
-      responses:
-        '200':
-          description: 校验完成,返回状态(可能为 INVALID / INSUFFICIENT_BALANCE)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiKey'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '502':
-          description: 上游校验不可用(API_KEY_UNAVAILABLE),可重试
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-
-  /api-key/status:
-    get:
-      tags: [api-key]
-      summary: 查询已保存 Key 的状态
-      operationId: getApiKeyStatus
-      responses:
-        '200':
-          description: OK;未保存 Key 时返回 status=UNKNOWN 且 masked_key 为空串
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiKey'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  # ---------- 制卡任务(V2.5 七态) ----------
-  /projects/{project_id}/tasks:
-    parameters:
-      - $ref: '#/components/parameters/ProjectId'
-    post:
-      tags: [tasks]
-      summary: 建立 DRAFT 任务(自动保存语义;保存章节、目标牌组和配置)
-      operationId: createTask
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TaskCreateRequest'
-      responses:
-        '201':
-          description: 任务已创建(DRAFT)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Task'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /tasks:
-    get:
-      tags: [tasks]
-      summary: 学习页任务区与历史列表
-      operationId: listTasks
-      parameters:
-        - name: project_id
-          in: query
-          required: false
-          schema:
-            type: string
-            format: uuid
-        - name: status
-          in: query
-          required: false
-          schema:
-            $ref: '#/components/schemas/TaskStatus'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Task'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /tasks/{task_id}:
-    parameters:
-      - $ref: '#/components/parameters/TaskId'
-    get:
-      tags: [tasks]
-      summary: 任务详情(七态、internal_stage、样卡、失败码)
-      operationId: getTask
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Task'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-    patch:
-      tags: [tasks]
-      summary: 仅 DRAFT/AWAITING_SAMPLE_CONFIRMATION 可改配置;修改后样卡失效
-      operationId: updateTask
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TaskUpdateRequest'
-      responses:
-        '200':
-          description: 更新后的任务
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Task'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-    delete:
-      tags: [tasks]
-      summary: 删除终态任务(delete_generated_cards 选择是否删除其已发布卡)
-      operationId: deleteTask
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - name: delete_generated_cards
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-      responses:
-        '204':
-          description: 已删除
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /tasks/{task_id}/samples:
-    parameters:
-      - $ref: '#/components/parameters/TaskId'
-    post:
-      tags: [tasks]
-      summary: 持久化生成 1~3 张样卡(只为比例大于 0 的难度各生成 1 张;幂等键防重复触发)
-      operationId: generateTaskSamples
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Task'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '502':
-          description: 上游校验不可用(API_KEY_UNAVAILABLE),可重试
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-
-  /tasks/{task_id}/start:
-    parameters:
-      - $ref: '#/components/parameters/TaskId'
-    post:
-      tags: [tasks]
-      summary: 校验样卡 hash 后进入 GENERATING(过期样卡返回 409 SAMPLE_STALE)
-      operationId: startTask
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '200':
-          description: 已进入生成
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Task'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /tasks/{task_id}/abandon:
-    parameters:
-      - $ref: '#/components/parameters/TaskId'
-    post:
-      tags: [tasks]
-      summary: 放弃任务(只允许正式生成前状态,进入 ABANDONED 终态)
-      operationId: abandonTask
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '200':
-          description: 已放弃
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Task'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /tasks/{task_id}/retry:
-    parameters:
-      - $ref: '#/components/parameters/TaskId'
-    post:
-      tags: [tasks]
-      summary: 失败任务创建关联新任务(可沿用已确认样卡)
-      operationId: retryTask
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '201':
-          description: 新任务已创建(DRAFT,retry_of_task_id 指向原任务)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Task'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  # ---------- 牌组与卡片 ----------
-  /decks:
-    get:
-      tags: [decks]
-      summary: 牌组列表(含进度摘要);支持 project_id 归属过滤
-      operationId: listDecks
-      parameters:
-        - name: project_id
-          in: query
-          required: false
-          schema:
-            type: string
-            format: uuid
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Deck'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-    post:
-      tags: [decks]
-      summary: 新建牌组(手动独立牌组 project_id=null)
-      operationId: createDeck
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                  maxLength: 64
-                project_id:
-                  type: [string, 'null']
-                  format: uuid
-                  description: 可选归属项目;缺省/null 为独立牌组
-      responses:
-        '201':
-          description: 已创建
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Deck'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /decks/{deck_id}:
-    parameters:
-      - $ref: '#/components/parameters/DeckId'
-    get:
-      tags: [decks]
-      summary: 牌组详情与进度(真实聚合数据)
-      operationId: getDeck
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Deck'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-    patch:
-      tags: [decks]
-      summary: 牌组改名(version 递增供缓存刷新)
-      operationId: renameDeck
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [name]
-              properties:
-                name:
-                  type: string
-                  minLength: 1
-                  maxLength: 64
-      responses:
-        '200':
-          description: 改名后的牌组(含真实进度)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Deck'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-    delete:
-      tags: [decks]
-      summary: 删除牌组及其卡片、复习状态与统计(服务端自动取消活跃制卡任务)
-      operationId: deleteDeck
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '204':
-          description: 已删除
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /decks/{deck_id}/deletion-preflight:
-    parameters:
-      - $ref: '#/components/parameters/DeckId'
-    get:
-      tags: [decks]
-      summary: 删除牌组预检(只读;返回影响范围与活跃任务可执行动作)
-      operationId: deckDeletionPreflight
-      parameters:
-        - name: cancel_active_tasks
-          in: query
-          required: false
-          schema:
-            type: boolean
-            default: false
-          description: 预检是否展示“取消活跃任务并删除”动作;不修改数据
-      responses:
-        '200':
-          description: 当前删除影响与阻塞任务
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DeletionPreflight'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /decks/{deck_id}/cards:
-    parameters:
-      - $ref: '#/components/parameters/DeckId'
-    get:
-      tags: [decks]
-      summary: 牌组卡片(自由刷题,仅浏览;支持 order/content_difficulty/mastery 过滤)
-      operationId: listCards
-      parameters:
-        - name: order
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [position, random]
-            default: position
-          description: random 顺序由客户端会话 seed 固定,服务端不每翻一张重新洗牌
-        - name: content_difficulty
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [BASIC, UNDERSTANDING, DEEP_QUESTION, UNLABELED]
-          description: 内容难度过滤;UNLABELED=未标注(手动/导入)
-        - name: mastery
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [all, mastered, unmastered]
-            default: all
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Card'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-    post:
-      tags: [decks]
-      summary: 手动新增问答卡(校验 front/back 非空,分配 position)
-      operationId: createCard
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [front, back]
-              properties:
-                front:
-                  type: string
-                  minLength: 1
-                back:
-                  type: string
-                  minLength: 1
-      responses:
-        '201':
-          description: 已创建
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Card'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /decks/{deck_id}/cards/import:
-    post:
-      tags: [decks]
-      summary: 批量导入问答卡(原子写入,返回逐张结果)
-      operationId: importCards
-      parameters:
-        - $ref: '#/components/parameters/DeckId'
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [cards]
-              properties:
-                cards:
-                  type: array
-                  minItems: 1
-                  items:
-                    type: object
-                    required: [front, back]
-                    properties:
-                      front:
-                        type: string
-                        minLength: 1
-                      back:
-                        type: string
-                        minLength: 1
-      responses:
-        '201':
-          description: 写入完成(含逐张结果)
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [results]
-                properties:
-                  results:
-                    type: array
-                    items:
-                      type: object
-                      required: [index, status]
-                      properties:
-                        index:
-                          type: integer
-                          description: 对应请求 cards 下标
-                        status:
-                          type: string
-                          enum: [CREATED, FAILED]
-                        card_id:
-                          type: string
-                          format: uuid
-                        error:
-                          $ref: '#/components/schemas/Error'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  # ---------- 今日学习计划(V2.5) ----------
-  /study/plan:
-    get:
-      tags: [study]
-      summary: 读取当前项目今日学习计划配置
-      operationId: getStudyPlan
-      responses:
-        '200':
-          description: 当前计划；未配置时 configured=false
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StudyPlan'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-    put:
-      tags: [study]
-      summary: 原子保存当前项目今日学习计划
-      operationId: updateStudyPlan
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/StudyPlanUpdateRequest'
-      responses:
-        '200':
-          description: 保存后的计划
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StudyPlan'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
-  /study/today:
-    get:
-      tags: [study]
-      summary: 当前项目今日计划(服务端账号时区、去重;到期优先 + 新卡补足)
-      operationId: getTodayStudyPlan
-      responses:
-        '200':
-          description: OK;无当前项目时 current_project 为 null(空态)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TodayStudyPlan'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /study/today/backlog:
-    get:
-      tags: [study]
-      summary: 分页读取超过巩固软目标的到期卡
-      operationId: getStudyTodayBacklog
-      parameters:
-        - name: offset
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 0
-            default: 0
-        - name: limit
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 200
-            default: 50
-      responses:
-        '200':
-          description: 积压卡分页
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items, offset, limit, total]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/TodayPlanCard'
-                  offset:
-                    type: integer
-                  limit:
-                    type: integer
-                  total:
-                    type: integer
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  # ---------- 复习 ----------
-  /decks/{deck_id}/review:
-    get:
-      tags: [review]
-      summary: 独立牌组或指定牌组到期复习队列(due <= now,按 due、position 排序)
-      operationId: getReviewQueue
-      parameters:
-        - $ref: '#/components/parameters/DeckId'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/ReviewQueueItem'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  /review-events:
-    post:
-      tags: [review]
-      summary: 提交复习评级,返回更新后的 FSRS 复习状态与本次学习日期(不再要求 device_timezone)
-      operationId: submitReviewEvent
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ReviewEventRequest'
-      responses:
-        '200':
-          description: 已处理(幂等重放时返回首次结果)
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [review_state, study_date]
-                properties:
-                  review_state:
-                    $ref: '#/components/schemas/ReviewState'
-                  study_date:
-                    type: string
-                    format: date
-                    description: 账号学习时区下的本次学习日期
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  # ---------- 单卡重写 ----------
-  /cards/{card_id}:
-    parameters:
-      - $ref: '#/components/parameters/CardId'
-    patch:
-      tags: [decks]
-      summary: 编辑卡片(内容覆盖 + ReviewState 重置为新卡,与重写同语义;version 递增)
-      operationId: updateCard
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [front, back]
-              properties:
-                front:
-                  type: string
-                  minLength: 1
-                back:
-                  type: string
-                  minLength: 1
-      responses:
-        '200':
-          description: 编辑后的卡片
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Card'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-    delete:
-      tags: [decks]
-      summary: 删除单卡(进入 10 秒撤销批次,不立即硬删;连续删除合并并重新计时)
-      operationId: deleteCard
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - name: delete_batch_id
-          in: query
-          required: false
-          schema:
-            type: string
-            format: uuid
-          description: 向仍为 PENDING 的批追加卡(客户端从上次删除响应获得)
-      responses:
-        '200':
-          description: 删除批次(含 undo_until)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CardDeletionBatch'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  # ---------- 删除批次(V2.5) ----------
-  /card-deletion-batches/pending:
-    get:
-      tags: [decks]
-      summary: App 重启恢复仍有效的撤销批次
-      operationId: listPendingDeletionBatches
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/CardDeletionBatch'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /card-deletion-batches/{delete_batch_id}/undo:
-    parameters:
-      - $ref: '#/components/parameters/DeleteBatchId'
-    post:
-      tags: [decks]
-      summary: 撤销整批删除(窗口内;过期返回 409 CARD_DELETE_WINDOW_EXPIRED)
-      operationId: undoCardDeletion
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '200':
-          description: 已恢复整批
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CardDeletionBatch'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  # ---------- 单卡 AI 重写(V2.5 两阶段) ----------
-  /cards/{card_id}/rewrite-previews:
-    parameters:
-      - $ref: '#/components/parameters/CardId'
-    post:
-      tags: [decks]
-      summary: 生成并持久化重写预览,不改原卡(来源失效或非生成卡返回 409 CARD_REWRITE_UNAVAILABLE)
-      operationId: createRewritePreview
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                custom_requirements:
-                  type: [string, 'null']
-                  description: 本次重写的附加要求(可选;不保存完整 Prompt)
-      responses:
-        '201':
-          description: 预览已持久化
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CardRewritePreview'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '502':
-          description: 上游校验不可用(API_KEY_UNAVAILABLE),可重试
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-
-  /cards/{card_id}/rewrite-previews/{rewrite_id}/apply:
-    parameters:
-      - $ref: '#/components/parameters/CardId'
-      - $ref: '#/components/parameters/RewriteId'
-    post:
-      tags: [decks]
-      summary: 版本一致时原子替换原卡(CAS;不一致返回 409 CARD_VERSION_CONFLICT,原卡不变)
-      operationId: applyRewritePreview
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '200':
-          description: 已替换,返回新卡
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Card'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /cards/{card_id}/rewrite-previews/{rewrite_id}:
-    parameters:
-      - $ref: '#/components/parameters/CardId'
-      - $ref: '#/components/parameters/RewriteId'
-    delete:
-      tags: [decks]
-      summary: 取消预览(可幂等)
-      operationId: cancelRewritePreview
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      responses:
-        '204':
-          description: 已取消
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  # ---------- 质量观测 ----------
-  /tasks/{task_id}/batches:
-    parameters:
-      - $ref: '#/components/parameters/TaskId'
-    get:
-      tags: [tasks]
-      summary: 批次列表,含单卡 Rubric 汇总、质量分布与 Prompt Cache 记录(AC-07 观测,契约 6.9)
-      operationId: listTaskBatches
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Batch'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-
-  # ---------- 数据看板(V2.5) ----------
-  /stats/dashboard:
-    get:
-      tags: [stats]
-      summary: 当前自然周数据看板(周一起始;服务端按账号学习时区分桶,周目标=每日目标×7;无客户端参数)
-      operationId: getDashboard
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/StatsDashboard'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-
-  /healthz:
-    servers:
-      - url: https://shanka.kbzz1.top
-    get:
-      summary: 存活探针
-      tags: [observability]
-      security: []
-      responses:
-        "200":
-          description: 进程存活
-  /readyz:
-    servers:
-      - url: https://shanka.kbzz1.top
-    get:
-      summary: 就绪探针
-      tags: [observability]
-      security: []
-      responses:
-        "200":
-          description: DB 连接与存储可写
-        "503":
-          description: 依赖不可用
-  /observability/quality-summary:
-    get:
-      summary: 跨任务质量聚合观测（契约 6.10）
-      tags: [observability]
-      parameters:
-        - name: group_by
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [model, pdf, difficulty]
-        - name: days
-          in: query
-          required: false
-          schema:
-            type: integer
-            default: 30
-      responses:
-        "200":
-          description: 质量聚合结果（Rubric 均分 / 覆盖重复率 / 完成率 / 成本汇总）
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/QualitySummary"
-
 components:
   securitySchemes:
     BearerAuth:
@@ -1825,13 +730,6 @@ components:
         type: string
         format: uuid
       description: 幂等键,客户端生成;重复请求返回首次成功结果(见 structure-contract.md 1.3)
-    FileId:
-      name: file_id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
     ProjectId:
       name: project_id
       in: path
@@ -1975,19 +873,25 @@ components:
 
     Chapter:
       type: object
-      required: [chapter_id, name, start_page, end_page]
+      required: [chapter_id, material_id, name]
       properties:
         chapter_id:
           type: string
           format: uuid
+        material_id:
+          type: string
+          format: uuid
+          description: 归属学习资料(structure-contract 3.2a)
         name:
           type: string
         start_page:
-          type: integer
+          type: [integer, 'null']
           minimum: 1
+          description: PDF 章节可修改;TEXT 章节为 null
         end_page:
-          type: integer
+          type: [integer, 'null']
           minimum: 1
+          description: PDF 章节可修改;TEXT 章节为 null
 
     ChapterUpdateRequest:
       type: object
@@ -2011,6 +915,7 @@ components:
         file_id:
           type: string
           format: uuid
+          description: 资料物证标识;V2.5 起与 material_id 同义(保留字段名兼容任务快照)
         filename:
           type: string
         size_bytes:
@@ -2027,6 +932,65 @@ components:
         created_at:
           type: string
           format: date-time
+
+    MaterialType:
+      type: string
+      enum: [PDF, TEXT]
+      description: LINK 为预留类型,本期不实现
+
+    MaterialStatus:
+      type: string
+      enum: [PENDING, PARSING, PARSED, FAILED, READY]
+      description: PDF 使用 PENDING/PARSING/PARSED/FAILED;TEXT 恒为 READY
+
+    Material:
+      type: object
+      required: [material_id, project_id, type, name, status, created_at]
+      properties:
+        material_id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+          format: uuid
+        type:
+          $ref: '#/components/schemas/MaterialType'
+        name:
+          type: string
+          description: PDF=文件名;TEXT=用户可改标题(1~60 字符)
+        status:
+          $ref: '#/components/schemas/MaterialStatus'
+        error_code:
+          type: [string, 'null']
+          description: 仅 PDF 解析失败码
+        size_bytes:
+          type: [integer, 'null']
+          description: 仅 PDF
+        char_count:
+          type: [integer, 'null']
+          description: 仅 TEXT;1~30000
+        chapter:
+          type: [object, 'null']
+          description: 仅 TEXT:资料自带的单一章节
+          $ref: '#/components/schemas/Chapter'
+        created_at:
+          type: string
+          format: date-time
+      description: 学习资料(structure-contract 3.2a);项目是资料集合,新增/删除任一资料重置章节确认
+
+    TextMaterialCreateRequest:
+      type: object
+      required: [name, content]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 60
+        content:
+          type: string
+          minLength: 1
+          maxLength: 30000
+          description: 去首尾空白后 1~30000 字;服务端按段落切分多 chunk,禁止整块单块
 
     DifficultyRatio:
       type: object
@@ -2096,7 +1060,7 @@ components:
         file_id:
           type: [string, 'null']
           format: uuid
-          description: 新任务必填;删除 PDF 后置 null(任务保留)
+          description: 任务创建时锁定的 PDF 资料(material_id 同义);纯文本项目任务为 null;删除被引用资料时任务被服务端静默取消
         deck_id:
           type: [string, 'null']
           format: uuid
@@ -2879,14 +1843,15 @@ components:
 
     ProjectStatus:
       type: string
-      enum: [PARSING, PARSE_FAILED, AWAITING_CHAPTER_CONFIRMATION, READY]
+      enum: [EMPTY, PARSING, PARSE_FAILED, AWAITING_CHAPTER_CONFIRMATION, READY]
+      description: 由资料状态与章节确认状态聚合派生(structure-contract 3.16):无资料=EMPTY;任一 PDF PARSING/PENDING=PARSING;有可用章节来源且未确认=AWAITING_CHAPTER_CONFIRMATION;确认后=READY;全部 PDF FAILED 且无可用章节=PARSE_FAILED
 
     LearningProject:
       type: object
       required:
         - project_id
         - name
-        - file
+        - materials
         - status
         - chapter_count
         - deck_count
@@ -2901,9 +1866,11 @@ components:
         name:
           type: string
           description: 去首尾空白后 1~60 字符,可重名
-        file:
-          $ref: '#/components/schemas/PdfFile'
-          description: 当前 PDF;列表响应可只返回摘要
+        materials:
+          type: array
+          description: 资料集合摘要(structure-contract 3.2a);空数组=空项目;列表响应可只返回摘要
+          items:
+            $ref: '#/components/schemas/Material'
         status:
           $ref: '#/components/schemas/ProjectStatus'
         chapter_count:

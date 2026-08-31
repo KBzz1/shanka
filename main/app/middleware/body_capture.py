@@ -5,7 +5,8 @@ GET/HEAD 不读取。请求日志不记录 body（红线 4），本中间件只�
 运行序：位于 Logging 内层（路由前）——Metrics → RequestID → IpRateLimit → Auth →
 RateLimit → Logging → BodyCapture → 路由，详见 main.py 装配。
 
-PDF 上传预检（final review I-1）：POST /pdfs 且 Content-Length 头超限 → 直接 400
+PDF 上传预检（final review I-1）：PDF 上传（V25-D-29 起为 POST
+/projects/{id}/materials/pdf）且 Content-Length 头超限 → 直接 400
 PDF_UPLOAD_INVALID，在读 body 之前拒绝——否则超大 body 先被全量缓存放大内存。
 """
 
@@ -17,12 +18,12 @@ from app.errors import AppError, ErrorCode, http_status
 
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
-_PDF_UPLOAD_PATH = "/pdfs"
+_PDF_UPLOAD_SUFFIX = "/materials/pdf"  # V25-D-29 起 PDF 上传入口（/pdfs 已移除）
 
 
 class BodyCaptureMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        if request.method == "POST" and request.url.path == _PDF_UPLOAD_PATH:
+        if request.method == "POST" and request.url.path.endswith(_PDF_UPLOAD_SUFFIX):
             max_bytes = request.app.state.settings.pdf_max_size_bytes
             content_length = request.headers.get("Content-Length")
             if (

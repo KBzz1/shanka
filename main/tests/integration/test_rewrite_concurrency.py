@@ -30,6 +30,8 @@ from infra.db.models import (
     Card,
     CardRewritePreview,
     Chapter,
+    LearningProject,
+    Material,
     PdfFile,
     ReviewEvent,
     ReviewState,
@@ -96,6 +98,16 @@ def _seed_card(session: Session) -> Card:
     session.flush()
     deck = create_deck(session, user_id=_USER, name="D", now=_NOW)
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=_USER,
+        name="重写项目",
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
+    session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=_USER,
@@ -107,7 +119,26 @@ def _seed_card(session: Session) -> Card:
     )
     session.add(pdf)
     session.flush()
-    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="b.pdf",
+            status=None,
+            size_bytes=1,
+            created_at=_NOW,
+        )
+    )
+    session.flush()
+    ch = Chapter(
+        chapter_id=_uuid(),
+        file_id=pdf.file_id,
+        material_id=pdf.file_id,
+        name="第一章",
+        start_page=1,
+        end_page=2,
+    )
     session.add(ch)
     session.flush()
     task = Task(

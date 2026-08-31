@@ -141,17 +141,19 @@ def test_acceptance_ac08_pdf_upload_content_not_logged(
     device = _user(client)
     monkeypatch.setattr(logging.getLogger("app.middleware.logging"), "disabled", False)
     with caplog.at_level(logging.INFO):
+        resp = client.post("/projects", json={"name": "ac08"}, headers={**device, **_idem()})
+        assert resp.status_code == 201
+        project_id = resp.json()["project_id"]
         with SAMPLE.open("rb") as f:
             resp = client.post(
-                "/pdfs",
+                f"/projects/{project_id}/materials/pdf",
                 files={"file": ("book.pdf", f, "application/pdf")},
                 headers={**device, **_idem()},
             )
         assert resp.status_code == 201
-        file_id = resp.json()["file_id"]
         _scan(client)  # 解析路径（提取文本层）也在日志捕获范围内
-        body = client.get(f"/pdfs/{file_id}", headers=device).json()
-    assert body["status"] == "PARSED"  # 前置：上传 + 解析确实完成（否则断言无意义）
+        body = client.get(f"/projects/{project_id}", headers=device).json()
+    assert body["materials"][0]["status"] == "PARSED"  # 前置：上传 + 解析确实完成
     assert "request complete" in caplog.text  # 请求日志确实产生（LoggingMiddleware 活跃）
     assert _PDF_MARKER not in caplog.text  # 完整 PDF 内容不落日志（7.1 日志红线 / AC-08）
     assert _PDF_MARKER_2 not in caplog.text

@@ -33,6 +33,7 @@ from infra.db.models import (
     Chapter,
     Deck,
     LearningProject,
+    Material,
     PdfFile,
     ReviewState,
     Task,
@@ -145,7 +146,6 @@ def _seed_pdf_context(client: TestClient, user: dict[str, str]) -> dict[str, obj
         project = LearningProject(
             project_id=str(uuid.uuid4()),
             user_id=owner.user_id,
-            file_id=pdf.file_id,
             name="P",
             chapters_confirmed_at=_NOW,
             version=_NOW,
@@ -153,6 +153,17 @@ def _seed_pdf_context(client: TestClient, user: dict[str, str]) -> dict[str, obj
             updated_at=_NOW,
         )
         session.add(project)
+        session.flush()
+        session.add(
+            Material(
+                material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project.project_id,
+                type="PDF",
+                name="seed.pdf",
+                status=None,
+                created_at=_NOW,
+            )
+        )
         session.flush()
         deck = Deck(
             deck_id=str(uuid.uuid4()),
@@ -171,6 +182,7 @@ def _seed_pdf_context(client: TestClient, user: dict[str, str]) -> dict[str, obj
             ch = Chapter(
                 chapter_id=str(uuid.uuid4()),
                 file_id=pdf.file_id,
+                material_id=pdf.file_id,
                 name=f"第{i + 1}章",
                 start_page=i + 1,
                 end_page=i + 2,
@@ -195,6 +207,8 @@ def _seed_pdf_context(client: TestClient, user: dict[str, str]) -> dict[str, obj
                 insert(TextChunk).values(
                     chunk_id=str(uuid.uuid4()),
                     file_id=pdf.file_id,
+                    material_id=pdf.file_id,
+                    chunk_seq=page,
                     page_number=page,
                     char_count=20,
                     content_sha256="0" * 64,

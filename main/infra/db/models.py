@@ -69,19 +69,53 @@ class PdfFile(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
+class Material(Base):
+    """materials（V2.5 多资料增量）：学习项目是资料集合（契约 3.2a；V25-D-29）。
+
+    - PDF 资料行与 pdf_files 一对一（material_id == file_id），解析状态/存储/租约仍以
+      pdf_files 为权威，本表 status 置 NULL 防止第二套状态漂移；
+    - TEXT 资料行 status 恒 'READY'，char_count 为文本长度；内容以 chapters +
+      text_chunks（chunk_seq 伪页码）承载，无 pdf_files 行。
+    """
+
+    __tablename__ = "materials"
+    __table_args__ = (Index("ix_materials_project_created", "project_id", "created_at"),)
+
+    material_id: Mapped[str] = mapped_column(String, primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String, ForeignKey("learning_projects.project_id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String, nullable=False)  # PDF/TEXT（LINK 预留）
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str | None] = mapped_column(String, nullable=True)  # TEXT='READY'; PDF=NULL
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    char_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
 class Chapter(Base):
-    """2.4 chapters：章节（用户可改 name/start_page/end_page）。"""
+    """2.4 chapters：章节（用户可改 name/start_page/end_page）。
+
+    V2.5 多资料：章节改挂 material_id；TEXT 资料的单章节页码为 NULL。
+    """
 
     __tablename__ = "chapters"
-    __table_args__ = (Index("ix_chapters_file_id", "file_id"),)
+    __table_args__ = (
+        Index("ix_chapters_file_id", "file_id"),
+        Index("ix_chapters_material_id", "material_id"),
+    )
 
     chapter_id: Mapped[str] = mapped_column(String, primary_key=True)
-    file_id: Mapped[str] = mapped_column(
-        String, ForeignKey("pdf_files.file_id", ondelete="CASCADE"), nullable=False
+    file_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("pdf_files.file_id", ondelete="CASCADE"), nullable=True
+    )
+    material_id: Mapped[str] = mapped_column(
+        String, ForeignKey("materials.material_id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
-    start_page: Mapped[int] = mapped_column(Integer, nullable=False)
-    end_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class GenerationOperation(Base):
@@ -459,18 +493,27 @@ class IdempotencyKey(Base):
 
 
 class TextChunk(Base):
-    """text_chunks：页文本一页一行、与章节解耦（spec §4.1；file_id 删除级联清理）。"""
+    """text_chunks：页文本一页一行、与章节解耦（spec §4.1）。
+
+    V2.5 多资料：chunk 挂 material_id；PDF 行 file_id/material_id 同值、
+    chunk_seq=page_number；TEXT 行 file_id=NULL、chunk_seq=1..N 伪页码
+    （(material_id, chunk_seq) 唯一）。
+    """
 
     __tablename__ = "text_chunks"
     __table_args__ = (
-        UniqueConstraint("file_id", "page_number", name="uq_text_chunks_file_page"),
-        Index("ix_text_chunks_file_page", "file_id", "page_number"),
+        UniqueConstraint("material_id", "chunk_seq", name="uq_text_chunks_material_seq"),
+        Index("ix_text_chunks_material_seq", "material_id", "chunk_seq"),
     )
 
     chunk_id: Mapped[str] = mapped_column(String, primary_key=True)
-    file_id: Mapped[str] = mapped_column(
-        String, ForeignKey("pdf_files.file_id", ondelete="CASCADE"), nullable=False
+    file_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("pdf_files.file_id", ondelete="CASCADE"), nullable=True
     )
+    material_id: Mapped[str] = mapped_column(
+        String, ForeignKey("materials.material_id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_seq: Mapped[int] = mapped_column(Integer, nullable=False)
     page_number: Mapped[int] = mapped_column(Integer, nullable=False)
     char_count: Mapped[int] = mapped_column(Integer, nullable=False)
     content_sha256: Mapped[str] = mapped_column(String, nullable=False)
@@ -581,9 +624,10 @@ class AuthSession(Base):
 
 
 class LearningProject(Base):
-    """2.17 learning_projects（V2.5 新增）：学习项目；file_id 为 PDF↔项目唯一外键权威。
+    """2.17 learning_projects（V2.5 新增）：学习项目 = 资料集合（V25-D-29）。
 
-    项目状态由 PDF 状态与 chapters_confirmed_at 确定（契约 3.16，不建第二套状态列）。
+    V2.5 多资料：不再持有 file_id 唯一外键；资料归属经 materials 表（project_id 外键）。
+    项目状态由全部资料状态与 chapters_confirmed_at 聚合派生（契约 3.16）。
     """
 
     __tablename__ = "learning_projects"
@@ -591,9 +635,6 @@ class LearningProject(Base):
 
     project_id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.user_id"), nullable=False)
-    file_id: Mapped[str] = mapped_column(
-        String, ForeignKey("pdf_files.file_id"), unique=True, nullable=False
-    )  # 唯一外键权威（一个项目恰好一份当前 PDF）
     name: Mapped[str] = mapped_column(String, nullable=False)  # 1~60 字符，可重名
     chapters_confirmed_at: Mapped[str | None] = mapped_column(String, nullable=True)
     version: Mapped[str] = mapped_column(String, nullable=False)  # 缓存刷新与并发检查

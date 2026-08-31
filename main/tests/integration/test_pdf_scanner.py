@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Chapter, PdfFile, User
+from infra.db.models import Base, Chapter, LearningProject, Material, PdfFile, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.storage.local import LocalStorage
 from services.pdf.scanner import process_pending, scan_once, validate_upload
@@ -55,7 +55,18 @@ def _ensure_user(session: Session, user_id: str) -> None:
 
 
 def _seed_pending(session: Session, *, user_id: str, storage_key: str) -> str:
+    """V25-D-29 基座：PDF 行伴随 LearningProject + Material（scanner 按 material_id 写回章节）。"""
     _ensure_user(session, user_id)
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        name="扫描项目",
+        version="2026-08-11T00:00:00.000Z",
+        created_at="2026-08-11T00:00:00.000Z",
+        updated_at="2026-08-11T00:00:00.000Z",
+    )
+    session.add(project)
+    session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -66,6 +77,18 @@ def _seed_pending(session: Session, *, user_id: str, storage_key: str) -> str:
         created_at="2026-08-11T00:00:00.000Z",
     )
     session.add(pdf)
+    session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="book.pdf",
+            status=None,
+            size_bytes=100,
+            created_at="2026-08-11T00:00:00.000Z",
+        )
+    )
     session.flush()
     return pdf.file_id
 
@@ -89,7 +112,7 @@ def test_scanner_process_pending_parses_sample(
     assert row is not None
     assert row.status == "PARSED"
     assert len(chapters) >= 3
-    assert chapters[0].start_page >= 1
+    assert chapters[0].start_page is not None and chapters[0].start_page >= 1
 
 
 def test_scanner_process_pending_failed_keeps_file(
@@ -134,6 +157,28 @@ def test_scanner_scan_once_resumes_after_restart(
             created_at="2026-08-11T00:00:00.000Z",
         )
         session.add(pdf2)
+        session.flush()
+        project2 = LearningProject(
+            project_id=_uuid(),
+            user_id=user,
+            name="重启项目",
+            version="2026-08-11T00:00:00.000Z",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+        session.add(project2)
+        session.flush()
+        session.add(
+            Material(
+                material_id=pdf2.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project2.project_id,
+                type="PDF",
+                name="b2.pdf",
+                status=None,
+                size_bytes=100,
+                created_at="2026-08-11T00:00:00.000Z",
+            )
+        )
         session.flush()
         f2 = pdf2.file_id
         session.commit()

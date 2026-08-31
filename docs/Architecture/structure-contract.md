@@ -118,26 +118,50 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `file_id` | uuid | ✓ | |
+| `material_id` | uuid | ✓ | V2.5 起以学习资料(3.2a Material)承载归属;`file_id` 保留为资料 ID 同义词(兼容既有任务快照字段) |
 | `filename` | string | ✓ | |
 | `size_bytes` | int | ✓ | |
 | `status` | enum | ✓ | `PENDING` / `PARSING` / `PARSED` / `FAILED` |
 | `error_code` | string | ✗ | 解析失败码(`PDF_PARSE_FAILED` / `PDF_TOC_MISSING`) |
 | `chapters` | Chapter[] | ✗ | 解析成功后返回 |
-| `project_id` | uuid | ✗ | V2.5 归属项目(以 `learning_projects.file_id` 唯一外键为持久化权威,PDF 表不重复存 project_id) |
+| `project_id` | uuid | ✗ | V2.5 归属项目(`materials` 表持久化;PDF 表不重复存 project_id) |
 | `created_at` | datetime | ✓ | |
 
 规则:目录解析失败 → `FAILED` + `error_code`,前端终止流程,不提供 AI 猜测兜底(PRD 5.2)。
-删除规则(V2.5):PDF 随学习项目生命周期管理——仅 `PARSE_FAILED` 项目可 `replace-pdf` 原子替换;项目删除时按用户选择随项目删除(3.16/6.2)。旧 `/pdfs` 兼容路径保留过渡期,委托项目接口同一业务语义(6.1 注)。
+删除规则(V2.5):PDF 是项目资料集合的成员,按资料级删除(3.2a/6.2)或随项目删除(3.16/6.2);
+仅 `FAILED` 资料支持原位替换(`replace-pdf` 语义,替换后重新解析)。旧 `/pdfs` 兼容路径已随
+多资料模型移除,不得再创建第二套项目/任务状态。
+
+### 3.2a Material(学习资料,V2.5 多资料增量)
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `material_id` | uuid | ✓ | |
+| `project_id` | uuid | ✓ | 归属学习项目 |
+| `type` | enum | ✓ | `PDF` / `TEXT`;`LINK` 预留,本期不实现 |
+| `name` | string | ✓ | PDF=文件名(去扩展名前的原始名);TEXT=用户可改标题,1~60 字符 |
+| `status` | enum | ✓ | PDF:`PENDING` / `PARSING` / `PARSED` / `FAILED`;TEXT:恒 `READY` |
+| `error_code` | string | ✗ | 仅 PDF 解析失败码 |
+| `size_bytes` | int | ✗ | 仅 PDF |
+| `char_count` | int | ✗ | 仅 TEXT;≤ 30000 |
+| `chapter` | Chapter | ✗ | 仅 TEXT:资料自带的单一章节 |
+| `created_at` | datetime | ✓ | |
+
+规则:一个项目包含 0~N 份资料;PDF 资料经解析产出章节,TEXT 资料本身即一个章节且按段落切分为
+多个 chunk(`(material_id, chunk_seq)` 唯一,每块数千字,禁止整块单块)。新增或删除任一资料都会
+重置项目 `chapters_confirmed_at`(V25-D-31)。删除资料为三档语义(6.2):确认后服务端静默取消引用
+该资料的活跃任务(fencing 失效迟到写入),用户选择保留或一并删除该资料产出的卡片;删除最后一份资料
+后项目保留为空项目。
 
 ### 3.3 Chapter
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `chapter_id` | uuid | ✓ | |
+| `material_id` | uuid | ✓ | 归属学习资料(3.2a) |
 | `name` | string | ✓ | 可修改 |
-| `start_page` | int | ✓ | 可修改 |
-| `end_page` | int | ✓ | 可修改 |
+| `start_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null |
+| `end_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null |
 
 ### 3.4 GenerationTask(制卡任务,V2.5 重写)
 
@@ -146,7 +170,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `task_id` | uuid | ✓ | |
 | `operation_id` | uuid | ✗ | 生成操作记录 ID;同一用户的稳定操作键跨请求/重启复用同一生成意图 |
 | `project_id` | uuid | 新任务必填 | 归属学习项目;迁移前已失去 PDF 的终态历史任务可为 null(只读历史,不可重试) |
-| `file_id` | uuid | 新任务必填 | 项目当前 PDF;历史终态任务可为 null |
+| `file_id` | uuid | 新任务必填 | 任务创建时锁定的 PDF 资料(3.2a);纯文本项目任务为 null;删除被任务引用的资料时任务被服务端静默取消 |
 | `deck_id` | uuid | 新任务必填 | 目标牌组,必须属于同一项目;删除牌组后置 `null`(任务保留) |
 | `retry_of_task_id` | uuid | ✗ | 失败重试关联:只指向同用户失败任务 |
 | `status` | enum | ✓ | 七态,见 4.1 |
@@ -401,16 +425,22 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `project_id` | uuid | ✓ | 用户内资源标识 |
-| `name` | string | ✓ | 去首尾空白后 1~60 字符,可重名;默认取上传文件名去扩展名 |
-| `file` | PdfFile | ✓ | 当前 PDF;列表响应可只返回摘要 |
-| `status` | enum | ✓ | `PARSING` / `PARSE_FAILED` / `AWAITING_CHAPTER_CONFIRMATION` / `READY` |
+| `name` | string | ✓ | 去首尾空白后 1~60 字符,可重名;默认取首份 PDF 文件名去扩展名(纯文本项目取文本标题) |
+| `materials` | Material[] | ✓ | 资料集合摘要(3.2a);可为空数组(空项目) |
+| `status` | enum | ✓ | `EMPTY` / `PARSING` / `PARSE_FAILED` / `AWAITING_CHAPTER_CONFIRMATION` / `READY` |
 | `chapter_count` | int | ✓ | 派生 |
 | `deck_count` | int | ✓ | 派生 |
 | `task_count` | int | ✓ | 派生 |
 | `tasks` | Task[] | ✗ | 仅项目详情可选返回;列表可省略,用于恢复草稿/样卡/生成中任务 |
 | `created_at` / `updated_at` / `version` | - | ✓ | 缓存刷新与并发检查 |
 
-规则:一个项目恰好对应一份当前 PDF;解析失败时允许 `replace-pdf` 原子替换该 PDF。`status` 由 PDF 状态与 `chapters_confirmed_at` 确定,不建立可漂移的第二套状态列。删除保护见 6.2;项目删除时 `user_preferences.current_project_id` 置空。`tasks` 仅为详情的服务端任务快照,权威状态仍来自任务表/任务列表。
+规则:一个项目包含 0~N 份资料(V25-D-29 资料集合)。`status` 由资料状态与 `chapters_confirmed_at`
+聚合派生,不建立可漂移的第二套状态列:无资料 → `EMPTY`;任一 PDF 为 `PENDING`/`PARSING` →
+`PARSING`;否则存在可用章节来源(`PARSED` PDF 或 `TEXT`)且 `chapters_confirmed_at` 为空 →
+`AWAITING_CHAPTER_CONFIRMATION`;章节已确认 → `READY`;全部 PDF 均 `FAILED` 且无可用章节来源 →
+`PARSE_FAILED`。新增或删除任一资料都会重置 `chapters_confirmed_at`(V25-D-31)。删除保护见 6.2;
+项目删除时 `user_preferences.current_project_id` 置空。`tasks` 仅为详情的服务端任务快照,权威状态仍
+来自任务表/任务列表。
 
 ### 3.21 DeletionPreflight(删除预检,V2.5 工程化增量)
 
@@ -668,14 +698,18 @@ Scheduler(
 
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |
-| POST | `/v1/projects` | multipart PDF + 可选 name;上传成功即建立项目(PDF 异步解析) | ✓ |
+| POST | `/v1/projects` | JSON `{name}`;建立空项目(两步创建第一步,资料集合可后置添加) | ✓ |
 | GET | `/v1/projects` | 当前用户项目列表,支持真实空态 | - |
-| GET | `/v1/projects/{project_id}` | 项目详情(含 file/chapters 摘要与派生计数) | - |
+| GET | `/v1/projects/{project_id}` | 项目详情(含 materials/chapters 摘要与派生计数) | - |
 | GET | `/v1/projects/{project_id}/deletion-preflight?retain_decks=true\|false&cancel_active_tasks=true\|false` | 删除预检:影响范围、阻塞任务与可执行动作;只读 | - |
 | PATCH | `/v1/projects/{project_id}` | 重命名(1~60 字符,去首尾空白) | ✓ |
 | DELETE | `/v1/projects/{project_id}?retain_decks=true\|false` | 二次确认后自动取消全部关联活跃任务(含 GENERATING)并删除;仅保留或删除卡组两种选择 | ✓ |
-| POST | `/v1/projects/{project_id}/replace-pdf` | 仅解析失败项目可替换并重新解析(原子替换 PDF) | ✓ |
-| PATCH | `/v1/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页 | ✓ |
+| POST | `/v1/projects/{project_id}/materials/pdf` | multipart PDF;建立 PDF 资料并异步解析(重置章节确认) | ✓ |
+| POST | `/v1/projects/{project_id}/materials/text` | JSON `{name, content}`;≤30000 字,单章节+段落多 chunk,即时就绪(重置章节确认) | ✓ |
+| GET | `/v1/projects/{project_id}/materials` | 资料列表(各自状态;TEXT 附单章节) | - |
+| DELETE | `/v1/projects/{project_id}/materials/{material_id}?retain_cards=true\|false` | 资料级删除:静默取消引用该资料的活跃任务并 fencing;按参数保留或删除该资料产出卡片;删最后一份资料后项目转 `EMPTY`(重置章节确认) | ✓ |
+| POST | `/v1/projects/{project_id}/replace-pdf` | 仅 `FAILED` PDF 资料可原位替换并重新解析(不重置其他资料) | ✓ |
+| PATCH | `/v1/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页(TEXT 章节仅名称) | ✓ |
 | DELETE | `/v1/projects/{project_id}/chapters/{chapter_id}?delete_cards=false` | 活跃任务保护;保留卡时 `chapter_id` 置空 | ✓ |
 | POST | `/v1/projects/{project_id}/confirm-chapters` | 确认目录,使项目进入 READY | ✓ |
 | GET/PATCH | `/v1/projects/{project_id}/study-settings` | 新卡章节范围与未归属分组(3.17) | PATCH ✓ |
@@ -684,7 +718,8 @@ Scheduler(
 | POST | `/v1/projects/{project_id}/decks/{deck_id}/attach` | 将本用户独立牌组归入项目 | ✓ |
 
 上传限制继续适用:≤ 100MB、≤ 1000 页;文件魔数 + 扩展名 + MIME 三重检查,不合规 → `400 PDF_UPLOAD_INVALID`。
-兼容路径:旧 `/v1/pdfs*` 在过渡期保留,内部**委托**项目接口同一业务语义,不得创建第二套项目/任务状态。
+文本限制:1~30000 字(去首尾空白后),超限 → `400 VALIDATION_ERROR`(全局校验失败统一 400,F1 约定)。
+兼容路径:旧 `/v1/pdfs*` 已移除,不得再创建第二套项目/任务状态。
 
 ### 6.3 API Key(FR-17,继承)
 
@@ -809,6 +844,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `PDF_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性) |
 | | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本用户(统一 404) |
 | | `PROJECT_NOT_FOUND` | 404 | V2.5 项目不存在或跨用户 |
+| | `MATERIAL_NOT_FOUND` | 404 | V2.5 学习资料不存在或跨项目（统一 404） |
 | | `PROJECT_STATE_CONFLICT` | 409 | V2.5 当前项目状态不允许操作 |
 | | `PROJECT_HAS_ACTIVE_TASK` | 409 | V2.5 删除被活跃任务阻止 |
 | API Key | `API_KEY_UNAVAILABLE` | 502 | Key 缺失/解密失败、chat 上游 401/429/5xx 或校验链路(validate_key)上游不可用(含网络);生成链路中 401(Key 错误)不可重试 → 任务 `FAILED`,429/5xx 可重试(账本预算内);生成链路网络/超时与响应解析失败内部记 `GENERATION_FAILED`(重试预算同) |

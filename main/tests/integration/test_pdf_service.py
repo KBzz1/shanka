@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Chapter, PdfFile, Task, User
+from infra.db.models import Base, Chapter, LearningProject, Material, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from infra.storage.local import LocalStorage
 from services.pdf.service import (
@@ -56,9 +56,31 @@ def _ensure_user(session: Session, user_id: str) -> None:
 
 
 def _seed_pdf(
-    session: Session, *, user_id: str, storage_key: str = "", status: str = "PARSED"
+    session: Session,
+    *,
+    user_id: str,
+    storage_key: str = "",
+    status: str = "PARSED",
+    with_project: bool = True,
 ) -> str:
+    """V25-D-29 基座：PDF 行伴随 LearningProject + Material（material_id == file_id）。
+
+    with_project=False 种孤儿 PDF（迁移前遗留形态，delete_pdf 走旧语义分支）。
+    """
     _ensure_user(session, user_id)
+    project_id = _uuid()
+    if with_project:
+        session.add(
+            LearningProject(
+                project_id=project_id,
+                user_id=user_id,
+                name="种子项目",
+                version="2026-08-11T00:00:00.000Z",
+                created_at="2026-08-11T00:00:00.000Z",
+                updated_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -70,6 +92,19 @@ def _seed_pdf(
     )
     session.add(pdf)
     session.flush()
+    if with_project:
+        session.add(
+            Material(
+                material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project_id,
+                type="PDF",
+                name="book.pdf",
+                status=None,
+                size_bytes=100,
+                created_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.flush()
     return pdf.file_id
 
 
@@ -163,7 +198,8 @@ def test_pdf_service_delete_auto_cancels_non_terminal_task(
     user = _uuid()
     task_id = _uuid()
     with session_factory() as session:
-        file_id = _seed_pdf(session, user_id=user)
+        # 孤儿 PDF（无项目/资料行）→ delete_pdf 旧语义分支：取消活跃任务 + SET NULL
+        file_id = _seed_pdf(session, user_id=user, with_project=False)
         session.add(
             Task(
                 task_id=task_id,
@@ -195,7 +231,14 @@ def test_pdf_service_update_chapter(session_factory: Callable[[], Session]) -> N
     user = _uuid()
     with session_factory() as session:
         file_id = _seed_pdf(session, user_id=user)
-        ch = Chapter(chapter_id=_uuid(), file_id=file_id, name="旧名", start_page=1, end_page=10)
+        ch = Chapter(
+            chapter_id=_uuid(),
+            file_id=file_id,
+            material_id=file_id,
+            name="旧名",
+            start_page=1,
+            end_page=10,
+        )
         session.add(ch)
         session.commit()
         chapter_id = ch.chapter_id
@@ -219,7 +262,14 @@ def test_pdf_service_update_chapter_invalid_range(session_factory: Callable[[], 
     user = _uuid()
     with session_factory() as session:
         file_id = _seed_pdf(session, user_id=user)
-        ch = Chapter(chapter_id=_uuid(), file_id=file_id, name="c", start_page=1, end_page=10)
+        ch = Chapter(
+            chapter_id=_uuid(),
+            file_id=file_id,
+            material_id=file_id,
+            name="c",
+            start_page=1,
+            end_page=10,
+        )
         session.add(ch)
         session.commit()
         chapter_id = ch.chapter_id
@@ -242,7 +292,14 @@ def test_pdf_service_update_chapter_not_parsed(session_factory: Callable[[], Ses
     user = _uuid()
     with session_factory() as session:
         file_id = _seed_pdf(session, user_id=user, status="FAILED")
-        ch = Chapter(chapter_id=_uuid(), file_id=file_id, name="c", start_page=1, end_page=5)
+        ch = Chapter(
+            chapter_id=_uuid(),
+            file_id=file_id,
+            material_id=file_id,
+            name="c",
+            start_page=1,
+            end_page=5,
+        )
         session.add(ch)
         session.commit()
         chapter_id = ch.chapter_id

@@ -6,6 +6,8 @@
 
 import re
 
+from sqlalchemy import UniqueConstraint
+
 from infra.db.models import Base
 from tests.contract.support import DATABASE_DESIGN_PATH, parse_database_tables
 
@@ -73,10 +75,12 @@ def test_orm_idempotency_pk_order_matches_design() -> None:
 
 
 def test_v25_new_tables_present() -> None:
-    """V2.5 新表：learning_projects / user_preferences / project_study_settings /
-    card_deletion_batches / card_rewrite_previews（database-design 2.17~2.21）。"""
+    """V2.5 新表：learning_projects / materials（V25-D-29 多资料）/ user_preferences /
+    project_study_settings / card_deletion_batches / card_rewrite_previews
+    （database-design 2.17~2.22）。"""
     for table in (
         "learning_projects",
+        "materials",
         "user_preferences",
         "project_study_settings",
         "card_deletion_batches",
@@ -85,15 +89,45 @@ def test_v25_new_tables_present() -> None:
         assert table in ORM_TABLES
 
 
+def test_v25_materials_columns_and_text_chunks_key() -> None:
+    """materials 列（database-design 2.22；PDF 行 status NULL 以 pdf_files 为权威）；
+    text_chunks 唯一键改 (material_id, chunk_seq)（V25-D-29/32）。"""
+    materials = ORM_TABLES["materials"]
+    for col in (
+        "material_id",
+        "project_id",
+        "type",
+        "name",
+        "status",
+        "error_code",
+        "size_bytes",
+        "char_count",
+        "created_at",
+    ):
+        assert col in materials.columns, f"materials 缺列 {col}"
+    assert materials.c.status.nullable, "materials.status 应可空（PDF 行 NULL）"
+    chunks = ORM_TABLES["text_chunks"]
+    uq = [c for c in chunks.constraints if isinstance(c, UniqueConstraint)]
+    assert any({col.name for col in u.columns} == {"material_id", "chunk_seq"} for u in uq), (
+        "text_chunks 唯一键应为 (material_id, chunk_seq)"
+    )
+    assert chunks.c.material_id.nullable is False
+    assert chunks.c.chunk_seq.nullable is False
+    assert chunks.c.file_id.nullable, "text_chunks.file_id 应可空（TEXT 资料无 PDF 行）"
+
+
 def test_v25_new_table_fks() -> None:
-    """新表外键（database-design 2.17~2.21）：
-    learning_projects.file_id UNIQUE FK → pdf_files；user_preferences.user_id PK FK → users；
-    project_study_settings.project_id PK FK CASCADE；删除批次/重写预览 user_id FK → users、
-    重写预览 card_id FK → cards CASCADE。"""
-    lps = ORM_TABLES["learning_projects"]
-    file_fk = [c for c in lps.c.file_id.foreign_keys]
-    assert len(file_fk) == 1 and file_fk[0].column.table.name == "pdf_files"
-    assert lps.c.file_id.unique, "learning_projects.file_id 应为 UNIQUE（唯一外键权威，契约 3.16）"
+    """新表外键（database-design 2.17~2.22）：
+    materials.project_id FK CASCADE（V25-D-29 资料集合权威归属）；user_preferences.user_id
+    PK FK → users；project_study_settings.project_id PK FK CASCADE；删除批次/重写预览
+    user_id FK → users、重写预览 card_id FK → cards CASCADE。"""
+    materials = ORM_TABLES["materials"]
+    project_fk = [c for c in materials.c.project_id.foreign_keys]
+    assert len(project_fk) == 1 and project_fk[0].column.table.name == "learning_projects"
+    assert project_fk[0].ondelete == "CASCADE"
+    assert "file_id" not in ORM_TABLES["learning_projects"].columns, (
+        "V25-D-29 后 learning_projects 不再持有 file_id（资料归属经 materials 表）"
+    )
     assert ORM_TABLES["user_preferences"].c.user_id.primary_key
     assert any(
         c.column.table.name == "users"

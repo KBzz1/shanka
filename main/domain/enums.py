@@ -135,9 +135,10 @@ class PublicationState(StrEnum):
 
 
 class ProjectStatus(StrEnum):
-    """学习项目状态（structure-contract 3.16；V2.5 新增；由 PDF 状态与
-    chapters_confirmed_at 确定，不建第二套状态列）。"""
+    """学习项目状态（structure-contract 3.16；V2.5 新增；由全部资料状态与
+    chapters_confirmed_at 聚合派生，不建第二套状态列；V25-D-29 起无资料 = EMPTY）。"""
 
+    EMPTY = "EMPTY"
     PARSING = "PARSING"
     PARSE_FAILED = "PARSE_FAILED"
     AWAITING_CHAPTER_CONFIRMATION = "AWAITING_CHAPTER_CONFIRMATION"

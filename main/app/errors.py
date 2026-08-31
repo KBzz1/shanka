@@ -32,6 +32,7 @@ class ErrorCode(StrEnum):
     PDF_NOT_FOUND = "PDF_NOT_FOUND"
     CHAPTER_NOT_FOUND = "CHAPTER_NOT_FOUND"
     PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"  # V2.5 项目不存在或跨用户（统一 404）
+    MATERIAL_NOT_FOUND = "MATERIAL_NOT_FOUND"  # V2.5 学习资料不存在或跨项目（统一 404）
     PROJECT_STATE_CONFLICT = "PROJECT_STATE_CONFLICT"  # V2.5 当前项目状态不允许操作
     PROJECT_HAS_ACTIVE_TASK = "PROJECT_HAS_ACTIVE_TASK"  # V2.5 删除被活跃任务阻止
     # API Key
@@ -75,6 +76,7 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.PDF_NOT_FOUND: 404,
     ErrorCode.CHAPTER_NOT_FOUND: 404,
     ErrorCode.PROJECT_NOT_FOUND: 404,
+    ErrorCode.MATERIAL_NOT_FOUND: 404,
     ErrorCode.PROJECT_STATE_CONFLICT: 409,
     ErrorCode.PROJECT_HAS_ACTIVE_TASK: 409,
     ErrorCode.API_KEY_UNAVAILABLE: 502,
@@ -116,6 +118,7 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.pdf_not_found",
         "error.chapter_not_found",
         "error.project_not_found",
+        "error.material_not_found",
         "error.project_state_conflict",
         "error.project_has_active_task",
         "error.api_key_unavailable",

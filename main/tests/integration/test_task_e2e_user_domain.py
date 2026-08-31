@@ -157,19 +157,22 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
     assert resp.status_code == 200
     assert resp.json()["status"] == "AVAILABLE"
 
-    # 2. 建学习项目（上传样书 → 201）；pdf scanner 显式扫描 → PARSED + 章节
+    # 2. 两步建项目 + 添加样书资料（V25-D-29）；pdf scanner 显式扫描 → PARSED + 章节
+    resp = client.post("/projects", json={"name": "e2e"}, headers={**user, **_idem()})
+    assert resp.status_code == 201
+    project_id = resp.json()["project_id"]
     with SAMPLE.open("rb") as f:
         resp = client.post(
-            "/projects",
+            f"/projects/{project_id}/materials/pdf",
             files={"file": ("book.pdf", f, "application/pdf")},
             headers={**user, **_idem()},
         )
     assert resp.status_code == 201
-    project_id = resp.json()["project_id"]
     _scan_pdfs(client)
     project = client.get(f"/projects/{project_id}", headers=user).json()
-    assert project["file"]["status"] == "PARSED"
-    chapters = project["file"]["chapters"]
+    assert project["status"] == "AWAITING_CHAPTER_CONFIRMATION"
+    assert project["materials"][0]["status"] == "PARSED"
+    chapters = project["chapters"]
     assert len(chapters) >= 3
 
     # 3. 建牌组（HTTP，归属项目——V2.5 6.4 同项目校验）

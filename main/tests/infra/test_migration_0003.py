@@ -14,12 +14,13 @@ def test_models_have_new_columns() -> None:
     assert Task.__table__.c.skipped_planning_group_count is not None
 
 
-def test_text_chunk_unique_per_page() -> None:
+def test_text_chunk_unique_per_material_seq() -> None:
+    """V25-D-29 多资料：text_chunks 唯一键 = (material_id, chunk_seq)（取代 file_id+page）。"""
     table = Base.metadata.tables[TextChunk.__tablename__]
     assert table.c.chunk_id.primary_key
     assert any(
         isinstance(c, UniqueConstraint)
-        and {col.name for col in c.columns} == {"file_id", "page_number"}
+        and {col.name for col in c.columns} == {"material_id", "chunk_seq"}
         for c in table.constraints
     )
 

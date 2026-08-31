@@ -14,7 +14,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from infra.db.models import PdfFile, TextChunk, User
+from infra.db.models import LearningProject, Material, PdfFile, TextChunk, User
 from infra.storage.local import LocalStorage
 from services.pdf.scanner import process_pending
 from services.pdf.text_chunks import chunk_id_for
@@ -28,6 +28,8 @@ def _uuid() -> str:
 
 
 def _seed_pending(session: Session, *, user_id: str, storage_key: str) -> str:
+    """V25-D-29 基座：PDF 行必须伴随 LearningProject + Material（material_id == file_id），
+    scanner 重建 chapters 时按 material_id FK 写回。"""
     session.add(
         User(
             user_id=user_id,
@@ -39,6 +41,16 @@ def _seed_pending(session: Session, *, user_id: str, storage_key: str) -> str:
         )
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        name="扫描项目",
+        version="2026-08-11T00:00:00.000Z",
+        created_at="2026-08-11T00:00:00.000Z",
+        updated_at="2026-08-11T00:00:00.000Z",
+    )
+    session.add(project)
+    session.flush()
     pdf = PdfFile(
         file_id=_uuid(),
         user_id=user_id,
@@ -49,6 +61,18 @@ def _seed_pending(session: Session, *, user_id: str, storage_key: str) -> str:
         created_at="2026-08-11T00:00:00.000Z",
     )
     session.add(pdf)
+    session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="book.pdf",
+            status=None,
+            size_bytes=100,
+            created_at="2026-08-11T00:00:00.000Z",
+        )
+    )
     session.flush()
     return pdf.file_id
 

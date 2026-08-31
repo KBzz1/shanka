@@ -13,10 +13,13 @@ from app.schemas.samples import GenerationConfig, SampleCard
 
 
 class Chapter(BaseModel):
+    """openapi Chapter（V2.5 多资料快照）：material_id 归属资料；TEXT 章节页码 null。"""
+
     chapter_id: str
+    material_id: str
     name: str
-    start_page: int
-    end_page: int
+    start_page: int | None
+    end_page: int | None
 
 
 class TaskCreateRequest(BaseModel):

@@ -12,7 +12,7 @@
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
@@ -27,7 +27,10 @@ from app.schemas.deletion import DeletionPreflight
 from app.schemas.pdfs import ChapterUpdateRequest
 from app.schemas.progress import ProgressSummary, ProjectWeeklyStats
 from app.schemas.project import ProjectStudySettingsUpdateRequest
-from app.schemas.projects import ProjectRenameRequest
+from app.schemas.projects import (
+    ProjectCreateRequest as ProjectCreateRequestAlias,
+)
+from app.schemas.projects import ProjectRenameRequest, TextMaterialCreateRequest
 from infra.clock import SystemClock
 from infra.db.session import format_utc, get_db_session
 from infra.storage.local import LocalStorage
@@ -37,12 +40,16 @@ from services.pdf.scanner import validate_upload
 from services.pdf.service import chapter_view
 from services.progress.service import project_progress, project_weekly_stats
 from services.projects.service import (
+    add_pdf_material,
+    add_text_material,
     confirm_chapters,
     create_project,
+    delete_material,
     delete_project,
     delete_project_chapter,
     get_project,
     get_study_settings,
+    list_materials,
     list_projects,
     project_deletion_preflight,
     rename_project,
@@ -78,29 +85,18 @@ async def _upload(request: Request, file: UploadFile) -> tuple[bytes, str]:
 
 
 @router.post("", status_code=201)
-async def create_project_endpoint(
+def create_project_endpoint(
     request: Request,
-    file: Annotated[UploadFile, File()],
+    payload: ProjectCreateRequestAlias,
     session: Annotated[Session, Depends(get_db_session)],
-    name: Annotated[str | None, Form()] = None,
 ) -> JSONResponse:
-    """上传 PDF 建立学习项目（可选 name；缺省取文件名去扩展名；上传成功即建立）。"""
+    """建立空项目（两步创建第一步，V25-D-29）；资料经 materials 端点添加。"""
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
     path = request.url.path
-    data, storage_key = await _upload(request, file)
-    body_hash = request_body_hash(data)  # multipart 幂等 body 比对：文件内容 hash
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        project = create_project(
-            session,
-            user_id=user_id,
-            filename=file.filename or "upload.pdf",
-            size_bytes=len(data),
-            storage_key=storage_key,
-            now=_now(),
-            name=name,
-        )
+        project = create_project(session, user_id=user_id, name=payload.name, now=_now())
         session.flush()
         return 201, project
 
@@ -109,7 +105,7 @@ async def create_project_endpoint(
         user_id=user_id,
         path=path,
         idempotency_key=key,
-        request_body_hash=body_hash,
+        request_body_hash=request_body_hash(payload.model_dump_json().encode()),
         fn=biz,
     )
     session.commit()
@@ -190,6 +186,133 @@ def attach_deck_endpoint(
         path=path,
         idempotency_key=key,
         request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router.get("/{project_id}/materials", status_code=200)
+def list_materials_endpoint(
+    request: Request,
+    project_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """资料列表（各自状态；TEXT 附单章节）。"""
+    user_id: str = request.state.principal.user_id
+    items = list_materials(session, user_id=user_id, project_id=project_id)
+    return JSONResponse(status_code=200, content={"items": items})
+
+
+@router.post("/{project_id}/materials/pdf", status_code=201)
+async def add_pdf_material_endpoint(
+    request: Request,
+    project_id: str,
+    file: Annotated[UploadFile, File()],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """添加 PDF 资料（≤100MB、≤1000 页；异步解析；重置章节确认，V25-D-31）。"""
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/materials/pdf"
+    data, storage_key = await _upload(request, file)
+    body_hash = request_body_hash(data)
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        body = add_pdf_material(
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            filename=file.filename or "upload.pdf",
+            size_bytes=len(data),
+            storage_key=storage_key,
+            now=_now(),
+        )
+        session.flush()
+        return 201, body
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router.post("/{project_id}/materials/text", status_code=201)
+def add_text_material_endpoint(
+    request: Request,
+    project_id: str,
+    payload: TextMaterialCreateRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """添加粘贴文本资料（≤30000 字；单章节+段落多 chunk；即时就绪，V25-D-32）。"""
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/materials/text"
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        body = add_text_material(
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            name=payload.name,
+            content=payload.content,
+            now=_now(),
+            settings=request.app.state.settings,
+        )
+        session.flush()
+        return 201, body
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=request_body_hash(payload.model_dump_json().encode()),
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router.delete("/{project_id}/materials/{material_id}", status_code=200)
+def delete_material_endpoint(
+    request: Request,
+    project_id: str,
+    material_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+    retain_cards: Annotated[bool, Query()] = True,
+) -> JSONResponse:
+    """删除资料（V25-D-30）：静默取消引用该资料的活跃任务并 fencing；retain_cards
+    选择保留或一并删除该资料产出卡片；删最后一份资料后项目转 EMPTY。"""
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/materials/{material_id}"
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        body = delete_material(
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            material_id=material_id,
+            retain_cards=retain_cards,
+            storage=request.app.state.storage,
+            now=_now(),
+        )
+        session.flush()
+        return 200, body
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=request_body_hash(f"retain_cards={retain_cards}".encode()),
         fn=biz,
     )
     session.commit()
@@ -287,17 +410,19 @@ def delete_project_endpoint(
     return Response(status_code=status)
 
 
-@router.post("/{project_id}/replace-pdf", status_code=200)
+@router.post("/{project_id}/materials/{material_id}/replace", status_code=200)
+@router.post("/{project_id}/replace-pdf", status_code=200, include_in_schema=False)
 async def replace_pdf_endpoint(
     request: Request,
     project_id: str,
+    material_id: str,
     file: Annotated[UploadFile, File()],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
     """仅解析失败项目可替换并重新解析（原子替换 PDF）。"""
     user_id: str = request.state.principal.user_id
     key = get_idempotency_key(request)
-    path = f"/projects/{project_id}/replace-pdf"
+    path = f"/projects/{project_id}/materials/{material_id}/replace"
     data, storage_key = await _upload(request, file)
     body_hash = request_body_hash(data)
 
@@ -306,6 +431,7 @@ async def replace_pdf_endpoint(
             session,
             user_id=user_id,
             project_id=project_id,
+            material_id=material_id,
             filename=file.filename or "upload.pdf",
             size_bytes=len(data),
             storage_key=storage_key,

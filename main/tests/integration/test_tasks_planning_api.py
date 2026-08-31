@@ -17,7 +17,7 @@ from sqlalchemy import insert, select, text
 
 from app.config import Settings
 from app.main import create_app
-from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile, Task, User
+from infra.db.models import ApiKey, Chapter, LearningProject, Material, PdfFile, Task, User
 from infra.db.session import create_db_engine, create_session_factory
 from services.decks.service import create_deck
 from tests.conftest import auth_headers
@@ -118,7 +118,6 @@ def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dic
         project = LearningProject(
             project_id=_uuid(),
             user_id=user_id,
-            file_id=pdf.file_id,
             name="P",
             chapters_confirmed_at=_NOW,
             version=_NOW,
@@ -126,6 +125,17 @@ def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dic
             updated_at=_NOW,
         )
         session.add(project)
+        session.flush()
+        session.add(
+            Material(
+                material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project.project_id,
+                type="PDF",
+                name="seed.pdf",
+                status=None,
+                created_at=_NOW,
+            )
+        )
         session.flush()
         deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
         deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
@@ -135,6 +145,7 @@ def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dic
             ch = Chapter(
                 chapter_id=_uuid(),
                 file_id=pdf.file_id,
+                material_id=pdf.file_id,
                 name=f"第{i + 1}章",
                 start_page=i + 1,
                 end_page=i + 2,
@@ -193,7 +204,7 @@ def test_tasks_create_201_draft_view(ctx: tuple[TestClient, Path]) -> None:
     assert body["skipped_planning_group_count"] == 0
     chapters = body["selected_chapters"]
     assert len(chapters) == 2
-    assert set(chapters[0]) == {"chapter_id", "name", "start_page", "end_page"}
+    assert set(chapters[0]) == {"chapter_id", "material_id", "name", "start_page", "end_page"}
     assert chapters[0]["name"] == "第1章"
     assert body["generation_config"]["coverage_mode"] == "COMPACT"
     assert body["resumable"] is False

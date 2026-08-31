@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.errors import AppError, ErrorCode
 from domain.task import ACTIVE_TASK_STATUSES
 from infra.clock import SystemClock
-from infra.db.models import Chapter, KnowledgePoint, LearningProject, PdfFile, Task
+from infra.db.models import Chapter, KnowledgePoint, LearningProject, Material, PdfFile, Task
 from infra.db.session import format_utc
 from infra.storage.local import LocalStorage
 
@@ -38,6 +38,7 @@ def chapter_view(chapter: Chapter) -> dict[str, Any]:
     """Chapter 视图（openapi Chapter）：/pdfs 与 /projects 路由共用（单一来源）。"""
     return {
         "chapter_id": chapter.chapter_id,
+        "material_id": chapter.material_id,
         "name": chapter.name,
         "start_page": chapter.start_page,
         "end_page": chapter.end_page,
@@ -101,8 +102,10 @@ def delete_pdf(
     )  # 函数级导入：pdf↔projects 服务互为依赖，防模块级循环
 
     project_id = session.scalar(
-        select(LearningProject.project_id).where(
-            LearningProject.file_id == file_id,
+        select(LearningProject.project_id)
+        .join(Material, Material.project_id == LearningProject.project_id)
+        .where(
+            Material.material_id == file_id,  # V25-D-29：归属经 materials（PDF 资料 id == file_id）
             LearningProject.user_id == user_id,
         )
     )
@@ -190,19 +193,24 @@ def update_chapter(
         raise AppError(ErrorCode.VALIDATION_ERROR, "起始页码非法")
     if end_page is not None and end_page < 1:
         raise AppError(ErrorCode.VALIDATION_ERROR, "结束页码非法")
-    pdf = _owned_pdf(session, user_id=user_id, file_id=file_id)
-    if pdf.status != "PARSED":
-        raise AppError(conflict_error, "PDF 尚未解析完成")
     chapter = session.get(Chapter, chapter_id)
-    if chapter is None or chapter.file_id != file_id:
+    if chapter is None or chapter.material_id != file_id:
         raise AppError(ErrorCode.PDF_NOT_FOUND, "章节不存在")
+    pdf = session.get(PdfFile, file_id)
+    if pdf is not None and pdf.status != "PARSED":
+        raise AppError(conflict_error, "PDF 尚未解析完成")
+    # TEXT 资料（无 pdf 行）章节仅名称可改（页码为 null 恒定）
     if name is not None:
         chapter.name = name
     if start_page is not None:
         chapter.start_page = start_page
     if end_page is not None:
         chapter.end_page = end_page
-    if chapter.start_page > chapter.end_page:
+    if (
+        chapter.start_page is not None
+        and chapter.end_page is not None
+        and chapter.start_page > chapter.end_page
+    ):
         raise AppError(ErrorCode.VALIDATION_ERROR, "章节页码范围非法")
     return chapter
 
@@ -213,12 +221,12 @@ def delete_chapter(session: Session, *, user_id: str, file_id: str, chapter_id: 
     仅 PARSED 后可删（同章节 PATCH 约束）；关联 knowledge_points.chapter_id 应用层
     置 null（2.6 无 DB FK）；历史任务 selected_chapters 为快照，不受影响。
     """
-    pdf = _owned_pdf(session, user_id=user_id, file_id=file_id)
-    if pdf.status != "PARSED":
-        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "PDF 尚未解析完成")
     chapter = session.get(Chapter, chapter_id)
-    if chapter is None or chapter.file_id != file_id:
+    if chapter is None or chapter.material_id != file_id:
         raise AppError(ErrorCode.CHAPTER_NOT_FOUND, "章节不存在")
+    pdf = session.get(PdfFile, file_id)
+    if pdf is not None and pdf.status != "PARSED":
+        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "PDF 尚未解析完成")
     session.execute(
         update(KnowledgePoint)
         .where(KnowledgePoint.chapter_id == chapter_id)

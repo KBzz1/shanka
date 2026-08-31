@@ -143,7 +143,8 @@ def session_factory(tmp_path: Path) -> Callable[[], Session]:
 
 
 def _seed_file(session: Session, *, file_id: str) -> None:
-    from infra.db.models import PdfFile, User
+    """V25-D-29 基座：PDF 行伴随 LearningProject + Material（chunk 归属 materials）。"""
+    from infra.db.models import LearningProject, Material, PdfFile, User
 
     user_id = _uuid()
     session.add(
@@ -157,6 +158,16 @@ def _seed_file(session: Session, *, file_id: str) -> None:
         )
     )
     session.flush()
+    project = LearningProject(
+        project_id=_uuid(),
+        user_id=user_id,
+        name="样卡项目",
+        version=_NOW,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    session.add(project)
+    session.flush()
     session.add(
         PdfFile(
             file_id=file_id,
@@ -165,6 +176,18 @@ def _seed_file(session: Session, *, file_id: str) -> None:
             storage_key=_uuid(),
             size_bytes=10,
             status="PARSED",
+            created_at=_NOW,
+        )
+    )
+    session.flush()
+    session.add(
+        Material(
+            material_id=file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="b.pdf",
+            status=None,
+            size_bytes=10,
             created_at=_NOW,
         )
     )
@@ -178,6 +201,8 @@ def _seed_chunks(session: Session, *, file_id: str, pages: int = 3) -> None:
             insert(TextChunk).values(
                 chunk_id=_uuid(),
                 file_id=file_id,
+                material_id=file_id,
+                chunk_seq=page,
                 page_number=page,
                 char_count=20,
                 content_sha256="0" * 64,

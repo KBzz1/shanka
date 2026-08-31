@@ -32,6 +32,7 @@ from infra.db.models import (
     Chapter,
     Deck,
     LearningProject,
+    Material,
     PdfFile,
     Task,
     User,
@@ -113,7 +114,6 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at=_NOW,
         version=_NOW,
@@ -121,6 +121,17 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         updated_at=_NOW,
     )
     session.add(project)
+    session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            created_at=_NOW,
+        )
+    )
     session.flush()
     deck = Deck(
         deck_id=_uuid(),
@@ -139,6 +150,7 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         ch = Chapter(
             chapter_id=_uuid(),
             file_id=pdf.file_id,
+            material_id=pdf.file_id,
             name=f"第{i + 1}章",
             start_page=i + 1,
             end_page=i + 2,
@@ -372,7 +384,6 @@ def test_create_task_same_project_deck_required(
         other_project = LearningProject(
             project_id=_uuid(),
             user_id=user,
-            file_id=other_pdf.file_id,
             name="P2",
             chapters_confirmed_at=None,
             version=_NOW,
@@ -380,6 +391,17 @@ def test_create_task_same_project_deck_required(
             updated_at=_NOW,
         )
         session.add(other_project)
+        session.flush()
+        session.add(
+            Material(
+                material_id=other_pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=other_project.project_id,
+                type="PDF",
+                name="seed.pdf",
+                status=None,
+                created_at=_NOW,
+            )
+        )
         session.flush()
         other_deck = Deck(
             deck_id=_uuid(),

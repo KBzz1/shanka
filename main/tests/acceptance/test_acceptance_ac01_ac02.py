@@ -58,45 +58,60 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
+def _create_project_with_pdf(
+    client: TestClient,
+    user: dict[str, str],
+    *,
+    filename: str = "book.pdf",
+    data: bytes | None = None,
+) -> str:
+    """两步创建（V25-D-29）：POST /projects + materials/pdf，返回 project_id。"""
+    resp = client.post("/projects", json={"name": "验收项目"}, headers={**user, **_idem()})
+    assert resp.status_code == 201, resp.text
+    project_id = str(resp.json()["project_id"])
+    payload = data if data is not None else SAMPLE.read_bytes()
+    resp = client.post(
+        f"/projects/{project_id}/materials/pdf",
+        files={"file": (filename, payload, "application/pdf")},
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 201, resp.text
+    return project_id
+
+
 def test_acceptance_ac01_sample_book_parses_to_chapters(client: TestClient, tmp_path: Path) -> None:
     """AC-01-1：可提取文本层 + 可识别目录的 PDF 进入章节确认流程（PARSED + 章节列表）。"""
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
     device = _user(client)
-    with SAMPLE.open("rb") as f:
-        resp = client.post(
-            "/pdfs",
-            files={"file": ("book.pdf", f, "application/pdf")},
-            headers={**device, **_idem()},
-        )
-    assert resp.status_code == 201
-    file_id = resp.json()["file_id"]
+    project_id = _create_project_with_pdf(client, device)
     _scan(client)
-    resp = client.get(f"/pdfs/{file_id}", headers=device)
+    resp = client.get(f"/projects/{project_id}", headers=device)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "PARSED"
-    assert body["error_code"] is None
-    assert body["chapters"] and len(body["chapters"]) >= 3
-    first = body["chapters"][0]
+    assert body["status"] == "AWAITING_CHAPTER_CONFIRMATION"
+    assert body["materials"][0]["status"] == "PARSED"
+    assert body["materials"][0]["error_code"] is None
+    chapters = body["chapters"]
+    assert chapters and len(chapters) >= 3
+    first = chapters[0]
     assert first["name"] and first["start_page"] >= 1 and first["end_page"] >= first["start_page"]
+    assert first["material_id"] == body["materials"][0]["material_id"]
 
 
 def test_acceptance_ac01_no_toc_stops_flow(client: TestClient) -> None:
-    """AC-01-2：无可用目录 → FAILED + PDF_TOC_MISSING（流程停止）。"""
+    """AC-01-2：无可用目录 → FAILED + PDF_TOC_MISSING（流程停止；项目转 PARSE_FAILED）。"""
     device = _user(client)
-    resp = client.post(
-        "/pdfs",
-        files={"file": ("notoc.pdf", b"%PDF-1.4 broken", "application/pdf")},
-        headers={**device, **_idem()},
+    project_id = _create_project_with_pdf(
+        client, device, filename="notoc.pdf", data=b"%PDF-1.4 broken"
     )
-    assert resp.status_code == 201
-    file_id = resp.json()["file_id"]
     _scan(client)
-    resp = client.get(f"/pdfs/{file_id}", headers=device)
+    resp = client.get(f"/projects/{project_id}/materials", headers=device)
     assert resp.status_code == 200
-    assert resp.json()["status"] == "FAILED"
-    assert resp.json()["error_code"] in ("PDF_PARSE_FAILED", "PDF_TOC_MISSING")
+    item = resp.json()["items"][0]
+    assert item["status"] == "FAILED"
+    assert item["error_code"] in ("PDF_PARSE_FAILED", "PDF_TOC_MISSING")
+    assert client.get(f"/projects/{project_id}", headers=device).json()["status"] == "PARSE_FAILED"
 
 
 def test_acceptance_ac02_chapter_patch(client: TestClient, tmp_path: Path) -> None:
@@ -104,17 +119,12 @@ def test_acceptance_ac02_chapter_patch(client: TestClient, tmp_path: Path) -> No
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
     device = _user(client)
-    with SAMPLE.open("rb") as f:
-        file_id = client.post(
-            "/pdfs",
-            files={"file": ("book.pdf", f, "application/pdf")},
-            headers={**device, **_idem()},
-        ).json()["file_id"]
+    project_id = _create_project_with_pdf(client, device)
     _scan(client)
-    chapters = client.get(f"/pdfs/{file_id}", headers=device).json()["chapters"]
-    ch = chapters[0]
+    project = client.get(f"/projects/{project_id}", headers=device).json()
+    ch = project["chapters"][0]
     resp = client.patch(
-        f"/pdfs/{file_id}/chapters/{ch['chapter_id']}",
+        f"/projects/{project_id}/chapters/{ch['chapter_id']}",
         json={"name": "第一章 修订"},
         headers={**device, **_idem()},
     )

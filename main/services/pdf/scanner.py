@@ -135,6 +135,7 @@ def process_pending(session: Session, *, storage: Any) -> int:
                 Chapter(
                     chapter_id=str(uuid.uuid4()),
                     file_id=file_id,
+                    material_id=file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
                     name=ch["name"],
                     start_page=ch["start_page"],
                     end_page=ch["end_page"],

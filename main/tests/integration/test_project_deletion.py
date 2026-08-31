@@ -72,7 +72,7 @@ def _db(db_path: Path) -> tuple[Any, Any]:
 
 def _seed_project(db_path: Path, user_id: str, *, status: str = "PARSED") -> dict[str, Any]:
     """种子项目（PENDING/PARSED/FAILED）+ 章节；返回 {project_id, file_id, chapter_ids}。"""
-    from infra.db.models import Chapter, LearningProject, PdfFile
+    from infra.db.models import Chapter, LearningProject, Material, PdfFile
 
     factory, engine = _db(db_path)
     project_id, file_id = str(uuid.uuid4()), str(uuid.uuid4())
@@ -91,22 +91,10 @@ def _seed_project(db_path: Path, user_id: str, *, status: str = "PARSED") -> dic
             )
         )
         session.flush()
-        if status == "PARSED":
-            for i, cid in enumerate(chapter_ids):
-                session.add(
-                    Chapter(
-                        chapter_id=cid,
-                        file_id=file_id,
-                        name=f"第{i + 1}章",
-                        start_page=i * 10 + 1,
-                        end_page=i * 10 + 10,
-                    )
-                )
         session.add(
             LearningProject(
                 project_id=project_id,
                 user_id=user_id,
-                file_id=file_id,
                 name="种子项目",
                 chapters_confirmed_at="2026-08-15T00:00:00.000Z",
                 version="2026-08-15T00:00:00.000Z",
@@ -114,6 +102,29 @@ def _seed_project(db_path: Path, user_id: str, *, status: str = "PARSED") -> dic
                 updated_at="2026-08-15T00:00:00.000Z",
             )
         )
+        session.add(
+            Material(
+                material_id=file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project_id,
+                type="PDF",
+                name="seed.pdf",
+                status=None,
+                created_at="2026-08-15T00:00:00.000Z",
+            )
+        )
+        session.flush()
+        if status == "PARSED":
+            for i, cid in enumerate(chapter_ids):
+                session.add(
+                    Chapter(
+                        chapter_id=cid,
+                        file_id=file_id,
+                        material_id=file_id,
+                        name=f"第{i + 1}章",
+                        start_page=i * 10 + 1,
+                        end_page=i * 10 + 10,
+                    )
+                )
         session.commit()
     engine.dispose()
     return {"project_id": project_id, "file_id": file_id, "chapter_ids": chapter_ids}
@@ -712,13 +723,25 @@ def test_delete_chapter_cross_user_404(client: TestClient, tmp_path: Path) -> No
 
 
 def test_delete_chapter_not_parsed_409(client: TestClient, tmp_path: Path) -> None:
-    """未解析项目删章节 → 409 PROJECT_STATE_CONFLICT。"""
+    """资料未解析完成时删章节 → 409 冲突（V25-D-29 多资料：未知章节先行 404，
+    状态栅栏按真实章节触发）。"""
     user = _user(client)
     db = tmp_path / "project_del.db"
-    project = _seed_project(db, _user_id(db), status="PENDING")
+    project = _seed_project(db, _user_id(db), status="PARSED")
+    from sqlalchemy import text as _sqltext
+
+    from infra.db.session import create_db_engine as _engine_for
+
+    engine = _engine_for(f"sqlite:///{db}")
+    with engine.begin() as conn:
+        conn.execute(
+            _sqltext("UPDATE pdf_files SET status = 'PENDING' WHERE file_id = :f"),
+            {"f": str(project["file_id"])},
+        )
+    engine.dispose()
     resp = client.delete(
-        f"/projects/{project['project_id']}/chapters/{uuid.uuid4()}",
+        f"/projects/{project['project_id']}/chapters/{project['chapter_ids'][0]}",
         headers={**user, **_idem()},
     )
     assert resp.status_code == 409
-    assert _error_code(resp) == "PROJECT_STATE_CONFLICT"
+    assert _error_code(resp) == "TASK_STATE_CONFLICT"

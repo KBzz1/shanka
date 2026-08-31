@@ -73,16 +73,20 @@ def _create_task_before_executor(
         "/api-key", json={"api_key": "sk-test-cont-1234"}, headers={**user, **_idem()}
     )
     assert resp.status_code == 200
+    resp = client.post("/projects", json={"name": "continuity"}, headers={**user, **_idem()})
+    assert resp.status_code == 201
+    project_id = resp.json()["project_id"]
     with SAMPLE.open("rb") as f:
         resp = client.post(
-            "/projects",
+            f"/projects/{project_id}/materials/pdf",
             files={"file": ("book.pdf", f, "application/pdf")},
             headers={**user, **_idem()},
         )
     assert resp.status_code == 201
-    project_id = resp.json()["project_id"]
     _scan_pdfs(client)
-    chapters = client.get(f"/projects/{project_id}", headers=user).json()["file"]["chapters"]
+    project = client.get(f"/projects/{project_id}", headers=user).json()
+    chapters = project["chapters"]
+    assert project["materials"][0]["status"] == "PARSED"
     deck_resp = client.post(
         "/decks", json={"name": "D", "project_id": project_id}, headers={**user, **_idem()}
     )

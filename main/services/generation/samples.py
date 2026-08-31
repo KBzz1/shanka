@@ -70,15 +70,18 @@ def sample_cards_llm(
     snapshot = json.loads(task.selected_chapters)
     if not isinstance(snapshot, list) or not snapshot:
         raise ValueError("章节快照为空")
-    if task.file_id is None:
-        raise ValueError("任务缺少 PDF")
     first = snapshot[0]
     chapter_name = str(first["name"])
+    material_id = first.get("material_id") or task.file_id
+    if material_id is None:
+        raise ValueError("任务缺少章节资料")
+    start = first.get("start_page")
+    end = first.get("end_page")
     pages = load_pages(
         session,
-        file_id=task.file_id,
-        start_page=int(first["start_page"]),
-        end_page=int(first["end_page"]),
+        material_id=str(material_id),
+        start_page=int(start) if start is not None else None,
+        end_page=int(end) if end is not None else None,
     )
     if not pages:
         raise ValueError("章节无文本内容")

@@ -33,6 +33,7 @@ from infra.db.models import (
     KnowledgePoint,
     LearningProject,
     LlmCallAttempt,
+    Material,
     PdfFile,
     Task,
     TextChunk,
@@ -157,7 +158,6 @@ def _seed_scoring_task(
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at=_NOW,
         version=_NOW,
@@ -166,10 +166,28 @@ def _seed_scoring_task(
     )
     session.add(project)
     session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            created_at=_NOW,
+        )
+    )
+    session.flush()
     deck = create_deck(session, user_id=user_id, name="D", now=_NOW)
     deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
     session.flush()
-    ch = Chapter(chapter_id=_uuid(), file_id=pdf.file_id, name="第一章", start_page=1, end_page=2)
+    ch = Chapter(
+        chapter_id=_uuid(),
+        file_id=pdf.file_id,
+        material_id=pdf.file_id,
+        name="第一章",
+        start_page=1,
+        end_page=2,
+    )
     session.add(ch)
     session.flush()
     if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:

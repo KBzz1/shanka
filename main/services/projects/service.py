@@ -1,17 +1,17 @@
-"""services.projects.service：学习项目用例（structure-contract 3.16/3.17/6.2；V2.5 新增）。
+"""services.projects.service：学习项目用例（structure-contract 3.16/3.2a/6.2；V2.5 多资料）。
 
-- 项目为聚合根：一个项目恰好一份当前 PDF（learning_projects.file_id 唯一外键权威）；
-  status 由 PDF 状态与 chapters_confirmed_at 派生（3.16，不建可漂移的第二套状态列）。
-- 删除语义（PRD V25-GEN-FR-09，两种用户决策）：retain_decks=true 删除项目聚合
-  （PDF/章节/任务历史/项目设置），保留已发布牌组与卡片（cards.chapter_id 置空脱离项目）；
-  retain_decks=false 删除整个聚合（牌组/卡片/复习数据经 FK 级联）。
+- 项目为聚合根 = 资料集合（V25-D-29）：materials 表承载归属（PDF 资料与 pdf_files 一对一，
+  解析状态/存储以 pdf_files 为权威；TEXT 资料即时就绪、单章节+段落多 chunk）。
+- status 由全部资料状态与 chapters_confirmed_at 聚合派生（3.16，不建第二套状态列）；
+  新增/删除任一资料重置 chapters_confirmed_at（V25-D-31）。
+- 删除语义（PRD V25-GEN-FR-09）：retain_decks=true 删除项目聚合，保留已发布牌组与卡片；
+  retain_decks=false 删除整个聚合。资料级删除（V25-D-30）为独立三档语义（6.2）。
 - 存储补偿：storage.delete 在 DB 删除之后、事务提交之前执行；失败抛错 → 调用方不 commit
   → 元数据整体回滚（绝不宣称成功却半删，可重试）。
 - 删除安全：解析中的 PDF 使用版本栅栏，活跃任务在确认删除时由服务端自动取消；迟到的
   parser/worker 结果不得写回已删除项目。
 - 章节删除（V25-GEN-FR-02）：被活跃任务引用的章节不可删；delete_cards 决定卡去留，
   保留的卡 chapter_id 置空进入"未归属章节"；章节同步移出新卡范围。
-- 兼容 /pdfs 路由委托本服务同一业务模型（6.2 注，无第二套项目/任务状态）。
 - 事务语义：本模块函数不 commit/rollback，由调用方（handler）控制。
 """
 
@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from app.errors import AppError, ErrorCode
 from domain.card import VISIBLE_PREDICATE_SQL
 from domain.task import ACTIVE_TASK_STATUSES as _ACTIVE_TASK_STATUSES
@@ -33,6 +34,7 @@ from infra.db.models import (
     GenerationOperation,
     LearningProject,
     LlmCallAttempt,
+    Material,
     PdfFile,
     ProjectStudyDeck,
     ProjectStudySettings,
@@ -46,7 +48,8 @@ from services.deletion.service import (
     preflight_payload,
     resource_tasks,
 )
-from services.pdf.service import chapter_view, delete_chapter, pdf_view, update_chapter, upload_pdf
+from services.pdf.service import chapter_view, delete_chapter, update_chapter, upload_pdf
+from services.pdf.text_chunks import persist_text_material_chunks
 
 
 def _uuid4() -> str:
@@ -66,13 +69,6 @@ def _validate_daily_goal(value: int, field: str) -> None:
         raise AppError(ErrorCode.VALIDATION_ERROR, f"{field} 须为 0~200 的 10 倍数")
 
 
-def _default_name(filename: str) -> str:
-    """缺省项目名：上传文件名去扩展名（与 V2.5 迁移回填同口径）；超长截断、空兜底。"""
-    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
-    stem = stem.strip() or "未命名项目"
-    return stem[:60]
-
-
 def _owned_project(session: Session, *, user_id: str, project_id: str) -> LearningProject:
     """项目不存在或跨用户 → 404 PROJECT_NOT_FOUND（6.2 统一 404，不暴露存在性）。"""
     project = session.get(LearningProject, project_id)
@@ -81,50 +77,134 @@ def _owned_project(session: Session, *, user_id: str, project_id: str) -> Learni
     return project
 
 
-def _require_pdf(session: Session, project: LearningProject) -> PdfFile:
-    """项目必有当前 PDF（file_id 非空唯一外键）；行缺失 = 数据完整性异常，不泛化 404。"""
-    pdf = session.get(PdfFile, project.file_id)
-    if pdf is None:
-        raise AppError(ErrorCode.INTERNAL_ERROR, "项目缺少当前 PDF 记录")
-    return pdf
+def _project_pdfs(session: Session, project_id: str) -> list[PdfFile]:
+    """项目全部 PDF 资料行（materials×pdf_files 一对一，material_id == file_id）。"""
+    return list(
+        session.scalars(
+            select(PdfFile)
+            .join(Material, Material.material_id == PdfFile.file_id)
+            .where(Material.project_id == project_id)
+            .order_by(Material.created_at, Material.material_id)
+        ).all()
+    )
 
 
-def _project_status(pdf: PdfFile, chapters_confirmed_at: str | None) -> str:
-    """项目状态派生（3.16）：PARSING/PARSE_FAILED/AWAITING_CHAPTER_CONFIRMATION/READY。"""
-    if pdf.status == "PARSED":
-        return "READY" if chapters_confirmed_at else "AWAITING_CHAPTER_CONFIRMATION"
-    if pdf.status == "FAILED":
+def _project_materials(session: Session, project_id: str) -> list[Material]:
+    return list(
+        session.scalars(
+            select(Material)
+            .where(Material.project_id == project_id)
+            .order_by(Material.created_at, Material.material_id)
+        ).all()
+    )
+
+
+def _pdf_status_map(session: Session, project_id: str) -> dict[str, str]:
+    """{material_id: pdf_status}（仅 PDF 资料行）。"""
+    rows = session.execute(
+        select(Material.material_id, PdfFile.status)
+        .join(PdfFile, PdfFile.file_id == Material.material_id)
+        .where(Material.project_id == project_id)
+    ).all()
+    return {mid: status for mid, status in rows}
+
+
+def _derive_status(
+    session: Session, project: LearningProject, chapters_confirmed_at: str | None
+) -> str:
+    """项目状态聚合派生（3.16）：EMPTY/PARSING/PARSE_FAILED/AWAITING/READY。"""
+    pdf_statuses = list(_pdf_status_map(session, project.project_id).values())
+    if not pdf_statuses and not _project_materials(session, project.project_id):
+        return "EMPTY"
+    if any(status in ("PENDING", "PARSING") for status in pdf_statuses):
+        return "PARSING"
+    # 可用章节来源：任一 PARSED PDF 或任一 TEXT 资料
+    has_source = (
+        "PARSED" in pdf_statuses
+        or _count(
+            session, Material, Material.project_id == project.project_id, Material.type == "TEXT"
+        )
+        > 0
+    )
+    if not has_source:
         return "PARSE_FAILED"
-    return "PARSING"  # PENDING/PARSING
+    return "READY" if chapters_confirmed_at else "AWAITING_CHAPTER_CONFIRMATION"
+
+
+def _reset_chapter_confirmation(project: LearningProject, *, now: str) -> None:
+    """材质增删重置章节确认（V25-D-31）。"""
+    project.chapters_confirmed_at = None
+    project.updated_at = now
+    project.version = now
 
 
 def _count(session: Session, model: type, *whereclause: Any) -> int:
     return session.scalar(select(func.count()).select_from(model).where(*whereclause)) or 0
 
 
+def material_view(session: Session, material: Material) -> dict[str, Any]:
+    """Material 视图（openapi Material，3.2a）：PDF 行状态取自 pdf_files（单一权威）。"""
+    material_type = material.type
+    pdf_status: str | None = None
+    error_code = material.error_code
+    size_bytes = material.size_bytes
+    if material_type == "PDF":
+        pdf = session.get(PdfFile, material.material_id)
+        pdf_status = pdf.status if pdf is not None else "FAILED"
+        error_code = pdf.error_code if pdf is not None else "PDF_PARSE_FAILED"
+        size_bytes = pdf.size_bytes if pdf is not None else material.size_bytes
+    chapter: dict[str, Any] | None = None
+    if material_type == "TEXT":
+        row = session.scalars(
+            select(Chapter).where(Chapter.material_id == material.material_id)
+        ).first()
+        if row is not None:
+            chapter = chapter_view(row)
+    status = "READY" if material_type == "TEXT" else pdf_status
+    return {
+        "material_id": material.material_id,
+        "project_id": material.project_id,
+        "type": material_type,
+        "name": material.name,
+        "status": status,
+        "error_code": error_code,
+        "size_bytes": size_bytes,
+        "char_count": material.char_count,
+        "chapter": chapter,
+        "created_at": material.created_at,
+    }
+
+
 def project_view(
     session: Session, project: LearningProject, *, with_chapters: bool = True
 ) -> dict[str, Any]:
-    """项目视图（openapi LearningProject）：file/chapters 摘要 + 派生计数 + 派生状态。"""
-    pdf = _require_pdf(session, project)
+    """项目视图（openapi LearningProject）：materials/chapters 摘要 + 派生计数 + 聚合状态。"""
+    materials = _project_materials(session, project.project_id)
+    material_ids = [m.material_id for m in materials]
     chapters = None
-    if with_chapters and pdf.status == "PARSED":
+    if with_chapters and material_ids:
         rows = session.scalars(
-            select(Chapter).where(Chapter.file_id == pdf.file_id).order_by(Chapter.start_page)
+            select(Chapter)
+            .where(Chapter.material_id.in_(material_ids))
+            .order_by(Chapter.start_page, Chapter.name)
         ).all()
         chapters = [chapter_view(ch) for ch in rows]
     view: dict[str, Any] = {
         "project_id": project.project_id,
         "name": project.name,
-        "file": pdf_view(pdf, chapters),
-        "status": _project_status(pdf, project.chapters_confirmed_at),
-        "chapter_count": _count(session, Chapter, Chapter.file_id == pdf.file_id),
+        "materials": [material_view(session, m) for m in materials],
+        "status": _derive_status(session, project, project.chapters_confirmed_at),
+        "chapter_count": _count(session, Chapter, Chapter.material_id.in_(material_ids))
+        if material_ids
+        else 0,
         "deck_count": _count(session, Deck, Deck.project_id == project.project_id),
         "task_count": _count(session, Task, Task.project_id == project.project_id),
         "created_at": project.created_at,
         "updated_at": project.updated_at,
         "version": project.version,
     }
+    if with_chapters and chapters is not None:
+        view["chapters"] = chapters
     # Lists stay lightweight; detail includes the persisted task snapshot so a restarted app can
     # render every draft/sample/generation state without relying on an in-memory _pdfTask.
     if with_chapters:
@@ -139,34 +219,12 @@ def project_view(
     return view
 
 
-def create_project(
-    session: Session,
-    *,
-    user_id: str,
-    filename: str,
-    size_bytes: int,
-    storage_key: str,
-    now: str,
-    name: str | None = None,
-) -> dict[str, Any]:
-    """上传 PDF 建立学习项目（POST /projects 与兼容 POST /pdfs 共用同一业务模型）。
-
-    上传成功即建立项目（V25-GEN-FR-01），PDF 异步解析由扫描器接管（本项目不落解析逻辑）。
-    """
-    final_name = _validate_name(name) if name is not None else _default_name(filename)
-    pdf = upload_pdf(
-        session,
-        user_id=user_id,
-        filename=filename,
-        size_bytes=size_bytes,
-        storage_key=storage_key,
-        now=now,
-    )
-    session.flush()  # 先落 pdf_files 行（无 relationship 时 UoW 不保证插入顺序——既有模式）
+def create_project(session: Session, *, user_id: str, name: str, now: str) -> dict[str, Any]:
+    """两步创建第一步（POST /projects，契约 6.2）：仅名称的空项目（V25-D-29）。"""
+    final_name = _validate_name(name)
     project = LearningProject(
         project_id=_uuid4(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name=final_name,
         chapters_confirmed_at=None,
         version=now,
@@ -192,15 +250,181 @@ def create_project(
     return project_view(session, project)
 
 
+def add_pdf_material(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    filename: str,
+    size_bytes: int,
+    storage_key: str,
+    now: str,
+) -> dict[str, Any]:
+    """添加 PDF 资料（POST /materials/pdf）：登记 pdf_files + materials 并重置确认（V25-D-31）。"""
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    pdf = upload_pdf(
+        session,
+        user_id=user_id,
+        filename=filename,
+        size_bytes=size_bytes,
+        storage_key=storage_key,
+        now=now,
+    )
+    session.flush()  # 先落 pdf_files 行（UoW 顺序）
+    material = Material(
+        material_id=pdf.file_id,
+        project_id=project.project_id,
+        type="PDF",
+        name=filename,
+        status=None,  # 解析状态以 pdf_files 为权威
+        size_bytes=size_bytes,
+        created_at=now,
+    )
+    session.add(material)
+    _reset_chapter_confirmation(project, now=now)
+    session.flush()
+    return material_view(session, material)
+
+
+def add_text_material(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    name: str,
+    content: str,
+    now: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    """添加粘贴文本资料（POST /materials/text，V25-D-32）：单章节 + 段落多 chunk，即时就绪。"""
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    title = _validate_name(name)
+    stripped = content.strip()
+    if not stripped or len(stripped) > 30000:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "文本资料须为 1~30000 字")
+    material = Material(
+        material_id=_uuid4(),
+        project_id=project.project_id,
+        type="TEXT",
+        name=title,
+        status="READY",
+        char_count=len(stripped),
+        created_at=now,
+    )
+    session.add(material)
+    session.flush()
+    session.add(
+        Chapter(
+            chapter_id=_uuid4(),
+            file_id=None,
+            material_id=material.material_id,
+            name=title,
+            start_page=None,
+            end_page=None,
+        )
+    )
+    session.flush()
+    persist_text_material_chunks(
+        session,
+        material_id=material.material_id,
+        content=stripped,
+        target_chars=settings.text_chunk_target_chars,
+        now=now,
+    )
+    _reset_chapter_confirmation(project, now=now)
+    session.flush()
+    return material_view(session, material)
+
+
+def list_materials(session: Session, *, user_id: str, project_id: str) -> list[dict[str, Any]]:
+    _owned_project(session, user_id=user_id, project_id=project_id)
+    return [material_view(session, m) for m in _project_materials(session, project_id)]
+
+
+def delete_material(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    material_id: str,
+    retain_cards: bool,
+    storage: Any,
+    now: str,
+) -> dict[str, Any]:
+    """资料级删除（DELETE /materials/{material_id}，V25-D-30 三档语义）。
+
+    - 静默取消引用该资料的活跃任务（CAS + fencing，不向用户暴露任务选项）；
+    - retain_cards=true 保留该资料产出卡片（chapter_id 置空脱离）；false 连同删除；
+    - 章节与 chunk 经 FK 级联；PDF 资料连带删 pdf_files 行与存储对象；
+    - 删最后一份资料后项目保留为空项目；均重置章节确认（V25-D-31）。
+    """
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    material = session.get(Material, material_id)
+    if material is None or material.project_id != project_id:
+        raise AppError(ErrorCode.MATERIAL_NOT_FOUND, "资料不存在")
+    pdf = session.get(PdfFile, material.material_id) if material.type == "PDF" else None
+    active_tasks = resource_tasks(session, user_id=user_id, project_id=project_id)
+    # 仅取消快照引用本资料的活跃任务（V25-D-30：静默取消，不向用户暴露任务选项）
+    referencing = [
+        task for task in active_tasks if _snapshot_references_material(task, material_id)
+    ]
+    if referencing:
+        cancel_active_generation_tasks(
+            session,
+            user_id=user_id,
+            tasks=referencing,
+            now=now,
+            resource_type="PROJECT",
+            resource_id=project_id,
+        )
+    if not retain_cards:
+        # 该资料产出的卡片：经章节集合定位，连同复习数据级联删除（用户明确选择）
+        chapter_ids = list(
+            session.scalars(
+                select(Chapter.chapter_id).where(Chapter.material_id == material_id)
+            ).all()
+        )
+        if chapter_ids:
+            for card in session.scalars(
+                select(Card).where(Card.user_id == user_id, Card.chapter_id.in_(chapter_ids))
+            ).all():
+                session.delete(card)
+            session.flush()
+        _remove_chapters_from_settings(session, project_id, chapter_ids)
+    # 先删资料行（chapters/text_chunks 级联），再删 PDF 行与存储
+    session.delete(material)
+    session.flush()
+    if pdf is not None:
+        if pdf.status in ("PENDING", "PARSING"):
+            pdf.parse_version += 1
+            pdf.parse_lease_token = None
+            pdf.parse_lease_until = None
+        session.delete(pdf)
+        session.flush()
+        storage.delete(pdf.storage_key)
+    _reset_chapter_confirmation(project, now=now)
+    session.flush()
+    return project_view(session, project)
+
+
+def _snapshot_items(task: Task) -> list[dict[str, Any]]:
+    try:
+        snapshot = json.loads(task.selected_chapters)
+    except (ValueError, TypeError):
+        return []
+    return (
+        [item for item in snapshot if isinstance(item, dict)] if isinstance(snapshot, list) else []
+    )
+
+
+def _snapshot_references_material(task: Task, material_id: str) -> bool:
+    return any(item.get("material_id") == material_id for item in _snapshot_items(task))
+
+
 def list_projects(session: Session, *, user_id: str) -> list[dict[str, Any]]:
-    # Historical SQLite files can contain pre-V2.5 project shells without a
-    # current PDF row.  They cannot satisfy the one-project/one-PDF response
-    # contract, so omit them from the list instead of making every valid project
-    # unreadable with an INTERNAL_ERROR.  The rows and any learning data remain
-    # untouched for explicit recovery.
+    """项目列表（含空项目；V25-D-29 资料集合语义下不再要求 1:1 PDF 行存在）。"""
     projects = session.scalars(
         select(LearningProject)
-        .join(PdfFile, PdfFile.file_id == LearningProject.file_id)
         .where(LearningProject.user_id == user_id)
         .order_by(LearningProject.updated_at.desc())
     ).all()
@@ -225,13 +449,16 @@ def rename_project(
 def confirm_chapters(
     session: Session, *, user_id: str, project_id: str, now: str
 ) -> dict[str, Any]:
-    """确认目录 → READY（3.16）；未解析或已确认 → 409 PROJECT_STATE_CONFLICT。"""
+    """确认目录 → READY（3.16）；无可确认来源或已确认 → 409 PROJECT_STATE_CONFLICT。"""
     project = _owned_project(session, user_id=user_id, project_id=project_id)
-    pdf = _require_pdf(session, project)
-    if pdf.status != "PARSED":
-        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "PDF 尚未解析完成，无法确认章节")
-    if project.chapters_confirmed_at is not None:
-        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "章节已确认（项目已处于可制卡状态）")
+    if _derive_status(session, project, project.chapters_confirmed_at) in (
+        "AWAITING_CHAPTER_CONFIRMATION",
+        "READY",
+    ):
+        if project.chapters_confirmed_at is not None:
+            raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "章节已确认（项目已处于可制卡状态）")
+    else:
+        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "尚无已就绪资料，无法确认章节")
     project.chapters_confirmed_at = now
     project.updated_at = now
     project.version = now
@@ -243,22 +470,25 @@ def replace_pdf(
     *,
     user_id: str,
     project_id: str,
+    material_id: str,
     filename: str,
     size_bytes: int,
     storage_key: str,
     now: str,
     storage: Any,
 ) -> dict[str, Any]:
-    """仅解析失败项目可替换（原子替换当前 PDF 并重新解析；V25-GEN-FR-01）。
+    """仅 FAILED 的 PDF 资料可原位替换（V25-GEN-FR-01/契约 6.2；不影响其他资料）。
 
-    顺序：新 PDF 行 + 项目改指先 flush（防 UoW 无 relationship 乱序触发 FK 违约），
-    再删旧 PDF 行（chapters/text_chunks 级联、tasks.file_id SET NULL），最后清理旧存储
-    对象——清理失败抛错 → 调用方回滚（元数据不半提交）。
+    顺序：新 PDF 行 + 资料改指先 flush（防 UoW 乱序 FK 违约），再删旧 PDF 行
+    （chapters/text_chunks 级联），最后清理旧存储对象——清理失败抛错 → 调用方回滚。
     """
     project = _owned_project(session, user_id=user_id, project_id=project_id)
-    old_pdf = _require_pdf(session, project)
-    if old_pdf.status != "FAILED":
-        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "仅解析失败的项目可替换 PDF")
+    material = session.get(Material, material_id)
+    if material is None or material.project_id != project_id or material.type != "PDF":
+        raise AppError(ErrorCode.MATERIAL_NOT_FOUND, "PDF 资料不存在")
+    old_pdf = session.get(PdfFile, material.material_id)
+    if old_pdf is None or old_pdf.status != "FAILED":
+        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "仅解析失败的 PDF 资料可替换")
     new_pdf = upload_pdf(
         session,
         user_id=user_id,
@@ -268,10 +498,21 @@ def replace_pdf(
         now=now,
     )
     session.flush()  # 先落新 PDF 行（显式顺序，防 UoW 乱序导致 FK 违约）
-    project.file_id = new_pdf.file_id
-    project.chapters_confirmed_at = None  # 重新解析后需重新确认章节
-    project.updated_at = now
-    project.version = now
+    # 资料行整体替换（不改主键）：删旧行（chapters/text_chunks 级联）→ 建新行
+    session.delete(material)
+    session.flush()
+    session.add(
+        Material(
+            material_id=new_pdf.file_id,
+            project_id=project.project_id,
+            type="PDF",
+            name=filename,
+            status=None,
+            size_bytes=size_bytes,
+            created_at=now,
+        )
+    )
+    _reset_chapter_confirmation(project, now=now)
     session.flush()
     session.delete(old_pdf)
     session.flush()
@@ -296,13 +537,14 @@ def delete_project(
     存储对象；存储删除失败抛错，调用方不 commit → 全部回滚（绝不宣称成功却半删）。
     """
     project = _owned_project(session, user_id=user_id, project_id=project_id)
-    pdf = _require_pdf(session, project)
     # PDF 解析采用租约 + 版本栅栏；删除可以在 PENDING/PARSING 时进行，迟到的解析结果
     # 会因 PDF 行/parse_version 不匹配而丢弃，不能再阻塞用户清理项目。
-    if pdf.status in ("PENDING", "PARSING"):
-        pdf.parse_version += 1
-        pdf.parse_lease_token = None
-        pdf.parse_lease_until = None
+    project_pdfs = _project_pdfs(session, project_id)
+    for pdf in project_pdfs:
+        if pdf.status in ("PENDING", "PARSING"):
+            pdf.parse_version += 1
+            pdf.parse_lease_token = None
+            pdf.parse_lease_until = None
     active_tasks = resource_tasks(session, user_id=user_id, project_id=project_id)
     if active_tasks:
         # 产品语义（契约 570/675）：确认删除后全部关联活跃任务在同一写事务内 CAS 取消。
@@ -328,10 +570,12 @@ def delete_project(
     if settings is not None:
         session.delete(settings)
     session.delete(project)
-    session.flush()  # 先删项目行（释放 learning_projects.file_id 引用）
-    session.delete(pdf)
+    session.flush()  # 先删项目行（materials.project_id 级联删资料；TEXT 随行清理）
+    for pdf in project_pdfs:
+        session.delete(pdf)
     session.flush()
-    storage.delete(pdf.storage_key)
+    for pdf in project_pdfs:
+        storage.delete(pdf.storage_key)
 
 
 def _active_task_count(session: Session, project_id: str) -> int:
@@ -356,7 +600,6 @@ def project_deletion_preflight(
 ) -> dict[str, object]:
     """Read-only deletion preview; the DELETE endpoint repeats all checks atomically."""
     project = _owned_project(session, user_id=user_id, project_id=project_id)
-    pdf = _require_pdf(session, project)
     decks = session.scalars(select(Deck).where(Deck.project_id == project_id)).all()
     deck_ids = [deck.deck_id for deck in decks]
     card_count = (
@@ -382,7 +625,7 @@ def project_deletion_preflight(
             "deck_count": len(decks),
             "card_count": card_count,
             "task_count": _count(session, Task, Task.project_id == project_id),
-            "project_status": _project_status(pdf, project.chapters_confirmed_at),
+            "project_status": _derive_status(session, project, project.chapters_confirmed_at),
         },
     )
     payload["project_state_blocked"] = False
@@ -424,11 +667,14 @@ def update_project_chapter(
     now: str,
 ) -> Chapter:
     """项目路由修改章节：委托 pdf 服务同一章节实现；状态冲突换项目语义错误码。"""
-    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    _owned_project(session, user_id=user_id, project_id=project_id)  # 归属校验（404）
+    chapter = session.get(Chapter, chapter_id)
+    if chapter is None or not _chapter_in_project(session, project_id, chapter_id):
+        raise AppError(ErrorCode.CHAPTER_NOT_FOUND, "章节不存在")
     return update_chapter(
         session,
         user_id=user_id,
-        file_id=project.file_id,
+        file_id=chapter.file_id or chapter.material_id,
         chapter_id=chapter_id,
         name=name,
         start_page=start_page,
@@ -448,12 +694,9 @@ def delete_project_chapter(
 ) -> None:
     """删除章节（V25-GEN-FR-02）：活跃任务保护；delete_cards 决定卡去留，保留的卡
     chapter_id 置空进入"未归属章节"；章节同步移出新卡范围；KP chapter_id 置 null。"""
-    project = _owned_project(session, user_id=user_id, project_id=project_id)
-    pdf = _require_pdf(session, project)
-    if pdf.status != "PARSED":
-        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "PDF 尚未解析完成，无法删除章节")
+    _owned_project(session, user_id=user_id, project_id=project_id)  # 归属校验（404）
     chapter = session.get(Chapter, chapter_id)
-    if chapter is None or chapter.file_id != project.file_id:
+    if chapter is None or not _chapter_in_project(session, project_id, chapter_id):
         raise AppError(ErrorCode.CHAPTER_NOT_FOUND, "章节不存在")
     if _chapter_referenced_by_active_task(session, project_id, chapter_id):
         raise AppError(
@@ -469,7 +712,12 @@ def delete_project_chapter(
             session.delete(card)
         session.flush()
     _remove_chapter_from_settings(session, project_id, chapter_id)
-    delete_chapter(session, user_id=user_id, file_id=project.file_id, chapter_id=chapter_id)
+    delete_chapter(
+        session,
+        user_id=user_id,
+        file_id=chapter.file_id or chapter.material_id,
+        chapter_id=chapter_id,
+    )
 
 
 def _chapter_referenced_by_active_task(session: Session, project_id: str, chapter_id: str) -> bool:
@@ -489,6 +737,14 @@ def _snapshot_has_chapter(task: Task, chapter_id: str) -> bool:
     except (ValueError, TypeError):
         return False
     return any(isinstance(item, dict) and item.get("chapter_id") == chapter_id for item in snapshot)
+
+
+def _remove_chapters_from_settings(
+    session: Session, project_id: str, chapter_ids: list[str]
+) -> None:
+    """多章节批量移出新卡范围（资料级删除；逐章调用单一移除实现）。"""
+    for chapter_id in chapter_ids:
+        _remove_chapter_from_settings(session, project_id, chapter_id)
 
 
 def _remove_chapter_from_settings(session: Session, project_id: str, chapter_id: str) -> None:
@@ -579,18 +835,21 @@ def update_study_settings(
     return _settings_view(session, row)
 
 
+def _chapter_in_project(session: Session, project_id: str, chapter_id: str) -> bool:
+    """章节是否属于项目任一资料（多资料语义；V25-D-29）。"""
+    row = session.execute(
+        select(Chapter.chapter_id)
+        .join(Material, Material.material_id == Chapter.material_id)
+        .where(Chapter.chapter_id == chapter_id, Material.project_id == project_id)
+    ).first()
+    return row is not None
+
+
 def _validate_chapter_ids(session: Session, project: LearningProject, ids: list[str]) -> None:
-    """范围章节必须属于项目当前 PDF（不存在/他属 → 404 CHAPTER_NOT_FOUND）。"""
+    """范围章节必须属于项目任一资料（不存在/他属 → 404 CHAPTER_NOT_FOUND）。"""
     if not ids:
         return
-    found = set(
-        session.scalars(
-            select(Chapter.chapter_id).where(
-                Chapter.file_id == project.file_id,
-                Chapter.chapter_id.in_(ids),
-            )
-        ).all()
-    )
+    found = {cid for cid in ids if _chapter_in_project(session, project.project_id, cid)}
     if found != set(ids):
         raise AppError(ErrorCode.CHAPTER_NOT_FOUND, "章节不存在或不属于该项目")
 

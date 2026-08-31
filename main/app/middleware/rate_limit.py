@@ -158,7 +158,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return "samples"
         if method == "PUT" and path in ("/api-key", "/v1/api-key"):
             return "api_key"
-        if method == "POST" and path in ("/pdfs", "/v1/pdfs"):
+        # V25-D-29 起 /pdfs 移除，PDF 上传入口为 POST /projects/{id}/materials/pdf
+        # （1.6 pdf 维度 10 次/时/user 沿用）。
+        if method == "POST" and (path in ("/pdfs", "/v1/pdfs") or path.endswith("/materials/pdf")):
             return "pdf"
         if method in ("POST", "PUT", "PATCH", "DELETE"):
             return "write"

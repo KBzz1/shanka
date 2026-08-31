@@ -55,8 +55,9 @@ def test_alembic_upgrade_creates_all_tables(alembic_env: tuple[Config, Path]) ->
         "llm_call_attempts",
         "users",
         "auth_sessions",
-        # V2.5 新表（database-design 2.17~2.21）
+        # V2.5 新表（database-design 2.17~2.22）
         "learning_projects",
+        "materials",
         "user_preferences",
         "project_study_settings",
         "card_deletion_batches",
@@ -411,10 +412,14 @@ def test_legacy_device_rows_removed_on_v2_3(alembic_env: tuple[Config, Path]) ->
 
 
 def test_v2_3_downgrade_rejected(alembic_env: tuple[Config, Path]) -> None:
-    """V2.3 起 downgrade 显式拒绝：设备数据已物理删除，不可逆。"""
+    """V2.3 起 downgrade 显式拒绝：设备数据已物理删除，不可逆。
+
+    head 迁移链末端为 V25-D-29 多资料 revision（b7e4c2a91d50，downgrade 抛
+    NotImplementedError）：从 head 降级先命中最新不可逆栅栏，两种异常均为 fail-closed。
+    """
     config, _ = alembic_env
     command.upgrade(config, "head")
-    with pytest.raises(RuntimeError, match="迁移不可逆"):
+    with pytest.raises((RuntimeError, NotImplementedError), match="不可逆"):
         command.downgrade(config, "e85c78b2a345")
 
 
@@ -456,8 +461,9 @@ def test_alembic_empty_and_legacy_only_downgrade_ok(alembic_env: tuple[Config, P
     command.upgrade(config, "e85c78b2a345")
     command.downgrade(config, "base")
     command.upgrade(config, "head")
-    # 从 head 降过 V2.3 显式拒绝（downgrade 目标 e85c78b2a345）
-    with pytest.raises(RuntimeError, match="迁移不可逆"):
+    # 从 head 降过 V2.3 显式拒绝（downgrade 目标 e85c78b2a345；head 末端
+    # b7e4c2a91d50 先抛 NotImplementedError 栅栏，同为 fail-closed）
+    with pytest.raises((RuntimeError, NotImplementedError), match="不可逆"):
         command.downgrade(config, "e85c78b2a345")
 
 
@@ -501,8 +507,9 @@ def test_v2_4_account_data_wiped_and_downgrade_rejected(
         assert conn.execute(text("SELECT COUNT(*) FROM decks")).scalar() == 0
         cols = [r[1] for r in conn.execute(text("PRAGMA table_info('users')"))]
     assert "email" in cols
-    # V2.4 downgrade 显式拒绝（fail-closed）：迁移文件 downgrade 第一行 raise
-    with pytest.raises(RuntimeError, match="迁移不可逆"):
+    # V2.4 downgrade 显式拒绝（fail-closed）；head 末端 b7e4c2a91d50 先抛
+    # NotImplementedError 栅栏（同为 fail-closed，见 test_v2_3_downgrade_rejected）
+    with pytest.raises((RuntimeError, NotImplementedError), match="不可逆"):
         command.downgrade(config, "b92357b079ca")
 
 
@@ -629,6 +636,7 @@ def test_v25_fresh_upgrade_creates_new_schema(alembic_env: tuple[Config, Path]) 
         }
         for t in (
             "learning_projects",
+            "materials",
             "user_preferences",
             "project_study_settings",
             "card_deletion_batches",
@@ -640,6 +648,10 @@ def test_v25_fresh_upgrade_creates_new_schema(alembic_env: tuple[Config, Path]) 
         tasks_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('tasks')"))}
         decks_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('decks')"))}
         review_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('review_events')"))}
+        chapters_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('chapters')"))}
+        chunks_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('text_chunks')"))}
+        materials_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('materials')"))}
+        lp_cols = {r[1] for r in conn.execute(text("PRAGMA table_info('learning_projects')"))}
         # 列存在性 + 默认值（SQLite dflt_value 含引号）
         assert users_cols["avatar_key"][4] == "'mood_01'"
         assert cards_cols["publication_state"][4] == "'PUBLISHED'"
@@ -672,8 +684,29 @@ def test_v25_fresh_upgrade_creates_new_schema(alembic_env: tuple[Config, Path]) 
         lp_fks = {
             (r[2], r[3]) for r in conn.execute(text("PRAGMA foreign_key_list('learning_projects')"))
         }
-        assert ("pdf_files", "file_id") in lp_fks
-        assert ("users", "user_id") in lp_fks  # 隔离键 FK
+        materials_fks = {
+            (r[2], r[3]) for r in conn.execute(text("PRAGMA foreign_key_list('materials')"))
+        }
+        chapters_fks = {
+            (r[2], r[3]) for r in conn.execute(text("PRAGMA foreign_key_list('chapters')"))
+        }
+        chunks_fks = {
+            (r[2], r[3]) for r in conn.execute(text("PRAGMA foreign_key_list('text_chunks')"))
+        }
+        # V25-D-29 多资料：learning_projects 去 file_id，资料归属经 materials
+        assert "file_id" not in lp_cols
+        assert lp_fks == {("users", "user_id")}  # 仅隔离键 FK
+        assert ("learning_projects", "project_id") in materials_fks
+        assert ("materials", "material_id") in chapters_fks
+        assert ("materials", "material_id") in chunks_fks
+        assert "material_id" in chapters_cols and "file_id" in chapters_cols
+        assert chapters_cols["start_page"][3] == 0  # 页码可空（TEXT 章节 null）
+        assert chapters_cols["end_page"][3] == 0
+        assert "material_id" in chunks_cols and "chunk_seq" in chunks_cols
+        assert chunks_cols["file_id"][3] == 0  # TEXT 块无 PDF 行
+        for col in ("material_id", "project_id", "type", "name", "status", "created_at"):
+            assert col in materials_cols
+        assert materials_cols["status"][3] == 0  # PDF 行 status NULL（权威在 pdf_files）
         # 索引
         cards_idx = {r[1] for r in conn.execute(text("PRAGMA index_list('cards')"))}
         tasks_idx = {r[1] for r in conn.execute(text("PRAGMA index_list('tasks')"))}
@@ -686,6 +719,13 @@ def test_v25_fresh_upgrade_creates_new_schema(alembic_env: tuple[Config, Path]) 
         assert "ix_learning_projects_user_updated" in {
             r[1] for r in conn.execute(text("PRAGMA index_list('learning_projects')"))
         }
+        assert "ix_materials_project_created" in {
+            r[1] for r in conn.execute(text("PRAGMA index_list('materials')"))
+        }
+        # text_chunks 唯一键 (material_id, chunk_seq) 取代旧 (file_id, page_number)
+        chunk_unique = _unique_constraint_column_sets(conn, "text_chunks")
+        assert {"material_id", "chunk_seq"} in chunk_unique
+        assert {"file_id", "page_number"} not in chunk_unique
         assert "ix_deletion_batches_user_status_undo" in {
             r[1] for r in conn.execute(text("PRAGMA index_list('card_deletion_batches')"))
         }
@@ -699,8 +739,8 @@ def test_v25_fresh_upgrade_creates_new_schema(alembic_env: tuple[Config, Path]) 
         assert "basic_ratio % 10 = 0" in prefs_sql
         assert "basic_ratio + understanding_ratio + deep_question_ratio = 100" in prefs_sql
         assert "daily_goal" in prefs_sql and "% 10 = 0" in prefs_sql
-        # learning_projects.file_id UNIQUE
-        assert {"file_id"} in _unique_constraint_column_sets(conn, "learning_projects")
+        # learning_projects 无 file_id 唯一约束（V25-D-29 已删列）
+        assert {"file_id"} not in _unique_constraint_column_sets(conn, "learning_projects")
 
 
 def test_v25_legacy_db_maps_states_and_backfills(alembic_env: tuple[Config, Path]) -> None:
@@ -763,13 +803,15 @@ def test_v25_legacy_db_maps_states_and_backfills(alembic_env: tuple[Config, Path
             == "Asia/Shanghai"
         )
         # 4) 项目回填：每个现有 PDF 一个项目；PARSED → chapters_confirmed_at = migrated_at，
-        #    FAILED → NULL；名称取 filename 去扩展名
+        #    FAILED → NULL；名称取 filename 去扩展名；V25-D-29 后归属经 materials
+        #    （material_id == file_id 回填，type=PDF、status NULL 以 pdf_files 为权威）
         projects = {
-            file_id: (name, confirmed)
-            for file_id, name, confirmed in conn.execute(
+            material_id: (name, confirmed)
+            for material_id, name, confirmed in conn.execute(
                 text(
-                    "SELECT file_id, name, chapters_confirmed_at FROM learning_projects"
-                    " ORDER BY file_id"
+                    "SELECT m.material_id, lp.name, lp.chapters_confirmed_at"
+                    " FROM learning_projects lp JOIN materials m ON m.project_id = lp.project_id"
+                    " ORDER BY m.material_id"
                 )
             )
         }
@@ -778,11 +820,23 @@ def test_v25_legacy_db_maps_states_and_backfills(alembic_env: tuple[Config, Path
         assert projects["f1"][1] is not None
         assert projects["f2"][0] == "broken"
         assert projects["f2"][1] is None
+        materials = {
+            material_id: (mtype, status, name)
+            for material_id, mtype, status, name in conn.execute(
+                text("SELECT material_id, type, status, name FROM materials")
+            )
+        }
+        assert materials["f1"] == ("PDF", None, "算法导论.pdf")
+        assert materials["f2"] == ("PDF", None, "broken.pdf")
+        chapter_materials = {
+            r[0]: r[1] for r in conn.execute(text("SELECT chapter_id, material_id FROM chapters"))
+        }
+        assert chapter_materials == {"ch1": "f1"}  # 章节 material_id 回填 = file_id
         # 5) 牌组/任务绑定：GENERATED 牌组 d1（唯一 file 定位）绑定项目；MANUAL d2 独立；
         #    tasks 绑定其 file 对应项目；file_id=null 终态任务 project_id 保持 NULL
     with engine.connect() as conn:
         proj_f1 = conn.execute(
-            text("SELECT project_id FROM learning_projects WHERE file_id='f1'")
+            text("SELECT project_id FROM materials WHERE material_id='f1'")
         ).scalar_one()
         assert (
             conn.execute(text("SELECT project_id FROM decks WHERE deck_id='d1'")).scalar()
@@ -808,10 +862,11 @@ def test_v25_legacy_db_maps_states_and_backfills(alembic_env: tuple[Config, Path
 
 
 def test_v25_downgrade_fail_closed(alembic_env: tuple[Config, Path]) -> None:
-    """V2.5 downgrade 第一行 raise（fail-closed，database-design 7.3：升级前备份，不假装可回滚）。"""
+    """V2.5 多资料链末端 b7e4c2a91d50 downgrade 抛 NotImplementedError
+    （fail-closed：空项目/纯文本项目无法重建 1:1 file_id 归属，database-design 7.5）。"""
     config, db_path = alembic_env
     _upgrade_v24_db_with_rows(config, db_path)
-    with pytest.raises(RuntimeError, match="迁移不可逆"):
+    with pytest.raises(NotImplementedError, match="不可逆迁移"):
         command.downgrade(config, _V25_LEGACY_REVISION)
 
 

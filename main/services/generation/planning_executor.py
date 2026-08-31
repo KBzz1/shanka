@@ -211,7 +211,7 @@ def _freeze_chapter_snapshot(session: Session, *, task: Task, now: str) -> bool:
     by_id = {ch.chapter_id: ch for ch in chapters}
     for entry in snapshot:
         ch = by_id.get(entry["chapter_id"])
-        if ch is None or ch.file_id != task.file_id:
+        if ch is None or ch.material_id != entry.get("material_id"):
             return _stale_fail(session, task=task, now=now)
         entry["name"] = ch.name
         entry["start_page"] = ch.start_page
@@ -293,8 +293,8 @@ def run_planning(
             internal_reason="PLANNING_SNAPSHOT_INVALID",
         )
         return
-    file_id = task.file_id
-    if file_id is None:
+    # 多资料语义（V25-D-29）：页文本经快照 material_id 读取（不再要求任务持有 file_id）
+    if not all(e.get("material_id") for e in chapters):
         _fail_planning_inplace(
             session,
             task,
@@ -305,11 +305,13 @@ def run_planning(
     # 1. 快照选页 + 连续页拆组（§4.2）；组数超上限 → FAILED（§6.3 硬上限）
     chapter_groups: list[list[list[TextChunk]]] = []
     for entry in chapters:
+        start = entry.get("start_page")
+        end = entry.get("end_page")
         pages = load_pages(
             session,
-            file_id=file_id,
-            start_page=int(entry["start_page"]),
-            end_page=int(entry["end_page"]),
+            material_id=str(entry["material_id"]),
+            start_page=int(start) if start is not None else None,
+            end_page=int(end) if end is not None else None,
         )
         chapter_groups.append(_split_groups(pages, max_chars=settings.planner_max_input_chars))
     total_groups = sum(len(g) for g in chapter_groups)

@@ -94,10 +94,11 @@ def test_write_bucket_window_advance_with_manual_clock(tmp_path: Path) -> None:
 
 
 def test_rate_limit_pdf_dimension_hits_429(tmp_path: Path) -> None:
-    """1.6 专门维度回归（fix round 1）：POST /pdfs 10 次/时/user 须生效。
+    """1.6 专门维度回归（fix round 1）：PDF 上传 10 次/时/user 须生效。
 
     F-2 修复前 _scope 按 /v1/pdfs 判定（路由无前缀）→ 落入通用 write 维度；
-    修复后走 pdf 维度——低阈值构造 app 验证 429。
+    修复后走 pdf 维度——低阈值构造 app 验证 429。V25-D-29 /pdfs 移除后
+    以 POST /projects/{id}/materials/pdf 为 PDF 上传入口。
     """
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'rl_pdf.db'}",
@@ -107,13 +108,18 @@ def test_rate_limit_pdf_dimension_hits_429(tmp_path: Path) -> None:
     )
     _upgrade(settings.database_url)
     with TestClient(create_app(settings)) as client:
-        headers = {**_user_headers(client), "Idempotency-Key": str(uuid.uuid4())}
+        user = _user_headers(client)
+        r = client.post(
+            "/projects", json={"name": "rl"}, headers={**user, "Idempotency-Key": str(uuid.uuid4())}
+        )
+        assert r.status_code == 201, r.text
+        pid = r.json()["project_id"]
         codes = []
         for _ in range(4):
             resp = client.post(
-                "/pdfs",
+                f"/projects/{pid}/materials/pdf",
                 files={"file": ("a.pdf", b"x", "application/pdf")},
-                headers=headers,
+                headers={**user, "Idempotency-Key": str(uuid.uuid4())},
             )
             codes.append(resp.status_code)
     assert codes[:2] == [400, 400]  # 限流通过 → 上传三重校验失败 400

@@ -14,7 +14,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
-from infra.db.models import PdfFile, User
+from infra.db.models import LearningProject, Material, PdfFile, User
 from services.pdf.parser import PageText, extract_pages
 from services.pdf.text_chunks import chunk_id_for, load_pages, page_text_map, persist_text_chunks
 
@@ -51,7 +51,11 @@ def _write_text_pages(path: Path, texts: list[str]) -> None:
 
 
 def _seed_pdf(session: Session, file_id: str = "pdf-1") -> None:
-    """父行先落库（PRAGMA foreign_keys=ON 强制，V1 教训同款）：text_chunks.file_id FK pdf_files。"""
+    """父行先落库（PRAGMA foreign_keys=ON 强制，V1 教训同款）。
+
+    V25-D-29 多资料基座：chapters/text_chunks 归属 materials —— 需 LearningProject +
+    Material（material_id == file_id，PDF 资料一对一）行先行。
+    """
     session.add(
         User(
             user_id="user-1",
@@ -64,6 +68,17 @@ def _seed_pdf(session: Session, file_id: str = "pdf-1") -> None:
     )
     session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）——users 行先落库
     session.add(
+        LearningProject(
+            project_id="proj-1",
+            user_id="user-1",
+            name="文本块项目",
+            version="2026-08-11T00:00:00.000Z",
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
+    session.flush()
+    session.add(
         PdfFile(
             file_id=file_id,
             user_id="user-1",
@@ -71,6 +86,18 @@ def _seed_pdf(session: Session, file_id: str = "pdf-1") -> None:
             storage_key="k",
             size_bytes=100,
             status="PARSED",
+            created_at="2026-08-11T00:00:00.000Z",
+        )
+    )
+    session.flush()
+    session.add(
+        Material(
+            material_id=file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id="proj-1",
+            type="PDF",
+            name="book.pdf",
+            status=None,
+            size_bytes=100,
             created_at="2026-08-11T00:00:00.000Z",
         )
     )
@@ -92,7 +119,7 @@ def test_persist_and_load_roundtrip(session: Session) -> None:
     ]
     persist_text_chunks(session, file_id="pdf-1", pages=pages, now="2026-08-12T00:00:00.000Z")
     session.commit()
-    rows = load_pages(session, file_id="pdf-1", start_page=1, end_page=2)
+    rows = load_pages(session, material_id="pdf-1", start_page=1, end_page=2)
     assert [r.page_number for r in rows] == [1, 2]
     assert rows[0].content == "第一页"
     # chunk_id 落库 = 确定性生成值；char_count/content_sha256/created_at 按列记录
@@ -117,8 +144,8 @@ def test_reparse_rebuilds_and_cascades(session: Session) -> None:
         now="2026-08-12T00:00:00.000Z",
     )
     session.commit()
-    assert len(load_pages(session, file_id="pdf-1", start_page=1, end_page=5)) == 1
-    assert load_pages(session, file_id="pdf-1", start_page=1, end_page=5)[0].content == "v2"
+    assert len(load_pages(session, material_id="pdf-1", start_page=1, end_page=5)) == 1
+    assert load_pages(session, material_id="pdf-1", start_page=1, end_page=5)[0].content == "v2"
 
 
 def test_load_pages_ascending_inclusive_range(session: Session) -> None:
@@ -131,10 +158,10 @@ def test_load_pages_ascending_inclusive_range(session: Session) -> None:
     persist_text_chunks(session, file_id="pdf-1", pages=pages, now="2026-08-12T00:00:00.000Z")
     session.commit()
     # 闭区间 [start, end]，page_number 升序（与插入顺序无关）
-    rows = load_pages(session, file_id="pdf-1", start_page=2, end_page=3)
+    rows = load_pages(session, material_id="pdf-1", start_page=2, end_page=3)
     assert [r.page_number for r in rows] == [2, 3]
     assert [
-        r.page_number for r in load_pages(session, file_id="pdf-1", start_page=1, end_page=5)
+        r.page_number for r in load_pages(session, material_id="pdf-1", start_page=1, end_page=5)
     ] == [1, 2, 3]
 
 
@@ -146,7 +173,7 @@ def test_page_text_map(session: Session) -> None:
     ]
     persist_text_chunks(session, file_id="pdf-1", pages=pages, now="2026-08-12T00:00:00.000Z")
     session.commit()
-    assert page_text_map(load_pages(session, file_id="pdf-1", start_page=1, end_page=2)) == {
+    assert page_text_map(load_pages(session, material_id="pdf-1", start_page=1, end_page=2)) == {
         1: "第一页",
         2: "第二页",
     }

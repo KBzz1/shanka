@@ -42,6 +42,7 @@ from infra.db.models import (
     Chapter,
     LearningProject,
     LlmCallAttempt,
+    Material,
     PdfFile,
     Task,
     User,
@@ -140,7 +141,6 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
         project = LearningProject(
             project_id=_uuid(),
             user_id=user_id,
-            file_id=pdf.file_id,
             name="P",
             chapters_confirmed_at="2026-08-11T00:00:00.000Z",
             version="2026-08-11T00:00:00.000Z",
@@ -148,6 +148,17 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
             updated_at="2026-08-11T00:00:00.000Z",
         )
         session.add(project)
+        session.flush()
+        session.add(
+            Material(
+                material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project.project_id,
+                type="PDF",
+                name="seed.pdf",
+                status=None,
+                created_at="2026-08-11T00:00:00.000Z",
+            )
+        )
         session.flush()
         deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
         deck.project_id = project.project_id  # V2.5：牌组归属项目（6.4 同项目校验）
@@ -157,6 +168,7 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
             ch = Chapter(
                 chapter_id=_uuid(),
                 file_id=pdf.file_id,
+                material_id=pdf.file_id,
                 name=f"第{i + 1}章",
                 start_page=i + 1,
                 end_page=i + 2,

@@ -78,7 +78,7 @@ def _seed_parsed_project(
     """ORM 直种 PARSED PDF + 章节 + 学习项目（章节相关用例；完整解析链路由验收套件覆盖）。"""
     from sqlalchemy.orm import Session, sessionmaker
 
-    from infra.db.models import Chapter, LearningProject, PdfFile
+    from infra.db.models import Chapter, LearningProject, Material, PdfFile
     from infra.db.session import create_db_engine
 
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -86,6 +86,18 @@ def _seed_parsed_project(
     project_id, file_id = str(uuid.uuid4()), str(uuid.uuid4())
     chapter_ids = [str(uuid.uuid4()) for _ in range(chapters)]
     with factory() as session:
+        session.add(
+            LearningProject(
+                project_id=project_id,
+                user_id=user_id,
+                name="种子项目",
+                chapters_confirmed_at="2026-08-15T00:00:00.000Z" if confirmed else None,
+                version="2026-08-15T00:00:00.000Z",
+                created_at="2026-08-15T00:00:00.000Z",
+                updated_at="2026-08-15T00:00:00.000Z",
+            )
+        )
+        session.flush()
         session.add(
             PdfFile(
                 file_id=file_id,
@@ -97,29 +109,30 @@ def _seed_parsed_project(
                 created_at="2026-08-15T00:00:00.000Z",
             )
         )
-        session.flush()  # 无 relationship 时 UoW 不保证插入顺序——先落 pdf_files 行
+        session.flush()
+        session.add(
+            Material(
+                material_id=file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project_id,
+                type="PDF",
+                name="seed.pdf",
+                status=None,
+                size_bytes=100,
+                created_at="2026-08-15T00:00:00.000Z",
+            )
+        )
+        session.flush()
         for i, cid in enumerate(chapter_ids):
             session.add(
                 Chapter(
                     chapter_id=cid,
                     file_id=file_id,
+                    material_id=file_id,
                     name=f"第{i + 1}章",
                     start_page=i * 10 + 1,
                     end_page=i * 10 + 10,
                 )
             )
-        session.add(
-            LearningProject(
-                project_id=project_id,
-                user_id=user_id,
-                file_id=file_id,
-                name="种子项目",
-                chapters_confirmed_at="2026-08-15T00:00:00.000Z" if confirmed else None,
-                version="2026-08-15T00:00:00.000Z",
-                created_at="2026-08-15T00:00:00.000Z",
-                updated_at="2026-08-15T00:00:00.000Z",
-            )
-        )
         session.commit()
     engine.dispose()
     return {"project_id": project_id, "file_id": file_id, "chapter_ids": chapter_ids}
@@ -144,7 +157,13 @@ def _seed_task(
     factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
     task_id = str(uuid.uuid4())
     snapshot = [
-        {"chapter_id": cid, "name": "x", "start_page": 1, "end_page": 10}
+        {
+            "chapter_id": cid,
+            "material_id": file_id,
+            "name": "x",
+            "start_page": 1,
+            "end_page": 10,
+        }
         for cid in (chapter_ids or [])
     ]
     with factory() as session:
@@ -200,92 +219,158 @@ def _error_code(resp: Any) -> str:
     return str(resp.json()["error"]["code"])
 
 
-# ---------- 上传 → 建项目 ----------
+# ---------- 两步创建 + 资料添加（V25-D-29/31/32）----------
 
 
-def test_projects_upload_creates_project_with_default_name(client: TestClient) -> None:
-    """V25-GEN-FR-01：PDF 上传成功即建立项目；缺省名取文件名去扩展名。"""
-    user = _user(client)
+def _create_project(client: TestClient, user: dict[str, str], name: str = "新书项目") -> Any:
     resp = client.post(
         "/projects",
-        files={"file": ("book.pdf", _pdf_bytes(), "application/pdf")},
+        json={"name": name},
         headers={**user, **_idem()},
     )
     assert resp.status_code == 201, resp.text
-    body = resp.json()
-    assert body["project_id"]
-    assert body["name"] == "book"  # 默认名 = 上传文件名去扩展名
-    assert body["status"] == "PARSING"  # 上传即建立，PDF 异步解析
-    assert body["chapter_count"] == 0
-    assert body["deck_count"] == 0
-    assert body["task_count"] == 0
-    assert body["file"]["file_id"] and body["file"]["status"] in ("PENDING", "PARSING")
-    assert body["file"]["filename"] == "book.pdf"
-    assert body["file"]["chapters"] is None  # 解析完成前无章节
-    assert body["version"] and body["created_at"] and body["updated_at"]
-    # 详情可轮询（PARSING 时 GET 200）
-    resp = client.get(f"/projects/{body['project_id']}", headers=user)
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "PARSING"
+    return resp.json()
 
 
-def test_projects_upload_custom_name_trimmed(client: TestClient) -> None:
-    """显式 name：去首尾空白后保存。"""
-    user = _user(client)
+def _add_pdf_material(
+    client: TestClient, user: dict[str, str], project_id: str, filename: str = "book.pdf"
+) -> Any:
     resp = client.post(
-        "/projects",
-        files={"file": ("book.pdf", _pdf_bytes(), "application/pdf")},
-        data={"name": "  我的 项目  "},
+        f"/projects/{project_id}/materials/pdf",
+        files={"file": (filename, _pdf_bytes(), "application/pdf")},
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def test_projects_create_empty_then_add_pdf_parses(client: TestClient) -> None:
+    """V25-D-29 两步创建：空项目(EMPTY) → 添加 PDF(PARSING) → 详情轮询。"""
+    user = _user(client)
+    body = _create_project(client, user, "  我的项目  ")
+    assert body["name"] == "我的项目"
+    assert body["status"] == "EMPTY"  # 空项目存活
+    assert body["materials"] == []
+    assert body["chapter_count"] == 0
+    material = _add_pdf_material(client, user, body["project_id"])
+    assert material["type"] == "PDF"
+    assert material["status"] in ("PENDING", "PARSING")
+    assert material["project_id"] == body["project_id"]
+    detail = client.get(f"/projects/{body['project_id']}", headers=user).json()
+    assert detail["status"] == "PARSING"
+    assert len(detail["materials"]) == 1
+    assert detail["materials"][0]["material_id"] == material["material_id"]
+
+
+def test_projects_add_text_material_ready_single_chapter(client: TestClient) -> None:
+    """V25-D-32：粘贴文本即时就绪；单章节页码 null；项目转 AWAITING_CHAPTER_CONFIRMATION。"""
+    user = _user(client)
+    body = _create_project(client, user)
+    resp = client.post(
+        f"/projects/{body['project_id']}/materials/text",
+        json={"name": "课堂笔记", "content": "第一段内容。\n\n第二段内容，主题不同。"},
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 201, resp.text
+    material = resp.json()
+    assert material["type"] == "TEXT"
+    assert material["status"] == "READY"
+    assert material["chapter"] is not None
+    assert material["chapter"]["material_id"] == material["material_id"]
+    assert material["chapter"]["start_page"] is None
+    detail = client.get(f"/projects/{body['project_id']}", headers=user).json()
+    assert detail["status"] == "AWAITING_CHAPTER_CONFIRMATION"
+    assert detail["chapter_count"] == 1
+
+
+def test_projects_text_material_too_long_400(client: TestClient) -> None:
+    """V25-D-32：>30000 字拒绝（全局校验失败统一 400）。"""
+    user = _user(client)
+    body = _create_project(client, user)
+    resp = client.post(
+        f"/projects/{body['project_id']}/materials/text",
+        json={"name": "超长", "content": "字" * 30001},
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 400
+    assert _error_code(resp) == "VALIDATION_ERROR"
+
+
+def test_projects_material_add_resets_confirmation(client: TestClient, tmp_path: Path) -> None:
+    """V25-D-31：新增资料重置章节确认（READY → AWAITING；TEXT 资料即时就绪可观测）。"""
+    user = _user(client)
+    db = tmp_path / "projects_api.db"
+    uid = _user_id(db)
+    seed = _seed_parsed_project(db, uid, confirmed=True)
+    pid = seed["project_id"]
+    assert client.get(f"/projects/{pid}", headers=user).json()["status"] == "READY"
+    resp = client.post(
+        f"/projects/{pid}/materials/text",
+        json={"name": "补充笔记", "content": "新资料重置确认。"},
         headers={**user, **_idem()},
     )
     assert resp.status_code == 201
-    assert resp.json()["name"] == "我的 项目"
+    assert (
+        client.get(f"/projects/{pid}", headers=user).json()["status"]
+        == "AWAITING_CHAPTER_CONFIRMATION"
+    )
 
 
-def test_projects_upload_blank_name_400(client: TestClient) -> None:
-    """显式 name 全空白 → 400 VALIDATION_ERROR（去首尾空白后为空）。"""
+def test_projects_delete_material_three_tiers_and_empty_alive(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """V25-D-30/29：资料删除 → 空项目存活；retain_cards 决定卡去留（计数经 preflight 观测）。"""
     user = _user(client)
-    resp = client.post(
-        "/projects",
-        files={"file": ("book.pdf", _pdf_bytes(), "application/pdf")},
-        data={"name": "   "},
+    db = tmp_path / "projects_api.db"
+    uid = _user_id(db)
+    seed = _seed_parsed_project(db, uid, confirmed=True)
+    pid, mid = seed["project_id"], seed["file_id"]
+    # 删除 PDF 资料（无卡场景）→ 项目转 EMPTY 仍存活
+    resp = client.delete(
+        f"/projects/{pid}/materials/{mid}?retain_cards=true",
         headers={**user, **_idem()},
     )
-    assert resp.status_code == 400
-    assert _error_code(resp) == "VALIDATION_ERROR"
-
-
-def test_projects_upload_name_too_long_400(client: TestClient) -> None:
-    """显式 name > 60 字符 → 400 VALIDATION_ERROR。"""
-    user = _user(client)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "EMPTY"
+    assert body["materials"] == []
+    # 空项目可再添加文本资料复活
     resp = client.post(
-        "/projects",
-        files={"file": ("book.pdf", _pdf_bytes(), "application/pdf")},
-        data={"name": "长" * 61},
+        f"/projects/{pid}/materials/text",
+        json={"name": "新笔记", "content": "复活内容。"},
         headers={**user, **_idem()},
     )
-    assert resp.status_code == 400
-    assert _error_code(resp) == "VALIDATION_ERROR"
-
-
-def test_projects_upload_invalid_pdf_400(client: TestClient) -> None:
-    """三重校验沿用 PDF 上传管线：魔数不符 → 400 PDF_UPLOAD_INVALID。"""
-    user = _user(client)
-    resp = client.post(
-        "/projects",
-        files={"file": ("a.pdf", b"not a pdf", "application/pdf")},
-        headers={**user, **_idem()},
+    assert resp.status_code == 201
+    assert (
+        client.get(f"/projects/{pid}", headers=user).json()["status"]
+        == "AWAITING_CHAPTER_CONFIRMATION"
     )
-    assert resp.status_code == 400
-    assert _error_code(resp) == "PDF_UPLOAD_INVALID"
 
 
-def test_projects_upload_requires_idempotency_key(client: TestClient) -> None:
+def test_projects_material_list_and_cross_project_404(client: TestClient, tmp_path: Path) -> None:
+    user = _user(client)
+    db = tmp_path / "projects_api.db"
+    uid = _user_id(db)
+    seed = _seed_parsed_project(db, uid)
+    resp = client.get(f"/projects/{seed['project_id']}/materials", headers=user)
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1 and items[0]["type"] == "PDF"
+    # 他人项目资料删除 → 404
+    other = _user(client, username="bob", password="secret-pass-2")
+    resp = client.delete(
+        f"/projects/{seed['project_id']}/materials/{seed['file_id']}",
+        headers={**other, **_idem()},
+    )
+    assert resp.status_code == 404
+
+
+def test_projects_create_requires_idempotency_key(client: TestClient) -> None:
     """写接口强制 Idempotency-Key（契约 1.3）。"""
     user = _user(client)
     resp = client.post(
         "/projects",
-        files={"file": ("a.pdf", _pdf_bytes(), "application/pdf")},
+        json={"name": "任意"},
         headers=user,
     )
     assert resp.status_code == 400
@@ -300,35 +385,30 @@ def test_projects_list_empty_state_and_cross_user_isolation(client: TestClient) 
     user_a = _user(client)
     user_b = _user(client, "user2", "pass-2222")
     assert client.get("/projects", headers=user_a).json() == {"items": []}
-    resp = client.post(
-        "/projects",
-        files={"file": ("a.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**user_a, **_idem()},
-    )
-    assert resp.status_code == 201
+    created = _create_project(client, user_a, "隔离项目")
     items_a = client.get("/projects", headers=user_a).json()["items"]
     assert len(items_a) == 1
-    assert items_a[0]["name"] == "a"
+    assert items_a[0]["name"] == "隔离项目"
+    assert items_a[0]["project_id"] == created["project_id"]
     assert client.get("/projects", headers=user_b).json() == {"items": []}
 
 
-def test_projects_list_skips_legacy_project_without_pdf_record(
+def test_projects_list_includes_legacy_project_without_materials(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """损坏历史项目不能令同用户所有有效项目列表 500。"""
+    """V25-D-29 资料集合语义：无资料的历史项目不再被跳过，按空项目（EMPTY）列出。"""
     user = _user(client)
     db_path = tmp_path / "projects_api.db"
     with sqlite3.connect(db_path) as connection:
         # Raw legacy SQLite data may predate FK/NOT NULL enforcement.
         connection.execute(
             "INSERT INTO learning_projects "
-            "(project_id, user_id, file_id, name, chapters_confirmed_at, version, "
+            "(project_id, user_id, name, chapters_confirmed_at, version, "
             "created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, NULL, ?, ?, ?)",
+            "VALUES (?, ?, ?, NULL, ?, ?, ?)",
             (
                 str(uuid.uuid4()),
                 _user_id(db_path),
-                "missing-pdf-record",
                 "legacy shell",
                 "2026-08-28T00:00:00.000Z",
                 "2026-08-28T00:00:00.000Z",
@@ -339,22 +419,18 @@ def test_projects_list_skips_legacy_project_without_pdf_record(
     response = client.get("/projects", headers=user)
 
     assert response.status_code == 200
-    assert response.json() == {"items": []}
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["name"] == "legacy shell"
+    assert items[0]["status"] == "EMPTY"
+    assert items[0]["materials"] == []
 
 
 def test_projects_list_ordered_by_updated_desc(client: TestClient) -> None:
     """列表按 updated_at 倒序（最近使用在前）；重命名刷新排序。"""
     user = _user(client)
-    first = client.post(
-        "/projects",
-        files={"file": ("a.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**user, **_idem()},
-    ).json()
-    second = client.post(
-        "/projects",
-        files={"file": ("b.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**user, **_idem()},
-    ).json()
+    first = _create_project(client, user, "第一本")
+    second = _create_project(client, user, "第二本")
     ids = [p["project_id"] for p in client.get("/projects", headers=user).json()["items"]]
     assert ids == [second["project_id"], first["project_id"]]
     # 重命名 first（刷新 updated_at）→ 排序翻转
@@ -387,7 +463,7 @@ def test_projects_get_detail_cross_user_404(client: TestClient, tmp_path: Path) 
 def test_projects_get_detail_derived_counts_and_chapters(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """详情派生计数（chapter/deck/task）+ PARSED 时 file.chapters 摘要；多任务每项目。"""
+    """详情派生计数（chapter/deck/task）+ PARSED 时 chapters 摘要；多任务每项目。"""
     user = _user(client)
     db = tmp_path / "projects_api.db"
     project = _seed_parsed_project(db, _user_id(db), confirmed=True)
@@ -399,7 +475,8 @@ def test_projects_get_detail_derived_counts_and_chapters(
     assert body["chapter_count"] == len(project["chapter_ids"])
     assert body["deck_count"] == 1
     assert body["task_count"] == 2  # 一个项目可含多个任务
-    assert [c["chapter_id"] for c in body["file"]["chapters"]] == project["chapter_ids"]
+    assert [c["chapter_id"] for c in body["chapters"]] == project["chapter_ids"]
+    assert body["materials"][0]["material_id"] == project["file_id"]
     # 未确认章节 → AWAITING_CHAPTER_CONFIRMATION
     project2 = _seed_parsed_project(db, _user_id(db), confirmed=False)
     body = client.get(f"/projects/{project2['project_id']}", headers=user).json()
@@ -426,8 +503,7 @@ def test_projects_rename_trims_and_bumps_version(client: TestClient, tmp_path: P
     # 可重名：两个项目同名
     resp = client.post(
         "/projects",
-        files={"file": ("c.pdf", _pdf_bytes(), "application/pdf")},
-        data={"name": "新名称"},
+        json={"name": "新名称"},
         headers={**user, **_idem()},
     )
     assert resp.status_code == 201
@@ -486,14 +562,23 @@ def test_projects_confirm_chapters_ready_and_reconfirm_409(
     assert _error_code(resp) == "PROJECT_STATE_CONFLICT"
 
 
-def test_projects_confirm_chapters_before_parsed_409(client: TestClient) -> None:
-    """PDF 未解析完成 → 确认章节 409 PROJECT_STATE_CONFLICT。"""
+def test_projects_confirm_chapters_before_ready_409(client: TestClient) -> None:
+    """无已就绪资料（EMPTY 项目）→ 确认章节 409 PROJECT_STATE_CONFLICT。"""
     user = _user(client)
-    project_id = client.post(
-        "/projects",
-        files={"file": ("a.pdf", _pdf_bytes(), "application/pdf")},
+    project_id = _create_project(client, user, "空项目")["project_id"]
+    resp = client.post(
+        f"/projects/{project_id}/confirm-chapters",
         headers={**user, **_idem()},
-    ).json()["project_id"]
+    )
+    assert resp.status_code == 409
+    assert _error_code(resp) == "PROJECT_STATE_CONFLICT"
+
+
+def test_projects_confirm_chapters_parsing_pdf_409(client: TestClient) -> None:
+    """PDF 解析中（无已确认章节）→ 确认章节 409 PROJECT_STATE_CONFLICT。"""
+    user = _user(client)
+    project_id = _create_project(client, user)["project_id"]
+    _add_pdf_material(client, user, project_id)
     resp = client.post(
         f"/projects/{project_id}/confirm-chapters",
         headers={**user, **_idem()},
@@ -519,44 +604,43 @@ def test_projects_confirm_chapters_cross_user_404(client: TestClient, tmp_path: 
 
 
 def test_projects_replace_pdf_only_parse_failed(client: TestClient, tmp_path: Path) -> None:
-    """仅 PARSE_FAILED 项目可替换：PARSED → 409；FAILED → 200 原子替换重新解析。"""
+    """仅 FAILED 的 PDF 资料可替换：PARSED → 409；FAILED → 200 原子替换重新解析。"""
     user = _user(client)
     db = tmp_path / "projects_api.db"
-    # 1) PARSED 项目替换 → 409 PROJECT_STATE_CONFLICT
+    # 1) PARSED 资料替换 → 409 PROJECT_STATE_CONFLICT
     project = _seed_parsed_project(db, _user_id(db))
     resp = client.post(
-        f"/projects/{project['project_id']}/replace-pdf",
+        f"/projects/{project['project_id']}/materials/{project['file_id']}/replace",
         files={"file": ("new.pdf", _pdf_bytes(), "application/pdf")},
         headers={**user, **_idem()},
     )
     assert resp.status_code == 409
     assert _error_code(resp) == "PROJECT_STATE_CONFLICT"
-    # 2) 解析失败项目（HTTP 上传坏 PDF + 扫描失败）→ 可替换
-    resp = client.post(
-        "/projects",
-        files={"file": ("bad.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**user, **_idem()},
-    )
+    # 2) 解析失败资料（HTTP 上传坏 PDF + 扫描失败）→ 可替换
+    resp = client.post("/projects", json={"name": "bad"}, headers={**user, **_idem()})
     assert resp.status_code == 201
-    project_id, old_file_id = resp.json()["project_id"], resp.json()["file"]["file_id"]
+    project_id = resp.json()["project_id"]
+    material = _add_pdf_material(client, user, project_id, "bad.pdf")
+    old_material_id = material["material_id"]
     app = cast(Any, client.app)
     scan_once(app.state.session_factory, storage=app.state.storage)
     body = client.get(f"/projects/{project_id}", headers=user).json()
     assert body["status"] == "PARSE_FAILED"
     resp = client.post(
-        f"/projects/{project_id}/replace-pdf",
+        f"/projects/{project_id}/materials/{old_material_id}/replace",
         files={"file": ("good.pdf", _pdf_bytes(), "application/pdf")},
         headers={**user, **_idem()},
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["name"] == "bad"  # 项目名保留
-    assert body["file"]["file_id"] != old_file_id  # 原子替换为新 PDF
-    assert body["file"]["filename"] == "good.pdf"
-    assert body["status"] == "PARSING"  # 重新解析
-    # 旧 PDF 不再可读
-    resp = client.get(f"/pdfs/{old_file_id}", headers=user)
-    assert resp.status_code == 404
+    assert body["materials"][0]["material_id"] != old_material_id  # 原子替换为新资料
+    assert body["materials"][0]["name"] == "good.pdf"
+    assert body["materials"][0]["status"] in ("PENDING", "PARSING")  # 重新解析
+    assert body["status"] == "PARSING"
+    # 旧资料不在资料列表中
+    materials = client.get(f"/projects/{project_id}/materials", headers=user).json()["items"]
+    assert [m["material_id"] for m in materials] != old_material_id
 
 
 def test_projects_replace_pdf_cross_user_404(client: TestClient, tmp_path: Path) -> None:
@@ -565,7 +649,7 @@ def test_projects_replace_pdf_cross_user_404(client: TestClient, tmp_path: Path)
     db = tmp_path / "projects_api.db"
     project = _seed_parsed_project(db, _user_id(db))
     resp = client.post(
-        f"/projects/{project['project_id']}/replace-pdf",
+        f"/projects/{project['project_id']}/materials/{project['file_id']}/replace",
         files={"file": ("x.pdf", _pdf_bytes(), "application/pdf")},
         headers={**user_b, **_idem()},
     )
@@ -602,21 +686,44 @@ def test_projects_chapter_patch_and_partial_update(client: TestClient, tmp_path:
     assert resp.status_code == 404
 
 
-def test_projects_chapter_patch_not_parsed_409(client: TestClient) -> None:
-    """未解析项目改章节 → 409 PROJECT_STATE_CONFLICT。"""
+def test_projects_chapter_patch_not_parsed_409(client: TestClient, tmp_path: Path) -> None:
+    """资料未解析完成（PENDING）时改章节 → 409 PROJECT_STATE_CONFLICT
+    （V25-D-29 多资料：未知章节先行 404，状态栅栏按真实章节触发）。"""
     user = _user(client)
-    project_id = client.post(
-        "/projects",
-        files={"file": ("a.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**user, **_idem()},
-    ).json()["project_id"]
+    db = tmp_path / "projects_api.db"
+    project = _seed_parsed_project(db, _user_id(db))
+    from sqlalchemy import text as _sqltext
+
+    from infra.db.session import create_db_engine as _engine_for
+
+    engine = _engine_for(f"sqlite:///{db}")
+    with engine.begin() as conn:
+        conn.execute(
+            _sqltext("UPDATE pdf_files SET status = 'PENDING' WHERE file_id = :f"),
+            {"f": str(project["file_id"])},
+        )
+    engine.dispose()
     resp = client.patch(
-        f"/projects/{project_id}/chapters/{uuid.uuid4()}",
+        f"/projects/{project['project_id']}/chapters/{project['chapter_ids'][0]}",
         json={"name": "x"},
         headers={**user, **_idem()},
     )
     assert resp.status_code == 409
     assert _error_code(resp) == "PROJECT_STATE_CONFLICT"
+
+
+def test_projects_chapter_patch_unknown_404(client: TestClient, tmp_path: Path) -> None:
+    """未知章节改/删 → 404 CHAPTER_NOT_FOUND（不暴露项目存在性之外的信息）。"""
+    user = _user(client)
+    db = tmp_path / "projects_api.db"
+    project = _seed_parsed_project(db, _user_id(db))
+    resp = client.patch(
+        f"/projects/{project['project_id']}/chapters/{uuid.uuid4()}",
+        json={"name": "x"},
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 404
+    assert _error_code(resp) == "CHAPTER_NOT_FOUND"
 
 
 # ---------- 项目学习设置（章节范围） ----------
@@ -703,11 +810,8 @@ def test_projects_study_settings_cross_user_404(client: TestClient, tmp_path: Pa
 def test_projects_delete_parsing_succeeds(client: TestClient) -> None:
     """解析中项目可删（契约 570）：删除自增 parse_version 栅栏迟到解析，不再 409。"""
     user = _user(client)
-    project_id = client.post(
-        "/projects",
-        files={"file": ("a.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**user, **_idem()},
-    ).json()["project_id"]
+    project_id = _create_project(client, user)["project_id"]
+    _add_pdf_material(client, user, project_id)
     resp = client.delete(f"/projects/{project_id}?retain_decks=true", headers={**user, **_idem()})
     assert resp.status_code == 204
     assert client.get(f"/projects/{project_id}", headers=user).status_code == 404
@@ -745,61 +849,55 @@ def test_projects_delete_cross_user_404(client: TestClient, tmp_path: Path) -> N
     assert _error_code(resp) == "PROJECT_NOT_FOUND"
 
 
-# ---------- /pdfs 兼容路由委托同一业务模型 ----------
+# ---------- PDF 资料上传三重校验（/pdfs 移除后由 materials/pdf 承接）----------
 
 
-def test_pdfs_compat_upload_creates_project(client: TestClient) -> None:
-    """兼容 /pdfs POST 委托项目创建：上传同时建立项目（同一业务模型，无第二语义路径）。"""
-    user = _user(client)
+def test_projects_add_pdf_material_invalid_magic_400(client: TestClient) -> None:
+    project_id = _create_project(client, _user(client))["project_id"]
     resp = client.post(
-        "/pdfs",
-        files={"file": ("compat.pdf", _pdf_bytes(), "application/pdf")},
-        headers={**user, **_idem()},
+        f"/projects/{project_id}/materials/pdf",
+        files={"file": ("a.pdf", b"not a pdf", "application/pdf")},
+        headers={**_user(client, "user2", "pass-2222"), **_idem()},
     )
-    assert resp.status_code == 201
-    items = client.get("/projects", headers=user).json()["items"]
-    assert len(items) == 1
-    assert items[0]["name"] == "compat"  # 默认名 = 文件名去扩展名
-    assert items[0]["file"]["file_id"] == resp.json()["file_id"]
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "PDF_UPLOAD_INVALID"
 
 
-def test_pdfs_compat_delete_delegates_keep_decks(client: TestClient, tmp_path: Path) -> None:
-    """兼容 /pdfs DELETE 委托项目删除（retain_decks=true）：项目/PDF 删除，牌组保留脱离项目。"""
-    user = _user(client)
-    db = tmp_path / "projects_api.db"
-    user_id = _user_id(db)
-    # ORM 直种 PARSED 项目（storage 对象同步写盘，供删除清理断言）
-    project = _seed_parsed_project(db, user_id)
-    deck_id = _seed_deck(db, user_id, str(project["project_id"]))
-    from sqlalchemy import text
+def test_projects_add_pdf_material_invalid_extension_400(client: TestClient) -> None:
+    project_id = _create_project(client, _user(client))["project_id"]
+    resp = client.post(
+        f"/projects/{project_id}/materials/pdf",
+        files={"file": ("a.txt", _pdf_bytes(), "application/pdf")},
+        headers={**_user(client, "user2", "pass-2222"), **_idem()},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "PDF_UPLOAD_INVALID"
 
-    from infra.db.session import create_db_engine
 
-    engine = create_db_engine(f"sqlite:///{db}")
-    with engine.connect() as conn:
-        conn.execute(
-            text("UPDATE pdf_files SET storage_key = :k WHERE file_id = :f"),
-            {"k": "b" * 32, "f": str(project["file_id"])},
-        )
-        conn.commit()
-    engine.dispose()
-    storage = cast(Any, client.app).state.storage
-    obj = storage.open("b" * 32)
-    obj.parent.mkdir(parents=True, exist_ok=True)
-    obj.write_bytes(b"%PDF-1.4")
-    assert obj.exists()
+def test_projects_add_pdf_material_content_length_precheck_400(client: TestClient) -> None:
+    """final review I-1：伪造超大 Content-Length 头（110MB > 100MB 上限）+ 合法小 body → 400
+    PDF_UPLOAD_INVALID；BodyCaptureMiddleware 在读 body 前按头预检拒绝（不读 body）。"""
+    project_id = _create_project(client, _user(client))["project_id"]
+    resp = client.post(
+        f"/projects/{project_id}/materials/pdf",
+        files={"file": ("big.pdf", _pdf_bytes(), "application/pdf")},
+        headers={**_user(client), **_idem(), "Content-Length": "110000000"},
+    )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error"]["code"] == "PDF_UPLOAD_INVALID"
+    assert body["error"]["localization_key"] == "error.pdf_upload_invalid"
 
-    resp = client.delete(f"/pdfs/{project['file_id']}", headers={**user, **_idem()})
-    assert resp.status_code == 204, resp.text
-    # 项目与 PDF 已删
-    resp = client.get(f"/projects/{project['project_id']}", headers=user)
+
+def test_projects_add_pdf_material_cross_user_404(client: TestClient) -> None:
+    """他人项目的资料端点 → 404（统一不暴露存在性）。"""
+    _user(client)  # alice 先注册（种子依赖）
+    other = _user(client, "user2", "pass-2222")
+    project_id = _create_project(client, other)["project_id"]
+    resp = client.post(
+        f"/projects/{project_id}/materials/pdf",
+        files={"file": ("a.pdf", _pdf_bytes(), "application/pdf")},
+        headers={**_user(client, "user3", "pass-3333"), **_idem()},
+    )
     assert resp.status_code == 404
-    assert not obj.exists()  # 存储对象随删除清理
-    # 牌组保留且脱离项目（project_id 置空）
-    engine = create_db_engine(f"sqlite:///{db}")
-    with engine.connect() as conn:
-        pid = conn.execute(
-            text("SELECT project_id FROM decks WHERE deck_id = :d"), {"d": deck_id}
-        ).scalar()
-    engine.dispose()
-    assert pid is None
+    assert _error_code(resp) == "PROJECT_NOT_FOUND"

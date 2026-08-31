@@ -82,7 +82,7 @@ def _seed_project(db_path: Path, *, user_id: str, with_key: bool = False) -> dic
     项目/PDF/章节种子沿用 test_tasks_api._seed_context 同款模式（本测试只测
     deck.project_id 写路径，不重复覆盖项目域）。
     """
-    from infra.db.models import ApiKey, Chapter, LearningProject, PdfFile, User
+    from infra.db.models import ApiKey, Chapter, LearningProject, Material, PdfFile, User
     from infra.db.session import create_db_engine, create_session_factory
 
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
@@ -114,10 +114,20 @@ def _seed_project(db_path: Path, *, user_id: str, with_key: bool = False) -> dic
         )
         session.flush()
         session.add(
+            Material(
+                material_id=file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=project_id,
+                type="PDF",
+                name="seed.pdf",
+                status=None,
+                size_bytes=10,
+                created_at="2026-08-11T00:00:00.000Z",
+            )
+        )
+        session.add(
             LearningProject(
                 project_id=project_id,
                 user_id=user_id,
-                file_id=file_id,
                 name="P",
                 chapters_confirmed_at="2026-08-11T00:00:00.000Z",
                 version="2026-08-11T00:00:00.000Z",
@@ -132,6 +142,7 @@ def _seed_project(db_path: Path, *, user_id: str, with_key: bool = False) -> dic
                 Chapter(
                     chapter_id=cid,
                     file_id=file_id,
+                    material_id=file_id,
                     name=f"第{i + 1}章",
                     start_page=i + 1,
                     end_page=i + 2,

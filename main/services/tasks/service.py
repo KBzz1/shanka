@@ -43,7 +43,7 @@ from infra.db.models import (
     GenerationOperation,
     LearningProject,
     LlmCallAttempt,
-    PdfFile,
+    Material,
     Task,
 )
 from services.decks.service import _owned as _owned_deck
@@ -81,13 +81,15 @@ def _owned_project(session: Session, *, user_id: str, project_id: str) -> Learni
     return project
 
 
-def _project_pdf(session: Session, *, user_id: str, project_id: str) -> PdfFile:
-    """项目当前 PDF（file_id 唯一外键权威）；行缺失 = 数据完整性异常，不泛化 404。"""
-    project = _owned_project(session, user_id=user_id, project_id=project_id)
-    pdf = session.get(PdfFile, project.file_id)
-    if pdf is None:
-        raise AppError(ErrorCode.INTERNAL_ERROR, "项目缺少当前 PDF 记录")
-    return pdf
+def _task_file_id(session: Session, *, project_id: str) -> str | None:
+    """任务快照 file_id：项目首份 PDF 资料（多资料语义）；纯文本项目为 None（契约 3.4）。"""
+    row = session.execute(
+        select(Material.material_id)
+        .where(Material.project_id == project_id, Material.type == "PDF")
+        .order_by(Material.created_at, Material.material_id)
+        .limit(1)
+    ).first()
+    return row[0] if row else None
 
 
 def _snapshot_chapter_ids(task: Task) -> list[str]:
@@ -102,20 +104,24 @@ def _snapshot_chapter_ids(task: Task) -> list[str]:
 
 
 def _chapter_snapshot(
-    session: Session, *, pdf: PdfFile, chapter_ids: list[str]
+    session: Session, *, project_id: str, chapter_ids: list[str]
 ) -> list[dict[str, object]]:
-    """章节归属校验 + 快照（契约 3.4 Chapter[]；3.6 章节删除后名称从快照还原）。"""
+    """章节归属校验 + 快照（契约 3.4 Chapter[]；V25-D-29 多资料：material_id 入快照，
+    TEXT 章节页码为 null；章节删除后名称从快照还原）。"""
     if not chapter_ids:
         raise AppError(ErrorCode.VALIDATION_ERROR, "章节列表不能为空")
     chapters = session.scalars(
-        select(Chapter).where(Chapter.chapter_id.in_(chapter_ids), Chapter.file_id == pdf.file_id)
+        select(Chapter)
+        .join(Material, Material.material_id == Chapter.material_id)
+        .where(Chapter.chapter_id.in_(chapter_ids), Material.project_id == project_id)
     ).all()
     by_id = {ch.chapter_id: ch for ch in chapters}
     if any(cid not in by_id for cid in chapter_ids):
-        raise AppError(ErrorCode.PDF_NOT_FOUND, "章节不属于该 PDF")
+        raise AppError(ErrorCode.CHAPTER_NOT_FOUND, "章节不属于该项目资料")
     return [
         {
             "chapter_id": cid,
+            "material_id": by_id[cid].material_id,
             "name": by_id[cid].name,
             "start_page": by_id[cid].start_page,
             "end_page": by_id[cid].end_page,
@@ -143,17 +149,17 @@ def _require_api_key(session: Session, *, user_id: str) -> None:
         raise AppError(ErrorCode.API_KEY_NOT_SET, "未保存可用 API Key")
 
 
-def _chapter_chars(
-    session: Session, *, file_id: str, chapter_snapshot: list[dict[str, object]]
-) -> int:
+def _chapter_chars(session: Session, *, chapter_snapshot: list[dict[str, object]]) -> int:
     """所选章节的文本总量（密度制预算估算输入；查询异常/无文本时按 0 处理走回落估算）。"""
     total = 0
     for entry in chapter_snapshot:
+        start = entry.get("start_page")
+        end = entry.get("end_page")
         pages = load_pages(
             session,
-            file_id=file_id,
-            start_page=int(str(entry["start_page"])),
-            end_page=int(str(entry["end_page"])),
+            material_id=str(entry["material_id"]),
+            start_page=int(str(start)) if start is not None else None,
+            end_page=int(str(end)) if end is not None else None,
         )
         total += sum(page.char_count for page in pages)
     return total
@@ -260,16 +266,14 @@ def create_task(
     预算硬上限 → 落 DRAFT（章节快照 + 目标牌组 + 配置；internal_stage 空）。
     页面切换/App 退出/换设备后经 GET 读取继续，无需重新上传 PDF。"""
     validate_config(config)
-    pdf = _project_pdf(session, user_id=user_id, project_id=project_id)
-    chapter_snapshot = _chapter_snapshot(session, pdf=pdf, chapter_ids=chapter_ids)
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    chapter_snapshot = _chapter_snapshot(session, project_id=project_id, chapter_ids=chapter_ids)
     _require_same_project_deck(session, user_id=user_id, project_id=project_id, deck_id=deck_id)
     _require_api_key(session, user_id=user_id)
     _budget_guard(
         session,
         chapter_count=len(chapter_ids),
-        chapter_chars=_chapter_chars(
-            session, file_id=pdf.file_id, chapter_snapshot=chapter_snapshot
-        ),
+        chapter_chars=_chapter_chars(session, chapter_snapshot=chapter_snapshot),
         config=config,
         settings=settings,
     )
@@ -293,8 +297,8 @@ def create_task(
     task = Task(
         task_id=_uuid4(),
         user_id=user_id,
-        project_id=project_id,
-        file_id=pdf.file_id,
+        project_id=project.project_id,
+        file_id=_task_file_id(session, project_id=project.project_id),
         deck_id=deck_id,
         status=TaskStatus.DRAFT.value,
         stage=None,  # internal_stage 在正式生成（start）后才有观测值
@@ -356,15 +360,12 @@ def update_task(
     project_id = task.project_id
     if project_id is None:
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "历史遗留任务不可修改")
-    pdf = session.get(PdfFile, task.file_id)
-    if pdf is None:
-        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "PDF 已删除，任务不可修改")
     # 变更目标校验（未变更字段沿用现值）
     new_deck = deck_id if deck_id is not None else task.deck_id
     if new_deck is None:
         raise AppError(ErrorCode.DECK_NOT_FOUND, "牌组不存在或不属于该项目")
     new_chapter_ids = chapter_ids if chapter_ids is not None else _snapshot_chapter_ids(task)
-    snapshot = _chapter_snapshot(session, pdf=pdf, chapter_ids=new_chapter_ids)
+    snapshot = _chapter_snapshot(session, project_id=project_id, chapter_ids=new_chapter_ids)
     if config is not None:
         validate_config(config)
         new_config = config
@@ -377,7 +378,7 @@ def update_task(
     _budget_guard(
         session,
         chapter_count=len(new_chapter_ids),
-        chapter_chars=_chapter_chars(session, file_id=pdf.file_id, chapter_snapshot=snapshot),
+        chapter_chars=_chapter_chars(session, chapter_snapshot=snapshot),
         config=new_config,
         settings=None,
     )
@@ -563,7 +564,7 @@ def retry_task(
     original = _owned_task(session, user_id=user_id, task_id=task_id)
     if original.status != TaskStatus.FAILED.value:
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "仅失败任务可重试")
-    if original.project_id is None or original.file_id is None:
+    if original.project_id is None:
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "历史遗留任务不可重试")
     if original.deck_id is None:
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "目标牌组已删除，无法重试")
@@ -578,7 +579,6 @@ def retry_task(
         chapter_count=len(_snapshot_chapter_ids(original)),
         chapter_chars=_chapter_chars(
             session,
-            file_id=original.file_id,
             chapter_snapshot=json.loads(original.selected_chapters or "[]")
             if isinstance(original.selected_chapters, str)
             else [],

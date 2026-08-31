@@ -25,6 +25,7 @@ from infra.db.models import (
     Deck,
     KnowledgePoint,
     LearningProject,
+    Material,
     PdfFile,
     Task,
     User,
@@ -75,7 +76,6 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
     project = LearningProject(
         project_id=_uuid(),
         user_id=user_id,
-        file_id=pdf.file_id,
         name="P",
         chapters_confirmed_at=_NOW,
         version=_NOW,
@@ -83,6 +83,17 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         updated_at=_NOW,
     )
     session.add(project)
+    session.flush()
+    session.add(
+        Material(
+            material_id=pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+            project_id=project.project_id,
+            type="PDF",
+            name="seed.pdf",
+            status=None,
+            created_at=_NOW,
+        )
+    )
     session.flush()
     deck = Deck(
         deck_id=_uuid(),
@@ -102,6 +113,7 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         ch = Chapter(
             chapter_id=_uuid(),
             file_id=pdf.file_id,
+            material_id=pdf.file_id,
             name=f"第{i + 1}章",
             start_page=i + 1,
             end_page=i + 2,
@@ -129,6 +141,7 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
         "chapters": [
             {
                 "chapter_id": ch.chapter_id,
+                "material_id": ch.material_id,
                 "name": ch.name,
                 "start_page": ch.start_page,
                 "end_page": ch.end_page,
@@ -217,7 +230,8 @@ def test_tasks_create_cross_user_project_404(session_factory: Callable[[], Sessi
 
 
 def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]) -> None:
-    """章节归属校验：chapter_ids 含不属于项目 PDF 的章节 → PDF_NOT_FOUND。"""
+    """章节归属校验：chapter_ids 含不属于项目资料的章节 → CHAPTER_NOT_FOUND
+    （V25-D-29 多资料：归属经 materials join 校验）。"""
     user = _uuid()
     with session_factory() as session:
         ctx = _seed_context(session, user_id=user)
@@ -233,6 +247,16 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
             )
         )
         session.flush()
+        other_project = LearningProject(
+            project_id=_uuid(),
+            user_id=foreign,
+            name="他人项目",
+            version=_NOW,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+        session.add(other_project)
+        session.flush()
         other_pdf = PdfFile(
             file_id=_uuid(),
             user_id=foreign,
@@ -244,8 +268,25 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
         )
         session.add(other_pdf)
         session.flush()
+        session.add(
+            Material(
+                material_id=other_pdf.file_id,  # PDF 资料 material_id == file_id（契约 3.2a）
+                project_id=other_project.project_id,
+                type="PDF",
+                name="c.pdf",
+                status=None,
+                size_bytes=1,
+                created_at=_NOW,
+            )
+        )
+        session.flush()
         other_ch = Chapter(
-            chapter_id=_uuid(), file_id=other_pdf.file_id, name="他章", start_page=1, end_page=2
+            chapter_id=_uuid(),
+            file_id=other_pdf.file_id,
+            material_id=other_pdf.file_id,
+            name="他章",
+            start_page=1,
+            end_page=2,
         )
         session.add(other_ch)
         session.flush()
@@ -261,7 +302,7 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
             config=_config(),
             now=_NOW,
         )
-    assert excinfo.value.code is ErrorCode.PDF_NOT_FOUND
+    assert excinfo.value.code is ErrorCode.CHAPTER_NOT_FOUND
 
 
 def test_tasks_get_missing_404(session_factory: Callable[[], Session]) -> None:
