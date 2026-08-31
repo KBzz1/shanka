@@ -1,18 +1,19 @@
 # AGENTS.md
 
-闪卡 App v2.1 后端仓库（契约驱动实现）。依赖方向单向向下：`docs/PRD → docs/Architecture → main/`，实现不得反向驱动契约。
+闪卡 App V2.5 契约驱动 monorepo（FastAPI 后端 + Android Compose 前端）。依赖方向单向向下：`docs/PRD → docs/Architecture → main/ + frontend/Front`，实现不得反向驱动契约。
 
 ## 仓库布局
 
-- `docs/` — 文档层级：`PRD/V2.4/prd_v2_4.md` 需求权威（做什么、为什么）；`Architecture/` 设计契约集合 + 防漂移规则（见 `Architecture/AGENTS.md`）；`frontend/` 前端对接、`superpowers/` 工作流产物、`Progress.md` 进度（层级规则见 `docs/AGENTS.md`）。
+- `docs/` — 文档层级：`PRD/V2.5/prd_v2_5.md` 需求权威（做什么、为什么）；`Architecture/` 设计契约集合 + 防漂移规则（见 `Architecture/AGENTS.md`）；`frontend/` 前端对接、`superpowers/` 工作流产物、`Progress.md` 进度（层级规则见 `docs/AGENTS.md`）。
 - `main/` — FastAPI 后端（Python >= 3.12）：
   - `app/` HTTP 出入口：`api/` 路由、`middleware/`（Bearer 认证、Idempotency-Key 幂等、统一错误）、`schemas/` 请求/响应模型、`main.py` 装配。
   - `domain/` 纯领域模型与枚举，不依赖任何其他包。
   - `services/` 用例编排：auth / api_key / cards / decks / generation / pdf / review / scheduling（FSRS-6）/ stats / tasks。
   - `infra/` db（ORM 与迁移，`main/migrations/` 为 Alembic 迁移）/ storage（PDF 文件）/ llm（DeepSeek 调用、Prompt 组装）。
   - 分层依赖：`app → services → infra` 单向，均可依赖 `domain/`；禁止在 handler 中直接暴露 ORM 对象。
+- `frontend/Front` — Android 客户端（Kotlin + Compose，Gradle 工程）：Retrofit/OkHttp 网络栈、`shanka-v25.db` Room 投影 + 评分 outbox（离线恰好一次）；对接规则见 `docs/frontend/AGENTS.md`。
 - `agent_evolution/` — agent 版本化资产（prompt/schema/rubric + manifest.json），`main/infra/llm/` 按 manifest 加载；资产演进 = 新版本目录 + 更新 manifest + CHANGELOG，属技术评审级变更。
-- `scripts/` — run.sh / stop.sh（启动/停止，语义见 `docs/Architecture/deployment.md` 契约 4.1）。
+- `scripts/` — run.sh / stop.sh（启动/停止，语义见 `docs/Architecture/deployment.md` 契约 4.1）、gen_sample_cards.py（样卡真实生成演示，见 `scripts/AGENTS.md`）。
 - `res/` — 样书 PDF 夹具（只读引用，勿替换，规则见 `main/services/pdf/AGENTS.md`）。
 
 ## 一致性红线（改动前先确认下游）
@@ -35,5 +36,5 @@
 
 ## 约定
 
-- 文档命名：小写 + 连字符，版本与 PRD 对齐（v2.1）；破坏性变更（删字段、改语义）须同步 PRD 与验收标准，兼容性变更只更新契约。
+- 文档命名：小写 + 连字符，版本与 PRD 对齐（V2.5）；破坏性变更（删字段、改语义）须同步 PRD 与验收标准，兼容性变更只更新契约。
 - `CLAUDE.md` 是 `AGENTS.md` 的符号链接：只维护 AGENTS.md；新增子目录 AGENTS.md 后执行 `ln -sf AGENTS.md CLAUDE.md`。

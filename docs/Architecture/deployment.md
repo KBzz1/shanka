@@ -73,3 +73,11 @@ services:
 - 代码零改动依据：`app/config.py` 的 `database_url`/`storage_path` 已是环境变量可覆盖；迁移交付物 = `main/data/` 目录 + 根 `.env`。
 - 迁移步骤：打包 `data/` + `.env` → 新机器 `docker compose up`；隧道无需重建，同一 `CLOUDFLARED_SERVICE_INSTALL_TOKEN` 运行即接管出站连接（DNS/主机名在 CF 侧不变）。
 - YAGNI：Dockerfile/compose/生产锁文件在明确迁移时再实施，当前不引入。
+
+## 9. V2.5 Android Release 边界
+
+- Debug 与 Release 使用独立构建配置；Release base URL 固定为正式 HTTPS 地址，普通用户不可修改。
+- 正式产物固定写入仓库根 `releases/app-release.apk`，不写入 `res/`，且被 Git 忽略。
+- 构建成功后以临时文件原子替换目标 APK；构建失败不得把旧 APK 报告为本次产物。
+- Release 不依赖开发机、样书目录、在线头像服务或本机环境地址启动。
+- 签名、版本、SHA-256 与目标设备安装结果按 V2.5 Release PRD 留存证据。
