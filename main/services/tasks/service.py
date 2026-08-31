@@ -47,9 +47,10 @@ from infra.db.models import (
     Task,
 )
 from services.decks.service import _owned as _owned_deck
-from services.generation.quota import task_unit_budget
+from services.generation.quota import estimate_task_units, task_unit_budget
 from services.generation.samples import config_fingerprint
 from services.generation.validate import validate_config
+from services.pdf.text_chunks import load_pages
 from services.tasks.lease import TaskLease, require_lease
 from services.tasks.operations import (
     begin_operation,
@@ -142,18 +143,45 @@ def _require_api_key(session: Session, *, user_id: str) -> None:
         raise AppError(ErrorCode.API_KEY_NOT_SET, "未保存可用 API Key")
 
 
+def _chapter_chars(
+    session: Session, *, file_id: str, chapter_snapshot: list[dict[str, object]]
+) -> int:
+    """所选章节的文本总量（密度制预算估算输入；查询异常/无文本时按 0 处理走回落估算）。"""
+    total = 0
+    for entry in chapter_snapshot:
+        pages = load_pages(
+            session,
+            file_id=file_id,
+            start_page=int(str(entry["start_page"])),
+            end_page=int(str(entry["end_page"])),
+        )
+        total += sum(page.char_count for page in pages)
+    return total
+
+
 def _budget_guard(
-    session: Session, *, chapter_count: int, config: GenerationConfig, settings: Settings | None
+    session: Session,
+    *,
+    chapter_count: int,
+    chapter_chars: int,
+    config: GenerationConfig,
+    settings: Settings | None,
 ) -> None:
-    """预算硬上限（spec §10）：章节数 × 3 × 密度 > 上限 → 拒绝不创建。"""
+    """预算硬上限（spec §10；V25-D-25 密度制口径）：按所选章节文本规模估算的区间上限
+    超过任务单元硬顶 → 拒绝创建。文本不可得（异常）时回落旧口径 估算，由规划期组数
+    上限兜底。"""
     if settings is None:
         injected = session.info.get("settings")
         settings = injected if isinstance(injected, Settings) else Settings()
-    if (
-        task_unit_budget(chapter_count, config.coverage_mode)
-        > settings.max_generation_units_per_task
-    ):
-        raise AppError(ErrorCode.VALIDATION_ERROR, "生成单元预算超出上限")
+    if chapter_chars > 0:
+        estimated = estimate_task_units(chapter_chars, config.coverage_mode)
+    else:
+        estimated = int(task_unit_budget(chapter_count, config.coverage_mode) * 1.2)
+    if estimated > settings.max_generation_units_per_task:
+        raise AppError(
+            ErrorCode.VALIDATION_ERROR,
+            "生成单元预算超出上限（按所选章节内容规模估算）；请减少章节或改用更精简的覆盖模式",
+        )
 
 
 def _cas_transition(
@@ -236,7 +264,15 @@ def create_task(
     chapter_snapshot = _chapter_snapshot(session, pdf=pdf, chapter_ids=chapter_ids)
     _require_same_project_deck(session, user_id=user_id, project_id=project_id, deck_id=deck_id)
     _require_api_key(session, user_id=user_id)
-    _budget_guard(session, chapter_count=len(chapter_ids), config=config, settings=settings)
+    _budget_guard(
+        session,
+        chapter_count=len(chapter_ids),
+        chapter_chars=_chapter_chars(
+            session, file_id=pdf.file_id, chapter_snapshot=chapter_snapshot
+        ),
+        config=config,
+        settings=settings,
+    )
     stable_operation_key = operation_key or _uuid4()
     input_fingerprint = normalized_input_fingerprint(
         user_id=user_id,
@@ -338,7 +374,13 @@ def update_task(
         except (ValueError, TypeError):
             raise AppError(ErrorCode.INTERNAL_ERROR, "任务配置数据异常") from None
     _require_same_project_deck(session, user_id=user_id, project_id=project_id, deck_id=new_deck)
-    _budget_guard(session, chapter_count=len(new_chapter_ids), config=new_config, settings=None)
+    _budget_guard(
+        session,
+        chapter_count=len(new_chapter_ids),
+        chapter_chars=_chapter_chars(session, file_id=pdf.file_id, chapter_snapshot=snapshot),
+        config=new_config,
+        settings=None,
+    )
     # 条件更新落库：并发 start/abandon 后状态已转移 → rowcount=0 不覆盖
     if not _cas_transition(
         session,
@@ -534,6 +576,13 @@ def retry_task(
     _budget_guard(
         session,
         chapter_count=len(_snapshot_chapter_ids(original)),
+        chapter_chars=_chapter_chars(
+            session,
+            file_id=original.file_id,
+            chapter_snapshot=json.loads(original.selected_chapters or "[]")
+            if isinstance(original.selected_chapters, str)
+            else [],
+        ),
         config=config,
         settings=settings,
     )

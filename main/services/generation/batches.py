@@ -5,9 +5,9 @@
   （同事务）；不再有 batch_size 分组与 offset 反推。
 - process_next_batch：条件更新抢占下一个可处理批次（PENDING 或 FAILED，原子转
   PROCESSING，rowcount=0 → 下一条/0 → 并发单执行者）→ 批 → 单元（generation_unit_id）
-  → Prompt 组装（稳定 system：generator v3 + generator-output schema v2 原文；动态
-  user：<GENERATOR_INPUT> 安全 JSON——学习目标/锚定难度/锚定卡型/有序页文本/自定义
-  要求）→ 账本记账（operation_key=f"generating:{batch_id}"，输入指纹 = 单元学习目标/
+  → Prompt 组装（稳定 system：generator prompt + generator-output schema 原文；动态
+  user 三区块：<GENERATION_SPEC> 学习目标/锚定难度/锚定卡型/覆盖层级 +
+  <SOURCE_MATERIAL> 有序页文本 + <USER_REQUIREMENTS> 自定义要求，V25-D-27）→ 账本记账（operation_key=f"generating:{batch_id}"，输入指纹 = 单元学习目标/
   锚定/有序页 id+content_sha256/资产版本；调用前 STARTED 占位 + 抢占同事务提交 →
   事务外 chat → 终态与卡入库同事务）→ 输出校验（generator-output schema v2 → 卡型=
   锚定 → 数量=1 → Card v1 投影后校验）→ SUCCEEDED / FAILED（重试）/ SKIPPED（预算
@@ -564,12 +564,15 @@ def _project_batch_usage(batch: Batch, result: dict[str, Any], versions: dict[st
 def _build_generator_prompts(
     task: Task, unit: KnowledgePoint, pages: Sequence[TextChunk]
 ) -> tuple[str, str]:
-    """Generator 双消息组装（spec §5.7 Generator 行）：稳定 system（generator v3 +
-    generator-output schema v2 原文）+ 动态 user（<GENERATOR_INPUT> 安全 JSON 信封）。
+    """Generator 双消息组装（spec §5.7 Generator 行）：稳定 system（generator v5 +
+    generator-output schema 原文）+ 动态 user 三区块信封。
 
-    动态对象只由服务端构造并 safe_json_dumps（ensure_ascii=False, sort_keys=True,
-    separators=(",",":") + 信封边界字符转义）；原文/自定义要求按不可信数据处理；
-    关联元数据（generation_unit_id/chunk_id）不进入模型输入。
+    三区块（V25-D-27）：`<GENERATION_SPEC>` 机器规范块（Planner 锚定的难度/卡型/
+    覆盖层级与学习目标，语义等同系统级约束）；`<SOURCE_MATERIAL>` 本次待处理原文
+    （按页序）；`<USER_REQUIREMENTS>` 用户自定义偏好。全部由服务端构造并
+    safe_json_dumps（ensure_ascii=False, sort_keys=True, separators=(",",":") +
+    信封边界字符转义）；原文/自定义要求按不可信数据处理；关联元数据
+    （generation_unit_id/chunk_id）不进入模型输入。
     """
     system_prompt = (
         f"{load_asset('prompts', 'generator')}\n\n<GENERATOR_OUTPUT_SCHEMA>\n"
@@ -580,14 +583,18 @@ def _build_generator_prompts(
     except (ValueError, TypeError):
         config = None
     custom_requirements = config.get("custom_requirements") if isinstance(config, dict) else None
-    payload = {
+    spec = {
         "learning_objective": unit.topic,
         "target_difficulty": unit.target_difficulty,
         "card_type": unit.card_type,
-        "source_material": [{"page_number": p.page_number, "content": p.content} for p in pages],
-        "custom_requirements": custom_requirements,
+        "coverage_tier": unit.coverage_tier,
     }
-    user_prompt = f"<GENERATOR_INPUT>{safe_json_dumps(payload)}</GENERATOR_INPUT>"
+    source_material = [{"page_number": p.page_number, "content": p.content} for p in pages]
+    user_prompt = (
+        f"<GENERATION_SPEC>{safe_json_dumps(spec)}</GENERATION_SPEC>\n"
+        f"<SOURCE_MATERIAL>{safe_json_dumps(source_material)}</SOURCE_MATERIAL>\n"
+        f"<USER_REQUIREMENTS>{safe_json_dumps({'custom_requirements': custom_requirements})}</USER_REQUIREMENTS>"
+    )
     return system_prompt, user_prompt
 
 

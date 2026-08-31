@@ -45,7 +45,7 @@ _PER_BATCH_COST = pytest.approx(2 * 0.5e-6 + 8 * 2e-6 + 5 * 8e-6)  # 0.000057 �
 def _dispatch(request: httpx.Request) -> httpx.Response:
     """mock transport 全链路分派（模块级，供失败注入工厂复用）：<PLANNER_INPUT> →
     按请求配额产出锚定单元（引用请求内组页）；<SCORING_INPUT> → ID 守恒的确定性
-    分数；其余（<GENERATOR_INPUT>）→ 1 张合法卡（1 单元 1 批）。usage 统一
+    分数；其余（<GENERATION_SPEC>）→ 1 张合法卡（1 单元 1 批）。usage 统一
     hit=2/miss=8/output=5——cost 估算可算。"""
 
     body = json.loads(request.content)
@@ -54,8 +54,8 @@ def _dispatch(request: httpx.Request) -> httpx.Response:
         payload = json.loads(user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0])
         chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
         units: list[dict[str, object]] = []
-        for difficulty, quota in payload["difficulty_quota"].items():
-            for _ in range(quota):
+        for difficulty, quota_i in payload["difficulty_interval"].items():
+            for _ in range(quota_i["max"]):
                 units.append(
                     {
                         "source_chunk_ids": [chunk_ids[0]],
@@ -302,6 +302,7 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
     resp = client.get(f"/tasks/{task_id}/batches", headers=user)
     assert resp.status_code == 200
     items = resp.json()["items"]
+    print("REAL_BATCH_ITEMS:", len(items))
     assert len(items) == 6  # 1 单元 1 批（6 生成单元）
     first = items[0]
     assert first["status"] == "SUCCEEDED"
@@ -313,7 +314,7 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
     assert first["output_tokens"] == 5
     # 版本/model/http_status/duration
     assert first["model"] == "deepseek-v4-flash"
-    assert first["prompt_version"] == "v4"
+    assert first["prompt_version"] == "v5"
     assert first["schema_version"] == "v3"
     assert first["rubric_version"] == "v3"
     assert first["http_status"] == 200
@@ -380,9 +381,10 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     groups = resp.json()["groups"]
     by_key = {g["key"]: g for g in groups}
     assert set(by_key) == {"BASIC", "UNDERSTANDING", "DEEP_QUESTION"}
-    assert by_key["BASIC"]["card_count"] == 3
+    # 密度制（V25-D-25）：2 章 COMPACT，每章区间 (1,1) 经极小占比兜底 → 每难度各 1 单元
+    assert by_key["BASIC"]["card_count"] == 2
     assert by_key["UNDERSTANDING"]["card_count"] == 2
-    assert by_key["DEEP_QUESTION"]["card_count"] == 1
+    assert by_key["DEEP_QUESTION"]["card_count"] == 2
 
 
 def test_quality_summary_isolates_by_device(ctx: tuple[TestClient, Path]) -> None:
@@ -410,28 +412,29 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
     _run_task(client, db_path, user=user)
     after = client.get("/metrics").text
 
-    # llm（样卡 3 次 + 生成 6 批 + 评分 5 组 = 14 次 chat；规划调用不在 llm 指标口径）
+    # llm（样卡 3 次 + 生成 6 批 + 评分 6 次 = 15 次 chat；规划调用不在 llm 指标口径；
+    # 密度制 V25-D-25 后每章难度兜底产出 6 生成单元）
     ok_labels = ['model="deepseek-v4-flash"', 'http_status="200"']
     assert (
         _labeled_value(after, "llm_requests_total", ok_labels)
         - _labeled_value(before, "llm_requests_total", ok_labels)
-    ) == 14.0
+    ) == 15.0
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="cache_hit"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="cache_hit"'])
-    ) == 28.0  # 14 次 × 2
+    ) == 30.0  # 15 次 × 2
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="cache_miss"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="cache_miss"'])
-    ) == 112.0  # 14 次 × 8
+    ) == 120.0  # 15 次 × 8
     assert (
         _labeled_value(after, "llm_tokens_total", ['kind="output"'])
         - _labeled_value(before, "llm_tokens_total", ['kind="output"'])
-    ) == 70.0  # 14 次 × 5
+    ) == 75.0  # 15 次 × 5
     assert (
         _plain_value(after, "llm_request_duration_seconds_count")
         - _plain_value(before, "llm_request_duration_seconds_count")
-    ) == 14.0
+    ) == 15.0
     # generation（1 个任务 COMPLETED）
     assert (
         _labeled_value(after, "generation_tasks_total", ['result="COMPLETED"'])

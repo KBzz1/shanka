@@ -277,24 +277,30 @@ def _build_prompts(
     difficulty: str,
     pages: list[dict[str, object]],
 ) -> tuple[str, str]:
-    """Generator 双消息组装（spec §5.7 Generator 行，与正式批次同款）。
+    """Generator 双消息组装（spec §5.7 Generator 行，与正式批次同款三区块）。
 
-    稳定 system（generator prompt v3 + generator-output schema v2 原文）+ 动态 user
-    （<GENERATOR_INPUT> 安全 JSON 信封，safe_json_dumps 确定性序列化 + 信封边界转义）。
-    样卡 learning_objective 取章节名（样卡为预览性质——真实知识点由规划阶段产出）。
+    稳定 system（generator prompt + generator-output schema 原文）+ 动态 user 三区块
+    （V25-D-27：<GENERATION_SPEC> 机器规范 + <SOURCE_MATERIAL> 原文 +
+    <USER_REQUIREMENTS> 用户偏好；safe_json_dumps 确定性序列化 + 信封边界转义）。
+    样卡 learning_objective 取章节名（样卡为预览性质——真实知识点由规划阶段产出）；
+    coverage_tier 为 null（样卡阶段无规划层级）。
     """
     system_prompt = (
         f"{load_asset('prompts', 'generator')}\n\n<GENERATOR_OUTPUT_SCHEMA>\n"
         f"{load_asset('schemas', 'generator_output')}\n</GENERATOR_OUTPUT_SCHEMA>"
     )
-    payload = {
+    spec = {
         "learning_objective": chapter_name,
         "target_difficulty": difficulty,
         "card_type": "QUESTION",  # V2.5 契约 3.6：三档均 QUESTION（判断题另行引入）
-        "source_material": pages,
-        "custom_requirements": config.custom_requirements,
+        "coverage_tier": None,
     }
-    return system_prompt, f"<GENERATOR_INPUT>{safe_json_dumps(payload)}</GENERATOR_INPUT>"
+    user_prompt = (
+        f"<GENERATION_SPEC>{safe_json_dumps(spec)}</GENERATION_SPEC>\n"
+        f"<SOURCE_MATERIAL>{safe_json_dumps(pages)}</SOURCE_MATERIAL>\n"
+        f"<USER_REQUIREMENTS>{safe_json_dumps({'custom_requirements': config.custom_requirements})}</USER_REQUIREMENTS>"
+    )
+    return system_prompt, user_prompt
 
 
 def _to_sample_card(internal: dict[str, object], *, difficulty: str) -> dict[str, object]:

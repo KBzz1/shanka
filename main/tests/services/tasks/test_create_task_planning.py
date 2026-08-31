@@ -199,12 +199,12 @@ def test_create_task_budget_exceeded_rejected(session: Session, tmp_path: Path) 
             now=_NOW,
         )
     assert excinfo.value.code == ErrorCode.VALIDATION_ERROR
-    assert excinfo.value.message == "生成单元预算超出上限"
+    assert excinfo.value.message.startswith("生成单元预算超出上限")
     assert session.scalars(select(Task)).all() == []  # 不创建任务
 
 
 def test_create_task_budget_boundary_accepted(session: Session, tmp_path: Path) -> None:
-    """预算等于上限（5 章 COMPACT=15 = 15）→ 正常创建 DRAFT（显式 settings 参数通道）。"""
+    """预算等于上限（无页文本回落估算：5 章 COMPACT×1.2=18 = 18）→ 正常创建 DRAFT。"""
     user = _uuid()
     ctx = _seed(session, user_id=user, chapter_count=5)
     task = create_task(
@@ -215,7 +215,7 @@ def test_create_task_budget_boundary_accepted(session: Session, tmp_path: Path) 
         chapter_ids=ctx["chapter_ids"],
         config=_config("COMPACT"),
         now=_NOW,
-        settings=_budget_settings(tmp_path, max_units=15),
+        settings=_budget_settings(tmp_path, max_units=18),
     )
     assert task.status == "DRAFT"
     assert task.stage is None

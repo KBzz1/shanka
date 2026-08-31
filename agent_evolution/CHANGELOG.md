@@ -58,3 +58,22 @@
   Prompt 声明的 XML 标记包裹服务端 JSON 序列化输入；服务端难度键须为
   `DEEP_QUESTION`（Task 7 起规划/配额/分布口径同步改名），历史 `APPLICATION` 值经
   迁移映射（`domain/task.py` DIFFICULTY_V25_MIGRATION）为 `DEEP_QUESTION`。
+
+## 2026-08-31（密度制 V25-D-25/26/27）
+
+- **prompts/planner v4 → v5**：`difficulty_quota`（硬上限、"上限禁凑"）改为
+  `difficulty_interval`（`{min, max}` 密度区间，V25-D-25）——区间由章节内容规模推导，
+  区间内按实际内容密度取舍：来源充分向区间上部规划，来源稀薄允许低于 min 输出；
+  薄内容不注水、富内容不偷工。0/0 语义保持"禁止输出该难度"。
+- **prompts/generator v4 → v5**：运行时输入由单一 `<GENERATOR_INPUT>` 改为三区块
+  `<GENERATION_SPEC>`（机器规范：learning_objective/target_difficulty/card_type/
+  coverage_tier，V25-D-27）+ `<SOURCE_MATERIAL>`（原文）+ `<USER_REQUIREMENTS>`
+  （用户自定义偏好）；SPEC 枚举取值为锚定约束，字符串内容仍按不可信数据处理；
+  coverage_tier 用于校准详略与角度，不改变难度/卡型锚定。其余规则不变。
+- **schemas/planner_output v3 → v4**：字段与 v3 完全相同；数量约束由服务端密度区间
+  执行（$comment 记录语义），schema 不约束数量。
+- **manifest** 切换到 planner v5 / generator v5 / planner_output v4；scoring/rubric
+  保持 v3（四维语义与密度制不冲突）。
+- 配套服务端变更（同次）：`quota.py` 密度锚点 {6,12,20}/万字 + 区间推导；
+  `planner_validator` 区间上限截断（min 不强制填充）；`knowledge_points.coverage_tier`
+  落库（迁移 a3f8d21c9e47）并注入 GENERATION_SPEC。

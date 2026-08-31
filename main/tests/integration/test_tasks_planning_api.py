@@ -212,7 +212,7 @@ def test_tasks_create_budget_exceeded_400(ctx_strict: tuple[TestClient, Path]) -
     assert resp.status_code == 400
     error = resp.json()["error"]
     assert error["code"] == "VALIDATION_ERROR"
-    assert error["message"] == "生成单元预算超出上限"
+    assert error["message"].startswith("生成单元预算超出上限")
     factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
     with factory() as session:
         rows = session.scalars(select(Task)).all()

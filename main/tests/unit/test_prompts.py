@@ -30,7 +30,7 @@ def test_prompts_load_asset_missing_raises_internal_error() -> None:
 
 def test_prompts_asset_versions_match_manifest() -> None:
     versions = asset_versions()
-    assert versions["prompt_version"] == "v4"
+    assert versions["prompt_version"] == "v5"
     assert versions["schema_version"] == "v3"
     assert versions["rubric_version"] == "v3"
 

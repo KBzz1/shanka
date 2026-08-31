@@ -34,12 +34,15 @@ def validate_and_truncate(
     raw: dict[str, Any],
     *,
     allowed_page_ids: set[str],
-    quota: dict[str, int],
+    interval: dict[str, dict[str, int]],
     max_pages_per_unit: int,
     max_chars_per_unit: int,
     page_chars: dict[str, int],
 ) -> list[dict[str, Any]]:
-    """Planner 原始输出 → 规范化且按配额截断后的 units（priority 1..N）。
+    """Planner 原始输出 → 规范化且按区间上限截断后的 units（priority 1..N）。
+
+    interval 契约（V25-D-25 密度制）：`{难度: {"min": n, "max": n}}`——max 是硬上限
+    （超配确定性截断、不重试），min 是软目标（内容不足允许低于下界，不强制填充）。
 
     page_chars 契约：`{chunk_id: char_count}`，调用方必须按 `load_pages` 页序
     （page_number 升序）构造——规范化按该插入序重排来源，保证兼容投影首项确定
@@ -55,7 +58,7 @@ def validate_and_truncate(
             max_chars_per_unit=max_chars_per_unit,
             page_chars=page_chars,
         )
-    kept = _truncate_by_quota(units, quota)
+    kept = _enforce_interval_max(units, interval)
     page_order = {chunk_id: i for i, chunk_id in enumerate(page_chars)}
     return _normalize(kept, page_order=page_order)
 
@@ -106,11 +109,16 @@ def _priority_key(unit: dict[str, Any], index: int) -> tuple[int, int]:
         return (index, index)
 
 
-def _truncate_by_quota(units: list[dict[str, Any]], quota: dict[str, int]) -> list[dict[str, Any]]:
-    """按难度配额确定性截断（§3.5）：每难度按 priority 升序保留 quota 个，输出保持原数组序。"""
+def _enforce_interval_max(
+    units: list[dict[str, Any]], interval: dict[str, dict[str, int]]
+) -> list[dict[str, Any]]:
+    """按难度区间上限确定性截断：每难度按 priority 升序保留 max 个，输出保持原数组序。
+
+    min 不在本层强制：内容不足时低于下界是合法输出（密度制"不注水"语义，V25-D-25）。
+    """
     surviving: set[int] = set()
     for difficulty in _DIFFICULTY_ORDER:
-        limit = quota.get(difficulty, 0)
+        limit = interval.get(difficulty, {}).get("max", 0)
         candidates = [
             (i, unit) for i, unit in enumerate(units) if unit["target_difficulty"] == difficulty
         ]
@@ -120,7 +128,10 @@ def _truncate_by_quota(units: list[dict[str, Any]], quota: dict[str, int]) -> li
 
 
 def _normalize(units: list[dict[str, Any]], *, page_order: dict[str, int]) -> list[dict[str, Any]]:
-    """规范化：source_chunk_ids 按页序重排 + 去重；priority 重排 1..N；只保留契约字段。"""
+    """规范化：source_chunk_ids 按页序重排 + 去重；priority 重排 1..N；保留契约字段。
+
+    coverage_tier 自 v5 起落库并传给生成阶段（V25-D-25）；历史模型输出缺省时为 None。
+    """
     normalized: list[dict[str, Any]] = []
     for unit in units:
         chunk_ids = list(
@@ -137,6 +148,7 @@ def _normalize(units: list[dict[str, Any]], *, page_order: dict[str, int]) -> li
                 "learning_objective": unit["learning_objective"],
                 "target_difficulty": unit["target_difficulty"],
                 "card_type": unit["card_type"],
+                "coverage_tier": unit.get("coverage_tier"),
             }
         )
     return [{**unit, "priority": i + 1} for i, unit in enumerate(normalized)]

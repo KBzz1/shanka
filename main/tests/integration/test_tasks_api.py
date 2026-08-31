@@ -39,7 +39,7 @@ _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 def _client_factory(api_key: str) -> DeepSeekClient:
     """mock transport 全链路分派（LLM 升级管线）：<PLANNER_INPUT> → 按请求配额产出
     锚定单元（引用请求内组页）；<SCORING_INPUT> → ID 守恒的确定性分数；其余
-    （<GENERATOR_INPUT>）→ 每批 1 张合法卡（1 单元 1 批）。COMPACT 2 章 = 6 单元
+    （<GENERATION_SPEC>）→ 每批 1 张合法卡（1 单元 1 批）。COMPACT 2 章 = 6 单元
     → 6 批 → 6 卡。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -56,8 +56,8 @@ def _client_factory(api_key: str) -> DeepSeekClient:
             # 难度键原样回显（与 test_observability 同款）：planner 输出 schema v3
             # 枚举为 BASIC/UNDERSTANDING/DEEP_QUESTION 且单元必填 coverage_tier
             # （Task 7 资产 v4/v3 起服务端配额键与模型输出口径一致）
-            for difficulty, quota in payload["difficulty_quota"].items():
-                for _ in range(quota):
+            for difficulty, quota_i in payload["difficulty_interval"].items():
+                for _ in range(quota_i["max"]):
                     units.append(
                         {
                             "source_chunk_ids": [chunk_ids[0]],

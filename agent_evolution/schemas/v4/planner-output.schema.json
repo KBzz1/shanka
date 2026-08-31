@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "planner-output.schema.json",
+  "title": "PlannerOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "units"
+  ],
+  "properties": {
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_chunk_ids",
+          "learning_objective",
+          "target_difficulty",
+          "card_type",
+          "coverage_tier"
+        ],
+        "properties": {
+          "source_chunk_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "learning_objective": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "target_difficulty": {
+            "enum": [
+              "BASIC",
+              "UNDERSTANDING",
+              "DEEP_QUESTION"
+            ]
+          },
+          "card_type": {
+            "enum": [
+              "QUESTION",
+              "TRUE_FALSE"
+            ]
+          },
+          "coverage_tier": {
+            "enum": [
+              "CORE",
+              "IMPORTANT",
+              "LOW_FREQUENCY"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$comment": "v4：units 数量约束由服务端密度区间执行（V25-D-25），本 schema 不约束数量；字段与 v3 相同。"
+}

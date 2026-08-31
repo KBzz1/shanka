@@ -8,6 +8,7 @@ session_factory 定式——adaptation 见任务报告）。mock chat 从请求�
 
 import json
 import logging
+import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -43,9 +44,10 @@ from services.generation.planning_executor import (
     run_planning,
 )
 from services.generation.quota import (
-    allocate_chapter_quota,
-    allocate_group_quota,
-    allocate_task_quota,
+    allocate_chapter_intervals,
+    allocate_group_interval,
+    difficulty_interval,
+    interval_for_chapter,
 )
 from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.service import create_task
@@ -222,12 +224,28 @@ def _ok_response(content: str) -> httpx.Response:
     )
 
 
-def _expected_sub_quota(pages: list[Any]) -> dict[str, int]:
-    """镜像 run_planning 的配额链：1 章 COMPACT 40/40/20 → 组子配额。"""
-    task_quota = allocate_task_quota(3, 0.4, 0.4, 0.2)
-    chapter_quotas = allocate_chapter_quota(task_quota, 1)
+def _expected_sub_interval(pages: list[Any]) -> dict[str, dict[str, int]]:
+    """镜像 run_planning 的密度区间链（V25-D-25）：1 章 COMPACT 40/40/20 → 组区间。
+
+    测试页字符总量 < planner_max_input_chars → 单组，组区间 = 章难度区间。
+    """
+    from app.config import Settings
+
+    settings = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
     char_counts = [sum(p.char_count for p in pages)]
-    return allocate_group_quota(chapter_quotas[0], char_counts)[0]
+    intervals = allocate_chapter_intervals(
+        char_counts,
+        "COMPACT",
+        0.4,
+        0.4,
+        0.2,
+        cards_per_10k={
+            "COMPACT": settings.cards_per_10k_compact,
+            "BALANCED": settings.cards_per_10k_balanced,
+            "EXTENSIVE": settings.cards_per_10k_extensive,
+        },
+    )
+    return intervals[0]
 
 
 def _claim_and_plan(
@@ -403,9 +421,9 @@ def test_planning_success_reuses_normalized(
                 .order_by(TextChunk.page_number)
             ).all()
         )
-        quota = _expected_sub_quota(pages)
+        interval = _expected_sub_interval(pages)
         op_key = f"planning:{chapter_id}:0"
-        fp = group_fingerprint(pages, quota, asset_versions(), "COMPACT")
+        fp = group_fingerprint(pages, interval, asset_versions(), "COMPACT")
         units = [
             {
                 "source_chunk_ids": [pages[0].chunk_id],
@@ -479,9 +497,9 @@ def test_planning_budget_reset_prevented(
                 .order_by(TextChunk.page_number)
             ).all()
         )
-        quota = _expected_sub_quota(pages)
+        interval = _expected_sub_interval(pages)
         op_key = f"planning:{chapter_id}:0"
-        fp = group_fingerprint(pages, quota, asset_versions(), "COMPACT")
+        fp = group_fingerprint(pages, interval, asset_versions(), "COMPACT")
         for attempt_no in (1, 2, 3):
             att = create_attempt(
                 session,
@@ -624,13 +642,18 @@ def test_planning_failed_final_condition_update(
 
 
 def test_planning_groups_split_and_sub_quota(
-    session_factory: Callable[[], Session],
+    session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """按 planner_max_input_chars 连续页拆组：2 组各一次调用、每组只引用本组页。"""
+    """按 planner_max_input_chars 连续页拆组：2 组各一次调用、每组只引用本组页。
+
+    密度制（V25-D-25）：页文本加厚到 300 字符（总 1200，EXTENSIVE 目标 2.4 张），
+    保证两组的难度区间上界都 ≥1——薄内容在密度制下合法地产出更少单元。
+    """
+    monkeypatch.setattr(sys.modules[__name__], "_page_content", lambda pn: f"第{pn}页内容" * 120)
     user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
-        planner_max_input_chars=300,
+        planner_max_input_chars=1300,
         _env_file=None,  # type: ignore[call-arg]
     )
     with session_factory() as session:
@@ -667,9 +690,9 @@ def test_planning_groups_split_and_sub_quota(
         task = session.get(Task, task_id)
         assert task is not None
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
-    assert calls == 2  # 4 页 × 100 字符 = 400 > 300 → 2 组
-    assert [len(pages) for pages in received] == [3, 1]  # 连续页分组：[1,2,3] + [4]
-    assert all(received[0][i] != received[1][0] for i in range(3))  # 组间无重叠页
+    assert calls == 2  # 4 页 × 600 字符 = 2400 > 1300 → 2 组
+    assert [len(pages) for pages in received] == [2, 2]  # 连续页分组：[1,2] + [3,4]
+    assert all(received[0][i] != received[1][0] for i in range(2))  # 组间无重叠页
     assert len(kps) == 2
     assert task.total_batch_count == 2
 
@@ -907,12 +930,23 @@ def test_planning_mixed_skipped_and_empty_records_skips(
                 .order_by(TextChunk.page_number)
             ).all()
         )
-        # 镜像子配额：组 0（页 1-3，300 字符）拿满配额；组 1（页 4，100 字符）零配额
-        task_quota = allocate_task_quota(3, 0.4, 0.4, 0.2)
-        chapter_quotas = allocate_chapter_quota(task_quota, 1)
-        sub_quotas = allocate_group_quota(chapter_quotas[0], [300, 100])
+        # 镜像难度区间（V25-D-25）：组 0（页 1-3）的区间由章区间按字符占比拆分
+        from app.config import Settings as _Settings
+
+        _s = _Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
+        chapter_interval = interval_for_chapter(
+            400,
+            "COMPACT",
+            cards_per_10k={
+                "COMPACT": _s.cards_per_10k_compact,
+                "BALANCED": _s.cards_per_10k_balanced,
+                "EXTENSIVE": _s.cards_per_10k_extensive,
+            },
+        )
+        di = difficulty_interval(chapter_interval, 0.4, 0.4, 0.2)
+        sub_interval = allocate_group_interval(di, [300, 100])[0]
         op_key0 = f"planning:{chapter_id}:0"
-        fp0 = group_fingerprint(pages[:3], sub_quotas[0], asset_versions(), "COMPACT")
+        fp0 = group_fingerprint(pages[:3], sub_interval, asset_versions(), "COMPACT")
         for attempt_no in (1, 2, 3):
             att = create_attempt(
                 session,

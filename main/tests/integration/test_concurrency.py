@@ -653,7 +653,7 @@ def test_concurrency_retry_after_failure_publishes_replacement(
             content = _scoring_content(request)
         elif "<PLANNER_INPUT>" in user_msg:
             content = _planning_content(request)
-        else:  # GENERATOR_INPUT
+        else:  # GENERATION_SPEC
             run_phase["gen_calls"] += 1
             if run_phase["fail_run"] and run_phase["gen_calls"] == 2:
                 return httpx.Response(401, json={"error": {"message": "invalid api key"}})

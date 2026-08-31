@@ -67,20 +67,27 @@ def _manifest_versions() -> set[str]:
 def test_manifest_pins_v4_v3_versions_and_paths() -> None:
     """manifest 升版：prompts v4、schemas（除 card v1）v3、rubrics v3，path 指向新目录。"""
     manifest = load_manifest()
-    assert manifest["prompts"]["planner"]["version"] == "v4"
-    assert manifest["prompts"]["generator"]["version"] == "v4"
+    assert manifest["prompts"]["planner"]["version"] == "v5"
+    assert manifest["prompts"]["generator"]["version"] == "v5"
     assert manifest["prompts"]["rewrite"]["version"] == "v4"
     assert manifest["prompts"]["scoring"]["version"] == "v3"
     assert manifest["schemas"]["card"]["version"] == "v1"  # 持久化 Card Schema 保持 v1
-    assert manifest["schemas"]["planner_output"]["version"] == "v3"
+    # 密度制 V25-D-25/26/27：planner v5 / generator v5 / planner_output v4；其余保持
+    assert manifest["schemas"]["planner_output"]["version"] == "v4"
     assert manifest["schemas"]["generator_output"]["version"] == "v3"
     assert manifest["schemas"]["scoring_output"]["version"] == "v3"
     assert manifest["rubrics"]["main"]["version"] == "v3"
-    for name in ("planner", "generator", "rewrite"):
-        assert str(manifest["prompts"][name]["path"]).startswith("prompts/v4/")
+    for name in ("planner", "generator"):
+        assert str(manifest["prompts"][name]["path"]).startswith("prompts/v5/")
+    assert str(manifest["prompts"]["rewrite"]["path"]).startswith("prompts/v4/")
     assert str(manifest["prompts"]["scoring"]["path"]).startswith("rubrics/v3/")
     for name, entry in manifest["schemas"].items():
-        expected = "schemas/v1/" if name == "card" else "schemas/v3/"
+        if name == "card":
+            expected = "schemas/v1/"
+        elif name == "planner_output":
+            expected = "schemas/v4/"
+        else:
+            expected = "schemas/v3/"
         assert str(entry["path"]).startswith(expected)
     assert str(manifest["rubrics"]["main"]["path"]).startswith("rubrics/v3/")
 

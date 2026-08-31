@@ -139,7 +139,8 @@ def planner_prompts(
             "start_page": pages[0]["page_number"],
             "end_page": pages[-1]["page_number"],
         },
-        "difficulty_quota": quota,
+        # 演示脚本单组固定数量：区间退化为 [q, q]（与旧"每难度 q 个"行为一致）
+        "difficulty_interval": {d: {"min": q, "max": q} for d, q in quota.items()},
         "limits": {
             "max_source_chunks_per_unit": settings.max_source_pages_per_unit,
             "max_source_chars_per_unit": settings.generator_max_input_chars,
@@ -158,24 +159,30 @@ def planner_prompts(
 
 
 def generator_prompts(unit: dict[str, Any], page_by_id: dict[str, PageText]) -> tuple[str, str]:
-    """Generator 双消息组装（与 batches._build_generator_prompts 同款）：
-    稳定 system（generator v3 + generator-output schema 原文）+ 动态 user（<GENERATOR_INPUT> 信封）。
+    """Generator 双消息组装（与 batches._build_generator_prompts 同款三区块，V25-D-27）：
+    稳定 system（generator prompt + generator-output schema 原文）+ 动态 user
+    （<GENERATION_SPEC> + <SOURCE_MATERIAL> + <USER_REQUIREMENTS>）。
     """
     system_prompt = (
         f"{load_asset('prompts', 'generator')}\n\n<GENERATOR_OUTPUT_SCHEMA>\n"
         f"{load_asset('schemas', 'generator_output')}\n</GENERATOR_OUTPUT_SCHEMA>"
     )
-    payload = {
+    spec = {
         "learning_objective": unit["learning_objective"],
         "target_difficulty": unit["target_difficulty"],
         "card_type": unit["card_type"],
-        "source_material": [
-            {"page_number": page_by_id[cid]["page_number"], "content": page_by_id[cid]["content"]}
-            for cid in unit["source_chunk_ids"]
-        ],
-        "custom_requirements": None,
+        "coverage_tier": unit.get("coverage_tier"),
     }
-    return system_prompt, f"<GENERATOR_INPUT>{safe_json_dumps(payload)}</GENERATOR_INPUT>"
+    source_material = [
+        {"page_number": page_by_id[cid]["page_number"], "content": page_by_id[cid]["content"]}
+        for cid in unit["source_chunk_ids"]
+    ]
+    user_prompt = (
+        f"<GENERATION_SPEC>{safe_json_dumps(spec)}</GENERATION_SPEC>\n"
+        f"<SOURCE_MATERIAL>{safe_json_dumps(source_material)}</SOURCE_MATERIAL>\n"
+        f"<USER_REQUIREMENTS>{safe_json_dumps({'custom_requirements': None})}</USER_REQUIREMENTS>"
+    )
+    return system_prompt, user_prompt
 
 
 def chat_with_retry(
@@ -407,7 +414,7 @@ def main() -> None:
                     f"Generator {i}/{len(units)}（代表，后续单元同构省略）",
                     sys_prompt,
                     user_prompt,
-                    "GENERATOR_INPUT",
+                    "GENERATION_SPEC",
                 )
             result = chat_with_retry(
                 client,

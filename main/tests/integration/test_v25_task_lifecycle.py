@@ -819,7 +819,7 @@ class _StubClient:
     ) -> dict[str, object]:
         import json as _json
 
-        raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
+        raw = user_prompt.split("<GENERATION_SPEC>")[1].split("</GENERATION_SPEC>")[0]
         difficulty = str(_json.loads(raw)["target_difficulty"])
         return {
             "content": _json.dumps(

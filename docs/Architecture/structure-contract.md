@@ -183,7 +183,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `coverage_mode` | enum | ✓ | `COMPACT`(精简) / `BALANCED`(均衡) / `EXTENSIVE`(充分覆盖);表达知识覆盖深度,不显示、不承诺卡片数量;隐藏安全硬上限仍由代码控制(PRD 5.4.1) |
+| `coverage_mode` | enum | ✓ | `COMPACT`(精简) / `BALANCED`(均衡) / `EXTENSIVE`(充分覆盖);表达知识覆盖深度,不显示、不承诺卡片数量。数量采用目标密度制(V25-D-26):服务端按章节字符规模(每 1 万字 ≈ 6/12/20 张)推导难度目标区间,Planner 在区间内按内容取舍(低于下限合法、超上限确定性截断);区间上限与 `max_generation_units_per_task` 为代码护栏 |
 | `difficulty_ratio` | object | ✓ | `basic / understanding / deep_question` 为 0~100 的 10% 整数档,合计 100,允许任一档为 0;比例为 0 的难度不生成单元和样卡 |
 | `custom_requirements` | string | ✗ | 仅当前任务生效 |
 
@@ -204,6 +204,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `learning_objective` | string | ✓ | 学习目标(Planner 输出,语义复用 `topic` 列;不再用"第X章-知识点N"占位) |
 | `target_difficulty` | enum | ✓ | `BASIC` / `UNDERSTANDING` / `DEEP_QUESTION`(规划锚定,旧数据为 null;历史 `APPLICATION` 经迁移映射为 `DEEP_QUESTION`) |
 | `card_type` | enum | ✓ | `QUESTION` / `TRUE_FALSE`(规划锚定,旧数据为 null) |
+| `coverage_tier` | enum | ✗ | `CORE` / `IMPORTANT` / `LOW_FREQUENCY`(Planner 覆盖层级,V25-D-26 起落库并注入 `<GENERATION_SPEC>`;历史行为 null) |
 | `priority` | int | ✓ | 全局顺序(服务端按章序、组序、组内数组顺序合并分配,Planner 不输出数值) |
 | `status` | enum | ✓ | `PENDING` / `PROCESSED` / `SKIPPED` |
 
@@ -872,9 +873,9 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 
 - Rubric 评分执行者:LLM-as-judge;评分在独立 SCORING 阶段执行(4.1),评分 Prompt 资产入口:
   `agent_evolution/manifest.json` 的 `prompts.scoring`。
-- 当前资产登记:Planner Prompt v3 / planner-output Schema v2;Generator Prompt v3 /
-  generator-output Schema v2 / 投影后 card Schema v1;Rewrite Prompt v3 / generator-output
-  Schema v2 / 投影后 card Schema v1;Scoring Prompt v2 / scoring-output Schema v2 / Rubric v2。
+- 当前资产登记:Planner Prompt v5 / planner-output Schema v4;Generator Prompt v5 /
+  generator-output Schema v3 / 投影后 card Schema v1;Rewrite Prompt v4 / generator-output
+  Schema v3 / 投影后 card Schema v1;Scoring Prompt v3 / scoring-output Schema v3 / Rubric v3。
   具体 path 以 manifest 为唯一权威,禁止运行时绕过 manifest 读取相对路径。
 - `rubric_version` / `prompt_version` / `schema_version` 按每次调用实际使用的入口记录,不能用
   单个全局 schema_version 混写 card v1 与 generator/planner/scoring output v2。

@@ -81,7 +81,7 @@ def _pipeline_factory(
 
     - <PLANNER_INPUT>：按请求配额产出锚定单元（引用请求内组页）；学习目标全局唯一
       编号（跨规划调用共享计数器——生成卡内容可按目标序号定位）。
-    - <GENERATOR_INPUT>：从学习目标提取序号 → 每批 1 张卡（cards 按序号循环）。
+    - <GENERATION_SPEC>：从学习目标提取序号 → 每批 1 张卡（cards 按序号循环）。
     - <SCORING_INPUT>：ID 集合守恒的分数（scores 四维；缺省正常分数）。
     """
     counter = [0]
@@ -97,8 +97,8 @@ def _pipeline_factory(
                 )
                 chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
                 units: list[dict[str, object]] = []
-                for difficulty, quota in payload["difficulty_quota"].items():
-                    for _ in range(quota):
+                for difficulty, interval in payload["difficulty_interval"].items():
+                    for _ in range(interval["max"]):
                         units.append(
                             {
                                 "source_chunk_ids": [chunk_ids[0]],
@@ -124,10 +124,10 @@ def _pipeline_factory(
                     ensure_ascii=False,
                 )
             else:  # 生成调用：1 单元 1 批 → 每批 1 张卡（按目标序号循环）
-                payload = json.loads(
-                    user.split("<GENERATOR_INPUT>", 1)[1].split("</GENERATOR_INPUT>", 1)[0]
+                spec = json.loads(
+                    user.split("<GENERATION_SPEC>", 1)[1].split("</GENERATION_SPEC>", 1)[0]
                 )
-                objective = str(payload["learning_objective"])
+                objective = str(spec["learning_objective"])
                 # 样卡生成（V5A 真实样卡）：learning_objective 为章节名（无"知识点"前缀）→
                 # 固定取首张合法卡（样卡构成另一组验收用例覆盖；此处仅保证流水线可通）
                 index = int(objective.split("知识点", 1)[1]) if "知识点" in objective else 0
@@ -452,7 +452,7 @@ def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]
         assert item["output_tokens"] == 5
         # AC-07-a：整批质量统计（仅观测，随 rubrics 落库）
         assert item["rubric_version"] == "v3"
-        assert item["prompt_version"] == "v4" and item["schema_version"] == "v3"
+        assert item["prompt_version"] == "v5" and item["schema_version"] == "v3"
         assert item["model"] == "deepseek-v4-flash"
         assert item["http_status"] == 200
         assert item["coverage_rate"] == 1.0

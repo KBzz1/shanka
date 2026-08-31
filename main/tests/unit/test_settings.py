@@ -36,7 +36,7 @@ def test_new_hard_limits_defaults() -> None:
     settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.planner_max_input_chars == 20_000
     assert settings.max_generation_units_per_task == 300
-    assert settings.max_planner_groups_per_task == 30
+    assert settings.max_planner_groups_per_task == 60
     assert settings.max_source_pages_per_unit == 8
     assert settings.generator_max_input_chars == 10_000
     assert settings.max_scoring_calls_per_task == 60

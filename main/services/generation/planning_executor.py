@@ -53,10 +53,8 @@ from services.generation.ledger import (
 )
 from services.generation.planner_validator import validate_and_truncate
 from services.generation.quota import (
-    allocate_chapter_quota,
-    allocate_group_quota,
-    allocate_task_quota,
-    task_unit_budget,
+    allocate_chapter_intervals,
+    allocate_group_interval,
 )
 from services.pdf.text_chunks import load_pages
 from services.tasks.lease import TaskLease, renew_task, require_lease
@@ -90,16 +88,20 @@ def _format_cutoff(now: str, minutes: int) -> str:
 
 def group_fingerprint(
     pages: Sequence[TextChunk],
-    quota: dict[str, int],
+    interval: dict[str, dict[str, int]],
     versions: dict[str, str],
     coverage_mode: str,
 ) -> str:
-    """规划组输入指纹（spec §6.2）：页 ID + content_sha256 + 覆盖模式 + 子配额 + prompt/schema 版本。"""
+    """规划组输入指纹（spec §6.2）：页 ID + content_sha256 + 覆盖模式 + 难度区间 + prompt/schema 版本。"""
     payload = {
         "pages": [{"chunk_id": p.chunk_id, "content_sha256": p.content_sha256} for p in pages],
         "coverage_mode": coverage_mode,
-        "difficulty_quota": {
-            d: quota.get(d, 0) for d in ("BASIC", "UNDERSTANDING", "DEEP_QUESTION")
+        "difficulty_interval": {
+            d: {
+                "min": interval.get(d, {}).get("min", 0),
+                "max": interval.get(d, {}).get("max", 0),
+            }
+            for d in ("BASIC", "UNDERSTANDING", "DEEP_QUESTION")
         },
         "planner_prompt_version": versions["planner_prompt_version"],
         "planner_output_schema_version": versions["planner_output_schema_version"],
@@ -320,7 +322,8 @@ def run_planning(
             session, task, error_code=ErrorCode.GENERATION_FAILED.value, skipped=0
         )
         return
-    # 2. 三层配额（§3.5）：任务总配额 → 章配额 → 组子配额（char_count 占比）
+    # 2. 密度制区间（V25-D-25）：章字符数 → 目标区间 → 按难度占比拆分；组间按字符占比再拆。
+    #    区间 = [max(3,⌊0.6t⌋)∧⌈1.2t⌉, ⌈1.2t⌉]：下界软目标（内容不足允许低于），上界硬截断。
     config = json.loads(task.generation_config)
     ratio = config["difficulty_ratio"]
     # V2.5 兼容读取：新配置键 coverage_mode / deep_question（0~100 整数档），
@@ -333,19 +336,27 @@ def run_planning(
     def _fraction(value: float) -> float:
         return value / 100 if value > 1 else value
 
-    task_quota = allocate_task_quota(
-        task_unit_budget(len(chapters), mode),
+    chapter_char_counts = [
+        sum(page.char_count for group in groups for page in group) for groups in chapter_groups
+    ]
+    chapter_intervals = allocate_chapter_intervals(
+        chapter_char_counts,
+        str(mode),
         _fraction(ratio_basic),
         _fraction(ratio_understanding),
         _fraction(ratio_deep),
+        cards_per_10k={
+            "COMPACT": settings.cards_per_10k_compact,
+            "BALANCED": settings.cards_per_10k_balanced,
+            "EXTENSIVE": settings.cards_per_10k_extensive,
+        },
     )
-    chapter_quotas = allocate_chapter_quota(task_quota, len(chapters))
     # 3. 组调用（账本恢复/预算；STARTED 心跳 commit → 事务外 chat → 终态+心跳 commit）
     skipped_groups = 0
     merged: list[tuple[dict[str, Any], str]] = []
     for ci, (entry, groups) in enumerate(zip(chapters, chapter_groups)):
         char_counts = [sum(p.char_count for p in group) for group in groups]
-        sub_quotas = allocate_group_quota(chapter_quotas[ci], char_counts)
+        sub_intervals = allocate_group_interval(chapter_intervals[ci], char_counts)
         for gi, group in enumerate(groups):
             session.refresh(task)
             if task.status != _GENERATING_STATUS or task.stage != _PLANNING_STAGE:
@@ -360,8 +371,8 @@ def run_planning(
                     now=_now_utc(),
                 )
             operation_key = f"planning:{entry['chapter_id']}:{gi}"
-            quota = sub_quotas[gi]
-            fingerprint = group_fingerprint(group, quota, versions, str(mode))
+            interval = sub_intervals[gi]
+            fingerprint = group_fingerprint(group, interval, versions, str(mode))
             units = _run_group(
                 session,
                 task,
@@ -369,7 +380,7 @@ def run_planning(
                 client=client,
                 operation_key=operation_key,
                 fingerprint=fingerprint,
-                quota=quota,
+                interval=interval,
                 coverage_mode=str(mode),
                 pages=group,
                 chapter=entry,
@@ -439,7 +450,7 @@ def _run_group(
     client: LlmChatClient,
     operation_key: str,
     fingerprint: str,
-    quota: dict[str, int],
+    interval: dict[str, dict[str, int]],
     coverage_mode: str,
     pages: list[TextChunk],
     chapter: dict[str, Any],
@@ -498,7 +509,7 @@ def _run_group(
     page_chars = {p.chunk_id: p.char_count for p in pages}
     system_prompt, user_prompt = _build_planner_prompts(
         chapter=chapter,
-        quota=quota,
+        interval=interval,
         coverage_mode=coverage_mode,
         pages=pages,
         settings=settings,
@@ -602,7 +613,7 @@ def _run_group(
             units = validate_and_truncate(
                 raw,
                 allowed_page_ids=allowed_page_ids,
-                quota=quota,
+                interval=interval,
                 max_pages_per_unit=settings.max_source_pages_per_unit,
                 max_chars_per_unit=settings.generator_max_input_chars,
                 page_chars=page_chars,
@@ -644,7 +655,7 @@ def _attempt_total(session: Session, task: Task, operation_key: str) -> int:
 def _build_planner_prompts(
     *,
     chapter: dict[str, Any],
-    quota: dict[str, int],
+    interval: dict[str, dict[str, int]],
     coverage_mode: str,
     pages: list[TextChunk],
     settings: Settings,
@@ -663,7 +674,7 @@ def _build_planner_prompts(
             "end_page": chapter["end_page"],
         },
         "coverage_mode": coverage_mode,
-        "difficulty_quota": quota,
+        "difficulty_interval": interval,
         "limits": {
             "max_source_chunks_per_unit": settings.max_source_pages_per_unit,
             "max_source_chars_per_unit": settings.generator_max_input_chars,
@@ -881,6 +892,7 @@ def _finish_planning_generating(
                 status="PENDING",
                 target_difficulty=unit["target_difficulty"],
                 card_type=unit["card_type"],
+                coverage_tier=unit.get("coverage_tier"),
                 source_chunk_ids=json.dumps(chunk_ids, ensure_ascii=False),
             )
         )

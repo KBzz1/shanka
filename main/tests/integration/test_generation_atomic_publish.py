@@ -409,7 +409,7 @@ def _scoring_content(request: httpx.Request) -> str:
 
 
 def _client_factory(api_key: str) -> DeepSeekClient:
-    """mock transport 分派：<SCORING_INPUT> → 分数；其余（<GENERATOR_INPUT>）→ 每批 1 卡。"""
+    """mock transport 分派：<SCORING_INPUT> → 分数；其余（<GENERATION_SPEC>）→ 每批 1 卡。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)

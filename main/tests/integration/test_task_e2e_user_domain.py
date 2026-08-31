@@ -52,7 +52,7 @@ class FakeClient:
 
 def _client_factory(api_key: str) -> DeepSeekClient:
     """mock transport 全链路分派（与 test_tasks_api 同款）：<PLANNER_INPUT> → 按请求配额
-    产出锚定单元；<SCORING_INPUT> → ID 守恒的确定性分数；其余（<GENERATOR_INPUT>）→
+    产出锚定单元；<SCORING_INPUT> → ID 守恒的确定性分数；其余（<GENERATION_SPEC>）→
     每批 1 张合法卡。COMPACT 2 章 = 6 单元 → 6 批 → 6 卡。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -64,8 +64,8 @@ def _client_factory(api_key: str) -> DeepSeekClient:
             )
             chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
             units: list[dict[str, object]] = []
-            for difficulty, quota in payload["difficulty_quota"].items():
-                for _ in range(quota):
+            for difficulty, quota_i in payload["difficulty_interval"].items():
+                for _ in range(quota_i["max"]):
                     units.append(
                         {
                             "source_chunk_ids": [chunk_ids[0]],
@@ -214,13 +214,13 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
         if final["status"] == "COMPLETED":
             break
     assert final["status"] == "COMPLETED"
-    assert final["generated_card_count"] == 6
+    assert final["generated_card_count"] == 32
     assert final["ended_at"] is not None
 
     # 6. 归属判别：全部卡片 user_id 非空（归属切 user 域）
     engine = create_db_engine(f"sqlite:///{db_path}")
     with engine.connect() as conn:
         cards = conn.execute(text("SELECT card_id, user_id, deck_id FROM cards")).all()
-    assert len(cards) == 6
+    assert len(cards) == 32
     assert all(row[1] is not None for row in cards), "卡片 user_id 应非空（user 域归属）"
     assert {row[2] for row in cards} == {deck_id}

@@ -226,7 +226,7 @@ def _db_factory(db_path: Path) -> sessionmaker[Session]:
 
 
 def _sample_factory(api_key: str) -> DeepSeekClient:
-    """样卡 worker 扫描注入：仅 GENERATOR_INPUT → 固定合法卡（崩溃模拟扫描用的
+    """样卡 worker 扫描注入：仅 GENERATION_SPEC → 固定合法卡（崩溃模拟扫描用的
     _scripted_factory 不参与样卡阶段——避免调用计数被 3 次样卡调用打乱）。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -262,7 +262,7 @@ def _scripted_factory(
 
     - <PLANNER_INPUT>：按请求配额产出锚定单元（学习目标全局唯一编号——生成调用可按
       目标定位批次）；2 章 → 2 次规划调用 → 6 单元（知识点0..5）。
-    - <GENERATOR_INPUT>：crash_call 次生成调用抛 SystemExit（崩溃模拟——批 2 处理
+    - <GENERATION_SPEC>：crash_call 次生成调用抛 SystemExit（崩溃模拟——批 2 处理
       中断）；其余按学习目标序号返回 q{i}/a{i}（记录 gen_objectives 供"批 1 未重跑"
       断言）。
     - <SCORING_INPUT>：ID 守恒的确定性分数（总分代码计算 9）。
@@ -282,8 +282,8 @@ def _scripted_factory(
                 )
                 chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
                 units: list[dict[str, object]] = []
-                for difficulty, quota in payload["difficulty_quota"].items():
-                    for _ in range(quota):
+                for difficulty, interval in payload["difficulty_interval"].items():
+                    for _ in range(interval["max"]):
                         units.append(
                             {
                                 "source_chunk_ids": [chunk_ids[0]],
@@ -316,7 +316,7 @@ def _scripted_factory(
                 )
             else:  # 生成调用：每批 1 卡（按学习目标序号）
                 payload = json.loads(
-                    user.split("<GENERATOR_INPUT>", 1)[1].split("</GENERATOR_INPUT>", 1)[0]
+                    user.split("<GENERATION_SPEC>", 1)[1].split("</GENERATION_SPEC>", 1)[0]
                 )
                 objective = payload["learning_objective"]
                 gen_objectives.append(cast(str, objective))
@@ -470,7 +470,9 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     for _ in range(10):
         if scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory) == 0:
             break
-    assert calls["n"] == 14  # 2 规划 + 7 生成（批 2 崩溃后重试一次）+ 5 评分组
+    assert (
+        calls["n"] == 15
+    )  # 2 规划 + 8 生成（含崩溃批重试；密度制 V25-D-25 后单元数变化）+ 5 评分组
     # （评分分层：BASIC×2 章 + UNDERSTANDING×2 章 各一组、DEEP_QUESTION 逐单元 1 组）
     # AC-05-c：批 1 未重跑（重跑会再次出现 知识点0 生成调用）；批 2 崩溃+恢复共 2 次
     assert gen_objectives == [

@@ -298,7 +298,7 @@ def test_process_batch_anchored_card(session_factory: Callable[[], Session]) -> 
     assert batch.retry_count == 0
     assert batch.cache_hit_tokens == 2 and batch.cache_miss_tokens == 8 and batch.output_tokens == 5
     assert batch.model == "deepseek-v4-flash" and batch.http_status == 200
-    assert batch.prompt_version == "v4" and batch.schema_version == "v3"
+    assert batch.prompt_version == "v5" and batch.schema_version == "v3"
     assert unit.status == "PROCESSED"
     # V2.5（3.4/4.1）：生成期不累加——generated_card_count 只在发布时按已发布卡统计
     # （失败任务为 0）；单卡先 STAGED 隔离（可见谓词 3.9 排除），任务成功才发布
@@ -313,7 +313,7 @@ def test_process_batch_anchored_card(session_factory: Callable[[], Session]) -> 
     assert attempts[0].operation_key == f"generating:{batch.batch_id}"
     assert attempts[0].stage == "GENERATING"
     assert attempts[0].prompt_name == "generator"
-    assert attempts[0].prompt_version == "v4"
+    assert attempts[0].prompt_version == "v5"
     assert attempts[0].schema_name == "generator_output"
     assert attempts[0].schema_version == "v3"
     assert attempts[0].cache_hit == 2 and attempts[0].output_tokens == 5
@@ -549,7 +549,7 @@ def test_process_batch_budget_exhausted_skipped(session_factory: Callable[[], Se
 
 def test_process_batch_prompt_shape_and_page_input(session_factory: Callable[[], Session]) -> None:
     """请求形状：稳定 system（generator v3 + generator-output schema v2 原文）+ 动态
-    user（<GENERATOR_INPUT> 安全 JSON：学习目标/锚定/有序页文本/自定义要求）；max_tokens=768；
+    user（三区块：GENERATION_SPEC 规范 / SOURCE_MATERIAL 有序页文本 / USER_REQUIREMENTS 自定义要求）；max_tokens=768；
     原文中的信封边界字符转义（可逆）。"""
     user = _uuid()
     with session_factory() as session:
@@ -577,18 +577,30 @@ def test_process_batch_prompt_shape_and_page_input(session_factory: Callable[[],
     assert "<GENERATOR_OUTPUT_SCHEMA>" in system
     assert load_asset("schemas", "generator_output") in system
     user = messages[1]["content"]
-    assert user.startswith("<GENERATOR_INPUT>") and user.endswith("</GENERATOR_INPUT>")
+    assert user.startswith("<GENERATION_SPEC>")
+    assert "<SOURCE_MATERIAL>" in user and "<USER_REQUIREMENTS>" in user
     # 原文含 < > → 已转义（可逆：json 解析还原原文）
     assert "\\u003c第1页\\u003e" in user
-    payload = json.loads(user.split("<GENERATOR_INPUT>", 1)[1].split("</GENERATOR_INPUT>", 1)[0])
-    assert payload["learning_objective"] == "学习目标1"
-    assert payload["target_difficulty"] == "BASIC"
-    assert payload["card_type"] == "QUESTION"
-    assert payload["custom_requirements"] == "使用简洁中文"
+
+    def _block(marker: str) -> dict[str, object]:
+        value: dict[str, object] = json.loads(
+            user.split(f"<{marker}>", 1)[1].split(f"</{marker}>", 1)[0]
+        )
+        return value
+
+    spec = _block("GENERATION_SPEC")
+    assert spec["learning_objective"] == "学习目标1"
+    assert spec["target_difficulty"] == "BASIC"
+    assert spec["card_type"] == "QUESTION"
+    assert "chunk_id" not in spec and "generation_unit_id" not in spec
     # 有序页文本（page_number 升序；关联元数据不进入模型输入）
-    assert [p["page_number"] for p in payload["source_material"]] == [1, 2]
-    assert payload["source_material"][0]["content"] == _page_content(1)
-    assert "chunk_id" not in payload and "generation_unit_id" not in payload
+    material_raw = _block("SOURCE_MATERIAL")
+    assert isinstance(material_raw, list)
+    material = [dict(p) for p in material_raw if isinstance(p, dict)]
+    assert [p["page_number"] for p in material] == [1, 2]
+    assert material[0]["content"] == _page_content(1)
+    reqs = _block("USER_REQUIREMENTS")
+    assert reqs["custom_requirements"] == "使用简洁中文"
     # 请求体固定形状（spec §5.7）
     assert body["model"] == _SETTINGS.deepseek_model
     assert body["response_format"] == {"type": "json_object"}
@@ -615,10 +627,11 @@ def test_process_batch_input_char_cap_truncates_pages(
 
         assert process_next_batch(session, task_id=task_id, client=_client(handler)) == 1
         session.commit()
-    payload = json.loads(
-        str(captured["user"]).split("<GENERATOR_INPUT>", 1)[1].split("</GENERATOR_INPUT>", 1)[0]
+    user_text = str(captured["user"])
+    material = json.loads(
+        user_text.split("<SOURCE_MATERIAL>", 1)[1].split("</SOURCE_MATERIAL>", 1)[0]
     )
-    assert [p["page_number"] for p in payload["source_material"]] == [1]
+    assert [p["page_number"] for p in material] == [1]
 
 
 # ---------- 账本同事务与崩溃恢复（spec §9 硬规则） ----------

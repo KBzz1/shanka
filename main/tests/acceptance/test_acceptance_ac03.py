@@ -54,7 +54,7 @@ def _test_settings() -> Settings:
 
 
 def _envelope(user_prompt: str) -> dict[str, object]:
-    raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
+    raw = user_prompt.split("<GENERATION_SPEC>")[1].split("</GENERATION_SPEC>")[0]
     return cast("dict[str, object]", json.loads(raw))
 
 

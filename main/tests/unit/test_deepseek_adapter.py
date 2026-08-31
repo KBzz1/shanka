@@ -182,7 +182,7 @@ def test_adapter_chat_supports_stable_system_dynamic_user_and_max_tokens() -> No
 
     client = DeepSeekClient(_settings(), transport=_mock_transport(handler))
     client.chat(
-        "<GENERATOR_INPUT>{}</GENERATOR_INPUT>",
+        "<GENERATION_SPEC>{}</GENERATION_SPEC>",
         "sk-test",
         system_prompt="稳定 Generator v3 + Schema",
         max_tokens=768,
@@ -190,7 +190,7 @@ def test_adapter_chat_supports_stable_system_dynamic_user_and_max_tokens() -> No
     body = captured["json"]
     assert body["messages"] == [
         {"role": "system", "content": "稳定 Generator v3 + Schema"},
-        {"role": "user", "content": "<GENERATOR_INPUT>{}</GENERATOR_INPUT>"},
+        {"role": "user", "content": "<GENERATION_SPEC>{}</GENERATION_SPEC>"},
     ]
     assert body["max_tokens"] == 768
 

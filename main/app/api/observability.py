@@ -1,4 +1,4 @@
-"""质量聚合观测（structure-contract 6.10；openapi /observability/quality-summary）。
+"""质量聚合观测（structure-contract §6.9；openapi /observability/quality-summary）。
 
 按当前 user_id 隔离聚合（跨用户聚合留给运营后台）：SQL 拉取窗口内批次（join Task），
 按 group_by 分组聚合——Rubric 各维平均（批次卡片经 generated_item_ids ↔
@@ -72,7 +72,7 @@ def quality_summary_endpoint(
     group_by: Literal["model", "pdf", "difficulty"] = "model",
     days: Annotated[int, Query(ge=1)] = 30,
 ) -> JSONResponse:
-    """跨任务质量聚合（6.10）：Rubric 均分 / 覆盖重复率 / 任务完成率 / 成本汇总，按 user 隔离。"""
+    """跨任务质量聚合（§6.9）：Rubric 均分 / 覆盖重复率 / 任务完成率 / 成本汇总，按 user 隔离。"""
     now = SystemClock().now_utc()
     groups = _aggregate(
         session,

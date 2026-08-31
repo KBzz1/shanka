@@ -1,19 +1,34 @@
 {
   "prompts": {
-    "planner": { "version": "v4", "path": "prompts/v4/planner.md" },
-    "generator": { "version": "v4", "path": "prompts/v4/generator.md" },
-    "rewrite": { "version": "v4", "path": "prompts/v4/rewrite.md" },
-    "scoring": { "version": "v3", "path": "rubrics/v3/scoring-prompt.md" }
+    "planner": {
+      "version": "v5",
+      "path": "prompts/v5/planner.md"
+    },
+    "generator": {
+      "version": "v5",
+      "path": "prompts/v5/generator.md"
+    },
+    "rewrite": {
+      "version": "v4",
+      "path": "prompts/v4/rewrite.md"
+    },
+    "scoring": {
+      "version": "v3",
+      "path": "rubrics/v3/scoring-prompt.md"
+    }
   },
   "schemas": {
-    "card": { "version": "v1", "path": "schemas/v1/card.schema.json" },
+    "card": {
+      "version": "v1",
+      "path": "schemas/v1/card.schema.json"
+    },
     "generator_output": {
       "version": "v3",
       "path": "schemas/v3/generator-output.schema.json"
     },
     "planner_output": {
-      "version": "v3",
-      "path": "schemas/v3/planner-output.schema.json"
+      "version": "v4",
+      "path": "schemas/v4/planner-output.schema.json"
     },
     "scoring_output": {
       "version": "v3",
@@ -21,6 +36,9 @@
     }
   },
   "rubrics": {
-    "main": { "version": "v3", "path": "rubrics/v3/rubric.md" }
+    "main": {
+      "version": "v3",
+      "path": "rubrics/v3/rubric.md"
+    }
   }
 }

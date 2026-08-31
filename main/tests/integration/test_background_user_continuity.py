@@ -149,7 +149,7 @@ def test_task_continues_after_logout_and_new_session_reads(ctx: tuple[TestClient
     task = client.get(f"/tasks/{task_id}", headers=new_headers)
     assert task.status_code == 200
     assert task.json()["status"] == "COMPLETED"
-    assert task.json()["generated_card_count"] == 6
+    assert task.json()["generated_card_count"] == 32
 
 
 def test_task_continues_after_session_expiry(ctx: tuple[TestClient, Path]) -> None:
@@ -203,7 +203,7 @@ def test_operation_key_task_domain_and_ledger_idempotent(ctx: tuple[TestClient, 
     assert rows, "账本应有调用行"
     # operation_key 纯任务域（planning:{chapter_id}:{gi} / generating:{batch_id} /
     # scoring:{group_key}），不含 user/session 维度（会话轮换不使账本恢复失效）
-    stage_prefixes = ("planning:", "generating:", "scoring:")
+    stage_prefixes = ("planning:", "generating:", "scoring:", "sample:")
     op_keys = [str(r[0] or "") for r in rows]
     assert all(key.startswith(stage_prefixes) for key in op_keys)
     assert all("user" not in key and "session" not in key for key in op_keys)

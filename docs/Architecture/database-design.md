@@ -162,6 +162,7 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 | topic | TEXT | NOT NULL | 学习目标(Planner 输出,语义复用;不再"第X章-知识点N"占位) |
 | target_difficulty | TEXT | NULL | 规划锚定:`BASIC / UNDERSTANDING / DEEP_QUESTION`(V2.5 改名);旧数据无值,新数据保证必填;历史 `APPLICATION` 经迁移映射为 `DEEP_QUESTION` |
 | card_type | TEXT | NULL | 规划锚定:`QUESTION / TRUE_FALSE`;旧数据无值,新数据保证必填 |
+| coverage_tier | TEXT | NULL | Planner 覆盖层级:`CORE / IMPORTANT / LOW_FREQUENCY`(V25-D-25 落库并注入生成 spec;历史行为 NULL) |
 | priority | INTEGER | NOT NULL | 全局顺序(服务端按章序、组序、数组顺序合并分配) |
 | status | TEXT | NOT NULL | `PENDING / PROCESSED / SKIPPED` |
 

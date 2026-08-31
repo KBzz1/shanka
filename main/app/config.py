@@ -66,11 +66,16 @@ class Settings(BaseSettings):
     # LLM 硬上限与预算（spec §10 全局硬上限、§8 scoring、§6.2/§6.3 planning；可运维调整）
     # 规划（§4.2 选页 / §6.2 组数上限）：按页文本累计字符拆组，组数超限 → 任务 FAILED
     planner_max_input_chars: int = 20_000
-    max_planner_groups_per_task: int = 30
+    # 60：密度制后全书任务（12 章 33 组）也放行（V25-D-25）
+    max_planner_groups_per_task: int = 60
     # 生成预算（§10 POST 校验）：任务预算超上限直接 VALIDATION_ERROR；单元页数与原文输入双限
     max_generation_units_per_task: int = 300
     max_source_pages_per_unit: int = 8
     generator_max_input_chars: int = 10_000
+    # 密度制锚点（V25-D-25）：每 1 万字目标卡数，按覆盖模式；规划目标区间由此推导
+    cards_per_10k_compact: float = 6.0
+    cards_per_10k_balanced: float = 12.0
+    cards_per_10k_extensive: float = 20.0
     # 评分（§8 分层抽样）：组批受卡片数与输入字符双限，调用数超限按确定性抽样缩减
     max_scoring_calls_per_task: int = 60
     scoring_max_cards_per_call: int = 12

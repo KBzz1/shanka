@@ -240,6 +240,9 @@ class KnowledgePoint(Base):
         String, nullable=True
     )  # BASIC/UNDERSTANDING/DEEP_QUESTION（规划锚定；历史 APPLICATION 经迁移映射）
     card_type: Mapped[str | None] = mapped_column(String, nullable=True)  # QUESTION/TRUE_FALSE
+    coverage_tier: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # CORE/IMPORTANT/LOW_FREQUENCY（Planner 标注；V25-D-25 起落库并传给生成 spec）
     source_chunk_ids: Mapped[str | None] = mapped_column(Text, nullable=True)  # TEXT JSON 数组
 
 

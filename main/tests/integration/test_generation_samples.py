@@ -6,7 +6,7 @@ sample_cards_llm（注入 StubClient，不触网）：
 - 1~3 张样卡与启用难度一一对应（比例为 0 的难度不生成，契约 3.5）；
 - 每张样卡为轻量组件（3.13）且 V2.5 三档均 QUESTION（契约 3.6 组合规则）；
 - generator 双消息信封（§5.7）：system=generator prompt + generator-output schema，
-  user=<GENERATOR_INPUT> 安全 JSON（难度/章节文本/自定义要求）；
+  user=<GENERATION_SPEC> 安全 JSON（难度/章节文本/自定义要求）；
 - Card v1 校验是唯一入库门槛（§5.6）：非法输出 → GENERATION_FAILED，不降格；
 - sample_config_hash 配置指纹确定性；配置校验（validate_config，INVALID_PREFERENCES）。
 """
@@ -53,8 +53,17 @@ def _config(basic: int = 40, understanding: int = 40, deep: int = 20) -> Generat
 
 
 def _envelope(user_prompt: str) -> dict[str, Any]:
-    raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
-    return cast("dict[str, Any]", json.loads(raw))
+    """三区块信封合并视图（V25-D-27）：规范 + 原文 + 用户要求平铺便于断言。"""
+
+    def block(marker: str) -> dict[str, Any]:
+        raw = user_prompt.split(f"<{marker}>")[1].split(f"</{marker}>")[0]
+        return cast("dict[str, Any]", json.loads(raw))
+
+    merged: dict[str, Any] = {}
+    merged.update(block("GENERATION_SPEC"))
+    merged["source_material"] = block("SOURCE_MATERIAL")
+    merged.update(block("USER_REQUIREMENTS"))
+    return merged
 
 
 class StubClient:
