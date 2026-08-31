@@ -37,9 +37,9 @@ from infra.db.models import (
     User,
 )
 from infra.db.session import create_db_engine, create_session_factory
+from infra.llm.crypto import encrypt_key, key_from_settings
 from services.generation.samples import config_fingerprint
 from services.pdf.text_chunks import persist_text_chunks
-from infra.llm.crypto import encrypt_key, key_from_settings
 from services.tasks.service import (
     abandon_task,
     create_task,
@@ -759,7 +759,9 @@ def test_no_service_path_writes_legacy_task_status(
         session.commit()
         _assert_seven(session)
         # 样卡 worker 扫描完成（SAMPLE_GENERATING → AWAITING）
-        tasks_executor.process_active_tasks(session, settings=_ensure_settings(session), client_factory=_stub_factory())
+        tasks_executor.process_active_tasks(
+            session, settings=_ensure_settings(session), client_factory=_stub_factory()
+        )
         session.commit()
         _assert_seven(session)
         start_task(session, user_id=user, task_id=task_id, now=_NOW)
@@ -861,7 +863,9 @@ def test_sample_task_resumes_after_restart(session_factory: Callable[[], Session
         session.commit()
     # "重启"：新 session 显式扫描
     with session_factory() as session:
-        process_active_tasks(session, settings=_ensure_settings(session), client_factory=_stub_factory())
+        process_active_tasks(
+            session, settings=_ensure_settings(session), client_factory=_stub_factory()
+        )
         session.commit()
     with session_factory() as session:
         row = session.get(Task, task_id)

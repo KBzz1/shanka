@@ -229,7 +229,46 @@ class ImportCoordinatorTest {
         override suspend fun listProjects(): V25Result<List<V25LearningProject>> = throw NotImplementedError()
         override suspend fun getProject(projectId: String): V25Result<V25LearningProject> = throw NotImplementedError()
         override suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject> = throw NotImplementedError()
-        override suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit> = throw NotImplementedError()
+        override suspend fun deleteProject(
+            projectId: String,
+            retainDecks: Boolean,
+            idempotencyKey: String?,
+        ): V25Result<Unit> = throw NotImplementedError()
+
+        // Not exercised by this suite; the interface declares them abstract.
+        override suspend fun projectProgress(
+            projectId: String,
+        ): V25Result<com.qiuzhao.flashcards.domain.v25.V25ProgressSummary> = throw NotImplementedError()
+
+        override suspend fun getProjectDeletionPreflight(
+            projectId: String,
+            retainDecks: Boolean,
+            allowCancel: Boolean,
+        ): V25Result<com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight> = throw NotImplementedError()
+
+        override suspend fun attachDeckToProject(
+            projectId: String,
+            deckId: String,
+            idempotencyKey: String?,
+        ): V25Result<com.qiuzhao.flashcards.domain.v25.V25Deck> = throw NotImplementedError()
+
+        override suspend fun getDeckDeletionPreflight(
+            deckId: String,
+            allowCancel: Boolean,
+        ): V25Result<com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight> = throw NotImplementedError()
+
+        override suspend fun getStudyPlan(): V25Result<com.qiuzhao.flashcards.domain.v25.V25StudyPlan> =
+            throw NotImplementedError()
+
+        override suspend fun updateStudyPlan(
+            plan: com.qiuzhao.flashcards.domain.v25.V25StudyPlanUpdate,
+            idempotencyKey: String?,
+        ): V25Result<com.qiuzhao.flashcards.domain.v25.V25StudyPlan> = throw NotImplementedError()
+
+        override suspend fun studyPlanBacklog(
+            offset: Int,
+            limit: Int,
+        ): V25Result<List<com.qiuzhao.flashcards.domain.v25.V25PlanCard>> = throw NotImplementedError()
         override suspend fun replaceProjectPdf(projectId: String, fileName: String, content: InputStream, idempotencyKey: String?): V25Result<V25LearningProject> = throw NotImplementedError()
         override suspend fun updateChapter(projectId: String, chapterId: String, edit: V25ChapterEdit): V25Result<V25Chapter> = throw NotImplementedError()
         override suspend fun deleteChapter(projectId: String, chapterId: String, deleteCards: Boolean): V25Result<Unit> = throw NotImplementedError()
@@ -248,7 +287,8 @@ class ImportCoordinatorTest {
         override suspend fun listDecks(projectId: String?): V25Result<List<V25Deck>> = throw NotImplementedError()
         override suspend fun getDeck(deckId: String): V25Result<V25Deck> = throw NotImplementedError()
         override suspend fun renameDeck(deckId: String, name: String): V25Result<V25Deck> = throw NotImplementedError()
-        override suspend fun deleteDeck(deckId: String): V25Result<Unit> = throw NotImplementedError()
+        override suspend fun deleteDeck(deckId: String, idempotencyKey: String?): V25Result<Unit> =
+            throw NotImplementedError()
         override suspend fun listCards(deckId: String, filter: V25BrowseFilter): V25Result<List<V25Card>> = throw NotImplementedError()
         override suspend fun updateCard(cardId: String, front: String, back: String): V25Result<V25Card> = throw NotImplementedError()
         override suspend fun deleteCard(cardId: String): V25Result<V25CardDeletionBatch> = throw NotImplementedError()

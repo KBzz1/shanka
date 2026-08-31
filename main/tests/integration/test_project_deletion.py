@@ -406,10 +406,10 @@ def test_delete_project_retain_decks_false_removes_everything(
 # ---------- 删除保护 ----------
 
 
-def test_delete_project_active_task_conflict_nothing_deleted(
+def test_delete_project_with_active_task_cancels_and_cascades(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """活跃任务阻止删除：409 PROJECT_HAS_ACTIVE_TASK，无任何数据被删。"""
+    """契约 570/675：确认删除自动取消全部关联活跃任务（含正式生成）并级联删除聚合。"""
     user = _user(client)
     db = tmp_path / "project_del.db"
     user_id = _user_id(db)
@@ -426,11 +426,9 @@ def test_delete_project_active_task_conflict_nothing_deleted(
     resp = client.delete(
         f"/projects/{project['project_id']}?retain_decks=false", headers={**user, **_idem()}
     )
-    assert resp.status_code == 409
-    assert _error_code(resp) == "PROJECT_HAS_ACTIVE_TASK"
-    assert _scalar(db, "SELECT COUNT(*) FROM learning_projects") == 1
-    assert _scalar(db, "SELECT COUNT(*) FROM decks") == 1
-    assert _scalar(db, "SELECT COUNT(*) FROM tasks") == 1
+    assert resp.status_code == 204, resp.text
+    for table in ("learning_projects", "pdf_files", "tasks", "decks", "cards"):
+        assert _scalar(db, f"SELECT COUNT(*) FROM {table}") == 0, table
 
 
 def test_project_deletion_preflight_exposes_blockers_and_detail_tasks(
@@ -478,10 +476,10 @@ def test_project_deletion_preflight_exposes_blockers_and_detail_tasks(
     }
 
 
-def test_delete_project_abandons_pre_generation_tasks_atomically(
+def test_delete_project_retain_decks_detaches_deck_and_clears_tasks(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """确认放弃后：可放弃任务转 ABANDONED，再按 retain_decks 语义完成删除。"""
+    """活跃任务在同一事务内自动取消；retain_decks=true 保留并脱离牌组。"""
     user = _user(client)
     db = tmp_path / "project_del.db"
     user_id = _user_id(db)
@@ -496,7 +494,7 @@ def test_delete_project_abandons_pre_generation_tasks_atomically(
     )
 
     resp = client.delete(
-        f"/projects/{project['project_id']}?retain_decks=true&abandon_pre_generation_tasks=true",
+        f"/projects/{project['project_id']}?retain_decks=true",
         headers={**user, **_idem()},
     )
     assert resp.status_code == 204, resp.text
@@ -509,14 +507,12 @@ def test_delete_project_abandons_pre_generation_tasks_atomically(
     assert _scalar(db, "SELECT COUNT(*) FROM tasks WHERE task_id = :t", t=task_id) == 0
 
 
-def test_delete_project_abandon_flag_still_blocks_formal_generation(
-    client: TestClient, tmp_path: Path
-) -> None:
-    """abandon_pre_generation_tasks 不得强杀 GENERATING，且返回可执行动作。"""
+def test_delete_project_cancels_formal_generation_task(client: TestClient, tmp_path: Path) -> None:
+    """契约 570：GENERATING 不再阻塞删除——任务历史随聚合删除，迟到 worker 被围栏。"""
     user = _user(client)
     db = tmp_path / "project_del.db"
     project = _seed_project(db, _user_id(db))
-    task_id = _seed_task(
+    _seed_task(
         db,
         _user_id(db),
         str(project["project_id"]),
@@ -525,29 +521,28 @@ def test_delete_project_abandon_flag_still_blocks_formal_generation(
     )
 
     resp = client.delete(
-        f"/projects/{project['project_id']}?retain_decks=true&abandon_pre_generation_tasks=true",
+        f"/projects/{project['project_id']}?retain_decks=true",
         headers={**user, **_idem()},
     )
-    assert resp.status_code == 409
-    assert _error_code(resp) == "PROJECT_HAS_ACTIVE_TASK"
-    error = resp.json()["error"]
-    assert set(error["actions"]) == {"WAIT_FOR_TERMINAL", "VIEW_TASKS"}
-    assert error["details"]["task_ids"] == [task_id]
-    assert _scalar(db, "SELECT status FROM tasks WHERE task_id = :t", t=task_id) == "GENERATING"
-    assert _scalar(db, "SELECT COUNT(*) FROM learning_projects") == 1
+    assert resp.status_code == 204, resp.text
+    assert _scalar(db, "SELECT COUNT(*) FROM tasks") == 0
+    assert _scalar(db, "SELECT COUNT(*) FROM learning_projects") == 0
+    assert _scalar(db, "SELECT COUNT(*) FROM pdf_files") == 0
 
 
-def test_delete_project_parsing_conflict(client: TestClient, tmp_path: Path) -> None:
-    """解析中（PENDING）项目不可删除 → 409 PROJECT_STATE_CONFLICT。"""
+def test_delete_project_parsing_succeeds_and_fences_late_parser(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """解析中可删（契约 4.2/570）：删除自增 parse_version，迟到解析结果被栅栏丢弃。"""
     user = _user(client)
     db = tmp_path / "project_del.db"
     project = _seed_project(db, _user_id(db), status="PENDING")
     resp = client.delete(
         f"/projects/{project['project_id']}?retain_decks=true", headers={**user, **_idem()}
     )
-    assert resp.status_code == 409
-    assert _error_code(resp) == "PROJECT_STATE_CONFLICT"
-    assert _scalar(db, "SELECT COUNT(*) FROM learning_projects") == 1
+    assert resp.status_code == 204, resp.text
+    assert _scalar(db, "SELECT COUNT(*) FROM learning_projects") == 0
+    assert _scalar(db, "SELECT COUNT(*) FROM pdf_files") == 0
 
 
 def test_delete_project_cross_user_404(client: TestClient, tmp_path: Path) -> None:

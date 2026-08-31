@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android Device Debugging"
+  short_description: "Windows 和 WSL 下可靠安装 APK 与真机排障"
+  default_prompt: "Use $android-device-debugging to install an Android APK and diagnose the physical-device ADB path safely."

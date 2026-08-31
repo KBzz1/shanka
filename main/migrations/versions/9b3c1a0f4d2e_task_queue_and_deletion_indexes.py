@@ -15,15 +15,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_index(
-        "ix_tasks_status_stage_updated", "tasks", ["status", "stage", "updated_at"]
-    )
+    op.create_index("ix_tasks_status_stage_updated", "tasks", ["status", "stage", "updated_at"])
     op.create_index(
         "ix_tasks_project_status_updated", "tasks", ["project_id", "status", "updated_at"]
     )
-    op.create_index(
-        "ix_tasks_deck_status_updated", "tasks", ["deck_id", "status", "updated_at"]
-    )
+    op.create_index("ix_tasks_deck_status_updated", "tasks", ["deck_id", "status", "updated_at"])
 
 
 def downgrade() -> None:

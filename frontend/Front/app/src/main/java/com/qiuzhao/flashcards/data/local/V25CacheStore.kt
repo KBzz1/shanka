@@ -161,8 +161,10 @@ class V25CacheStore(private val db: ShankaV25Database) {
     }
 
     suspend fun readDeckReviewQueue(userId: String, deckId: String): List<V25ReviewCard> =
-        queueDao.getDeckQueue(userId, deckId).map { card ->
-            V25ReviewCard(card = card.toDomain(), reviewState = cardDao.getReviewState(userId, card.cardId)?.toDomain())
+        queueDao.getDeckQueueWithState(userId, deckId).mapNotNull { row ->
+            row.card?.let { card ->
+                V25ReviewCard(card = card.toDomain(), reviewState = row.reviewState?.toDomain())
+            }
         }
 
     // --- study plan --------------------------------------------------------------------------------
@@ -197,10 +199,8 @@ class V25CacheStore(private val db: ShankaV25Database) {
     suspend fun readTodayPlan(userId: String, studyDate: LocalDate): V25TodayPlan? {
         val date = studyDate.toString()
         val plan = todayPlanDao.getTodayPlan(userId, date) ?: return null
-        val cards = todayPlanDao.getVisibleCards(userId, date).mapNotNull { item ->
-            cardDao.getCard(userId, item.cardId)?.let { card ->
-                item.toPlanCard(card.toDomain(), cardDao.getReviewState(userId, item.cardId)?.toDomain())
-            }
+        val cards = todayPlanDao.getVisiblePlanCards(userId, date).mapNotNull { row ->
+            row.card?.let { card -> row.item.toPlanCard(card.toDomain(), row.reviewState?.toDomain()) }
         }
         return plan.toDomain(cards)
     }
@@ -288,12 +288,13 @@ class V25CacheStore(private val db: ShankaV25Database) {
     fun observeDecks(userId: String): Flow<List<V25Deck>> =
         deckDao.observeDecks(userId).map { rows -> rows.map { it.toDomain() } }
 
-    /** Today's visible (not yet rated away) plan queue; a write re-emits the new order. */
+    /**
+     * Today's visible (not yet rated away) plan queue; a write re-emits the new order. The JOIN
+     * projection also watches `cards`/`review_states`, so a completed sync re-emits here too.
+     */
     fun observeTodayPlanCards(userId: String, studyDate: LocalDate): Flow<List<V25Card>> =
-        todayPlanDao.observeVisibleCards(userId, studyDate.toString()).map { items ->
-            items.mapNotNull { item ->
-                cardDao.getCard(userId, item.cardId)?.toDomain()
-            }
+        todayPlanDao.observeVisiblePlanCards(userId, studyDate.toString()).map { rows ->
+            rows.mapNotNull { it.card?.toDomain() }
         }
 
     /** 2xx or idempotent replay: done, and the server review state becomes the local fact. */

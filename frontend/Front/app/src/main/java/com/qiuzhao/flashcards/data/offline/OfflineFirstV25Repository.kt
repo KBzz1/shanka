@@ -392,30 +392,18 @@ class OfflineFirstV25Repository(
             userId()?.let { user -> cache.replaceProject(user, it, clock.millis()) }
         }
 
-    override suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit> =
-        remote.deleteProject(projectId, retainDecks).alsoOnSuccess {
+    override suspend fun deleteProject(
+        projectId: String,
+        retainDecks: Boolean,
+        idempotencyKey: String?,
+    ): V25Result<Unit> =
+        remote.deleteProject(projectId, retainDecks, idempotencyKey).alsoOnSuccess {
             userId()?.let { user ->
                 cache.invalidate(user, V25CacheStore.KEY_PROJECTS)
                 cache.invalidate(user, V25CacheStore.KEY_DECKS)
                 cache.invalidate(user, V25CacheStore.KEY_TODAY_PLAN)
             }
         }
-
-    override suspend fun deleteProject(
-        projectId: String,
-        retainDecks: Boolean,
-        abandonPreGenerationTasks: Boolean,
-        idempotencyKey: String?,
-        cancelActiveTasks: Boolean,
-    ): V25Result<Unit> =
-        remote.deleteProject(projectId, retainDecks, abandonPreGenerationTasks, idempotencyKey, cancelActiveTasks)
-            .alsoOnSuccess {
-                userId()?.let { user ->
-                    cache.invalidate(user, V25CacheStore.KEY_PROJECTS)
-                    cache.invalidate(user, V25CacheStore.KEY_DECKS)
-                    cache.invalidate(user, V25CacheStore.KEY_TODAY_PLAN)
-                }
-            }
 
     override suspend fun getProjectDeletionPreflight(
         projectId: String,
@@ -519,16 +507,8 @@ class OfflineFirstV25Repository(
             userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_DECKS) }
         }
 
-    override suspend fun deleteDeck(deckId: String): V25Result<Unit> =
-        remote.deleteDeck(deckId).alsoOnSuccess { userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_DECKS) } }
-
-    override suspend fun deleteDeck(
-        deckId: String,
-        abandonPreGenerationTasks: Boolean,
-        idempotencyKey: String?,
-        cancelActiveTasks: Boolean,
-    ): V25Result<Unit> =
-        remote.deleteDeck(deckId, abandonPreGenerationTasks, idempotencyKey, cancelActiveTasks)
+    override suspend fun deleteDeck(deckId: String, idempotencyKey: String?): V25Result<Unit> =
+        remote.deleteDeck(deckId, idempotencyKey)
             .alsoOnSuccess { userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_DECKS) } }
 
     override suspend fun getDeckDeletionPreflight(deckId: String, allowCancel: Boolean): V25Result<V25DeletionPreflight> =

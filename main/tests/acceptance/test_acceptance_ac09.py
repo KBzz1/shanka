@@ -111,15 +111,16 @@ def test_acceptance_ac09_real_progress(client: TestClient) -> None:
     )
     detail = client.get(f"/decks/{deck_id}", headers=device).json()
     assert detail["card_count"] == 2
-    # 新卡初始 due=now（服务端时钟）：due<=查询时刻 now 同值恒真 → 全部到期
-    assert detail["due_count"] == 2
+    # 契约 3.8：NEW 卡计入 not_started_count，不计为到期复习
+    assert detail["not_started_count"] == 2
+    assert detail["due_count"] == 0
     assert detail["mastered_card_count"] == 0
     assert detail["review_count"] == 0
     assert detail["mastery_ratio"] == 0.0
     item = client.get("/decks", headers=device).json()["items"][0]
     assert item["deck_id"] == deck_id
     assert item["card_count"] == 2
-    assert item["due_count"] == 2
+    assert item["due_count"] == 0  # 同契约 3.8：NEW 卡不计为到期
 
 
 def test_acceptance_ac09_delete_removes_from_reads(client: TestClient) -> None:

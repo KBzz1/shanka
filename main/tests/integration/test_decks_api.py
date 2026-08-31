@@ -200,10 +200,11 @@ def test_decks_api_delete(client: TestClient) -> None:
     assert resp.json()["error"]["code"] == "DECK_NOT_FOUND"
 
 
-def test_decks_api_delete_blocked_by_running_task(client: TestClient, tmp_path: Path) -> None:
-    """删除保护：进行中任务引用该牌组 → 409 TASK_IN_PROGRESS（AppError → HTTP 映射）。"""
+def test_decks_api_delete_auto_cancels_running_task(client: TestClient, tmp_path: Path) -> None:
+    """契约 722：删除牌组自动取消进行中任务并删除卡片与学习记录，任务历史保留。"""
     user = _user(client)
     deck_id = _create_deck(client, user)
+    task_id = str(uuid.uuid4())
     engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
     with engine.begin() as conn:
         owner_id = conn.execute(text("SELECT user_id FROM users WHERE username = 'alice'")).scalar()
@@ -217,15 +218,26 @@ def test_decks_api_delete_blocked_by_running_task(client: TestClient, tmp_path: 
                 " 0, 0, :now, :now)"
             ),
             {
-                "task_id": str(uuid.uuid4()),
+                "task_id": task_id,
                 "user_id": str(owner_id),
                 "deck_id": deck_id,
                 "now": "2026-08-11T00:00:00.000Z",
             },
         )
+    engine.dispose()
     resp = client.delete(f"/decks/{deck_id}", headers={**user, **_idem()})
-    assert resp.status_code == 409
-    assert resp.json()["error"]["code"] == "TASK_IN_PROGRESS"
+    assert resp.status_code == 204, resp.text
+    assert client.get(f"/decks/{deck_id}", headers=user).status_code == 404
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT status, deck_id, ended_at FROM tasks WHERE task_id = :task_id"),
+            {"task_id": task_id},
+        ).one()
+    engine.dispose()
+    assert row.status == "ABANDONED"
+    assert row.deck_id is None
+    assert row.ended_at is not None
 
 
 def test_decks_api_deletion_preflight_lists_task_actions(
@@ -269,10 +281,10 @@ def test_decks_api_deletion_preflight_lists_task_actions(
     assert body["impact"]["task_count"] == 1
 
 
-def test_decks_api_delete_abandons_pre_generation_task_and_keeps_history(
+def test_decks_api_delete_auto_cancels_pre_generation_task_and_keeps_history(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """确认放弃正式生成前任务后删除牌组，任务历史保留且脱离牌组。"""
+    """删除牌组自动取消正式生成前任务，任务历史保留且脱离牌组。"""
     user = _user(client)
     deck_id = _create_deck(client, user)
     task_id = str(uuid.uuid4())
@@ -297,10 +309,7 @@ def test_decks_api_delete_abandons_pre_generation_task_and_keeps_history(
         )
     engine.dispose()
 
-    resp = client.delete(
-        f"/decks/{deck_id}?abandon_pre_generation_tasks=true",
-        headers={**user, **_idem()},
-    )
+    resp = client.delete(f"/decks/{deck_id}", headers={**user, **_idem()})
     assert resp.status_code == 204, resp.text
     assert client.get(f"/decks/{deck_id}", headers=user).status_code == 404
     engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
@@ -316,10 +325,10 @@ def test_decks_api_delete_abandons_pre_generation_task_and_keeps_history(
     assert row.resumable == 0
 
 
-def test_decks_api_delete_abandon_flag_does_not_kill_generating_task(
+def test_decks_api_delete_cancels_generating_task_with_fencing(
     client: TestClient, tmp_path: Path
 ) -> None:
-    """正式生成中即使带 abandon 标志也保持 409，不能被强制终止。"""
+    """契约 570：GENERATING 不再阻塞删除——任务 CAS 取消、围栏（lease 失效）并脱离牌组。"""
     user = _user(client)
     deck_id = _create_deck(client, user)
     task_id = str(uuid.uuid4())
@@ -344,15 +353,19 @@ def test_decks_api_delete_abandon_flag_does_not_kill_generating_task(
         )
     engine.dispose()
 
-    resp = client.delete(
-        f"/decks/{deck_id}?abandon_pre_generation_tasks=true",
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 409
-    error = resp.json()["error"]
-    assert error["code"] == "TASK_IN_PROGRESS"
-    assert set(error["actions"]) == {"WAIT_FOR_TERMINAL", "VIEW_TASKS"}
-    assert error["details"]["task_ids"] == [task_id]
+    resp = client.delete(f"/decks/{deck_id}", headers={**user, **_idem()})
+    assert resp.status_code == 204, resp.text
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'api.db'}")
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT status, deck_id, ended_at, resumable FROM tasks WHERE task_id = :task_id"),
+            {"task_id": task_id},
+        ).one()
+    engine.dispose()
+    assert row.status == "ABANDONED"
+    assert row.deck_id is None
+    assert row.ended_at is not None
+    assert row.resumable == 0
 
 
 def test_decks_api_create_requires_idempotency_key(client: TestClient) -> None:

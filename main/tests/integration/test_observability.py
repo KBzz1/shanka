@@ -265,7 +265,11 @@ def _run_task(client: TestClient, db_path: Path, *, user: dict[str, str]) -> tup
     assert n == 1  # 样卡 worker 完成（SAMPLE_GENERATING → AWAITING）
     assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
     n = scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory)
-    assert n == 1  # 规划 + 生成 + 评分同轮衔接 → COMPLETED
+    assert n >= 1  # 规划 + 首轮生成（work_quantum 4 批/轮）
+    # worker 单轮受 generation_work_quantum_batches 限制：排空至无进展 → COMPLETED
+    for _ in range(10):
+        if scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory) == 0:
+            break
     return task_id, str(seed["file_id"])
 
 

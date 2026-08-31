@@ -286,8 +286,6 @@ def delete_project(
     project_id: str,
     retain_decks: bool,
     storage: Any,
-    abandon_pre_generation_tasks: bool = False,
-    cancel_active_tasks: bool = False,
     now: str | None = None,
 ) -> None:
     """删除项目聚合（两决策，PRD V25-GEN-FR-09）。存储清理失败 → 抛错回滚元数据。
@@ -307,8 +305,7 @@ def delete_project(
         pdf.parse_lease_until = None
     active_tasks = resource_tasks(session, user_id=user_id, project_id=project_id)
     if active_tasks:
-        # 产品语义：确认删除后所有关联任务自动取消。保留旧参数签名仅让历史内部调用
-        # 不立即失效，客户端不再暴露任务处理复选框。
+        # 产品语义（契约 570/675）：确认删除后全部关联活跃任务在同一写事务内 CAS 取消。
         cancel_active_generation_tasks(
             session,
             user_id=user_id,
@@ -514,9 +511,7 @@ def get_study_settings(
 ) -> dict[str, Any]:
     """项目学习设置（3.17）：get-or-create（默认空范围 + include_unassigned=false）。"""
     _owned_project(session, user_id=user_id, project_id=project_id)  # 归属校验（404）
-    return _settings_view(
-        session, _get_or_create_settings(session, project_id=project_id, now=now)
-    )
+    return _settings_view(session, _get_or_create_settings(session, project_id=project_id, now=now))
 
 
 def update_study_settings(
@@ -544,9 +539,7 @@ def update_study_settings(
         deck_query = select(Deck).where(Deck.user_id == user_id, Deck.project_id == project_id)
         if unique_deck_ids:
             deck_query = deck_query.where(Deck.deck_id.in_(unique_deck_ids))
-        decks = list(
-            session.scalars(deck_query).all()
-        )
+        decks = list(session.scalars(deck_query).all())
         if {deck.deck_id for deck in decks} != set(unique_deck_ids):
             raise AppError(ErrorCode.DECK_NOT_FOUND, "所选卡组不存在或不属于当前项目")
         if unique_deck_ids:
@@ -559,9 +552,9 @@ def update_study_settings(
             )
             if eligible == 0:
                 raise AppError(ErrorCode.VALIDATION_ERROR, "所选卡组暂无可学习卡片")
-        session.query(ProjectStudyDeck).filter(
-            ProjectStudyDeck.project_id == project_id
-        ).delete(synchronize_session=False)
+        session.query(ProjectStudyDeck).filter(ProjectStudyDeck.project_id == project_id).delete(
+            synchronize_session=False
+        )
         for deck_id in unique_deck_ids:
             session.add(ProjectStudyDeck(project_id=project_id, deck_id=deck_id, created_at=now))
         updates["daily_new_goal"] = row.daily_new_goal

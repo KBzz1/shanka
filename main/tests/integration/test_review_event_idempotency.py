@@ -197,11 +197,15 @@ def test_review_event_same_client_event_different_rating_conflicts(
     _, card_id = _make_deck_card(client, user)
     cev = str(uuid.uuid4())
     r1 = client.post(
-        "/review-events", json=_event_payload(card_id, cev, rating="GOOD"), headers={**user, **_idem()}
+        "/review-events",
+        json=_event_payload(card_id, cev, rating="GOOD"),
+        headers={**user, **_idem()},
     )
     assert r1.status_code == 200
     conflict = client.post(
-        "/review-events", json=_event_payload(card_id, cev, rating="AGAIN"), headers={**user, **_idem()}
+        "/review-events",
+        json=_event_payload(card_id, cev, rating="AGAIN"),
+        headers={**user, **_idem()},
     )
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "REVIEW_EVENT_CONFLICT"

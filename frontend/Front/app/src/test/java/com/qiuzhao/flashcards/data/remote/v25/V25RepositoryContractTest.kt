@@ -181,9 +181,9 @@ class V25RepositoryContractTest {
         enqueue("", 204)
         enqueue(preflightBody())
 
-        repo.deleteProject("p-1", retainDecks = false, abandonPreGenerationTasks = true, idempotencyKey = "project-key")
+        repo.deleteProject("p-1", retainDecks = false, idempotencyKey = "project-key")
         repo.getProjectDeletionPreflight("p-1", retainDecks = false)
-        repo.deleteDeck("d-1", abandonPreGenerationTasks = true, idempotencyKey = "deck-key")
+        repo.deleteDeck("d-1", idempotencyKey = "deck-key")
         repo.getDeckDeletionPreflight("d-1")
 
         val projectDelete = take()
@@ -203,9 +203,9 @@ class V25RepositoryContractTest {
         enqueue("", 204)
         enqueue(preflightBody())
 
-        repo.deleteProject("p-1", retainDecks = false, cancelActiveTasks = true, idempotencyKey = "project-cancel-key")
+        repo.deleteProject("p-1", retainDecks = false, idempotencyKey = "project-cancel-key")
         repo.getProjectDeletionPreflight("p-1", retainDecks = false, allowCancel = true)
-        repo.deleteDeck("d-1", cancelActiveTasks = true, idempotencyKey = "deck-cancel-key")
+        repo.deleteDeck("d-1", idempotencyKey = "deck-cancel-key")
         repo.getDeckDeletionPreflight("d-1", allowCancel = true)
 
         assertEquals("/projects/p-1?retain_decks=false", take().path)

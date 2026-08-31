@@ -92,8 +92,6 @@ def delete_pdf(
     user_id: str,
     file_id: str,
     storage: LocalStorage,
-    abandon_pre_generation_tasks: bool = False,
-    cancel_active_tasks: bool = False,
     now: str | None = None,
 ) -> None:
     """兼容 /pdfs 删除入口：委托项目删除（retain_decks=true，6.2 同一业务语义）；
@@ -115,8 +113,6 @@ def delete_pdf(
             project_id=project_id,
             retain_decks=True,
             storage=storage,
-            abandon_pre_generation_tasks=abandon_pre_generation_tasks,
-            cancel_active_tasks=cancel_active_tasks,
             now=now,
         )
         return
@@ -132,10 +128,8 @@ def delete_pdf(
         or 0
     )
     if blocking:
-        if not cancel_active_tasks:
-            raise AppError(ErrorCode.TASK_IN_PROGRESS, "存在进行中的任务引用该文件")
         # Legacy/orphan PDFs have no project aggregate to delegate to.  Preserve the same
-        # cancellation fence as project/deck deletion before detaching task history.
+        # auto-cancellation fence as project/deck deletion (契约 570：确认删除即取消活跃任务).
         from services.deletion.service import cancel_active_tasks as cancel_tasks
 
         active_tasks = list(

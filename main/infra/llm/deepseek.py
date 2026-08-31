@@ -16,7 +16,7 @@
 
 import logging
 import time
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -33,6 +33,24 @@ _UPSTREAM_DOWN = "DeepSeek 上游不可用"
 # 等价于官方 SDK 自带重试；账本 attempt 语义不变（一次 attempt = 一次逻辑调用）。
 _CHAT_INTERNAL_RETRIES = 1
 _RETRY_DELAY_SECONDS = 1.0
+
+
+class LlmChatClient(Protocol):
+    """LLM chat 边界（结构化协议）：executor/生成链只依赖 chat+close，测试可注入 stub。
+
+    [DeepSeekClient] 结构上满足本协议；生产装配仍由 executor 的 ClientFactory 构造。
+    """
+
+    def chat(
+        self,
+        prompt: str,
+        api_key: str = "",
+        *,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    def close(self) -> None: ...
 
 
 class RetryableUpstreamError(AppError):

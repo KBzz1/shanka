@@ -253,7 +253,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `source` | enum | ✓ | `MANUAL` / `IMPORTED` / `GENERATED`(牌组本身的来源;`GENERATED` 为 PDF 制卡新建的归属牌组) |
 | `project_id` | uuid | ✗ | V2.5 归属学习项目;`null` 表示手动/独立牌组 |
 | `card_count` | int | ✓ | 派生进度(接口计算,只含可见卡,可见谓词见 3.9) |
-| `due_count` | int | ✓ | 派生:`due <= now` 的可见卡数 |
+| `due_count` | int | ✓ | 派生:非 `NEW` 且 `due <= now` 的可见卡数(`NEW` 卡计入 `not_started_count`,不重复计为到期) |
 | `mastered_card_count` | int | ✓ | 派生:掌握判定见 5.3 |
 | `review_count` | int | ✓ | 派生:累计复习事件数 |
 | `mastery_ratio` | float | ✓ | 派生:`mastered_card_count / card_count`,为 0 时返回 0 |

@@ -64,7 +64,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogWindowProvider
 import kotlin.math.roundToInt
 import com.qiuzhao.flashcards.data.remote.DeckSummary
-import com.qiuzhao.flashcards.data.remote.LEGACY_UNASSIGNED_PROJECT_ID
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 
@@ -104,7 +103,7 @@ internal fun ProjectScreen(
                 contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * scale).dp)
             ) {
                 items(visibleProjects, key = { it.id }) { project ->
-                    ProjectSummaryCard(project, decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id }, scale) {
+                    ProjectSummaryCard(project, decks.filter { it.projectId == project.id }, scale) {
                         // Project detail is introduced as the next project work item.
                         nav.navigate(AppRoute.ProjectDetail(project.id))
                     }

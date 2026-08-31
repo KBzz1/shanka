@@ -51,7 +51,7 @@ from infra.clock import SystemClock
 from infra.db.models import ApiKey, Batch, Card, KnowledgePoint, Task
 from infra.db.session import format_utc
 from infra.llm.crypto import decrypt_key, key_from_settings
-from infra.llm.deepseek import DeepSeekClient
+from infra.llm.deepseek import DeepSeekClient, LlmChatClient
 from infra.metrics import GENERATION_TASKS_DURATION_SECONDS, GENERATION_TASKS_TOTAL
 from services.generation.batches import plan_batches, process_next_batch
 from services.generation.ledger import mark_stale_unknown
@@ -71,8 +71,8 @@ from services.tasks.service import complete_samples
 
 logger = logging.getLogger(__name__)
 
-# client_factory(decrypted_api_key) -> DeepSeekClient：测试注入 mock transport；生产缺省
-ClientFactory = Callable[[str], DeepSeekClient]
+# client_factory(decrypted_api_key) -> LlmChatClient：生产缺省构造 DeepSeekClient；测试注入 stub
+ClientFactory = Callable[[str], LlmChatClient]
 
 
 def _require_str(value: str | None, message: str) -> str:

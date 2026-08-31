@@ -87,12 +87,13 @@ def test_cards_create_assigns_incrementing_position_and_initial_state(
         assert rs.stability == 0.0
         assert rs.difficulty == 1.0  # ORM CHECK 1~10（Task 2 已踩坑：0.0 违约）
         assert rs.due == "2026-08-11T00:00:00.000Z"
-        # carry-forward：创建卡后进度非零且正确（初始 due=now 恒到期；now 取最后一张卡 due）
+        # carry-forward：创建卡后进度正确（契约 3.8：NEW 卡计入 not_started，不计为到期）
         progress = deck_progress(
             session, user_id="dev", deck_id=deck_id, now="2026-08-11T00:00:00.001Z"
         )
         assert progress["card_count"] == 2
-        assert progress["due_count"] == 2
+        assert progress["not_started_count"] == 2
+        assert progress["due_count"] == 0
         assert progress["mastered_card_count"] == 0
         assert progress["review_count"] == 0
 

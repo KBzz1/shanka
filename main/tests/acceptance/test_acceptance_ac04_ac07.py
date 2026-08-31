@@ -130,11 +130,7 @@ def _pipeline_factory(
                 objective = str(payload["learning_objective"])
                 # 样卡生成（V5A 真实样卡）：learning_objective 为章节名（无"知识点"前缀）→
                 # 固定取首张合法卡（样卡构成另一组验收用例覆盖；此处仅保证流水线可通）
-                index = (
-                    int(objective.split("知识点", 1)[1])
-                    if "知识点" in objective
-                    else 0
-                )
+                index = int(objective.split("知识点", 1)[1]) if "知识点" in objective else 0
                 content = json.dumps({"cards": [cards[index % len(cards)]]}, ensure_ascii=False)
             resp_body: dict[str, object] = {
                 "choices": [{"message": {"content": content}}],
@@ -331,13 +327,19 @@ def _run_to_completed(
     scores: dict[str, int] | None = None,
     with_usage: bool = True,
 ) -> None:
-    """显式 executor 扫描一轮（mock transport 全链路）→ 任务 COMPLETED。"""
-    n = scan_tasks(
-        _db_factory(db_path),
-        settings=_SETTINGS,
-        client_factory=_pipeline_factory(cards=cards, scores=scores, with_usage=with_usage),
-    )
-    assert n >= 1
+    """显式 executor 扫描循环（mock transport 全链路）直至无进展——worker 单轮受
+    `generation_work_quantum_batches` 限制（4 批/轮），6 批任务需多轮才 COMPLETED。"""
+    total = 0
+    for _ in range(10):  # 6 批任务 ≤ 2 轮；上限只防死循环，正常 2~3 轮内归零
+        n = scan_tasks(
+            _db_factory(db_path),
+            settings=_SETTINGS,
+            client_factory=_pipeline_factory(cards=cards, scores=scores, with_usage=with_usage),
+        )
+        total += n
+        if n == 0:
+            break
+    assert total >= 1
 
 
 def test_acceptance_ac04_valid_cards_inserted_and_completed(

@@ -176,7 +176,7 @@ def _settings() -> Settings:
 
 def _envelope(user_prompt: str) -> dict[str, object]:
     raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
-    return json.loads(raw)  # type: ignore[return-value]
+    return cast("dict[str, object]", json.loads(raw))
 
 
 class StubClient:
@@ -189,9 +189,14 @@ class StubClient:
         pass
 
     def chat(
-        self, user_prompt: str, system_prompt: str | None = None, max_tokens: int | None = None
+        self,
+        prompt: str,
+        api_key: str = "",
+        *,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, object]:
-        payload = _envelope(user_prompt)
+        payload = _envelope(prompt)
         difficulty = str(payload["target_difficulty"])
         self.calls.append(difficulty)
         return {
@@ -410,12 +415,12 @@ def test_sample_success_ledger_is_reused_after_worker_restart(
         session.commit()
 
     with session_factory() as session:
-        task = session.get(Task, task_id)
-        assert task is not None
+        first = session.get(Task, task_id)
+        assert first is not None
         first_client = StubClient()
         first_cards = sample_cards_llm(
             session,
-            task=task,
+            task=first,
             config=_config(),
             client=first_client,
             settings=_settings(),
@@ -424,12 +429,12 @@ def test_sample_success_ledger_is_reused_after_worker_restart(
         assert len(first_client.calls) == 3
 
     with session_factory() as session:
-        task = session.get(Task, task_id)
-        assert task is not None
+        restarted = session.get(Task, task_id)
+        assert restarted is not None
         restarted_client = StubClient()
         second_cards = sample_cards_llm(
             session,
-            task=task,
+            task=restarted,
             config=_config(),
             client=restarted_client,
             settings=_settings(),

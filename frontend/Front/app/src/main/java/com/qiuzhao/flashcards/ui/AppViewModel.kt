@@ -990,35 +990,8 @@ class AppViewModel(
         projectId: String,
         retainDecks: Boolean,
         onResult: (Boolean) -> Unit = {},
-    ) = deleteProjectInternal(projectId, retainDecks, false, false, onResult)
-
-    fun deleteProject(
-        projectId: String,
-        retainDecks: Boolean,
-        abandonPreGenerationTasks: Boolean,
-        onResult: (Boolean) -> Unit = {},
-        cancelActiveTasks: Boolean = false,
-    ) = deleteProjectInternal(
-        projectId,
-        retainDecks,
-        abandonPreGenerationTasks,
-        cancelActiveTasks,
-        onResult,
-    )
-
-    private fun deleteProjectInternal(
-        projectId: String,
-        retainDecks: Boolean,
-        abandonPreGenerationTasks: Boolean,
-        cancelActiveTasks: Boolean,
-        onResult: (Boolean) -> Unit,
     ) = viewModelScope.launch {
-        val operation = projectDeletionOperationKey(
-            projectId,
-            retainDecks,
-            abandonPreGenerationTasks,
-            cancelActiveTasks,
-        )
+        val operation = "delete_project:$projectId:retain=$retainDecks"
         val idempotencyKey = beginWrite(operation)
         if (idempotencyKey == null) {
             onResult(false)
@@ -1026,15 +999,7 @@ class AppViewModel(
         }
         var succeeded = false
         try {
-            when (
-                val result = v25Repository.deleteProject(
-                    projectId,
-                    retainDecks,
-                    abandonPreGenerationTasks,
-                    idempotencyKey,
-                    cancelActiveTasks,
-                )
-            ) {
+            when (val result = v25Repository.deleteProject(projectId, retainDecks, idempotencyKey)) {
                 is V25Result.Success -> {
                     succeeded = true
                     projectsById.remove(projectId)
@@ -1567,14 +1532,8 @@ class AppViewModel(
         deckId: String,
         onSuccess: () -> Unit = {},
         onFailure: () -> Unit = {},
-        abandonPreGenerationTasks: Boolean = false,
-        cancelActiveTasks: Boolean = false,
     ) = viewModelScope.launch {
-        val operation = deckDeletionOperationKey(
-            deckId,
-            abandonPreGenerationTasks,
-            cancelActiveTasks,
-        )
+        val operation = "delete_deck:$deckId"
         val idempotencyKey = beginWrite(operation)
         if (idempotencyKey == null) {
             onFailure()
@@ -1582,14 +1541,7 @@ class AppViewModel(
         }
         var succeeded = false
         try {
-            when (
-                val result = v25Repository.deleteDeck(
-                    deckId,
-                    abandonPreGenerationTasks,
-                    idempotencyKey,
-                    cancelActiveTasks,
-                )
-            ) {
+            when (val result = v25Repository.deleteDeck(deckId, idempotencyKey)) {
                 is V25Result.Success -> {
                     succeeded = true
                     cardFlows.remove(deckId)
@@ -1783,21 +1735,6 @@ class AppViewModel(
         else "project:$projectId:retain=$retainDecks"
 
     private fun deckDeletionKey(deckId: String): String = "delete_deck:$deckId"
-
-    private fun projectDeletionOperationKey(
-        projectId: String,
-        retainDecks: Boolean,
-        abandonPreGenerationTasks: Boolean,
-        cancelActiveTasks: Boolean,
-    ): String =
-        "delete_project:$projectId:retain=$retainDecks:abandon=$abandonPreGenerationTasks:cancel=$cancelActiveTasks"
-
-    private fun deckDeletionOperationKey(
-        deckId: String,
-        abandonPreGenerationTasks: Boolean,
-        cancelActiveTasks: Boolean,
-    ): String =
-        "delete_deck:$deckId:abandon=$abandonPreGenerationTasks:cancel=$cancelActiveTasks"
 
     /** One semantic destructive action gets one stable idempotency key and one in-flight gate. */
     private fun beginWrite(operation: String): String? {

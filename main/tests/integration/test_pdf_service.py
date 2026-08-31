@@ -157,15 +157,16 @@ def test_pdf_service_delete_removes_and_cleans_storage(
     assert not obj_path.exists()  # 存储清理
 
 
-def test_pdf_service_delete_blocked_by_non_terminal_task(
+def test_pdf_service_delete_auto_cancels_non_terminal_task(
     session_factory: Callable[[], Session], storage: LocalStorage
 ) -> None:
     user = _uuid()
+    task_id = _uuid()
     with session_factory() as session:
         file_id = _seed_pdf(session, user_id=user)
         session.add(
             Task(
-                task_id=_uuid(),
+                task_id=task_id,
                 user_id=user,
                 file_id=file_id,
                 status="GENERATING",
@@ -178,9 +179,16 @@ def test_pdf_service_delete_blocked_by_non_terminal_task(
             )
         )
         session.commit()
-    with session_factory() as session, pytest.raises(AppError) as excinfo:
+    # 契约 570：孤儿 PDF 删除同样自动取消活跃任务（与项目/牌组删除同一围栏语义）
+    with session_factory() as session:
         delete_pdf(session, user_id=user, file_id=file_id, storage=storage)
-    assert excinfo.value.code is ErrorCode.TASK_IN_PROGRESS
+        session.commit()
+    with session_factory() as session:
+        assert session.get(PdfFile, file_id) is None
+        task = session.get(Task, task_id)
+        assert task is not None
+        assert task.status == "ABANDONED"
+        assert task.file_id is None
 
 
 def test_pdf_service_update_chapter(session_factory: Callable[[], Session]) -> None:

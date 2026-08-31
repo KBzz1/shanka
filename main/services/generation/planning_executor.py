@@ -40,7 +40,7 @@ from app.errors import AppError, ErrorCode
 from infra.clock import SystemClock
 from infra.db.models import Chapter, KnowledgePoint, LlmCallAttempt, Task, TextChunk
 from infra.db.session import format_utc
-from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
+from infra.llm.deepseek import LlmChatClient, RetryableUpstreamError
 from infra.llm.prompts import asset_versions, load_asset, safe_json_dumps
 from services.generation.batches import plan_batches
 from services.generation.ledger import (
@@ -244,7 +244,7 @@ def _stale_fail(session: Session, *, task: Task, now: str) -> bool:
 
 
 def run_planning(
-    session: Session, task: Task, *, settings: Settings, client: DeepSeekClient
+    session: Session, task: Task, *, settings: Settings, client: LlmChatClient
 ) -> None:
     """执行规划（spec §6.2）：选页拆组 → 组调用（账本恢复/预算/STARTED→chat→终态）→
     合并去重 → 三分支条件落库。LLM 调用始终在事务外（§3/§6.2 硬规则）。
@@ -436,7 +436,7 @@ def _run_group(
     task: Task,
     *,
     settings: Settings,
-    client: DeepSeekClient,
+    client: LlmChatClient,
     operation_key: str,
     fingerprint: str,
     quota: dict[str, int],

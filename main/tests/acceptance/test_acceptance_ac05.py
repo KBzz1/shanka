@@ -228,9 +228,9 @@ def _db_factory(db_path: Path) -> sessionmaker[Session]:
 def _sample_factory(api_key: str) -> DeepSeekClient:
     """样卡 worker 扫描注入：仅 GENERATOR_INPUT → 固定合法卡（崩溃模拟扫描用的
     _scripted_factory 不参与样卡阶段——避免调用计数被 3 次样卡调用打乱）。"""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        user = body["messages"][-1]["content"]
+        json.loads(request.content)
         content = json.dumps(
             {"cards": [{"type": "QUESTION", "question": "q0", "answer": "a0"}]},
             ensure_ascii=False,
@@ -463,9 +463,13 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
         task.updated_at = "2026-07-01T00:00:00.000Z"
         session.commit()
 
-    # AC-05-b：恢复扫描从游标继续——只处理批 2..6 → COMPLETED（同一 transport 继续调用）
+    # AC-05-b：恢复扫描从游标继续——只处理批 2..6 → COMPLETED（同一 transport 继续调用）。
+    # worker 单轮受 work_quantum（4 批/轮）限制，排空至无进展后统计调用总量。
     n = scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory)
     assert n == 1
+    for _ in range(10):
+        if scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory) == 0:
+            break
     assert calls["n"] == 14  # 2 规划 + 7 生成（批 2 崩溃后重试一次）+ 5 评分组
     # （评分分层：BASIC×2 章 + UNDERSTANDING×2 章 各一组、DEEP_QUESTION 逐单元 1 组）
     # AC-05-c：批 1 未重跑（重跑会再次出现 知识点0 生成调用）；批 2 崩溃+恢复共 2 次

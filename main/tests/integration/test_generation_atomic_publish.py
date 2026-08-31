@@ -532,7 +532,9 @@ def test_visible_predicate_deck_progress_counts_visible_only(
     with session_factory() as session:
         progress = deck_progress(session, user_id=user, deck_id=ctx["deck_id"], now=_NOW)
     assert progress["card_count"] == 2
-    assert progress["due_count"] == 2  # 两张可见卡 due<=now
+    # 契约 3.8：NEW 卡计入 not_started，仅 REVIEW 可见卡计为到期
+    assert progress["not_started_count"] == 1
+    assert progress["due_count"] == 1
     assert progress["mastered_card_count"] == 1  # 仅可见 REVIEW 卡
     assert progress["review_count"] == 1  # 仅可见卡事件
     assert progress["mastery_ratio"] == 0.5

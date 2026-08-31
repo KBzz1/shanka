@@ -32,7 +32,7 @@ from app.config import Settings
 from app.errors import AppError, ErrorCode
 from app.schemas.samples import GenerationConfig
 from infra.db.models import Task, TextChunk
-from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
+from infra.llm.deepseek import LlmChatClient, RetryableUpstreamError
 from infra.llm.prompts import asset_versions, load_asset, safe_json_dumps
 from services.generation.ledger import (
     attempt_count,
@@ -58,7 +58,7 @@ def sample_cards_llm(
     *,
     task: Task,
     config: GenerationConfig,
-    client: DeepSeekClient,
+    client: LlmChatClient,
     settings: Settings,
 ) -> list[dict[str, object]]:
     """按配置真实生成 1~3 张样卡（启用难度各 1 张；纯生成不入库）。

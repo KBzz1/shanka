@@ -55,7 +55,7 @@ def _test_settings() -> Settings:
 
 def _envelope(user_prompt: str) -> dict[str, object]:
     raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
-    return json.loads(raw)  # type: ignore[return-value]
+    return cast("dict[str, object]", json.loads(raw))
 
 
 class StubClient:
@@ -65,9 +65,14 @@ class StubClient:
         pass
 
     def chat(
-        self, user_prompt: str, system_prompt: str | None = None, max_tokens: int | None = None
+        self,
+        prompt: str,
+        api_key: str = "",
+        *,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, object]:
-        payload = _envelope(user_prompt)
+        payload = _envelope(prompt)
         difficulty = str(payload["target_difficulty"])
         return {
             "content": json.dumps(
@@ -86,7 +91,6 @@ class StubClient:
             "http_status": 200,
             "duration_ms": 1,
         }
-
 
 
 @pytest.fixture

@@ -49,7 +49,7 @@ from domain.rewrite_preview import REWRITE_PREVIEW_EXPIRY_HOURS
 from infra.db.models import ApiKey, Card, CardRewritePreview, LlmCallAttempt, ReviewState
 from infra.db.session import format_utc
 from infra.llm.crypto import decrypt_key, key_from_settings
-from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
+from infra.llm.deepseek import DeepSeekClient, LlmChatClient, RetryableUpstreamError
 from infra.llm.prompts import asset_versions, load_asset, safe_json_dumps
 from services.generation.ledger import (
     attempt_count,
@@ -248,7 +248,7 @@ def create_rewrite_preview(
     now: str,
     settings: Settings,
     idempotency_key: str | None = None,
-    client_factory: Callable[[str], DeepSeekClient] | None = None,
+    client_factory: Callable[[str], LlmChatClient] | None = None,
 ) -> CardRewritePreview:
     """创建重写预览（3.19/6.5 POST rewrite-previews）：只持久化预览，不改原卡。
 

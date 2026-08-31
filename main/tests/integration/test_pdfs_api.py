@@ -163,19 +163,26 @@ def test_pdfs_api_get_detail_and_404(client: TestClient) -> None:
 
 
 def test_pdfs_api_delete_204_and_storage_cleaned(client: TestClient, tmp_path: Path) -> None:
-    """兼容删除委托项目删除（V2.5 语义，6.2）：解析中项目不可删（V25-GEN-FR-09 状态保护）；
-    解析失败（PARSE_FAILED）后可删 → 204 + 存储对象随元数据清理。"""
+    """兼容删除委托项目删除（V2.5 语义，6.2）：解析中与解析失败均可删（契约 570：删除
+    自增 parse_version 栅栏迟到解析）→ 204 + 存储对象随元数据清理。"""
     user = _user(client)
     file_id = client.post(
         "/pdfs",
         files={"file": ("c.pdf", _pdf_bytes(), "application/pdf")},
         headers={**user, **_idem()},
     ).json()["file_id"]
-    # 上传即建项目（兼容委托），解析中（PENDING）→ 409 PROJECT_STATE_CONFLICT（不再直接删 PDF）
+    # 上传即建项目（兼容委托）：解析中（PENDING）直接删除 → 204，不再状态保护
     resp = client.delete(f"/pdfs/{file_id}", headers={**user, **_idem()})
-    assert resp.status_code == 409
-    assert resp.json()["error"]["code"] == "PROJECT_STATE_CONFLICT"
-    # 触发解析（fake PDF 无文本层 → FAILED → 项目 PARSE_FAILED）→ 可删除
+    assert resp.status_code == 204, resp.text
+    assert client.get(f"/pdfs/{file_id}", headers=user).status_code == 404
+    assert not [p for p in (tmp_path / "storage").rglob("*") if p.is_file()]
+
+    # 第二次上传：触发解析（fake PDF 无文本层 → FAILED → 项目 PARSE_FAILED）后删除
+    file_id = client.post(
+        "/pdfs",
+        files={"file": ("c2.pdf", _pdf_bytes(), "application/pdf")},
+        headers={**user, **_idem()},
+    ).json()["file_id"]
     from services.pdf.scanner import scan_once
 
     app = cast(FastAPI, client.app)

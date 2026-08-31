@@ -46,7 +46,7 @@ from infra.db.models import (
     TextChunk,
 )
 from infra.db.session import format_utc
-from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
+from infra.llm.deepseek import LlmChatClient, RetryableUpstreamError
 from infra.llm.prompts import (
     asset_versions,
     load_asset,
@@ -154,7 +154,7 @@ def _claim_next_batch(session: Session, *, task_id: str) -> Batch | None:
         # 被其他 worker 抢占 → 取下一条（continue 循环）
 
 
-def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient) -> int:
+def process_next_batch(session: Session, *, task_id: str, client: LlmChatClient) -> int:
     """处理下一个可执行批次（1 批 = 1 生成单元，每次 = 账本一次尝试）。返回处理批次数（0 = 无）。
 
     账本纪律（spec §9 硬规则）：抢占 + STARTED 占位同事务提交（调用前必须有已提交的
@@ -276,13 +276,9 @@ def process_next_batch(session: Session, *, task_id: str, client: DeepSeekClient
         + 1
     )
     system_prompt, user_prompt = _build_generator_prompts(task, unit, pages)
-    # model：executor 注入 settings 为权威；直接调用（无注入）回退 client 自带 settings
-    # （账本记录实际请求的模型，client.chat 使用 client.settings.deepseek_model）
-    model = (
-        settings.deepseek_model
-        if isinstance(settings, Settings)
-        else client.settings.deepseek_model
-    )
+    # model：executor 注入 settings 为权威；直接调用（无注入）回退配置默认（LlmChatClient
+    # 协议不暴露 client.settings；chat 响应里的 model 才是实际请求值，账本先记默认）
+    model = settings.deepseek_model if isinstance(settings, Settings) else Settings().deepseek_model
     attempt = create_attempt(
         session,
         user_id=task.user_id,

@@ -139,7 +139,6 @@ import androidx.navigation3.ui.NavDisplay
 import com.qiuzhao.flashcards.data.CardDraft
 import com.qiuzhao.flashcards.data.remote.DeckProgress
 import com.qiuzhao.flashcards.data.remote.DeckSummary
-import com.qiuzhao.flashcards.data.remote.LEGACY_UNASSIGNED_PROJECT_ID
 import com.qiuzhao.flashcards.data.remote.FlashcardEntity
 import com.qiuzhao.flashcards.data.ImportParser
 import com.qiuzhao.flashcards.data.remote.Rating
@@ -206,7 +205,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
             val project = projects.firstOrNull { it.id == route.id }
             if (project == null) LoadingScreen() else ProjectDetailScreen(
                 project,
-                decks.filter { (it.projectId ?: LEGACY_UNASSIGNED_PROJECT_ID) == project.id },
+                decks.filter { it.projectId == project.id },
                 navigator,
                 onDeleteDeck = { deckId, onResult ->
                     viewModel.deleteDeck(

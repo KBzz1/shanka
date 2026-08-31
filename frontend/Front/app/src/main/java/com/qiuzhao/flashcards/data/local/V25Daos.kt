@@ -1,6 +1,7 @@
 package com.qiuzhao.flashcards.data.local
 
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -14,9 +15,6 @@ import kotlinx.coroutines.flow.Flow
  */
 @Dao
 interface ProjectDao {
-    @Query("SELECT * FROM projects WHERE user_id = :userId ORDER BY created_at")
-    fun observeProjects(userId: String): Flow<List<ProjectEntity>>
-
     @Query("SELECT * FROM projects WHERE user_id = :userId ORDER BY created_at")
     suspend fun getProjectList(userId: String): List<ProjectEntity>
 
@@ -80,9 +78,6 @@ interface CardDao {
     @Query("SELECT * FROM cards WHERE user_id = :userId AND deck_id = :deckId ORDER BY position")
     suspend fun getDeckCards(userId: String, deckId: String): List<CardEntity>
 
-    @Query("SELECT * FROM cards WHERE user_id = :userId AND card_id = :cardId")
-    suspend fun getCard(userId: String, cardId: String): CardEntity?
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCards(cards: List<CardEntity>)
 
@@ -99,18 +94,23 @@ interface CardDao {
 @Dao
 interface ReviewQueueDao {
     @Query(
-        "SELECT cards.* FROM review_queue JOIN cards ON cards.user_id = review_queue.user_id " +
-            "AND cards.card_id = review_queue.card_id WHERE review_queue.user_id = :userId " +
-            "AND review_queue.deck_id = :deckId ORDER BY review_queue.position",
+        "SELECT cards.user_id AS card_user_id, cards.card_id AS card_card_id, " +
+            "cards.deck_id AS card_deck_id, cards.front AS card_front, cards.back AS card_back, " +
+            "cards.card_type AS card_card_type, cards.position AS card_position, " +
+            "cards.target_difficulty AS card_target_difficulty, cards.chapter_id AS card_chapter_id, " +
+            "cards.source_task_id AS card_source_task_id, " +
+            "cards.publication_state AS card_publication_state, cards.version AS card_version, " +
+            "review_states.user_id AS state_user_id, review_states.card_id AS state_card_id, " +
+            "review_states.state AS state_state, review_states.due AS state_due, " +
+            "review_states.synced_at AS state_synced_at " +
+            "FROM review_queue LEFT JOIN cards ON cards.user_id = review_queue.user_id " +
+            "AND cards.card_id = review_queue.card_id " +
+            "LEFT JOIN review_states ON review_states.user_id = review_queue.user_id " +
+            "AND review_states.card_id = review_queue.card_id " +
+            "WHERE review_queue.user_id = :userId AND review_queue.deck_id = :deckId " +
+            "ORDER BY review_queue.position",
     )
-    suspend fun getDeckQueue(userId: String, deckId: String): List<CardEntity>
-
-    @Query(
-        "SELECT cards.* FROM review_queue JOIN cards ON cards.user_id = review_queue.user_id " +
-            "AND cards.card_id = review_queue.card_id WHERE review_queue.user_id = :userId " +
-            "AND review_queue.deck_id = :deckId ORDER BY review_queue.position",
-    )
-    fun observeDeckQueue(userId: String, deckId: String): Flow<List<CardEntity>>
+    suspend fun getDeckQueueWithState(userId: String, deckId: String): List<DeckQueueCardProjection>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertQueue(items: List<ReviewQueueItemEntity>)
@@ -129,31 +129,56 @@ interface ReviewQueueDao {
 @Dao
 interface StudyPlanDao {
     @Query("SELECT * FROM study_plan WHERE user_id = :userId")
-    fun observeStudyPlan(userId: String): Flow<StudyPlanEntity?>
-
-    @Query("SELECT * FROM study_plan WHERE user_id = :userId")
     suspend fun getStudyPlan(userId: String): StudyPlanEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(plan: StudyPlanEntity)
 
-    @Query("DELETE FROM study_plan WHERE user_id = :userId")
-    suspend fun delete(userId: String)
 }
 
 @Dao
 interface TodayPlanDao {
     @Query(
-        "SELECT * FROM today_plan_cards WHERE user_id = :userId AND study_date = :studyDate " +
-            "AND hidden = 0 ORDER BY position",
+        "SELECT today_plan_cards.*, " +
+            "cards.user_id AS card_user_id, cards.card_id AS card_card_id, " +
+            "cards.deck_id AS card_deck_id, cards.front AS card_front, cards.back AS card_back, " +
+            "cards.card_type AS card_card_type, cards.position AS card_position, " +
+            "cards.target_difficulty AS card_target_difficulty, cards.chapter_id AS card_chapter_id, " +
+            "cards.source_task_id AS card_source_task_id, " +
+            "cards.publication_state AS card_publication_state, cards.version AS card_version, " +
+            "review_states.user_id AS state_user_id, review_states.card_id AS state_card_id, " +
+            "review_states.state AS state_state, review_states.due AS state_due, " +
+            "review_states.synced_at AS state_synced_at " +
+            "FROM today_plan_cards " +
+            "LEFT JOIN cards ON cards.user_id = today_plan_cards.user_id " +
+            "AND cards.card_id = today_plan_cards.card_id " +
+            "LEFT JOIN review_states ON review_states.user_id = today_plan_cards.user_id " +
+            "AND review_states.card_id = today_plan_cards.card_id " +
+            "WHERE today_plan_cards.user_id = :userId AND today_plan_cards.study_date = :studyDate " +
+            "AND today_plan_cards.hidden = 0 ORDER BY today_plan_cards.position",
     )
-    suspend fun getVisibleCards(userId: String, studyDate: String): List<TodayPlanCardEntity>
+    suspend fun getVisiblePlanCards(userId: String, studyDate: String): List<TodayPlanCardProjection>
 
     @Query(
-        "SELECT * FROM today_plan_cards WHERE user_id = :userId AND study_date = :studyDate " +
-            "AND hidden = 0 ORDER BY position",
+        "SELECT today_plan_cards.*, " +
+            "cards.user_id AS card_user_id, cards.card_id AS card_card_id, " +
+            "cards.deck_id AS card_deck_id, cards.front AS card_front, cards.back AS card_back, " +
+            "cards.card_type AS card_card_type, cards.position AS card_position, " +
+            "cards.target_difficulty AS card_target_difficulty, cards.chapter_id AS card_chapter_id, " +
+            "cards.source_task_id AS card_source_task_id, " +
+            "cards.publication_state AS card_publication_state, cards.version AS card_version, " +
+            "review_states.user_id AS state_user_id, review_states.card_id AS state_card_id, " +
+            "review_states.state AS state_state, review_states.due AS state_due, " +
+            "review_states.synced_at AS state_synced_at " +
+            "FROM today_plan_cards " +
+            "LEFT JOIN cards ON cards.user_id = today_plan_cards.user_id " +
+            "AND cards.card_id = today_plan_cards.card_id " +
+            "LEFT JOIN review_states ON review_states.user_id = today_plan_cards.user_id " +
+            "AND review_states.card_id = today_plan_cards.card_id " +
+            "WHERE today_plan_cards.user_id = :userId AND today_plan_cards.study_date = :studyDate " +
+            "AND today_plan_cards.hidden = 0 ORDER BY today_plan_cards.position",
     )
-    fun observeVisibleCards(userId: String, studyDate: String): Flow<List<TodayPlanCardEntity>>
+    fun observeVisiblePlanCards(userId: String, studyDate: String): Flow<List<TodayPlanCardProjection>>
 
     @Query("SELECT * FROM today_plan WHERE user_id = :userId AND study_date = :studyDate")
     suspend fun getTodayPlan(userId: String, studyDate: String): TodayPlanEntity?
@@ -177,8 +202,6 @@ interface TodayPlanDao {
     @Query("DELETE FROM today_plan_cards WHERE user_id = :userId AND study_date != :studyDate")
     suspend fun deleteOtherDateCards(userId: String, studyDate: String)
 
-    @Query("SELECT COUNT(*) FROM today_plan WHERE user_id = :userId")
-    suspend fun countRows(userId: String): Int
 }
 
 @Dao
@@ -186,21 +209,13 @@ interface ProgressDao {
     @Query("SELECT * FROM project_progress WHERE user_id = :userId AND project_id = :projectId")
     suspend fun get(userId: String, projectId: String): ProjectProgressEntity?
 
-    @Query("SELECT * FROM project_progress WHERE user_id = :userId")
-    fun observe(userId: String): Flow<List<ProjectProgressEntity>>
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(progress: ProjectProgressEntity)
 
-    @Query("DELETE FROM project_progress WHERE user_id = :userId AND project_id = :projectId")
-    suspend fun delete(userId: String, projectId: String)
 }
 
 @Dao
 interface DashboardDao {
-    @Query("SELECT * FROM dashboard_snapshot WHERE user_id = :userId")
-    fun observe(userId: String): Flow<DashboardEntity?>
-
     @Query("SELECT * FROM dashboard_snapshot WHERE user_id = :userId")
     suspend fun get(userId: String): DashboardEntity?
 
@@ -219,8 +234,6 @@ interface CacheMetadataDao {
     @Query("DELETE FROM cache_metadata WHERE user_id = :userId AND resource_key = :resourceKey")
     suspend fun invalidate(userId: String, resourceKey: String)
 
-    @Query("DELETE FROM cache_metadata WHERE user_id = :userId AND resource_key LIKE :prefix || '%'")
-    suspend fun invalidatePrefix(userId: String, prefix: String)
 }
 
 @Dao
@@ -271,3 +284,22 @@ interface ReviewOutboxDao {
         errorCode: String?,
     )
 }
+
+// --- single-query JOIN projections -----------------------------------------------------------------
+
+/**
+ * One plan row joined with its card and server review state in a single SELECT: the plan read
+ * path never issues per-card lookups (see `V25DaoQueryShapeTest` for the query-count gate).
+ * Card/state stay null when the referenced row is absent (LEFT JOIN semantics).
+ */
+data class TodayPlanCardProjection(
+    @Embedded val item: TodayPlanCardEntity,
+    @Embedded(prefix = "card_") val card: CardEntity?,
+    @Embedded(prefix = "state_") val reviewState: ReviewStateEntity?,
+)
+
+/** Deck-queue entry joined with its card and review state in a single SELECT. */
+data class DeckQueueCardProjection(
+    @Embedded(prefix = "card_") val card: CardEntity?,
+    @Embedded(prefix = "state_") val reviewState: ReviewStateEntity?,
+)

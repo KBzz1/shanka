@@ -29,7 +29,7 @@ data class DeckSummary(
     val masteredLifecycleCount: Int = 0,
     val reviewEventCount: Int = 0,
     val lastStudiedAt: String? = null,
-    /** Null is a legacy standalone deck until the server migration assigns a project. */
+    /** Null is an independent deck (Architecture 3.8)；projects own their decks. */
     val projectId: String? = null,
 )
 
@@ -40,8 +40,6 @@ data class ProjectSummary(
     val deckCount: Int = 0,
     val materialCount: Int = 0
 )
-
-const val LEGACY_UNASSIGNED_PROJECT_ID = "legacy-unassigned"
 
 data class DeckProgress(
     val cardCount: Int,

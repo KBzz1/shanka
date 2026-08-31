@@ -460,7 +460,11 @@ private class StubV25Repository : V25Repository {
     override suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject> =
         V25Result.Success(project.copy(name = name.trim(), version = project.version + 1))
 
-    override suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit> =
+    override suspend fun deleteProject(
+        projectId: String,
+        retainDecks: Boolean,
+        idempotencyKey: String?,
+    ): V25Result<Unit> =
         V25Result.Failure(V25ErrorCodes.PROJECT_HAS_ACTIVE_TASK, "project.delete.blocked", "存在正式生成中的任务")
 
     override suspend fun replaceProjectPdf(
@@ -548,7 +552,7 @@ private class StubV25Repository : V25Repository {
     override suspend fun renameDeck(deckId: String, name: String): V25Result<V25Deck> =
         V25Result.Success(deck.copy(name = name))
 
-    override suspend fun deleteDeck(deckId: String): V25Result<Unit> = V25Result.Success(Unit)
+    override suspend fun deleteDeck(deckId: String, idempotencyKey: String?): V25Result<Unit> = V25Result.Success(Unit)
 
     override suspend fun listCards(deckId: String, filter: V25BrowseFilter): V25Result<List<V25Card>> {
         val difficulty = filter.contentDifficulty?.let { content ->
@@ -639,4 +643,39 @@ private class StubV25Repository : V25Repository {
 
     override suspend fun saveApiKey(apiKey: String): V25Result<V25ApiKeyStatus> =
         V25Result.Success(V25ApiKeyStatus(V25ApiKeyState.AVAILABLE, "sk-****1234"))
+
+    // Not exercised by this suite; bodies mirror the old interface defaults.
+    override suspend fun projectProgress(projectId: String): V25Result<V25ProgressSummary> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "项目进度暂不可用")
+
+    override suspend fun getProjectDeletionPreflight(
+        projectId: String,
+        retainDecks: Boolean,
+        allowCancel: Boolean,
+    ): V25Result<V25DeletionPreflight> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "删除预检暂不可用")
+
+    override suspend fun attachDeckToProject(
+        projectId: String,
+        deckId: String,
+        idempotencyKey: String?,
+    ): V25Result<V25Deck> = V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "归入项目暂不可用")
+
+    override suspend fun getDeckDeletionPreflight(
+        deckId: String,
+        allowCancel: Boolean,
+    ): V25Result<V25DeletionPreflight> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "删除预检暂不可用")
+
+    override suspend fun getStudyPlan(): V25Result<V25StudyPlan> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "学习计划暂不可用")
+
+    override suspend fun updateStudyPlan(
+        plan: V25StudyPlanUpdate,
+        idempotencyKey: String?,
+    ): V25Result<V25StudyPlan> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "学习计划暂不可用")
+
+    override suspend fun studyPlanBacklog(offset: Int, limit: Int): V25Result<List<V25PlanCard>> =
+        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "积压卡片暂不可用")
 }

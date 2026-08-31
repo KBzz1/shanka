@@ -633,6 +633,10 @@ def test_projects_study_settings_defaults(client: TestClient, tmp_path: Path) ->
     assert body == {
         "selected_new_card_chapter_ids": [],
         "include_unassigned": False,
+        # 契约 3.17 卡组计划范围与双目标（get-or-create 默认值）
+        "selected_deck_ids": [],
+        "daily_new_goal": 10,
+        "daily_review_goal": 40,
         "updated_at": body["updated_at"],
     }
     assert body["updated_at"]
@@ -696,8 +700,8 @@ def test_projects_study_settings_cross_user_404(client: TestClient, tmp_path: Pa
 # ---------- 删除保护（活跃任务 / 状态） ----------
 
 
-def test_projects_delete_parsing_state_conflict(client: TestClient) -> None:
-    """解析中项目不可删除（PRD V25-GEN-FR-09）→ 409 PROJECT_STATE_CONFLICT。"""
+def test_projects_delete_parsing_succeeds(client: TestClient) -> None:
+    """解析中项目可删（契约 570）：删除自增 parse_version 栅栏迟到解析，不再 409。"""
     user = _user(client)
     project_id = client.post(
         "/projects",
@@ -705,14 +709,12 @@ def test_projects_delete_parsing_state_conflict(client: TestClient) -> None:
         headers={**user, **_idem()},
     ).json()["project_id"]
     resp = client.delete(f"/projects/{project_id}?retain_decks=true", headers={**user, **_idem()})
-    assert resp.status_code == 409
-    assert _error_code(resp) == "PROJECT_STATE_CONFLICT"
-    # 项目仍在
-    assert client.get(f"/projects/{project_id}", headers=user).status_code == 200
+    assert resp.status_code == 204
+    assert client.get(f"/projects/{project_id}", headers=user).status_code == 404
 
 
-def test_projects_delete_active_task_conflict(client: TestClient, tmp_path: Path) -> None:
-    """存在活跃（非终态）任务 → 409 PROJECT_HAS_ACTIVE_TASK。"""
+def test_projects_delete_active_task_auto_cancelled(client: TestClient, tmp_path: Path) -> None:
+    """契约 570/675：活跃任务在同一写事务内自动取消，删除不再 409。"""
     user = _user(client)
     db = tmp_path / "projects_api.db"
     project = _seed_parsed_project(db, _user_id(db))
@@ -727,8 +729,8 @@ def test_projects_delete_active_task_conflict(client: TestClient, tmp_path: Path
     resp = client.delete(
         f"/projects/{project['project_id']}?retain_decks=false", headers={**user, **_idem()}
     )
-    assert resp.status_code == 409
-    assert _error_code(resp) == "PROJECT_HAS_ACTIVE_TASK"
+    assert resp.status_code == 204
+    assert client.get(f"/projects/{project['project_id']}", headers=user).status_code == 404
 
 
 def test_projects_delete_cross_user_404(client: TestClient, tmp_path: Path) -> None:

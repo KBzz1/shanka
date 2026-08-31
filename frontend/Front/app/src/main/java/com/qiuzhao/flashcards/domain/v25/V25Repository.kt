@@ -65,34 +65,24 @@ interface V25Repository {
     suspend fun getProject(projectId: String): V25Result<V25LearningProject>
 
     /** GET /projects/{project_id}/progress — server-derived project lifecycle aggregate. */
-    suspend fun projectProgress(projectId: String): V25Result<V25ProgressSummary> =
-        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "项目进度暂不可用")
+    suspend fun projectProgress(projectId: String): V25Result<V25ProgressSummary>
 
     /** PATCH /projects/{project_id} — rename the project (1..60 trimmed characters). */
     suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject>
 
     /** DELETE /projects/{project_id}?retain_decks= — server cancels active tasks; keep or delete decks. */
-    suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit>
-
-    /**
-     * Compatibility overload retaining the retry key for existing callers.  Task handling is
-     * server-side; the legacy abandon/cancel flags are intentionally ignored on the wire.
-     */
     suspend fun deleteProject(
         projectId: String,
         retainDecks: Boolean,
-        abandonPreGenerationTasks: Boolean = false,
         idempotencyKey: String? = null,
-        cancelActiveTasks: Boolean = false,
-    ): V25Result<Unit> = deleteProject(projectId, retainDecks)
+    ): V25Result<Unit>
 
     /** GET /projects/{project_id}/deletion-preflight — read-only impact and task blockers. */
     suspend fun getProjectDeletionPreflight(
         projectId: String,
         retainDecks: Boolean = true,
         allowCancel: Boolean = false,
-    ): V25Result<V25DeletionPreflight> =
-        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "删除预检暂不可用")
+    ): V25Result<V25DeletionPreflight>
 
     /** POST /projects/{project_id}/replace-pdf — replace and re-parse a failed PDF. */
     suspend fun replaceProjectPdf(
@@ -184,28 +174,19 @@ interface V25Repository {
         projectId: String,
         deckId: String,
         idempotencyKey: String? = null,
-    ): V25Result<V25Deck> = V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "归入项目暂不可用")
+    ): V25Result<V25Deck>
 
     /** PATCH /decks/{deck_id} — rename the deck. */
     suspend fun renameDeck(deckId: String, name: String): V25Result<V25Deck>
 
     /** DELETE /decks/{deck_id} — server cancels active tasks before cascading the deck delete. */
-    suspend fun deleteDeck(deckId: String): V25Result<Unit>
-
-    /** Compatibility overload; task handling is server-side and the legacy flags are ignored. */
-    suspend fun deleteDeck(
-        deckId: String,
-        abandonPreGenerationTasks: Boolean = false,
-        idempotencyKey: String? = null,
-        cancelActiveTasks: Boolean = false,
-    ): V25Result<Unit> = deleteDeck(deckId)
+    suspend fun deleteDeck(deckId: String, idempotencyKey: String? = null): V25Result<Unit>
 
     /** GET /decks/{deck_id}/deletion-preflight — read-only impact and task blockers. */
     suspend fun getDeckDeletionPreflight(
         deckId: String,
         allowCancel: Boolean = false,
-    ): V25Result<V25DeletionPreflight> =
-        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "删除预检暂不可用")
+    ): V25Result<V25DeletionPreflight>
 
     /** GET /decks/{deck_id}/cards — cards with free-browse order/difficulty/mastery filters. */
     suspend fun listCards(deckId: String, filter: V25BrowseFilter): V25Result<List<V25Card>>
@@ -248,15 +229,13 @@ interface V25Repository {
     // --- study and review (Architecture 4.5) ------------------------------------------------------
 
     /** GET /study/plan — current project's atomic deck-scoped plan. */
-    suspend fun getStudyPlan(): V25Result<V25StudyPlan> =
-        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "学习计划暂不可用")
+    suspend fun getStudyPlan(): V25Result<V25StudyPlan>
 
     /** PUT /study/plan — atomically save the project, deck scope and two daily quotas. */
     suspend fun updateStudyPlan(
         plan: V25StudyPlanUpdate,
         idempotencyKey: String? = null,
-    ): V25Result<V25StudyPlan> =
-        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "学习计划暂不可用")
+    ): V25Result<V25StudyPlan>
 
     /** GET /study/today — server-computed today plan in the account learning timezone. */
     suspend fun todayPlan(): V25Result<V25TodayPlan>
@@ -265,8 +244,7 @@ interface V25Repository {
     suspend fun studyPlanBacklog(
         offset: Int = 0,
         limit: Int = 50,
-    ): V25Result<List<V25PlanCard>> =
-        V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, message = "积压卡片暂不可用")
+    ): V25Result<List<V25PlanCard>>
 
     /** GET /decks/{deck_id}/review — due review for an independent deck or a specific deck. */
     suspend fun deckReviewQueue(deckId: String): V25Result<List<V25ReviewCard>>

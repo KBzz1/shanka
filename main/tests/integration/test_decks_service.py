@@ -68,6 +68,14 @@ def test_decks_create_assigns_defaults(session_factory: Callable[[], Session]) -
         "mastered_card_count": 0,
         "review_count": 0,
         "mastery_ratio": 0.0,
+        # 契约 3.8 学习分布与活跃度字段（V2.5）
+        "not_started_count": 0,
+        "learning_count": 0,
+        "relearning_count": 0,
+        "consolidating_count": 0,
+        "mastered_count": 0,
+        "review_event_count": 0,
+        "last_studied_at": None,
     }
 
 
@@ -171,7 +179,11 @@ def test_decks_delete_removes_cascade_and_sets_null(session_factory: Callable[[]
         assert excinfo.value.code is ErrorCode.DECK_NOT_FOUND
 
 
-def test_decks_delete_blocked_by_non_terminal_task(session_factory: Callable[[], Session]) -> None:
+def test_decks_delete_auto_cancels_non_terminal_task(
+    session_factory: Callable[[], Session],
+) -> None:
+    """契约 722：非终态任务不再阻塞删除——同一事务内 CAS 取消并脱离牌组。"""
+    from infra.db.models import Deck as DeckModel
     from infra.db.models import Task
 
     user = _uuid()
@@ -179,31 +191,39 @@ def test_decks_delete_blocked_by_non_terminal_task(session_factory: Callable[[],
         _ensure_user(session, user)
         deck = create_deck(session, user_id=user, name="D", now="2026-08-11T00:00:00.000Z")
         session.flush()
-        session.add(
-            Task(
-                task_id=_uuid(),
-                user_id=user,
-                status="GENERATING",
-                selected_chapters="[]",
-                generation_config="{}",
-                deck_id=deck.deck_id,
-                generated_card_count=0,
-                resumable=0,
-                created_at="2026-08-11T00:00:00.000Z",
-                updated_at="2026-08-11T00:00:00.000Z",
-            )
+        task = Task(
+            task_id=_uuid(),
+            user_id=user,
+            status="GENERATING",
+            selected_chapters="[]",
+            generation_config="{}",
+            deck_id=deck.deck_id,
+            generated_card_count=0,
+            resumable=0,
+            created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
         )
+        session.add(task)
         session.commit()
-        deck_id = deck.deck_id
-    with session_factory() as session, pytest.raises(AppError) as excinfo:
-        delete_deck(session, user_id=user, deck_id=deck_id)
-    assert excinfo.value.code is ErrorCode.TASK_IN_PROGRESS
+        deck_id, task_id = deck.deck_id, task.task_id
+
+    with session_factory() as session:
+        delete_deck(session, user_id=user, deck_id=deck_id, now="2026-08-11T00:01:00.000Z")
+        session.commit()
+
+    with session_factory() as session:
+        assert session.get(DeckModel, deck_id) is None
+        canceled = session.get(Task, task_id)
+        assert canceled is not None
+        assert canceled.status == "ABANDONED"
+        assert canceled.deck_id is None
+        assert canceled.ended_at is not None
 
 
-def test_decks_delete_cancels_active_task_when_explicit(
+def test_decks_delete_auto_cancels_active_task(
     session_factory: Callable[[], Session],
 ) -> None:
-    """显式选择取消后，正式生成任务被围栏并与牌组原子删除。"""
+    """删除在同一事务内自动取消正式生成任务并围栏，与牌组删除原子提交。"""
     from infra.db.models import Deck as DeckModel
     from infra.db.models import Task
 
@@ -233,7 +253,6 @@ def test_decks_delete_cancels_active_task_when_explicit(
             session,
             user_id=user,
             deck_id=deck_id,
-            cancel_active_tasks=True,
             now="2026-08-11T00:01:00.000Z",
         )
         session.commit()

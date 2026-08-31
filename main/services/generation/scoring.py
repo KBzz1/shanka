@@ -48,7 +48,7 @@ from infra.db.models import (
     TextChunk,
 )
 from infra.db.session import format_utc
-from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
+from infra.llm.deepseek import LlmChatClient, RetryableUpstreamError
 from infra.llm.prompts import asset_versions, load_asset, safe_json_dumps
 from services.generation.batches import apply_batch_quality
 from services.generation.ledger import (
@@ -499,7 +499,7 @@ def _run_scoring_group(
     group: ScoringGroup,
     *,
     settings: Settings,
-    client: DeepSeekClient,
+    client: LlmChatClient,
     versions: dict[str, str],
 ) -> None:
     """单组评分（spec §8/§9）：组数据+Prompt 组装（与 STARTED 占位同事务提交）→
@@ -772,7 +772,7 @@ def _finish_group_failed(
 
 
 def run_scoring_stage(
-    session: Session, *, task: Task, settings: Settings, client: DeepSeekClient
+    session: Session, *, task: Task, settings: Settings, client: LlmChatClient
 ) -> None:
     """SCORING 阶段执行（spec §8）：逐组（重读 Task 须 GENERATING+SCORING）→ 全部组后
     条件更新 WHERE status='GENERATING' AND stage='SCORING' → stage=PUBLISHING

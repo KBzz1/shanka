@@ -15,7 +15,7 @@ import json
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import insert
@@ -32,7 +32,11 @@ from services.generation.validate import validate_config
 
 _NOW = "2026-08-15T00:00:00.000Z"
 
-_SETTINGS = Settings(deepseek_api_key="stub", api_key_encryption_key="aa" * 32, _env_file=None)
+_SETTINGS = Settings(  # type: ignore[call-arg]  # pydantic-settings 运行时支持 _env_file
+    deepseek_api_key="stub",
+    api_key_encryption_key="aa" * 32,
+    _env_file=None,
+)
 
 
 def _uuid() -> str:
@@ -50,7 +54,7 @@ def _config(basic: int = 40, understanding: int = 40, deep: int = 20) -> Generat
 
 def _envelope(user_prompt: str) -> dict[str, Any]:
     raw = user_prompt.split("<GENERATOR_INPUT>")[1].split("</GENERATOR_INPUT>")[0]
-    return json.loads(raw)
+    return cast("dict[str, Any]", json.loads(raw))
 
 
 class StubClient:
@@ -72,10 +76,18 @@ class StubClient:
         self.fail_difficulty = fail_difficulty
         self.transient_failures = transient_failures
 
+    def close(self) -> None:
+        pass
+
     def chat(
-        self, user_prompt: str, system_prompt: str | None = None, max_tokens: int | None = None
+        self,
+        prompt: str,
+        api_key: str = "",
+        *,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
-        payload = _envelope(user_prompt)
+        payload = _envelope(prompt)
         difficulty = str(payload["target_difficulty"])
         self.calls.append(difficulty)
         if self.transient_failures > 0:
@@ -250,7 +262,7 @@ def test_samples_llm_user_envelope_carries_material_and_config(
     captured: list[dict[str, Any]] = []
 
     class Capture(StubClient):
-        def chat(
+        def chat(  # 捕获签名子集（缺省参数缺省即可）
             self,
             user_prompt: str,
             system_prompt: str | None = None,

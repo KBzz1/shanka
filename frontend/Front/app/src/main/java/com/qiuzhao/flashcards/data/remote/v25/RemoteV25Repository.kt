@@ -147,15 +147,10 @@ class RemoteV25Repository internal constructor(
     override suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject> =
         wire { api.renameProject(projectId, RenameRequest(name), newKey()).toDomain() }
 
-    override suspend fun deleteProject(projectId: String, retainDecks: Boolean): V25Result<Unit> =
-        wire { api.deleteProject(projectId, retainDecks, newKey()) }
-
     override suspend fun deleteProject(
         projectId: String,
         retainDecks: Boolean,
-        abandonPreGenerationTasks: Boolean,
         idempotencyKey: String?,
-        cancelActiveTasks: Boolean,
     ): V25Result<Unit> = wire { api.deleteProject(projectId, retainDecks, idempotencyKey ?: newKey()) }
 
     override suspend fun getProjectDeletionPreflight(
@@ -274,15 +269,8 @@ class RemoteV25Repository internal constructor(
     override suspend fun renameDeck(deckId: String, name: String): V25Result<V25Deck> =
         wire { api.renameDeck(deckId, RenameRequest(name), newKey()).toDomain() }
 
-    override suspend fun deleteDeck(deckId: String): V25Result<Unit> =
-        wire { api.deleteDeck(deckId, newKey()) }
-
-    override suspend fun deleteDeck(
-        deckId: String,
-        abandonPreGenerationTasks: Boolean,
-        idempotencyKey: String?,
-        cancelActiveTasks: Boolean,
-    ): V25Result<Unit> = wire { api.deleteDeck(deckId, idempotencyKey ?: newKey()) }
+    override suspend fun deleteDeck(deckId: String, idempotencyKey: String?): V25Result<Unit> =
+        wire { api.deleteDeck(deckId, idempotencyKey ?: newKey()) }
 
     override suspend fun getDeckDeletionPreflight(
         deckId: String,

@@ -86,13 +86,16 @@ def attach_deck_to_project(
     deck = _owned(session, user_id=user_id, deck_id=deck_id)
     if deck.project_id is not None:
         raise AppError(ErrorCode.VALIDATION_ERROR, "只有独立牌组可以归入项目")
-    visible_count = session.scalar(
-        select(func.count(Card.card_id)).where(
-            Card.user_id == user_id,
-            Card.deck_id == deck_id,
-            text(VISIBLE_PREDICATE_SQL),
+    visible_count = (
+        session.scalar(
+            select(func.count(Card.card_id)).where(
+                Card.user_id == user_id,
+                Card.deck_id == deck_id,
+                text(VISIBLE_PREDICATE_SQL),
+            )
         )
-    ) or 0
+        or 0
+    )
     if visible_count == 0:
         raise AppError(ErrorCode.VALIDATION_ERROR, "卡组暂无可学习卡片")
     deck.project_id = project.project_id
@@ -109,16 +112,19 @@ def _owned(session: Session, *, user_id: str, deck_id: str) -> Deck:
     return deck
 
 
-def deck_progress(
-    session: Session, *, user_id: str, deck_id: str, now: str
-) -> dict[str, object]:
+def deck_progress(session: Session, *, user_id: str, deck_id: str, now: str) -> dict[str, object]:
     """派生进度（structure-contract 3.8/5.3）：card_count/due_count/mastered/review_count/
     mastery_ratio——全部只含可见卡（统一可见谓词 3.9：card_count 派生进度只含可见卡）。"""
     _owned(session, user_id=user_id, deck_id=deck_id)
     visible = text(VISIBLE_PREDICATE_SQL)
-    card_count = session.scalar(
-        select(func.count(Card.card_id)).where(Card.user_id == user_id, Card.deck_id == deck_id, visible)
-    ) or 0
+    card_count = (
+        session.scalar(
+            select(func.count(Card.card_id)).where(
+                Card.user_id == user_id, Card.deck_id == deck_id, visible
+            )
+        )
+        or 0
+    )
     due_count = (
         session.scalar(
             select(func.count(Card.card_id))
@@ -265,8 +271,6 @@ def delete_deck(
     *,
     user_id: str,
     deck_id: str,
-    abandon_pre_generation_tasks: bool = False,
-    cancel_active_tasks: bool = False,
     now: str | None = None,
 ) -> None:
     deck = _owned(session, user_id=user_id, deck_id=deck_id)
