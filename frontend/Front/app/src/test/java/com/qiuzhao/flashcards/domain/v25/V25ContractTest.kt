@@ -453,9 +453,9 @@ private class StubV25Repository : V25Repository {
     ): V25Result<V25LearningProject> =
         V25Result.Success(project.copy(name = name ?: fileName.substringBeforeLast('.'), version = 1))
 
-    override suspend fun listProjects(): V25Result<List<V25LearningProject>> = V25Result.Success(emptyList())
+    override suspend fun listProjects(forceRefresh: Boolean): V25Result<List<V25LearningProject>> = V25Result.Success(emptyList())
 
-    override suspend fun getProject(projectId: String): V25Result<V25LearningProject> = V25Result.Success(project)
+    override suspend fun getProject(projectId: String, forceRefresh: Boolean): V25Result<V25LearningProject> = V25Result.Success(project)
 
     override suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject> =
         V25Result.Success(project.copy(name = name.trim(), version = project.version + 1))

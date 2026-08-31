@@ -15,6 +15,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.qiuzhao.flashcards.ui.AppViewModel
 import com.qiuzhao.flashcards.ui.AutumnFlashcardsTheme
@@ -58,6 +61,7 @@ fun ShankaRoot(appViewModel: AppViewModel) {
                 val authError = (authState as AuthState.LoggedIn).error
                 val actionError by appViewModel.uiMessage.collectAsState()
                 val message = actionError ?: authError
+                ForegroundParseReconcileEffect(appViewModel)
                 LaunchedEffect(message) {
                     if (message == null) return@LaunchedEffect
                     // Release error feedback is transient: failures never look like a completed action.
@@ -83,5 +87,20 @@ private fun AuthEntry(appViewModel: AppViewModel) {
     when (navigationState.currentRoute) {
         AppRoute.Register -> RegisterScreen(appViewModel, navigator)
         else -> LoginScreen(appViewModel, navigator, showBack = false)
+    }
+}
+
+/**
+ * Foreground reconcile for the decoupled parse wait: every time the app returns to RESUMED,
+ * still-parsing projects are force-pulled once so finished parses appear without any screen
+ * polling. The periodic ParseSyncWorker is the background twin of this effect.
+ */
+@Composable
+private fun ForegroundParseReconcileEffect(appViewModel: AppViewModel) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            appViewModel.reconcileParsingProjects()
+        }
     }
 }

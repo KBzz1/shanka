@@ -139,33 +139,44 @@ class OfflineFirstV25Repository(
 
     // --- reads (cached) ---------------------------------------------------------------------------
 
-    override suspend fun listProjects(): V25Result<List<V25LearningProject>> =
-        cachedRead(
+    override suspend fun listProjects(forceRefresh: Boolean): V25Result<List<V25LearningProject>> {
+        if (forceRefresh) {
+            val user = userId() ?: return requireUserId()
+            val forced = remote.listProjects()
+            if (forced is V25Result.Success) cache.replaceProjects(user, forced.value, clock.millis())
+            return forced
+        }
+        return cachedRead(
             V25CacheStore.KEY_PROJECTS,
             TTL_LIST,
             currentPolicy,
-            readCache = { userId()?.let { cache.readProjects(it) } },
+            readCache = { userId()?.let { user -> cache.readProjects(user) } },
             fetch = { remote.listProjects() },
             writeCache = { value -> userId()?.let { user -> cache.replaceProjects(user, value, clock.millis()) } },
         )
+    }
 
-    override suspend fun getProject(projectId: String): V25Result<V25LearningProject> {
+    override suspend fun getProject(projectId: String, forceRefresh: Boolean): V25Result<V25LearningProject> {
         val user = userId() ?: return requireUserId()
         val laneKey = "$user:${V25CacheStore.KEY_PROJECT}:$projectId"
         val cached = cache.readProject(user, projectId)
+        // Parse polling and first loads must observe server truth synchronously: a cached
+        // PARSING snapshot served for five minutes is exactly the "forever waiting" defect.
+        // A failed forced fetch still falls back to the snapshot so offline re-entry renders.
+        if (forceRefresh || cached == null) {
+            val result = remote.getProject(projectId)
+            if (result is V25Result.Success) {
+                cache.replaceProject(user, result.value, clock.millis())
+                return result
+            }
+            return cached?.let { V25Result.Success(it) } ?: result
+        }
         val metadata = cache.metadata(user, V25CacheStore.KEY_PROJECTS)
-        if (cached != null && metadata != null && clock.millis() - metadata.fetchedAt < TTL_LIST) {
+        if (metadata != null && clock.millis() - metadata.fetchedAt < TTL_LIST) {
             return V25Result.Success(cached)
         }
-        val result = if (cached != null) {
-            lanes.launchBackground(laneKey) { refreshProject(user, projectId) }
-            V25Result.Success(cached)
-        } else {
-            remote.getProject(projectId).also { fresh ->
-                if (fresh is V25Result.Success) cache.replaceProject(user, fresh.value, clock.millis())
-            }
-        }
-        return result
+        lanes.launchBackground(laneKey) { refreshProject(user, projectId) }
+        return V25Result.Success(cached)
     }
 
     private suspend fun refreshProject(user: String, projectId: String) {
@@ -262,6 +273,24 @@ class OfflineFirstV25Repository(
     fun observeDecks(): Flow<List<com.qiuzhao.flashcards.domain.v25.V25Deck>> = flow {
         val user = userId() ?: return@flow
         cache.observeDecks(user).collect { emit(it) }
+    }
+
+    /** Live learning projects: parse-status advances and reconciles re-emit here. */
+    fun observeProjects(): Flow<List<V25LearningProject>> = flow {
+        val user = userId() ?: return@flow
+        cache.observeProjects(user).collect { emit(it) }
+    }
+
+    /**
+     * Advances every still-parsing project's projection: one forced list pull, then one forced
+     * detail pull per PARSING project. The WorkManager [com.qiuzhao.flashcards.work.ParseSyncWorker]
+     * and the ViewModel foreground reconcile are the two callers.
+     */
+    suspend fun refreshParsingProjects() {
+        val fresh = listProjects(forceRefresh = true)
+        if (fresh !is V25Result.Success) return
+        fresh.value.filter { it.status == com.qiuzhao.flashcards.domain.v25.V25ProjectStatus.PARSING }
+            .forEach { project -> getProject(project.projectId, forceRefresh = true) }
     }
 
     /** Today's still-visible plan queue (a rated card disappears the moment its transaction commits). */

@@ -135,10 +135,10 @@ class RemoteV25Repository internal constructor(
         ).toDomain()
     }
 
-    override suspend fun listProjects(): V25Result<List<V25LearningProject>> =
+    override suspend fun listProjects(forceRefresh: Boolean): V25Result<List<V25LearningProject>> =
         wire { api.listProjects().items.map { it.toDomain() } }
 
-    override suspend fun getProject(projectId: String): V25Result<V25LearningProject> =
+    override suspend fun getProject(projectId: String, forceRefresh: Boolean): V25Result<V25LearningProject> =
         wire { api.getProject(projectId).toDomain() }
 
     override suspend fun projectProgress(projectId: String): V25Result<V25ProgressSummary> =

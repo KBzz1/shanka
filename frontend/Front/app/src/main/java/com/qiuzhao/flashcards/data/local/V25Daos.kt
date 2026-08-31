@@ -18,6 +18,10 @@ interface ProjectDao {
     @Query("SELECT * FROM projects WHERE user_id = :userId ORDER BY created_at")
     suspend fun getProjectList(userId: String): List<ProjectEntity>
 
+    /** Live project rows: a parse-status advance re-emits without any screen-driven polling. */
+    @Query("SELECT * FROM projects WHERE user_id = :userId ORDER BY created_at")
+    fun observeProjectList(userId: String): Flow<List<ProjectEntity>>
+
     @Query("SELECT * FROM projects WHERE user_id = :userId AND project_id = :projectId")
     suspend fun getProject(userId: String, projectId: String): ProjectEntity?
 

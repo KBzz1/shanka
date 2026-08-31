@@ -58,11 +58,11 @@ interface V25Repository {
         idempotencyKey: String? = null,
     ): V25Result<V25LearningProject>
 
-    /** GET /projects — the user's projects; empty list is the true empty state. */
-    suspend fun listProjects(): V25Result<List<V25LearningProject>>
+    /** GET /projects — the user's projects; empty list is the true empty state. `forceRefresh` bypasses the offline cache. */
+    suspend fun listProjects(forceRefresh: Boolean = false): V25Result<List<V25LearningProject>>
 
-    /** GET /projects/{project_id} — project detail. */
-    suspend fun getProject(projectId: String): V25Result<V25LearningProject>
+    /** GET /projects/{project_id} — project detail. `forceRefresh` bypasses the offline cache. */
+    suspend fun getProject(projectId: String, forceRefresh: Boolean = false): V25Result<V25LearningProject>
 
     /** GET /projects/{project_id}/progress — server-derived project lifecycle aggregate. */
     suspend fun projectProgress(projectId: String): V25Result<V25ProgressSummary>

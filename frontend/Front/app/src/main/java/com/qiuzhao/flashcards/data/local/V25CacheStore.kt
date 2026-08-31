@@ -289,6 +289,14 @@ class V25CacheStore(private val db: ShankaV25Database) {
         deckDao.observeDecks(userId).map { rows -> rows.map { it.toDomain() } }
 
     /**
+     * Live learning projects: the row flow triggers a consistent re-read of files/chapters
+     * (replaceProjects writes all three in one transaction), so a parse-status advance or a
+     * background reconcile re-emits the assembled domain model without screen-driven polling.
+     */
+    fun observeProjects(userId: String): Flow<List<V25LearningProject>> =
+        projectDao.observeProjectList(userId).map { readProjects(userId) }
+
+    /**
      * Today's visible (not yet rated away) plan queue; a write re-emits the new order. The JOIN
      * projection also watches `cards`/`review_states`, so a completed sync re-emits here too.
      */

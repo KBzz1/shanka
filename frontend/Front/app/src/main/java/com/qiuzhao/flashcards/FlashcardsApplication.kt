@@ -17,6 +17,7 @@ import com.qiuzhao.flashcards.data.remote.v25.RemoteV25Repository
 import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
 import com.qiuzhao.flashcards.data.session.SessionStore
 import com.qiuzhao.flashcards.data.session.loadQuietly
+import com.qiuzhao.flashcards.work.ParseSyncWorker
 import com.qiuzhao.flashcards.work.ReviewSyncWorker
 import java.time.Clock
 import kotlinx.coroutines.CoroutineScope
@@ -91,11 +92,13 @@ class AppContainer(context: Context) {
         }
     }
 
-    /** Sign-in: resume a 401-paused sync and enqueue the per-user WorkManager backstop. */
+    /** Sign-in: resume a 401-paused sync and enqueue the per-user WorkManager backstops. */
     fun onUserSignedIn() {
         val userId = sessionStore.loadQuietly()?.user?.userId ?: return
         v25Repository.onSignedIn()
         ReviewSyncWorker.enqueue(appContext, userId)
+        ParseSyncWorker.enqueueOneTime(appContext)
+        ParseSyncWorker.enqueuePeriodic(appContext)
     }
 
     /** Sign-out: cancel background revalidation, pause syncing, keep the account-isolated cache. */

@@ -300,14 +300,22 @@ internal fun ProjectCreateScreen(
             }
             Surface(
             onClick = {
-                val onResult: (String?) -> Unit = { error ->
-                    message = error
-                    if (error == null) nav.goBack()
-                }
                 if (editingProject == null) {
-                    viewModel.createProjectFromDraft(name, selectedTheme, onResult)
+                    // Creation success lands directly on the deck-generation entry: the parse
+                    // wait is non-blocking now, so the user should not re-click three levels.
+                    viewModel.createProjectFromDraft(name, selectedTheme) { projectId, error ->
+                        message = error
+                        if (error == null && projectId != null) {
+                            nav.replaceTop(AppRoute.DeckGeneration(projectId))
+                        } else if (error == null) {
+                            nav.goBack()
+                        }
+                    }
                 } else {
-                    viewModel.renameProjectFromEditor(editingProject.id, name, selectedTheme, onResult)
+                    viewModel.renameProjectFromEditor(editingProject.id, name, selectedTheme) { error ->
+                        message = error
+                        if (error == null) nav.goBack()
+                    }
                 }
             },
             // A submission in flight is already idempotently owned; a second tap would
@@ -410,6 +418,8 @@ internal fun ProjectDeletionDialog(
     projectName: String,
     theme: DeckTheme,
     deleting: Boolean = false,
+    /** Advisory impact line (decks/cards/tasks) from the deletion preflight; null hides it. */
+    impactText: String? = null,
     onConfirm: (retainDecks: Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -421,6 +431,9 @@ internal fun ProjectDeletionDialog(
         ) {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 AppText("删除“$projectName”吗？", AppTextRole.SectionTitle, color = theme.text, maxLines = 2)
+                if (!impactText.isNullOrBlank()) {
+                    AppText(impactText, AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .6f))
+                }
                 CompactDeletionButton("删除项目，保留卡组", theme, deleting) { onConfirm(true) }
                 CompactDeletionButton("删除项目及卡组", theme, deleting, destructive = true) { onConfirm(false) }
             }

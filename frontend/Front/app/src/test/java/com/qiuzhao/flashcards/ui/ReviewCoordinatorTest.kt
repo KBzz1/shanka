@@ -171,8 +171,8 @@ class ReviewCoordinatorTest {
         override suspend fun updatePreferences(patch: V25PreferencesPatch): V25Result<V25UserPreferences> = throw NotImplementedError()
         override suspend fun setCurrentProject(projectId: String?): V25Result<V25UserPreferences> = throw NotImplementedError()
         override suspend fun createProject(fileName: String, content: InputStream, name: String?, idempotencyKey: String?): V25Result<V25LearningProject> = throw NotImplementedError()
-        override suspend fun listProjects(): V25Result<List<V25LearningProject>> = throw NotImplementedError()
-        override suspend fun getProject(projectId: String): V25Result<V25LearningProject> = throw NotImplementedError()
+        override suspend fun listProjects(forceRefresh: Boolean): V25Result<List<V25LearningProject>> = throw NotImplementedError()
+        override suspend fun getProject(projectId: String, forceRefresh: Boolean): V25Result<V25LearningProject> = throw NotImplementedError()
         override suspend fun renameProject(projectId: String, name: String): V25Result<V25LearningProject> = throw NotImplementedError()
         override suspend fun deleteProject(
             projectId: String,
