@@ -6,11 +6,12 @@
 `Architecture/structure-contract.md` / `openapi.yaml` / `database-design.md`）。
 两份实施计划只负责细化任务，不得各自另建总状态表。
 
-最后事实审计：2026-08-31（第二次）。审计手段：全量后端测试复跑（`conda run -n shanka-backend python -m pytest`：
-**868 通过 / 0 失败 / 868 项**，R25-08 已关闭）+ 密度制真实验收（任务 `435598b1`：18 卡落在
-[12,25] 区间、COMPLETED、评分覆盖 100%；观测与双裁判盲评报告见
-`Architecture/generation-quality-metrics.md`）+ 提交/契约/迁移证据核对
-（32052e9 单栈收敛与 23 项契约漂移关闭、2bbd080 offline-foundation-v1 设备验收、29cf2d5 文档刷新）。
+最后事实审计：2026-08-31（第三次）。审计手段：全量后端测试复跑
+（**862 通过 / 0 失败 / 862 项**；v6 资产翻面 + `LearningProject.chapters` 守卫修复后全绿）
++ v6 难度锚定真实验收（任务 `3b83fb78`：同书同章同配置，18 卡 [12,25]、COMPLETED、覆盖 100%、
+难度分布偏差 2.2pp；双裁判盲评难度维 1.83→2.44/2.78，报告见
+`Architecture/generation-quality-metrics.md` v6 小节）+ 提交/契约/迁移证据核对
+（32052e9 单栈收敛、2bbd080 设备验收、29cf2d5 文档刷新、cdfe3f8 多资料 Android）。
 
 ---
 
@@ -89,7 +90,7 @@
 | NV-01 契约原子转正与迁移 | `DONE` | 目标 Architecture | 三契约自标 v2.5（openapi 2.5.0）；迁移 `0f8b9f33b769_v2_5_contract`、`30364748ec32`、`88f2e1abc6f3`、`f7a2b3c4d5e6` 已落；contract 守卫套件通过（2026-08-31 全量 pytest） |
 | NV-02 账号偏好与学习项目 | `DONE` | NV-01 | `/auth/*`、`/preferences`、`/projects/*` 路由与服务齐全；跨用户隔离与文件失败回滚入 integration/acceptance 套件并通过（2026-08-31） |
 | NV-03 任务状态机与整批发布 | `DONE` | NV-01/NV-02 | 七态迁移与 STAGED 隔离/整批发布落地（structure-contract 4.1）；样卡持久化、0 卡失败 `TASK_ZERO_CARDS`、retry 关联均有测试（2026-08-31 通过；R25-08 已关闭） |
-| NV-04 AI 资产与质量 | `DONE` | NV-03 | `agent_evolution/` prompts v5 / planner-output v4 / rubrics v3 + manifest 守卫；密度制编排（quota 区间 + `GENERATION_SPEC`/`USER_REQUIREMENTS` 双区块 + `coverage_tier` 落库）+ 质量观测体系（`scripts/task_quality_report.py`、`Architecture/generation-quality-metrics.md`）；首轮真实验收 `435598b1`（18 卡 [12,25]、COMPLETED、覆盖 100%）+ 双裁判盲评对比已登记 |
+| NV-04 AI 资产与质量 | `DONE` | NV-03 | `agent_evolution/` prompts v6（难度锚定重设计 V25-D-33：认知动作操作化/枚举拆分/DEEP 场景化/近失示例）/ planner-output v4 / rubric v3 + manifest 守卫；密度制编排（quota 区间 + `GENERATION_SPEC`/`USER_REQUIREMENTS` 双区块 + `coverage_tier` 落库）+ 质量观测体系（`scripts/task_quality_report.py`、`Architecture/generation-quality-metrics.md`）；两轮真实验收 `435598b1`（v5）与 `3b83fb78`（v6，难度维 1.83→2.44/2.78）+ 双裁判盲评对比已登记 |
 | NV-05 撤销与 AI 重写 | `DONE` | NV-01/NV-02 | 删除批次 10 秒服务端撤销窗口、重写预览两阶段 apply/cancel；`card_deletion_batches` / `card_rewrite_previews` 表与路由落地，测试通过 |
 | NV-06 今日计划与统计 | `DONE` | NV-01/NV-02/NV-05 | `/study/plan`、`/study/today`、`/study/today/backlog`、`/stats/dashboard`（账号时区分桶）；时区/去重/排序测试通过 |
 | NV-07 Android data 与 Release 配置 | `DONE` | NV-00 + 对应 API 稳定 | offline-foundation-v1 设备验收关闭（2bbd080）；`shanka-v25.db` Room 投影 + 评分 outbox；Release URL 编译期固定；`frontend/scripts/build-release.sh` 原子输出 APK（2.5.0 + SHA-256） |

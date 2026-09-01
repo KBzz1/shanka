@@ -325,7 +325,7 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
     assert first["output_tokens"] == 5
     # 版本/model/http_status/duration
     assert first["model"] == "deepseek-v4-flash"
-    assert first["prompt_version"] == "v5"
+    assert first["prompt_version"] == "v6"
     assert first["schema_version"] == "v3"
     assert first["rubric_version"] == "v3"
     assert first["http_status"] == 200

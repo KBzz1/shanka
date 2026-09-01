@@ -1,12 +1,12 @@
 {
   "prompts": {
     "planner": {
-      "version": "v5",
-      "path": "prompts/v5/planner.md"
+      "version": "v6",
+      "path": "prompts/v6/planner.md"
     },
     "generator": {
-      "version": "v5",
-      "path": "prompts/v5/generator.md"
+      "version": "v6",
+      "path": "prompts/v6/generator.md"
     },
     "rewrite": {
       "version": "v4",

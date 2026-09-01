@@ -564,7 +564,7 @@ def _project_batch_usage(batch: Batch, result: dict[str, Any], versions: dict[st
 def _build_generator_prompts(
     task: Task, unit: KnowledgePoint, pages: Sequence[TextChunk]
 ) -> tuple[str, str]:
-    """Generator 双消息组装（spec §5.7 Generator 行）：稳定 system（generator v5 +
+    """Generator 双消息组装（spec §5.7 Generator 行）：稳定 system（generator v6 +
     generator-output schema 原文）+ 动态 user 三区块信封。
 
     三区块（V25-D-27）：`<GENERATION_SPEC>` 机器规范块（Planner 锚定的难度/卡型/

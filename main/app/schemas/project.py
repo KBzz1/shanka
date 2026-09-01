@@ -25,16 +25,6 @@ class Material(BaseModel):
     created_at: str
 
 
-class ChapterRef(BaseModel):
-    """项目详情 chapters 摘要（openapi Chapter）。"""
-
-    chapter_id: str
-    material_id: str
-    name: str
-    start_page: int | None
-    end_page: int | None
-
-
 class LearningProject(BaseModel):
     project_id: str
     name: str  # 去首尾空白后 1~60 字符，可重名
@@ -44,6 +34,7 @@ class LearningProject(BaseModel):
     deck_count: int
     task_count: int
     tasks: list[Task] | None = None
+    chapters: list[Chapter] | None = None  # 详情返回的跨资料章节列表；列表响应省略
     created_at: str
     updated_at: str
     version: str  # 缓存刷新与并发检查

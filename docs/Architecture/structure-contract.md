@@ -909,7 +909,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 
 - Rubric 评分执行者:LLM-as-judge;评分在独立 SCORING 阶段执行(4.1),评分 Prompt 资产入口:
   `agent_evolution/manifest.json` 的 `prompts.scoring`。
-- 当前资产登记:Planner Prompt v5 / planner-output Schema v4;Generator Prompt v5 /
+- 当前资产登记:Planner Prompt v6 / planner-output Schema v4;Generator Prompt v6 /
   generator-output Schema v3 / 投影后 card Schema v1;Rewrite Prompt v4 / generator-output
   Schema v3 / 投影后 card Schema v1;Scoring Prompt v3 / scoring-output Schema v3 / Rubric v3。
   具体 path 以 manifest 为唯一权威,禁止运行时绕过 manifest 读取相对路径。
