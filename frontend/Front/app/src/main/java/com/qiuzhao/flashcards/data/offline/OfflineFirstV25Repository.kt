@@ -281,16 +281,45 @@ class OfflineFirstV25Repository(
         cache.observeProjects(user).collect { emit(it) }
     }
 
+    /** Live single project (assembled materials+chapters); any scoped write re-emits. */
+    fun observeProject(projectId: String): Flow<V25LearningProject?> = flow {
+        val user = userId() ?: return@flow
+        cache.observeProject(user, projectId).collect { emit(it) }
+    }
+
+    /** Live task statuses (V25-D-34): engine polls and task writes re-emit here. */
+    fun observeAllTasks(): Flow<List<com.qiuzhao.flashcards.domain.v25.V25ObservedTask>> = flow {
+        val user = userId() ?: return@flow
+        cache.observeAllTasks(user).collect { emit(it) }
+    }
+
+    fun observeProjectTasks(projectId: String): Flow<List<com.qiuzhao.flashcards.domain.v25.V25ObservedTask>> =
+        flow {
+            val user = userId() ?: return@flow
+            cache.observeProjectTasks(user, projectId).collect { emit(it) }
+        }
+
+    fun observeTask(taskId: String): Flow<com.qiuzhao.flashcards.domain.v25.V25ObservedTask?> = flow {
+        val user = userId() ?: return@flow
+        cache.observeTask(user, taskId).collect { emit(it) }
+    }
+
     /**
-     * Advances every still-parsing project's projection: one forced list pull, then one forced
-     * detail pull per PARSING project. The WorkManager [com.qiuzhao.flashcards.work.ParseSyncWorker]
-     * and the ViewModel foreground reconcile are the two callers.
+     * Foreground reconcile for every in-flight processing resource (V25-D-34): one forced
+     * projects pull, one forced detail pull per still-PARSING project (the list can lag the
+     * finished parse) and one forced task-list pull — all landing fresh statuses in Room. The
+     * observation engine's pollers re-arm from the re-emitted flows; the WorkManager
+     * [com.qiuzhao.flashcards.work.ProcessingSyncWorker] backstop calls this too.
      */
-    suspend fun refreshParsingProjects() {
+    suspend fun refreshProcessing() {
         val fresh = listProjects(forceRefresh = true)
-        if (fresh !is V25Result.Success) return
-        fresh.value.filter { it.status == com.qiuzhao.flashcards.domain.v25.V25ProjectStatus.PARSING }
-            .forEach { project -> getProject(project.projectId, forceRefresh = true) }
+        if (fresh is V25Result.Success) {
+            fresh.value.filter { it.status == com.qiuzhao.flashcards.domain.v25.V25ProjectStatus.PARSING }
+                .forEach { project -> getProject(project.projectId, forceRefresh = true) }
+        }
+        remote.listTasks(projectId = null, status = null).alsoOnSuccess { tasks ->
+            userId()?.let { user -> cache.replaceTasks(user, tasks, clock.millis()) }
+        }
     }
 
     /** Today's still-visible plan queue (a rated card disappears the moment its transaction commits). */
@@ -483,6 +512,7 @@ class OfflineFirstV25Repository(
                 cache.invalidate(user, V25CacheStore.KEY_PROJECTS)
                 cache.invalidate(user, V25CacheStore.KEY_DECKS)
                 cache.invalidate(user, V25CacheStore.KEY_TODAY_PLAN)
+                cache.deleteTasksOf(user, projectId)
             }
         }
 
@@ -519,30 +549,55 @@ class OfflineFirstV25Repository(
         patch: V25StudySettingsPatch,
     ): V25Result<V25ProjectStudySettings> = remote.updateStudySettings(projectId, patch)
 
+    // Every task-returning call lands the light status projection (V25-D-34) so the Room flows
+    // — not the caller — are the single place a status advance becomes observable.
+
     override suspend fun createTask(
         projectId: String,
         deckId: String,
         chapterIds: List<String>,
         config: V25GenerationConfig,
     ): V25Result<V25GenerationTask> = remote.createTask(projectId, deckId, chapterIds, config)
+        .alsoOnSuccess { task -> userId()?.let { user -> cache.upsertTask(user, task, clock.millis()) } }
 
     override suspend fun listTasks(projectId: String?, status: V25TaskStatus?): V25Result<List<V25GenerationTask>> =
-        remote.listTasks(projectId, status)
+        remote.listTasks(projectId, status).alsoOnSuccess { tasks ->
+            // The list payload is the authority: full-user scope replace keeps deleted
+            // projects' rows from lingering.
+            userId()?.let { user -> cache.replaceTasks(user, tasks, clock.millis()) }
+        }
 
-    override suspend fun getTask(taskId: String): V25Result<V25GenerationTask> = remote.getTask(taskId)
+    override suspend fun getTask(taskId: String): V25Result<V25GenerationTask> =
+        remote.getTask(taskId).alsoOnSuccess { task ->
+            userId()?.let { user -> cache.upsertTask(user, task, clock.millis()) }
+        }
 
     override suspend fun updateTaskConfig(taskId: String, patch: V25TaskConfigPatch): V25Result<V25GenerationTask> =
-        remote.updateTaskConfig(taskId, patch)
+        remote.updateTaskConfig(taskId, patch).alsoOnSuccess { task ->
+            userId()?.let { user -> cache.upsertTask(user, task, clock.millis()) }
+        }
 
     override suspend fun generateSamples(taskId: String): V25Result<List<V25SampleCard>> =
         remote.generateSamples(taskId)
 
-    override suspend fun startTask(taskId: String): V25Result<V25GenerationTask> =
-        remote.startTask(taskId).alsoOnSuccess { userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_DECKS) } }
+    override suspend fun startTask(taskId: String): V25Result<V25GenerationTask> = remote
+        .startTask(taskId)
+        .alsoOnSuccess { task ->
+            userId()?.let { user ->
+                cache.upsertTask(user, task, clock.millis())
+                cache.invalidate(user, V25CacheStore.KEY_DECKS)
+            }
+        }
 
-    override suspend fun abandonTask(taskId: String): V25Result<V25GenerationTask> = remote.abandonTask(taskId)
+    override suspend fun abandonTask(taskId: String): V25Result<V25GenerationTask> =
+        remote.abandonTask(taskId).alsoOnSuccess { task ->
+            userId()?.let { user -> cache.upsertTask(user, task, clock.millis()) }
+        }
 
-    override suspend fun retryTask(taskId: String): V25Result<V25GenerationTask> = remote.retryTask(taskId)
+    override suspend fun retryTask(taskId: String): V25Result<V25GenerationTask> =
+        remote.retryTask(taskId).alsoOnSuccess { task ->
+            userId()?.let { user -> cache.upsertTask(user, task, clock.millis()) }
+        }
 
     override suspend fun deleteTask(taskId: String, deleteGeneratedCards: Boolean): V25Result<Unit> =
         remote.deleteTask(taskId, deleteGeneratedCards).alsoOnSuccess {

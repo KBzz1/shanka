@@ -68,6 +68,32 @@ data class ProjectChapterEntity(
     @ColumnInfo(name = "position") val position: Int,
 )
 
+/**
+ * Light status-carrying projection of one generation task (V25-D-34): the fields an observing
+ * surface renders, deliberately without sample/chapter/config payloads (those come from an
+ * on-demand full `getTask`). Written by every task-returning repository call and by the
+ * observation engine's polls; read through Room flows by every status surface.
+ */
+@Entity(
+    tableName = "generation_tasks",
+    primaryKeys = ["user_id", "task_id"],
+    indices = [Index(value = ["user_id", "project_id"])],
+)
+data class GenerationTaskEntity(
+    @ColumnInfo(name = "user_id") val userId: String,
+    @ColumnInfo(name = "task_id") val taskId: String,
+    @ColumnInfo(name = "project_id") val projectId: String?,
+    @ColumnInfo(name = "deck_id") val deckId: String?,
+    @ColumnInfo(name = "retry_of_task_id") val retryOfTaskId: String?,
+    @ColumnInfo(name = "status") val status: String,
+    @ColumnInfo(name = "internal_stage") val internalStage: String?,
+    @ColumnInfo(name = "generated_card_count") val generatedCardCount: Int,
+    @ColumnInfo(name = "error_code") val errorCode: String?,
+    @ColumnInfo(name = "failure_stage") val failureStage: String?,
+    @ColumnInfo(name = "created_at") val createdAt: Long,
+    @ColumnInfo(name = "updated_at") val updatedAt: Long,
+)
+
 @Entity(tableName = "decks", primaryKeys = ["user_id", "deck_id"])
 data class DeckEntity(
     @ColumnInfo(name = "user_id") val userId: String,

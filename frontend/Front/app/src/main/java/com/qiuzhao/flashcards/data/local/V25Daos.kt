@@ -25,6 +25,9 @@ interface ProjectDao {
     @Query("SELECT * FROM projects WHERE user_id = :userId AND project_id = :projectId")
     suspend fun getProject(userId: String, projectId: String): ProjectEntity?
 
+    @Query("SELECT * FROM projects WHERE user_id = :userId AND project_id = :projectId")
+    fun observeProjectRow(userId: String, projectId: String): Flow<ProjectEntity?>
+
     @Query("SELECT * FROM project_materials WHERE user_id = :userId AND project_id = :projectId ORDER BY created_at")
     suspend fun getMaterials(userId: String, projectId: String): List<ProjectMaterialEntity>
 
@@ -72,6 +75,38 @@ interface DeckDao {
 
     @Query("DELETE FROM decks WHERE user_id = :userId")
     suspend fun deleteDecks(userId: String)
+}
+
+/**
+ * Task status projection (V25-D-34). Every read is reactive: the observation engine's polls and
+ * each task-returning repository call write here, and every status surface re-emits without
+ * running a poll loop of its own.
+ */
+@Dao
+interface TaskDao {
+    @Query("SELECT * FROM generation_tasks WHERE user_id = :userId ORDER BY created_at DESC")
+    fun observeAllTasks(userId: String): Flow<List<GenerationTaskEntity>>
+
+    @Query(
+        "SELECT * FROM generation_tasks WHERE user_id = :userId AND project_id = :projectId " +
+            "ORDER BY created_at DESC",
+    )
+    fun observeProjectTasks(userId: String, projectId: String): Flow<List<GenerationTaskEntity>>
+
+    @Query("SELECT * FROM generation_tasks WHERE user_id = :userId AND task_id = :taskId")
+    fun observeTask(userId: String, taskId: String): Flow<GenerationTaskEntity?>
+
+    @Query("SELECT * FROM generation_tasks WHERE user_id = :userId AND task_id = :taskId")
+    suspend fun getTask(userId: String, taskId: String): GenerationTaskEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertTasks(tasks: List<GenerationTaskEntity>)
+
+    @Query("DELETE FROM generation_tasks WHERE user_id = :userId AND project_id = :projectId")
+    suspend fun deleteTasksOf(userId: String, projectId: String)
+
+    @Query("DELETE FROM generation_tasks WHERE user_id = :userId")
+    suspend fun deleteTasks(userId: String)
 }
 
 @Dao

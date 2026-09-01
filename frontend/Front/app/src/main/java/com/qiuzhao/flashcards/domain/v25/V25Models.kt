@@ -349,6 +349,42 @@ data class V25DeletionTaskBlocker(
     val canCancel: Boolean = false,
 )
 
+/**
+ * Light status-carrying projection of one generation task (V25-D-34): everything an observing
+ * surface needs to render progress and terminal outcomes, without the bulky sample/chapter
+ * payloads. Surfaces that need samples or the frozen configuration read the full
+ * [V25GenerationTask] through `getTask` on demand.
+ */
+data class V25ObservedTask(
+    val taskId: String,
+    val projectId: String?,
+    val deckId: String?,
+    val retryOfTaskId: String?,
+    val status: V25TaskStatus,
+    val internalStage: V25InternalStage?,
+    val generatedCardCount: Int,
+    val errorCode: String?,
+    val failureStage: String?,
+    val updatedAt: Instant,
+)
+
+fun V25GenerationTask.toObserved() = V25ObservedTask(
+    taskId = taskId,
+    projectId = projectId,
+    deckId = deckId,
+    retryOfTaskId = retryOfTaskId,
+    status = status,
+    internalStage = internalStage,
+    generatedCardCount = generatedCardCount,
+    errorCode = errorCode,
+    failureStage = failureStage,
+    updatedAt = updatedAt,
+)
+
+/** Task states an observation engine must keep polling; everything else is terminal. */
+val V25TaskStatus.isTerminal: Boolean
+    get() = this == V25TaskStatus.COMPLETED || this == V25TaskStatus.FAILED || this == V25TaskStatus.ABANDONED
+
 /** Stable, typed impact summary returned by the deletion preflight endpoints. */
 data class V25DeletionImpact(
     val retainDecks: Boolean? = null,

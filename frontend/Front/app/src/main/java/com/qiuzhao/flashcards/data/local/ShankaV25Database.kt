@@ -18,6 +18,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProjectEntity::class,
         ProjectMaterialEntity::class,
         ProjectChapterEntity::class,
+        GenerationTaskEntity::class,
         DeckEntity::class,
         CardEntity::class,
         ReviewStateEntity::class,
@@ -35,6 +36,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 )
 abstract class ShankaV25Database : RoomDatabase() {
     abstract fun projectDao(): ProjectDao
+    abstract fun taskDao(): TaskDao
     abstract fun deckDao(): DeckDao
     abstract fun cardDao(): CardDao
     abstract fun reviewQueueDao(): ReviewQueueDao
@@ -47,10 +49,10 @@ abstract class ShankaV25Database : RoomDatabase() {
 
     companion object {
         const val NAME = "shanka-v25.db"
-        const val VERSION = 2
+        const val VERSION = 3
 
         /** Projection schema version written into cache metadata rows. */
-        const val CACHE_SCHEMA_VERSION = 2
+        const val CACHE_SCHEMA_VERSION = 3
 
         /**
          * Explicit migrations only. Bump [VERSION] → add the Migration here → the exported
@@ -84,6 +86,26 @@ abstract class ShankaV25Database : RoomDatabase() {
                             "`project_id` TEXT NOT NULL, `material_id` TEXT NOT NULL, " +
                             "`name` TEXT NOT NULL, `start_page` INTEGER, `end_page` INTEGER, " +
                             "`position` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `chapter_id`))",
+                    )
+                }
+            },
+            // v2 → v3 (observation layer, contract V25-D-34): the light `generation_tasks`
+            // projection lands. A brand-new rebuildable table — existing cached facts keep
+            // their rows; the next task-returning refresh repopulates statuses.
+            object : Migration(2, 3) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS `generation_tasks` (" +
+                            "`user_id` TEXT NOT NULL, `task_id` TEXT NOT NULL, " +
+                            "`project_id` TEXT, `deck_id` TEXT, `retry_of_task_id` TEXT, " +
+                            "`status` TEXT NOT NULL, `internal_stage` TEXT, " +
+                            "`generated_card_count` INTEGER NOT NULL, `error_code` TEXT, " +
+                            "`failure_stage` TEXT, `created_at` INTEGER NOT NULL, " +
+                            "`updated_at` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `task_id`))",
+                    )
+                    db.execSQL(
+                        "CREATE INDEX IF NOT EXISTS `index_generation_tasks_user_id_project_id` " +
+                            "ON `generation_tasks` (`user_id`, `project_id`)",
                     )
                 }
             },

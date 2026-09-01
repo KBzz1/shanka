@@ -45,6 +45,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
+import com.qiuzhao.flashcards.domain.v25.V25MaterialStatus
+import com.qiuzhao.flashcards.domain.v25.V25MaterialType
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
@@ -59,13 +61,12 @@ internal fun SmartCardGeneratingScreen(project: ProjectSummary, nav: ScreenNavig
     val scale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
     val theme = deckTheme(project)
     val task by viewModel.pdfTask.collectAsState()
-    val deckId by viewModel.pdfTaskDeckId.collectAsState()
     val status = task?.status
-    LaunchedEffect(task?.taskId, status, deckId) {
-        when (status) {
-            V25TaskStatus.COMPLETED -> deckId?.let { nav.replaceTop(AppRoute.CardList(it)) }
-            V25TaskStatus.FAILED, V25TaskStatus.ABANDONED, null -> Unit
-            else -> viewModel.refreshPdfTask()
+    // Navigation only: the observation engine (V25-D-34) polls the task and the projection
+    // flow re-emits each status advance — this screen runs no loop of its own.
+    LaunchedEffect(task?.taskId, status) {
+        if (status == V25TaskStatus.COMPLETED) {
+            task?.deckId?.let { nav.replaceTop(AppRoute.CardList(it)) }
         }
     }
     val headline = when (status) {
@@ -140,7 +141,6 @@ internal fun SmartCardChapterScreen(project: ProjectSummary, nav: ScreenNavigato
     val theme = deckTheme(project)
     val activeProject by viewModel.activePdfProject.collectAsState()
     val generationDraft by viewModel.projectGenerationDraft.collectAsState()
-    val parseWait by viewModel.parseWait.collectAsState()
     var selectedIds by remember { mutableStateOf(setOf<String>()) }
     var sampleRequestInFlight by remember { mutableStateOf(false) }
     var requestError by remember { mutableStateOf<String?>(null) }
@@ -151,17 +151,17 @@ internal fun SmartCardChapterScreen(project: ProjectSummary, nav: ScreenNavigato
     val chapters = active?.chapters.orEmpty().map { chapter ->
         SmartChapter(chapter.id, chapter.name, chapter.pageSpanLabel ?: "全文")
     }
-    // The ViewModel-owned poller drives the wait; the screen runs no loop of its own, so a
-    // slow parse can be left behind instead of freezing the page under a blocking dialog.
-    val wait = parseWait.takeIf { it.projectId == project.id } ?: ParseWaitUiState()
-    val parsing = wait.phase == ParseWaitPhase.POLLING
-    val parseFailed = wait.phase == ParseWaitPhase.FAILED || active?.status == V25ProjectStatus.PARSE_FAILED
-    val waitUnresolved = wait.phase == ParseWaitPhase.UNRESOLVED
-    val blocked = parsing || parseFailed || waitUnresolved
+    // The wait states derive straight from the Room-backed project flow (V25-D-34): the
+    // observation engine keeps it current, so the screen needs no poller and no timeout —
+    // leaving and coming back always shows server truth.
+    val parsing = active?.status == V25ProjectStatus.PARSING
+    val parseFailed = active?.status == V25ProjectStatus.PARSE_FAILED
+    val failedMaterial = active?.materials
+        ?.firstOrNull { it.type == V25MaterialType.PDF && it.status == V25MaterialStatus.FAILED }
+    val blocked = parsing || parseFailed
 
     LaunchedEffect(project.id) {
         viewModel.openProjectForGeneration(project.id) { }
-        viewModel.startParsePolling(project.id)
     }
     val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -207,24 +207,11 @@ internal fun SmartCardChapterScreen(project: ProjectSummary, nav: ScreenNavigato
             if (parseFailed) {
                 item {
                     SmartParseFailedCard(
-                        errorCode = wait.errorCode,
+                        errorCode = failedMaterial?.errorCode,
                         replacing = replacingPdf,
                         theme = theme,
                         scale = scale,
                         onReplacePdf = { pdfPicker.launch(arrayOf("application/pdf")) },
-                    )
-                }
-            }
-            if (waitUnresolved) {
-                item {
-                    SmartParseUnresolvedCard(
-                        reason = wait.reason,
-                        theme = theme,
-                        scale = scale,
-                        onRetry = {
-                            requestError = null
-                            viewModel.startParsePolling(project.id)
-                        },
                     )
                 }
             }
@@ -269,7 +256,6 @@ internal fun SmartCardChapterScreen(project: ProjectSummary, nav: ScreenNavigato
                     when {
                         parsing -> "正在解析"
                         parseFailed -> "解析失败"
-                        waitUnresolved -> "解析未完成"
                         replacingPdf -> "正在替换 PDF"
                         sampleRequestInFlight -> "正在生成样卡"
                         else -> "下一步"
@@ -335,7 +321,7 @@ private fun SmartChapterCard(
     }
 }
 
-/** In-page parse progress card: the user can leave; the ViewModel poller keeps running. */
+/** In-page parse progress card: the observation engine keeps the projection fresh; leaving is safe. */
 @Composable
 private fun SmartParseWaitCard(theme: DeckTheme, scale: Float) = Surface(
     color = theme.background,
@@ -391,43 +377,6 @@ private fun SmartParseFailedCard(
         ) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 AppText(if (replacing) "正在替换 PDF" else "重新上传 PDF", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
-            }
-        }
-    }
-}
-
-/** The wait window ended without a server verdict (timeout or repeated network failures). */
-@Composable
-private fun SmartParseUnresolvedCard(
-    reason: String?,
-    theme: DeckTheme,
-    scale: Float,
-    onRetry: () -> Unit,
-) = Surface(
-    color = theme.background,
-    shape = RoundedCornerShape((AppShapeRadius * scale).dp),
-    modifier = Modifier.fillMaxWidth()
-) {
-    Column(
-        Modifier.fillMaxWidth().padding((20 * scale).dp),
-        verticalArrangement = Arrangement.spacedBy((12 * scale).dp)
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy((10 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
-            MaterialSymbol("wifi_off", null, tint = theme.text, size = fixedSp(24 * scale), filled = true)
-            AppText("解析状态未知", AppTextRole.SectionTitle, color = theme.text, designScale = scale)
-        }
-        AppText(
-            reason ?: "网络异常或解析超时，请重试。",
-            AppTextRole.CardSubtitle, color = theme.text.copy(alpha = .55f), designScale = scale,
-        )
-        Surface(
-            onClick = onRetry,
-            color = theme.primary, contentColor = theme.onPrimary,
-            shape = RoundedCornerShape((AppButtonShapeRadius * scale).dp),
-            modifier = Modifier.fillMaxWidth().height((48 * scale).dp)
-        ) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                AppText("重试", AppTextRole.Label, color = LocalContentColor.current, designScale = scale)
             }
         }
     }

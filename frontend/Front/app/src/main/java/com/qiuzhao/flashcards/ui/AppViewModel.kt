@@ -11,13 +11,13 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.qiuzhao.flashcards.BuildConfig
 import com.qiuzhao.flashcards.data.CardDraft
+import com.qiuzhao.flashcards.data.offline.ObservationEngine
+import com.qiuzhao.flashcards.data.offline.OfflineFirstV25Repository
 import com.qiuzhao.flashcards.data.remote.ApiKeyStatus
 import com.qiuzhao.flashcards.data.remote.AuthRepository
 import com.qiuzhao.flashcards.data.remote.DeckProgress
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.FlashcardEntity
-import com.qiuzhao.flashcards.data.remote.PdfChapter
-import com.qiuzhao.flashcards.data.remote.PdfFile
 import com.qiuzhao.flashcards.data.remote.Rating
 import com.qiuzhao.flashcards.data.session.SessionStore
 import com.qiuzhao.flashcards.domain.v25.V25ApiKeyState
@@ -37,10 +37,10 @@ import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25MasteryFilter
 import com.qiuzhao.flashcards.domain.v25.V25MaterialStatus
 import com.qiuzhao.flashcards.domain.v25.V25MaterialType
+import com.qiuzhao.flashcards.domain.v25.V25ObservedTask
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
 import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25Rating
-import com.qiuzhao.flashcards.domain.v25.V25Repository
 import com.qiuzhao.flashcards.domain.v25.V25Result
 import com.qiuzhao.flashcards.domain.v25.V25SampleCard
 import com.qiuzhao.flashcards.domain.v25.V25StatsDashboard
@@ -57,6 +57,7 @@ import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -64,9 +65,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /** Configuration captured before samples are requested. Percentages are validated by V2.5. */
@@ -135,8 +138,6 @@ data class LocalAccount(val nickname: String, val email: String)
 
 data class AccountBootstrap(val loaded: Boolean = false, val account: LocalAccount? = null)
 
-data class PdfReadFailure(val title: String, val detail: String)
-
 /**
  * Presentation-only state for the project/material screens. In the creation wizard a material
  * is staged before any server call exists (two-step creation: the project is created first,
@@ -175,42 +176,14 @@ private fun ProjectDraftMaterial.renamedFile(rawTitle: String): ProjectDraftMate
     )
 }
 
-/** Coarse phase of the parse wait; the chapter screen renders from this, not a private loop. */
-internal enum class ParseWaitPhase { IDLE, POLLING, FAILED, UNRESOLVED }
-
-/** One FAILED PDF material behind a parse failure; the failure card replaces it in place. */
-internal data class FailedParseMaterial(
-    val materialId: String,
-    val materialName: String,
-    val errorCode: String?,
-)
-
-/**
- * Server-driven parse wait for the smart-card flow. [FAILED] carries every FAILED PDF material
- * of the project (contract: per-material replace) plus the first backend `error_code`
- * (PDF_PARSE_FAILED / PDF_TOC_MISSING / …); [UNRESOLVED] means the wait window ended (timeout or
- * repeated network failures) without a server verdict.
- */
-internal data class ParseWaitUiState(
-    val projectId: String? = null,
-    val phase: ParseWaitPhase = ParseWaitPhase.IDLE,
-    val errorCode: String? = null,
-    val reason: String? = null,
-    val failedMaterials: List<FailedParseMaterial> = emptyList(),
-)
-
 /** Ephemeral handoff from a text parser into the existing deck-import flow. */
 data class TextImportFlow(val deckName: String, val cards: List<CardDraft>)
 
-// Parse-wait poller cadence: fast at first (a parse usually finishes within seconds), then
-// backing off so a long tail never hammers the tunnel link; the window itself is bounded.
-private const val PARSE_POLL_INITIAL_DELAY_MS = 1_000L
-private const val PARSE_POLL_MAX_DELAY_MS = 5_000L
-private const val PARSE_POLL_TIMEOUT_MS = 180_000L
-private const val PARSE_POLL_MAX_CONSECUTIVE_FAILURES = 5
-
 /** TextMaterialCreateRequest cap (openapi: content ≤30000 trimmed characters). */
 private const val MAX_TEXT_MATERIAL_CHARS = 30_000
+
+/** Sample-wait ceiling: the observation engine polls underneath; this only bounds the caller. */
+private const val SAMPLE_WAIT_TIMEOUT_MS = 180_000L
 
 /** Server-derived weekly activity. The UI never derives it from a local review history. */
 data class WeeklyActivityData(
@@ -279,14 +252,14 @@ class AppViewModel(
     private val sessionStore: SessionStore,
     /** Kept as `repository` for the existing auth-injection test seam; used only for auth. */
     private val repository: AuthRepository,
-    v25Repository: V25Repository,
+    v25: OfflineFirstV25Repository,
     /** Process-level session hooks (WorkManager backstop, sync resume/pause). */
     private val onSignedIn: () -> Unit = {},
     private val onSignedOut: () -> Unit = {},
-    /** Live deck cache projection; null in JVM tests that inject a plain repository. */
-    private val deckUpdates: (() -> Flow<List<V25Deck>>)? = null,
+    /** Hosts the per-resource pollers; the Activity lifecycle attaches through it (V25-D-34). */
+    internal val observationEngine: ObservationEngine,
 ) : AndroidViewModel(application) {
-    private val v25Repository: V25Repository = v25Repository
+    private val v25Repository: OfflineFirstV25Repository = v25
     companion object {
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
@@ -298,10 +271,10 @@ class AppViewModel(
                     application = app,
                     sessionStore = container.sessionStore,
                     repository = container.authRepository,
-                    v25Repository = container.v25Repository,
+                    v25 = container.v25Repository,
                     onSignedIn = container::onUserSignedIn,
                     onSignedOut = container::onUserSignedOut,
-                    deckUpdates = container.v25Repository::observeDecks,
+                    observationEngine = container.observationEngine,
                 )
             }
         }
@@ -318,16 +291,14 @@ class AppViewModel(
 
     private val _projects = MutableStateFlow<List<com.qiuzhao.flashcards.data.remote.ProjectSummary>>(emptyList())
     val projects: StateFlow<List<com.qiuzhao.flashcards.data.remote.ProjectSummary>> = _projects.asStateFlow()
-    private val projectsById = mutableMapOf<String, V25LearningProject>()
-    private val _projectTasks = MutableStateFlow<Map<String, List<V25GenerationTask>>>(emptyMap())
-    /** Persisted task snapshots keyed by project; populated on project-detail entry. */
-    val projectTasks: StateFlow<Map<String, List<V25GenerationTask>>> = _projectTasks.asStateFlow()
+    private val _projectMaterials = MutableStateFlow<Map<String, List<ProjectDraftMaterial>>>(emptyMap())
+    internal val projectMaterials: StateFlow<Map<String, List<ProjectDraftMaterial>>> =
+        _projectMaterials.asStateFlow()
     private val _deletionPreflights = MutableStateFlow<Map<String, V25DeletionPreflight>>(emptyMap())
     val deletionPreflights: StateFlow<Map<String, V25DeletionPreflight>> =
         _deletionPreflights.asStateFlow()
     private val inFlightWrites = mutableSetOf<String>()
     private val writeKeys = mutableMapOf<String, String>()
-    private val taskRefreshGeneration = mutableMapOf<String, Long>()
     private val _deletionInFlight = MutableStateFlow<Set<String>>(emptySet())
     val deletionInFlight: StateFlow<Set<String>> = _deletionInFlight.asStateFlow()
 
@@ -357,26 +328,32 @@ class AppViewModel(
     private val _apiKeyStatus = MutableStateFlow<ApiKeyStatus?>(null)
     val apiKeyStatus: StateFlow<ApiKeyStatus?> = _apiKeyStatus.asStateFlow()
 
-    private val _pdfFile = MutableStateFlow<PdfFile?>(null)
-    val pdfFile: StateFlow<PdfFile?> = _pdfFile.asStateFlow()
     private val _pdfSamples = MutableStateFlow<List<CardDraft>>(emptyList())
     val pdfSamples: StateFlow<List<CardDraft>> = _pdfSamples.asStateFlow()
-    private val _pdfTask = MutableStateFlow<V25GenerationTask?>(null)
-    val pdfTask: StateFlow<V25GenerationTask?> = _pdfTask.asStateFlow()
-    private val _pdfTaskDeckId = MutableStateFlow<String?>(null)
-    val pdfTaskDeckId: StateFlow<String?> = _pdfTaskDeckId.asStateFlow()
-    private val _activePdfProject = MutableStateFlow<V25LearningProject?>(null)
-    val activePdfProject: StateFlow<V25LearningProject?> = _activePdfProject.asStateFlow()
+
+    /**
+     * The generation task the smart-card flow is working on. Only the id is imperative state;
+     * the status projection itself streams from Room (V25-D-34), so the observation engine's
+     * polls and every task write re-emit here without any screen-driven loop.
+     */
+    private val pdfTaskId = MutableStateFlow<String?>(null)
+    val pdfTask: StateFlow<V25ObservedTask?> = pdfTaskId
+        .flatMapLatest { taskId ->
+            taskId?.let { v25Repository.observeTask(it) } ?: flowOf(null)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** The project the smart-card flow has open; Room-driven like [pdfTask]. */
+    private val activePdfProjectId = MutableStateFlow<String?>(null)
+    val activePdfProject: StateFlow<V25LearningProject?> = activePdfProjectId
+        .flatMapLatest { projectId ->
+            projectId?.let { v25Repository.observeProject(it) } ?: flowOf(null)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     private val _projectCreationMaterials = MutableStateFlow<List<ProjectDraftMaterial>>(emptyList())
     internal val projectCreationMaterials: StateFlow<List<ProjectDraftMaterial>> =
         _projectCreationMaterials.asStateFlow()
-    private val _projectMaterials = MutableStateFlow<Map<String, List<ProjectDraftMaterial>>>(emptyMap())
-    internal val projectMaterials: StateFlow<Map<String, List<ProjectDraftMaterial>>> =
-        _projectMaterials.asStateFlow()
-    private val _parseWait = MutableStateFlow(ParseWaitUiState())
-    internal val parseWait: StateFlow<ParseWaitUiState> = _parseWait.asStateFlow()
-    private var parsePollJob: Job? = null
     private val _materialImportDrafts = MutableStateFlow<List<ProjectDraftMaterial>>(emptyList())
     internal val materialImportDrafts: StateFlow<List<ProjectDraftMaterial>> =
         _materialImportDrafts.asStateFlow()
@@ -415,6 +392,8 @@ class AppViewModel(
     private val _uiMessage = MutableStateFlow<String?>(null)
     val uiMessage: StateFlow<String?> = _uiMessage.asStateFlow()
 
+    private var observationJob: Job? = null
+
     init {
         checkSession()
         viewModelScope.launch {
@@ -425,6 +404,7 @@ class AppViewModel(
                     if (loggedIn == null) {
                         _accountBootstrap.value = AccountBootstrap(loaded = true)
                         onSignedOut()
+                        stopObservation()
                         clearAuthenticatedState()
                     } else {
                         _accountBootstrap.value = AccountBootstrap(
@@ -432,7 +412,7 @@ class AppViewModel(
                             account = LocalAccount(loggedIn.user.username, ""),
                         )
                         onSignedIn()
-                        observeDeckCache()
+                        startObservation()
                         refreshAll()
                     }
                 }
@@ -440,14 +420,31 @@ class AppViewModel(
     }
 
     /**
-     * The Room deck projection is the live source: the merged refresh after an outbox drain
-     * re-emits new due counts here without any per-rating network fan-out.
+     * Room is the single observable truth (V25-D-34): projects, materials, decks and the task
+     * statuses all stream from the projection here, once per sign-in. The observation engine
+     * (started by the container's sign-in hook) keeps those projections fresh; nothing below
+     * polls on its own.
      */
-    private fun observeDeckCache() {
-        val source = deckUpdates ?: return
-        viewModelScope.launch {
-            source().collect { decks -> _decks.value = decks.map(::toDeckSummary) }
+    private fun startObservation() {
+        if (observationJob?.isActive == true) return
+        observationJob = viewModelScope.launch {
+            launch {
+                v25Repository.observeProjects().collect { projects ->
+                    _projects.value = projects.map(::toProjectSummary)
+                    _projectMaterials.value = projects.associate { project ->
+                        project.projectId to project.materials.map { it.toProjectMaterial() }
+                    }
+                }
+            }
+            launch {
+                v25Repository.observeDecks().collect { decks -> _decks.value = decks.map(::toDeckSummary) }
+            }
         }
+    }
+
+    private fun stopObservation() {
+        observationJob?.cancel()
+        observationJob = null
     }
 
     fun checkSession() = auth.checkSession()
@@ -513,31 +510,24 @@ class AppViewModel(
         }
     }
 
+    /** Network kick only: the landing writes Room, and [startObservation] re-projects the flows. */
     fun refreshProjects(forceRefresh: Boolean = false): Job = viewModelScope.launch {
         when (val result = v25Repository.listProjects(forceRefresh)) {
-            is V25Result.Success -> {
-                projectsById.clear()
-                result.value.forEach { project -> projectsById[project.projectId] = project }
-                _projects.value = result.value.map(::toProjectSummary)
-                syncProjectMaterials(result.value)
-            }
+            is V25Result.Success -> Unit
             is V25Result.Failure -> handleFailure("list_projects", result)
         }
     }
 
-    /** Loads every persisted task for a project; unlike [_pdfTask], this survives app restarts. */
+    /** Loads every persisted task for a project into the Room projection (statuses stream out). */
     fun refreshProjectTasks(projectId: String): Job = viewModelScope.launch {
-        val requestGeneration = (taskRefreshGeneration[projectId] ?: 0L) + 1L
-        taskRefreshGeneration[projectId] = requestGeneration
         when (val result = v25Repository.listTasks(projectId = projectId)) {
-            is V25Result.Success -> {
-                if (taskRefreshGeneration[projectId] == requestGeneration) {
-                    _projectTasks.value = _projectTasks.value + (projectId to result.value)
-                }
-            }
+            is V25Result.Success -> Unit
             is V25Result.Failure -> handleFailure("list_project_tasks", result)
         }
     }
+
+    /** Live task statuses of one project, straight from the Room projection (V25-D-34). */
+    fun projectTasks(projectId: String): Flow<List<V25ObservedTask>> = v25Repository.observeProjectTasks(projectId)
 
     /** Refreshes the advisory deletion preview used by the confirmation dialog. */
     fun refreshProjectDeletionPreflight(
@@ -1068,80 +1058,6 @@ class AppViewModel(
         onResult: (String?) -> Unit,
     ) = renameProject(projectId, name, onResult)
 
-    /**
-     * Compatibility entry point for the pre-project PDF wizard. It now runs the two-step
-     * contract (JSON create + PDF material upload) and waits for the server-side parse result;
-     * it never manufactures chapters from the filename or stores a local-only document.
-     */
-    fun uploadPdf(
-        uri: Uri,
-        onParsed: (List<PdfChapter>) -> Unit,
-        onFailure: (PdfReadFailure) -> Unit,
-    ) = viewModelScope.launch {
-        val fileName = contentResolver.displayName(uri)
-        val projectName = fileName.substringBeforeLast('.').trim().ifBlank { "未命名项目" }
-        val uploads = listOf(
-            MaterialUpload.Pdf(
-                draftId = "wizard-pdf-${System.nanoTime()}",
-                materialName = fileName,
-                openStream = { contentResolver.openInputStream(uri) },
-            ),
-        )
-        when (val created = projectCreationCoordinator.submit(projectName, uploads)) {
-            is V25Result.Success -> {
-                refreshProjects()
-                awaitPdfParse(created.value, onParsed, onFailure)
-            }
-            is V25Result.Failure -> {
-                handleFailure("create_project_for_pdf_wizard", created, surface = false)
-                onFailure(PdfReadFailure("上传失败", userMessage(created)))
-            }
-        }
-    }
-
-    /** The parser is asynchronous, so a parse-in-progress response is not mistaken for success. */
-    private suspend fun awaitPdfParse(
-        projectId: String,
-        onParsed: (List<PdfChapter>) -> Unit,
-        onFailure: (PdfReadFailure) -> Unit,
-    ) {
-        repeat(120) {
-            when (val result = v25Repository.getProject(projectId, forceRefresh = true)) {
-                is V25Result.Success -> {
-                    projectsById[projectId] = result.value
-                    syncProjectMaterial(result.value)
-                    _activePdfProject.value = result.value
-                    _pdfFile.value = result.value.toPdfFile()
-                    when (result.value.status) {
-                        V25ProjectStatus.EMPTY -> Unit
-                        V25ProjectStatus.PARSING -> delay(1_000)
-                        V25ProjectStatus.AWAITING_CHAPTER_CONFIRMATION,
-                        V25ProjectStatus.READY -> {
-                            onParsed(_pdfFile.value?.chapters.orEmpty())
-                            return
-                        }
-                        V25ProjectStatus.PARSE_FAILED -> {
-                            onFailure(
-                                PdfReadFailure(
-                                    "PDF 解析失败",
-                                    result.value.materials.firstNotNullOfOrNull { it.errorCode }
-                                        ?: "服务未能解析该 PDF，请替换文件后重试。",
-                                ),
-                            )
-                            return
-                        }
-                    }
-                }
-                is V25Result.Failure -> {
-                    handleFailure("poll_project_parse", result, surface = false)
-                    onFailure(PdfReadFailure("无法获取解析结果", userMessage(result)))
-                    return
-                }
-            }
-        }
-        onFailure(PdfReadFailure("解析仍在进行", "解析超过两分钟仍未完成，请稍后从项目页继续查看。"))
-    }
-
     /** Replaces one FAILED PDF material in place (contract V25-D-30: only FAILED PDFs). */
     fun replaceProjectMaterial(
         projectId: String,
@@ -1190,10 +1106,6 @@ class AppViewModel(
         }
         when (val result = v25Repository.renameProject(projectId, normalized)) {
             is V25Result.Success -> {
-                projectsById[projectId] = result.value
-                syncProjectMaterial(result.value)
-                if (_activePdfProject.value?.projectId == projectId) _activePdfProject.value = result.value
-                _pdfFile.value = _activePdfProject.value?.toPdfFile()
                 refreshProjects()
                 onResult(null)
             }
@@ -1220,12 +1132,10 @@ class AppViewModel(
             when (val result = v25Repository.deleteProject(projectId, retainDecks, idempotencyKey)) {
                 is V25Result.Success -> {
                     succeeded = true
-                    projectsById.remove(projectId)
-                    _projectTasks.value = _projectTasks.value - projectId
                     _projectProgress.value = _projectProgress.value - projectId
                     _deletionPreflights.value = _deletionPreflights.value
                         .filterKeys { !it.startsWith("project:$projectId:") }
-                    if (_activePdfProject.value?.projectId == projectId) clearPdfFlow()
+                    if (activePdfProjectId.value == projectId) clearPdfFlow()
                     refreshProjects()
                     refreshDecks()
                     refreshTodayPlan()
@@ -1264,8 +1174,6 @@ class AppViewModel(
             when (val result = v25Repository.deleteProjectMaterial(projectId, materialId, retainCards, idempotencyKey)) {
                 is V25Result.Success -> {
                     succeeded = true
-                    projectsById[projectId] = result.value
-                    syncProjectMaterial(result.value)
                     refreshProjects()
                     refreshProjectTasks(projectId)
                     refreshDecks()
@@ -1293,18 +1201,15 @@ class AppViewModel(
         openProjectForGeneration(projectId, onReady)
     }
 
-    /** Opens a real project for chapter confirmation and generation. */
+    /**
+     * Opens a real project for chapter confirmation and generation. The forced read lands
+     * server truth in Room; the screen renders from the [activePdfProject] flow, and the
+     * observation engine keeps it current while a parse runs.
+     */
     fun openProjectForGeneration(projectId: String, onReady: (Boolean) -> Unit) = viewModelScope.launch {
-        // Forced: entering the chapter flow must observe server truth — a cached PARSING
-        // snapshot taken seconds after upload would otherwise pin the wait state.
+        activePdfProjectId.value = projectId
         when (val result = v25Repository.getProject(projectId, forceRefresh = true)) {
-            is V25Result.Success -> {
-                projectsById[projectId] = result.value
-                syncProjectMaterial(result.value)
-                _activePdfProject.value = result.value
-                _pdfFile.value = result.value.toPdfFile()
-                onReady(true)
-            }
+            is V25Result.Success -> onReady(true)
             is V25Result.Failure -> {
                 handleFailure("get_project", result)
                 onReady(false)
@@ -1317,201 +1222,49 @@ class AppViewModel(
      * poll whose first tick finds a terminal state exits immediately, so an open that raced a
      * finishing parse costs at most one extra GET.
      */
-    fun startParsePolling(projectId: String) {
-        val current = _activePdfProject.value
-        if (current?.projectId == projectId && current.status != V25ProjectStatus.PARSING) {
-            parsePollJob?.cancel()
-            parsePollJob = null
-            _parseWait.value = ParseWaitUiState()
-            return
-        }
-        if (parsePollJob?.isActive == true && _parseWait.value.let { it.projectId == projectId && it.phase == ParseWaitPhase.POLLING }) return
-        parsePollJob?.cancel()
-        _parseWait.value = ParseWaitUiState(projectId = projectId, phase = ParseWaitPhase.POLLING)
-        parsePollJob = viewModelScope.launch { pollProjectParse(projectId) }
-    }
-
-    /** Stops the poller and clears the wait state (project deleted / signed out / flow reset). */
-    fun stopParsePolling() {
-        parsePollJob?.cancel()
-        parsePollJob = null
-        _parseWait.value = ParseWaitUiState()
-    }
-
     /**
-     * The single parse-wait loop. Backoff (1s → 5s cap) keeps the tunnel link quiet; the whole
-     * wait window is [PARSE_POLL_TIMEOUT_MS] and [PARSE_POLL_MAX_CONSECUTIVE_FAILURES] network
-     * failures in a row end it as [ParseWaitPhase.UNRESOLVED] — never a silently frozen wait.
-     * Every tick forces the network read; the five-minute cache must not mask a finished parse.
-     */
-    private suspend fun pollProjectParse(projectId: String) {
-        var delayMs = PARSE_POLL_INITIAL_DELAY_MS
-        var consecutiveFailures = 0
-        val deadlineNanos = System.nanoTime() + PARSE_POLL_TIMEOUT_MS * 1_000_000L
-        while (kotlin.coroutines.coroutineContext.isActive) {
-            delay(delayMs)
-            delayMs = (delayMs * 2).coerceAtMost(PARSE_POLL_MAX_DELAY_MS)
-            when (val result = v25Repository.getProject(projectId, forceRefresh = true)) {
-                is V25Result.Success -> {
-                    consecutiveFailures = 0
-                    projectsById[projectId] = result.value
-                    syncProjectMaterial(result.value)
-                    _activePdfProject.value = result.value
-                    _pdfFile.value = result.value.toPdfFile()
-                    when (result.value.status) {
-                        V25ProjectStatus.EMPTY -> {
-                            _parseWait.value = ParseWaitUiState(projectId = projectId)
-                            refreshProjects()
-                            return
-                        }
-                        V25ProjectStatus.PARSING -> if (System.nanoTime() >= deadlineNanos) {
-                            _parseWait.value = ParseWaitUiState(
-                                projectId = projectId,
-                                phase = ParseWaitPhase.UNRESOLVED,
-                                reason = "解析仍在进行，已等待超过 3 分钟；可稍后重试或返回项目页查看",
-                            )
-                            return
-                        }
-                        V25ProjectStatus.PARSE_FAILED -> {
-                            _parseWait.value = parseFailedState(projectId, result.value)
-                            refreshProjects()
-                            return
-                        }
-                        V25ProjectStatus.AWAITING_CHAPTER_CONFIRMATION, V25ProjectStatus.READY -> {
-                            _parseWait.value = ParseWaitUiState()
-                            refreshProjects()
-                            return
-                        }
-                    }
-                }
-                is V25Result.Failure -> {
-                    handleFailure("poll_project_parse", result, surface = false)
-                    consecutiveFailures++
-                    if (consecutiveFailures >= PARSE_POLL_MAX_CONSECUTIVE_FAILURES) {
-                        _parseWait.value = ParseWaitUiState(
-                            projectId = projectId,
-                            phase = ParseWaitPhase.UNRESOLVED,
-                            reason = userMessage(result),
-                        )
-                        return
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * Foreground reconcile for the decoupled parse wait: advance every still-PARSING project's
-     * projection once so returning to the app reveals finished parses without re-entering a
-     * screen. The WorkManager [com.qiuzhao.flashcards.work.ParseSyncWorker] is the background twin.
-     */
-    fun reconcileParsingProjects(): Job = viewModelScope.launch {
-        refreshProjects(forceRefresh = true).join()
-        projectsById.values.filter { it.status == V25ProjectStatus.PARSING }.forEach { project ->
-            v25Repository.getProject(project.projectId, forceRefresh = true)
-        }
-    }
-
-    /**
-     * The materials-driven failure state: the project-level PARSE_FAILED verdict is the
-     * server's aggregate; the failure cards come from the FAILED PDF materials themselves.
-     */
-    private fun parseFailedState(projectId: String, project: V25LearningProject): ParseWaitUiState {
-        val failed = project.materials
-            .filter { it.type == V25MaterialType.PDF && it.status == V25MaterialStatus.FAILED }
-            .map { FailedParseMaterial(it.materialId, it.name, it.errorCode) }
-        return ParseWaitUiState(
-            projectId = projectId,
-            phase = ParseWaitPhase.FAILED,
-            errorCode = failed.firstNotNullOfOrNull { it.errorCode },
-            failedMaterials = failed,
-        )
-    }
-
-    /**
-     * Replaces the FAILED PDF material behind the parse-wait failure (contract: only FAILED PDF
-     * materials may replace in place), then re-arms the poller so the screen follows the new
-     * parse run.
+     * Replaces the FAILED PDF material behind the parse-failure card (contract: only FAILED PDF
+     * materials may replace in place). The replacement's new parse run is observed exactly like
+     * any other in-flight resource: the observation engine polls, the flows re-emit.
      */
     fun replaceActiveProjectPdf(uri: Uri, onResult: (Boolean, String?) -> Unit) {
-        val projectId = _parseWait.value.projectId ?: _activePdfProject.value?.projectId
-        if (projectId == null) {
+        val project = activePdfProject.value
+        if (project == null) {
             onResult(false, "没有待修复的项目")
             return
         }
-        val failedMaterial = _parseWait.value.failedMaterials.firstOrNull()
-            ?: _activePdfProject.value?.materials
-                ?.firstOrNull { it.type == V25MaterialType.PDF && it.status == V25MaterialStatus.FAILED }
-                ?.let { FailedParseMaterial(it.materialId, it.name, it.errorCode) }
+        val failedMaterial = project.materials
+            .firstOrNull { it.type == V25MaterialType.PDF && it.status == V25MaterialStatus.FAILED }
         if (failedMaterial == null) {
             onResult(false, "没有可替换的失败资料")
             return
         }
-        replaceProjectMaterial(projectId, failedMaterial.materialId, uri) { success, message ->
-            if (success) startParsePolling(projectId)
-            onResult(success, message)
-        }
+        replaceProjectMaterial(project.projectId, failedMaterial.materialId, uri, onResult)
     }
 
-    /** Refreshes active project state while parsing or after leaving a background task. */
+    /** Forced re-read of the open project; the projection flows carry the answer to the screens. */
     fun refreshActiveProject(projectId: String? = null, onUpdated: (V25LearningProject) -> Unit = {}) = viewModelScope.launch {
-        val targetId = projectId ?: _activePdfProject.value?.projectId ?: return@launch
+        val targetId = projectId ?: activePdfProjectId.value ?: return@launch
         when (val result = v25Repository.getProject(targetId, forceRefresh = true)) {
-            is V25Result.Success -> {
-                projectsById[targetId] = result.value
-                syncProjectMaterial(result.value)
-                _activePdfProject.value = result.value
-                _pdfFile.value = result.value.toPdfFile()
-                onUpdated(result.value)
-            }
+            is V25Result.Success -> onUpdated(result.value)
             is V25Result.Failure -> handleFailure("get_project", result)
         }
     }
 
     fun confirmPdfChapters(onResult: (String?) -> Unit) = viewModelScope.launch {
-        val project = _activePdfProject.value
+        val project = activePdfProject.value
         if (project == null) {
             onResult("请先选择一个 PDF 项目")
             return@launch
         }
         when (val result = v25Repository.confirmChapters(project.projectId)) {
             is V25Result.Success -> {
-                projectsById[project.projectId] = result.value
-                syncProjectMaterial(result.value)
-                _activePdfProject.value = result.value
-                _pdfFile.value = result.value.toPdfFile()
                 refreshProjects()
                 onResult(null)
             }
             is V25Result.Failure -> {
                 handleFailure("confirm_chapters", result, surface = false)
                 onResult(userMessage(result))
-            }
-        }
-    }
-
-    fun updatePdfChapter(chapter: PdfChapter, onFailure: () -> Unit = {}) = viewModelScope.launch {
-        val project = _activePdfProject.value ?: return@launch
-        when (val result = v25Repository.updateChapter(
-            project.projectId,
-            chapter.id,
-            com.qiuzhao.flashcards.domain.v25.V25ChapterEdit(chapter.name.trim(), chapter.startPage, chapter.endPage),
-        )) {
-            is V25Result.Success -> refreshActiveProject()
-            is V25Result.Failure -> {
-                handleFailure("update_chapter", result)
-                onFailure()
-            }
-        }
-    }
-
-    fun deletePdfChapter(chapter: PdfChapter, onFailure: () -> Unit = {}) = viewModelScope.launch {
-        val project = _activePdfProject.value ?: return@launch
-        when (val result = v25Repository.deleteChapter(project.projectId, chapter.id, deleteCards = false)) {
-            is V25Result.Success -> refreshActiveProject()
-            is V25Result.Failure -> {
-                handleFailure("delete_chapter", result)
-                onFailure()
             }
         }
     }
@@ -1528,7 +1281,7 @@ class AppViewModel(
         onReady: () -> Unit,
         onFailure: (String?) -> Unit = {},
     ) = viewModelScope.launch {
-        val currentProject = _activePdfProject.value ?: run {
+        val currentProject = activePdfProject.value ?: run {
             onFailure("PDF_NOT_READY")
             return@launch
         }
@@ -1541,10 +1294,7 @@ class AppViewModel(
                 val confirmed = v25Repository.confirmChapters(currentProject.projectId)
             ) {
                 is V25Result.Success -> {
-                    projectsById[confirmed.value.projectId] = confirmed.value
-                    syncProjectMaterial(confirmed.value)
-                    _activePdfProject.value = confirmed.value
-                    _pdfFile.value = confirmed.value.toPdfFile()
+                    refreshProjects()
                     confirmed.value
                 }
                 is V25Result.Failure -> {
@@ -1560,15 +1310,20 @@ class AppViewModel(
             }
         }
         val generationConfig = V25GenerationConfig(coverageMode(config.quantity), difficultyRatio(config), config.requirement.trim())
+        // Reuse decisions read the full server task once (the projection deliberately carries no
+        // sample/chapter payloads); server truth beats any in-memory snapshot.
+        val candidate = pdfTaskId.value?.let { id ->
+            (v25Repository.getTask(id) as? V25Result.Success)?.value
+        }
         val pending = reusableSampleTask(
-            task = _pdfTask.value,
+            task = candidate,
             projectId = project.projectId,
             deckId = existingDeckId,
             chapterIds = chapterIds,
             config = generationConfig,
         )
         val failedSample = retryableSampleTask(
-            task = _pdfTask.value,
+            task = candidate,
             projectId = project.projectId,
             deckId = existingDeckId,
             chapterIds = chapterIds,
@@ -1602,12 +1357,11 @@ class AppViewModel(
             }
             is V25Result.Success -> created.value
         }
-        _pdfTask.value = task
-        _pdfTaskDeckId.value = task.deckId ?: deckId
+        pdfTaskId.value = task.taskId
 
-        suspend fun deliverSamples(candidate: V25GenerationTask) {
+        suspend fun deliverSamples() {
             // The worker is server-owned; even an acknowledged POST may still have no cards.
-            when (val ready = awaitSampleCards(candidate)) {
+            when (val ready = awaitSampleCards(task.taskId)) {
                 is V25Result.Success -> {
                     _pdfSamples.value = ready.value.map { sample -> CardDraft(sample.front, sample.back) }
                     refreshDecks()
@@ -1622,9 +1376,9 @@ class AppViewModel(
 
         when (task.status) {
             V25TaskStatus.SAMPLE_GENERATING,
-            V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION -> deliverSamples(task)
+            V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION -> deliverSamples()
             V25TaskStatus.DRAFT -> when (val samples = v25Repository.generateSamples(task.taskId)) {
-                is V25Result.Success -> deliverSamples(task)
+                is V25Result.Success -> deliverSamples()
                 is V25Result.Failure -> {
                     // The request may have reached the server just before the response was
                     // lost. Re-read once on a state conflict and continue waiting instead of
@@ -1633,7 +1387,7 @@ class AppViewModel(
                         when (val refreshed = v25Repository.getTask(task.taskId)) {
                             is V25Result.Success -> when (refreshed.value.status) {
                                 V25TaskStatus.SAMPLE_GENERATING,
-                                V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION -> deliverSamples(refreshed.value)
+                                V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION -> deliverSamples()
                                 else -> {
                                     handleFailure("generate_samples", samples, surface = false)
                                     onFailure(samples.code)
@@ -1668,22 +1422,22 @@ class AppViewModel(
         onReady: () -> Unit,
         onFailure: (String?) -> Unit = {},
     ) {
-        val projectName = _activePdfProject.value?.name.orEmpty()
+        val projectName = activePdfProject.value?.name.orEmpty()
         generatePdfSamples(null, "${projectName.ifBlank { "PDF" }} 卡片组", chapterIds, config, onReady, onFailure)
     }
 
-    /** Starts sample-confirmed generation. Leaving the screen is safe; polling resumes on re-entry. */
+    /**
+     * Starts sample-confirmed generation. Leaving the screen is safe: the observation engine
+     * owns the polling, the generating screen renders from the [pdfTask] projection, and the
+     * engine's terminal hook refreshes decks/today/dashboard exactly once.
+     */
     fun startPdfTask(onStarted: () -> Unit, onFailure: (String?) -> Unit = {}) = viewModelScope.launch {
-        val task = _pdfTask.value ?: run {
+        val taskId = pdfTaskId.value ?: run {
             onFailure("TASK_NOT_FOUND")
             return@launch
         }
-        when (val result = v25Repository.startTask(task.taskId)) {
-            is V25Result.Success -> {
-                _pdfTask.value = result.value
-                onStarted()
-                pollTask(result.value)
-            }
+        when (val result = v25Repository.startTask(taskId)) {
+            is V25Result.Success -> onStarted()
             is V25Result.Failure -> {
                 handleFailure("start_task", result, surface = false)
                 onFailure(result.code)
@@ -1691,37 +1445,28 @@ class AppViewModel(
         }
     }
 
+    /** Forced one-shot task re-read; the projection flows carry the answer onward. */
     fun refreshPdfTask() = viewModelScope.launch {
-        val task = _pdfTask.value ?: return@launch
-        when (val result = v25Repository.getTask(task.taskId)) {
-            is V25Result.Success -> {
-                _pdfTask.value = result.value
-                if (result.value.status == V25TaskStatus.COMPLETED) {
-                    refreshDecks()
-                    refreshDashboard()
-                    refreshTodayPlan()
-                }
-            }
+        val taskId = pdfTaskId.value ?: return@launch
+        when (val result = v25Repository.getTask(taskId)) {
+            is V25Result.Success -> Unit
             is V25Result.Failure -> handleFailure("get_task", result)
         }
     }
 
     fun abandonPdfTask(onDone: () -> Unit = {}) = viewModelScope.launch {
-        val task = _pdfTask.value ?: return@launch
-        when (val result = v25Repository.abandonTask(task.taskId)) {
-            is V25Result.Success -> {
-                _pdfTask.value = result.value
-                onDone()
-            }
+        val taskId = pdfTaskId.value ?: return@launch
+        when (val result = v25Repository.abandonTask(taskId)) {
+            is V25Result.Success -> onDone()
             is V25Result.Failure -> handleFailure("abandon_task", result)
         }
     }
 
     fun retryPdfTask(onReady: () -> Unit = {}) = viewModelScope.launch {
-        val task = _pdfTask.value ?: return@launch
-        when (val result = v25Repository.retryTask(task.taskId)) {
+        val taskId = pdfTaskId.value ?: return@launch
+        when (val result = v25Repository.retryTask(taskId)) {
             is V25Result.Success -> {
-                _pdfTask.value = result.value
+                pdfTaskId.value = result.value.taskId
                 _pdfSamples.value = result.value.sampleCards.map { CardDraft(it.front, it.back) }
                 onReady()
             }
@@ -1729,34 +1474,28 @@ class AppViewModel(
         }
     }
 
-    /** Wait for the server-owned sample worker; never infer samples from local UI configuration. */
-    private suspend fun awaitSampleCards(initial: V25GenerationTask): V25Result<List<V25SampleCard>> {
-        var current = initial
-        repeat(120) {
-            when (current.status) {
-                V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION -> {
-                    _pdfTask.value = current
-                    return V25Result.Success(current.sampleCards)
-                }
-                V25TaskStatus.FAILED, V25TaskStatus.ABANDONED -> {
-                    _pdfTask.value = current
-                    return V25Result.Failure(current.errorCode ?: V25ErrorCodes.GENERATION_FAILED)
-                }
-                else -> Unit
-            }
-            delay(2_500)
-            when (val result = v25Repository.getTask(current.taskId)) {
-                is V25Result.Success -> {
-                    current = result.value
-                    // Keep the persisted task state visible while the worker is running. This
-                    // makes a screen re-entry observe SAMPLE_GENERATING instead of the stale
-                    // DRAFT snapshot and gives the user an honest progress state.
-                    _pdfTask.value = current
-                }
-                is V25Result.Failure -> return result
-            }
+    /**
+     * Waits for the server-owned sample worker on the task's Room projection — the observation
+     * engine does the polling — then reads the full payload once for the samples themselves.
+     * Never infers samples from local UI configuration.
+     */
+    private suspend fun awaitSampleCards(taskId: String): V25Result<List<V25SampleCard>> {
+        val sampleVerdicts = setOf(
+            V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION,
+            V25TaskStatus.FAILED,
+            V25TaskStatus.ABANDONED,
+        )
+        val observed = withTimeoutOrNull(SAMPLE_WAIT_TIMEOUT_MS) {
+            v25Repository.observeTask(taskId).first { it != null && it.status in sampleVerdicts }
         }
-        return V25Result.Failure("SAMPLE_TIMEOUT")
+        if (observed == null) return V25Result.Failure("SAMPLE_TIMEOUT")
+        if (observed.status != V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION) {
+            return V25Result.Failure(observed.errorCode ?: V25ErrorCodes.GENERATION_FAILED)
+        }
+        return when (val full = v25Repository.getTask(taskId)) {
+            is V25Result.Success -> V25Result.Success(full.value.sampleCards)
+            is V25Result.Failure -> full
+        }
     }
 
     /** A generated sample already owns a DRAFT task; starting it is the only valid next action. */
@@ -1768,11 +1507,6 @@ class AppViewModel(
         onStarted: () -> Unit,
         onFailure: (String?) -> Unit = {},
     ) = startPdfTask(onStarted, onFailure)
-
-    /** V2.5 has no pause/resume task state; refresh is the only safe re-entry operation. */
-    fun resumePdfTask() {
-        refreshPdfTask()
-    }
 
     fun beginTextImportFlow(deckName: String, cards: List<CardDraft>) {
         _textImportFlow.value = TextImportFlow(deckName, cards)
@@ -2100,34 +1834,6 @@ class AppViewModel(
         }
     }
 
-    private suspend fun pollTask(initial: V25GenerationTask) {
-        var current = initial
-        repeat(240) {
-            when (current.status) {
-                V25TaskStatus.COMPLETED -> {
-                    refreshDecks()
-                    refreshDashboard()
-                    refreshTodayPlan()
-                    return
-                }
-                V25TaskStatus.FAILED, V25TaskStatus.ABANDONED -> return
-                else -> Unit
-            }
-            delay(2_500)
-            when (val result = v25Repository.getTask(current.taskId)) {
-                is V25Result.Success -> {
-                    current = result.value
-                    _pdfTask.value = current
-                }
-                is V25Result.Failure -> {
-                    handleFailure("get_task", result)
-                    return
-                }
-            }
-        }
-        _uiMessage.value = "生成状态暂时无法更新，请稍后在项目中查看。"
-    }
-
     private fun cardFlow(deckId: String): MutableStateFlow<List<FlashcardEntity>> =
         cardFlows.getOrPut(deckId) { MutableStateFlow(emptyList()) }
 
@@ -2153,11 +1859,9 @@ class AppViewModel(
 
     private fun clearAuthenticatedState() {
         _projects.value = emptyList()
-        projectsById.clear()
-        _projectTasks.value = emptyMap()
+        _projectMaterials.value = emptyMap()
         _projectProgress.value = emptyMap()
         _deletionPreflights.value = emptyMap()
-        taskRefreshGeneration.clear()
         inFlightWrites.clear()
         writeKeys.clear()
         _deletionInFlight.value = emptySet()
@@ -2173,7 +1877,6 @@ class AppViewModel(
         cardFlows.clear()
         clearPdfFlow()
         _projectCreationMaterials.value = emptyList()
-        _projectMaterials.value = emptyMap()
         _materialImportDrafts.value = emptyList()
         _textImportFlow.value = null
         _projectGenerationDraft.value = null
@@ -2185,12 +1888,9 @@ class AppViewModel(
     }
 
     private fun clearPdfFlow() {
-        stopParsePolling()
-        _activePdfProject.value = null
-        _pdfFile.value = null
+        activePdfProjectId.value = null
+        pdfTaskId.value = null
         _pdfSamples.value = emptyList()
-        _pdfTask.value = null
-        _pdfTaskDeckId.value = null
     }
 
     private fun handleFailure(operation: String, result: V25Result.Failure, surface: Boolean = true) {
@@ -2213,18 +1913,6 @@ class AppViewModel(
         materialCount = project.materials.size,
         status = project.status.name,
     )
-
-    private fun syncProjectMaterials(projects: List<V25LearningProject>) {
-        _projectMaterials.value = projects.associate { project ->
-            project.projectId to project.materials.map { it.toProjectMaterial() }
-        }
-    }
-
-    private fun syncProjectMaterial(project: V25LearningProject) {
-        _projectMaterials.value = _projectMaterials.value.toMutableMap().apply {
-            put(project.projectId, project.materials.map { it.toProjectMaterial() })
-        }
-    }
 
     private fun com.qiuzhao.flashcards.domain.v25.V25Material.toProjectMaterial() = ProjectDraftMaterial(
         id = "project-material-$projectId-$materialId",
@@ -2271,21 +1959,6 @@ class AppViewModel(
         position = card.position,
         source = "V25",
         version = card.version,
-    )
-
-    /**
-     * Legacy wizard view of the active project: the first PDF material names the "file", and
-     * the chapters come from the project's cross-material chapter list (page spans only exist
-     * for PDF chapters; TEXT chapters are whole-content and stay out of the wizard).
-     */
-    private fun V25LearningProject.toPdfFile() = PdfFile(
-        id = materials.firstOrNull { it.type == V25MaterialType.PDF }?.materialId.orEmpty(),
-        name = materials.firstOrNull { it.type == V25MaterialType.PDF }?.name.orEmpty(),
-        status = status.name,
-        errorCode = materials.firstOrNull { it.type == V25MaterialType.PDF }?.errorCode,
-        chapters = chapters
-            .filter { it.startPage != null && it.endPage != null }
-            .map { PdfChapter(it.id, it.name, it.startPage!!, it.endPage!!) },
     )
 
     private fun com.qiuzhao.flashcards.domain.v25.V25ApiKeyStatus.toLegacyApiKeyStatus() = ApiKeyStatus(

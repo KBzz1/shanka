@@ -273,21 +273,3 @@ private fun PdfPreviewFace(card: CardDraft, type: PdfPreviewType, answer: Boolea
     }
 }
 
-@Composable
-internal fun PdfGenerationBlockedDialog(block: PdfGenerationBlock, onDismiss: () -> Unit, onOpenSettings: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(block.title, fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal) },
-        text = { AppText(block.detail, AppTextRole.Supporting) },
-        confirmButton = {
-            if (block.canOpenSettings) {
-                TextButton(onClick = onOpenSettings) { AppText("去设置", AppTextRole.Label) }
-            } else {
-                TextButton(onClick = onDismiss) { AppText("知道了", AppTextRole.Label) }
-            }
-        },
-        dismissButton = {
-            if (block.canOpenSettings) TextButton(onClick = onDismiss) { AppText("取消", AppTextRole.Label) }
-        }
-    )
-}

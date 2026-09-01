@@ -61,7 +61,7 @@ fun ShankaRoot(appViewModel: AppViewModel) {
                 val authError = (authState as AuthState.LoggedIn).error
                 val actionError by appViewModel.uiMessage.collectAsState()
                 val message = actionError ?: authError
-                ForegroundParseReconcileEffect(appViewModel)
+                ObservationLifecycleEffect(appViewModel)
                 LaunchedEffect(message) {
                     if (message == null) return@LaunchedEffect
                     // Release error feedback is transient: failures never look like a completed action.
@@ -91,16 +91,15 @@ private fun AuthEntry(appViewModel: AppViewModel) {
 }
 
 /**
- * Foreground reconcile for the decoupled parse wait: every time the app returns to RESUMED,
- * still-parsing projects are force-pulled once so finished parses appear without any screen
- * polling. The periodic ParseSyncWorker is the background twin of this effect.
+ * The observation engine rides the Activity lifecycle (V25-D-34): every return to RESUMED
+ * reconciles all in-flight resources (parsing projects, non-terminal tasks) once and re-arms
+ * its pollers; going to the background pauses them. The periodic ProcessingSyncWorker is the
+ * background twin of this effect.
  */
 @Composable
-private fun ForegroundParseReconcileEffect(appViewModel: AppViewModel) {
+private fun ObservationLifecycleEffect(appViewModel: AppViewModel) {
     val lifecycleOwner = LocalLifecycleOwner.current
     LaunchedEffect(lifecycleOwner) {
-        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            appViewModel.reconcileParsingProjects()
-        }
+        appViewModel.observationEngine.attach(lifecycleOwner.lifecycle)
     }
 }

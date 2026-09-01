@@ -51,7 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.qiuzhao.flashcards.data.remote.DeckSummary
 import com.qiuzhao.flashcards.data.remote.ProjectSummary
-import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
+import com.qiuzhao.flashcards.domain.v25.V25ObservedTask
 import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
@@ -64,7 +64,7 @@ internal fun ProjectDetailScreen(
     nav: ScreenNavigator,
     onDeleteDeck: (String, (Boolean) -> Unit) -> Unit,
     onDeleteProject: (retainDecks: Boolean, onResult: (Boolean) -> Unit) -> Unit,
-    tasks: List<V25GenerationTask> = emptyList(),
+    tasks: List<V25ObservedTask> = emptyList(),
     progress: V25ProgressSummary? = null,
     /** Server status EMPTY: the project has no materials yet and shows the add-material guide. */
     isEmptyProject: Boolean = false,
@@ -259,7 +259,7 @@ private fun CompactDeckDeletionDialog(
 @Composable
 private fun ProjectStatisticsContent(
     decks: List<DeckSummary>,
-    tasks: List<V25GenerationTask>,
+    tasks: List<V25ObservedTask>,
     progress: V25ProgressSummary?,
     theme: DeckTheme,
     scale: Float,
@@ -319,7 +319,7 @@ private fun ProjectStatisticsContent(
 
 @Composable
 private fun ProjectTaskStatusCard(
-    tasks: List<V25GenerationTask>,
+    tasks: List<V25ObservedTask>,
     theme: DeckTheme,
     scale: Float,
 ) {

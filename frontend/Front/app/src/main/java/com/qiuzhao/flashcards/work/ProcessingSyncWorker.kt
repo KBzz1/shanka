@@ -16,19 +16,19 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 
 /**
- * WorkManager backstop for the decoupled parse wait: advances every still-PARSING project's
- * projection (forced reads) so a finished server-side parse reaches the Room projection even
- * when no screen is polling. Reads are session-scoped inside the repository, so one app-wide
- * unique worker is enough; a signed-out run is a harmless no-op. The foreground ON_RESUME
- * reconcile is the primary path — this worker only covers the app sitting in the background.
+ * WorkManager backstop for the observation engine (V25-D-34): one forced reconcile of every
+ * in-flight resource (parsing projects, non-terminal tasks) so finished server-side processing
+ * reaches the Room projection even when the app sits in the background with no pollers running.
+ * Reads are session-scoped inside the repository, so one app-wide unique worker is enough; a
+ * signed-out run is a harmless no-op. The foreground ON_RESUME reconcile is the primary path.
  */
-class ParseSyncWorker(
+class ProcessingSyncWorker(
     context: Context,
     parameters: WorkerParameters,
 ) : CoroutineWorker(context, parameters) {
 
     override suspend fun doWork(): Result = try {
-        (applicationContext as FlashcardsApplication).container.v25Repository.refreshParsingProjects()
+        (applicationContext as FlashcardsApplication).container.v25Repository.refreshProcessing()
         Result.success()
     } catch (failure: Throwable) {
         if (failure is CancellationException) throw failure
@@ -37,12 +37,12 @@ class ParseSyncWorker(
     }
 
     companion object {
-        private const val ONE_TIME_NAME = "parse-sync/on-sign-in"
-        private const val PERIODIC_NAME = "parse-sync/periodic"
+        private const val ONE_TIME_NAME = "processing-sync/on-sign-in"
+        private const val PERIODIC_NAME = "processing-sync/periodic"
 
         /** Sign-in kick: reconcile once soon after connectivity allows. */
         fun enqueueOneTime(context: Context) {
-            val request = OneTimeWorkRequestBuilder<ParseSyncWorker>()
+            val request = OneTimeWorkRequestBuilder<ProcessingSyncWorker>()
                 .setConstraints(
                     Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
                 )
@@ -53,7 +53,7 @@ class ParseSyncWorker(
 
         /** Bounded periodic backstop; WorkManager's floor is 15 minutes. */
         fun enqueuePeriodic(context: Context) {
-            val request = PeriodicWorkRequestBuilder<ParseSyncWorker>(15, TimeUnit.MINUTES)
+            val request = PeriodicWorkRequestBuilder<ProcessingSyncWorker>(15, TimeUnit.MINUTES)
                 .setConstraints(
                     Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
                 )

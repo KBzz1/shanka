@@ -5,8 +5,11 @@ import com.qiuzhao.flashcards.domain.v25.V25Card
 import com.qiuzhao.flashcards.domain.v25.V25Chapter
 import com.qiuzhao.flashcards.domain.v25.V25DailyActivity
 import com.qiuzhao.flashcards.domain.v25.V25Deck
+import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
+import com.qiuzhao.flashcards.domain.v25.V25InternalStage
 import com.qiuzhao.flashcards.domain.v25.V25LearningProject
 import com.qiuzhao.flashcards.domain.v25.V25Material
+import com.qiuzhao.flashcards.domain.v25.V25ObservedTask
 import com.qiuzhao.flashcards.domain.v25.V25PlanCard
 import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25Rating
@@ -35,6 +38,7 @@ private val cacheJson = Json
 
 class V25CacheStore(private val db: ShankaV25Database) {
     private val projectDao = db.projectDao()
+    private val taskDao = db.taskDao()
     private val deckDao = db.deckDao()
     private val cardDao = db.cardDao()
     private val queueDao = db.reviewQueueDao()
@@ -79,9 +83,39 @@ class V25CacheStore(private val db: ShankaV25Database) {
             projectDao.insertProjects(listOf(project.toEntity(userId)))
             projectDao.insertMaterials(project.materials.toEntities(userId))
             projectDao.insertChapters(project.chapters.toEntities(userId, project.projectId))
-            metadataDao.invalidate(userId, "$KEY_PROJECT:${project.projectId}")
         }
     }
+
+    // --- generation tasks (V25-D-34 observation projection) --------------------------------------
+
+    /** Full-user scope replace: the task list payload is the authority for every project's rows. */
+    suspend fun replaceTasks(userId: String, tasks: List<V25GenerationTask>, now: Long) {
+        db.withTransaction {
+            taskDao.deleteTasks(userId)
+            taskDao.insertTasks(tasks.map { it.toEntity(userId) })
+        }
+    }
+
+    /** Landing spot for single-task payloads (create/get/start/abandon/retry/config). */
+    suspend fun upsertTask(userId: String, task: V25GenerationTask, now: Long) {
+        taskDao.insertTasks(listOf(task.toEntity(userId)))
+    }
+
+    suspend fun deleteTasksOf(userId: String, projectId: String) {
+        taskDao.deleteTasksOf(userId, projectId)
+    }
+
+    suspend fun readTask(userId: String, taskId: String): V25ObservedTask? =
+        taskDao.getTask(userId, taskId)?.toObservedDomain()
+
+    fun observeAllTasks(userId: String): Flow<List<V25ObservedTask>> =
+        taskDao.observeAllTasks(userId).map { rows -> rows.map { it.toObservedDomain() } }
+
+    fun observeProjectTasks(userId: String, projectId: String): Flow<List<V25ObservedTask>> =
+        taskDao.observeProjectTasks(userId, projectId).map { rows -> rows.map { it.toObservedDomain() } }
+
+    fun observeTask(userId: String, taskId: String): Flow<V25ObservedTask?> =
+        taskDao.observeTask(userId, taskId).map { it?.toObservedDomain() }
 
     suspend fun readProjects(userId: String): List<V25LearningProject> =
         projectDao.getProjectList(userId).map { row -> readProjectParts(userId, row) }
@@ -297,6 +331,12 @@ class V25CacheStore(private val db: ShankaV25Database) {
     fun observeProjects(userId: String): Flow<List<V25LearningProject>> =
         projectDao.observeProjectList(userId).map { readProjects(userId) }
 
+    /** Live single project: the same assembled read, re-emitted on any scoped write. */
+    fun observeProject(userId: String, projectId: String): Flow<V25LearningProject?> =
+        projectDao.observeProjectRow(userId, projectId).map { row ->
+            row?.let { readProjectParts(userId, it) }
+        }
+
     /**
      * Today's visible (not yet rated away) plan queue; a write re-emits the new order. The JOIN
      * projection also watches `cards`/`review_states`, so a completed sync re-emits here too.
@@ -420,6 +460,34 @@ private fun ProjectEntity.toDomain(materials: List<V25Material>, chapters: List<
             V25Chapter(it.chapterId, it.materialId, it.name, it.startPage, it.endPage)
         },
     )
+
+private fun V25GenerationTask.toEntity(userId: String) = GenerationTaskEntity(
+    userId = userId,
+    taskId = taskId,
+    projectId = projectId,
+    deckId = deckId,
+    retryOfTaskId = retryOfTaskId,
+    status = status.name,
+    internalStage = internalStage?.name,
+    generatedCardCount = generatedCardCount,
+    errorCode = errorCode,
+    failureStage = failureStage,
+    createdAt = createdAt.toEpochMilli(),
+    updatedAt = updatedAt.toEpochMilli(),
+)
+
+private fun GenerationTaskEntity.toObservedDomain() = V25ObservedTask(
+    taskId = taskId,
+    projectId = projectId,
+    deckId = deckId,
+    retryOfTaskId = retryOfTaskId,
+    status = enumValueOf(status),
+    internalStage = internalStage?.let { enumValueOf<V25InternalStage>(it) },
+    generatedCardCount = generatedCardCount,
+    errorCode = errorCode,
+    failureStage = failureStage,
+    updatedAt = Instant.ofEpochMilli(updatedAt),
+)
 
 private fun V25Deck.toEntity(userId: String) = DeckEntity(
     userId = userId,

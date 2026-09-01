@@ -160,7 +160,6 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val activity = LocalContext.current as? Activity
     val decks by viewModel.decks.collectAsState()
     val projects by viewModel.projects.collectAsState()
-    val projectTasks by viewModel.projectTasks.collectAsState()
     val dueCount by viewModel.dueCount.collectAsState()
     val dashboard by viewModel.dashboard.collectAsState()
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
@@ -203,22 +202,27 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                 viewModel.refreshProjectProgress(route.id)
             }
             val project = projects.firstOrNull { it.id == route.id }
-            if (project == null) LoadingScreen() else ProjectDetailScreen(
-                project,
-                decks.filter { it.projectId == project.id },
-                navigator,
-                onDeleteDeck = { deckId, onResult ->
-                    viewModel.deleteDeck(
-                        deckId,
-                        onSuccess = { onResult(true) },
-                        onFailure = { onResult(false) },
-                    )
-                },
-                onDeleteProject = { retainDecks, onResult ->
-                    viewModel.deleteProject(project.id, retainDecks, onResult)
-                },
-                tasks = projectTasks[route.id].orEmpty(),
-                progress = projectProgress[route.id],
+            if (project == null) LoadingScreen() else {
+                // Live task statuses from the Room projection (V25-D-34): a generating task
+                // advances to its terminal state here without any screen-driven polling.
+                val tasks by viewModel.projectTasks(route.id)
+                    .collectAsState(initial = emptyList())
+                ProjectDetailScreen(
+                    project,
+                    decks.filter { it.projectId == project.id },
+                    navigator,
+                    onDeleteDeck = { deckId, onResult ->
+                        viewModel.deleteDeck(
+                            deckId,
+                            onSuccess = { onResult(true) },
+                            onFailure = { onResult(false) },
+                        )
+                    },
+                    onDeleteProject = { retainDecks, onResult ->
+                        viewModel.deleteProject(project.id, retainDecks, onResult)
+                    },
+                    tasks = tasks,
+                    progress = projectProgress[route.id],
                 // Contract 3.16: status EMPTY means no materials yet — the guide replaces the
                 // generation surface until the first PDF/text material lands.
                 isEmptyProject = project.status == "EMPTY",
@@ -236,7 +240,8 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                         )
                     )
                 },
-            )
+                )
+            }
         }
         entry<AppRoute.DeckGeneration> { route ->
             val project = projects.firstOrNull { it.id == route.projectId }
@@ -281,7 +286,6 @@ fun FlashcardsApp(viewModel: AppViewModel) {
         entry<AppRoute.ImportToDeck> { route ->
             ImportScreen(viewModel, navigator, existingDeckId = route.deckId)
         }
-        entry<AppRoute.PdfMaker> { PdfSmartCardsFlow(decks, viewModel, navigator) }
         entry<AppRoute.Login> { LoginScreen(viewModel, navigator, showBack = true) }
         entry<AppRoute.Register> { RegisterScreen(viewModel, navigator) }
         entry<AppRoute.Settings> { SettingsScreen(viewModel, navigator) }

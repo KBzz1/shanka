@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import com.qiuzhao.flashcards.data.local.ShankaV25Database
 import com.qiuzhao.flashcards.data.local.V25CacheStore
+import com.qiuzhao.flashcards.data.offline.ObservationEngine
 import com.qiuzhao.flashcards.data.offline.OfflineFirstV25Repository
 import com.qiuzhao.flashcards.data.offline.RefreshPolicy
 import com.qiuzhao.flashcards.data.offline.RequestLanes
@@ -17,7 +18,7 @@ import com.qiuzhao.flashcards.data.remote.v25.RemoteV25Repository
 import com.qiuzhao.flashcards.data.session.KeystoreSessionStore
 import com.qiuzhao.flashcards.data.session.SessionStore
 import com.qiuzhao.flashcards.data.session.loadQuietly
-import com.qiuzhao.flashcards.work.ParseSyncWorker
+import com.qiuzhao.flashcards.work.ProcessingSyncWorker
 import com.qiuzhao.flashcards.work.ReviewSyncWorker
 import java.time.Clock
 import kotlinx.coroutines.CoroutineScope
@@ -77,6 +78,19 @@ class AppContainer(context: Context) {
     )
 
     /**
+     * The single polling mechanism (V25-D-34): per-resource pollers while a parse or a
+     * generation task is in flight, writing Room only. A polled task turning terminal fires
+     * one authoritative decks/today/dashboard refresh — the completion chain the old
+     * per-screen loops each reimplemented.
+     */
+    val observationEngine = ObservationEngine(
+        repository = v25Repository,
+        sessionUser = { sessionStore.loadQuietly()?.user?.userId },
+        scope = applicationScope,
+        onTaskTerminal = { _ -> authoritativeRefresh() },
+    )
+
+    /**
      * Exactly one authoritative pull after a permanent outbox failure: force the fast
      * resources once, then return to soft-TTL revalidation.
      */
@@ -87,6 +101,7 @@ class AppContainer(context: Context) {
         try {
             runCatching { v25Repository.listDecks() }
             runCatching { v25Repository.todayPlan() }
+            runCatching { v25Repository.statsDashboard() }
         } finally {
             v25Repository.currentPolicy = RefreshPolicy.SOFT_TTL
         }
@@ -96,13 +111,16 @@ class AppContainer(context: Context) {
     fun onUserSignedIn() {
         val userId = sessionStore.loadQuietly()?.user?.userId ?: return
         v25Repository.onSignedIn()
+        observationEngine.start()
+        observationEngine.reconcile()
         ReviewSyncWorker.enqueue(appContext, userId)
-        ParseSyncWorker.enqueueOneTime(appContext)
-        ParseSyncWorker.enqueuePeriodic(appContext)
+        ProcessingSyncWorker.enqueueOneTime(appContext)
+        ProcessingSyncWorker.enqueuePeriodic(appContext)
     }
 
     /** Sign-out: cancel background revalidation, pause syncing, keep the account-isolated cache. */
     fun onUserSignedOut() {
+        observationEngine.stop()
         applicationScope.launch { runCatching { v25Repository.onSignedOut() } }
     }
 }

@@ -198,10 +198,10 @@ class OfflineParseWaitTest {
         db.close()
     }
 
-    // --- 4. refreshParsingProjects: the reconcile trusts the detail over a stale PARSING list -------
+    // --- 4. refreshProcessing: the reconcile trusts the detail over a stale PARSING list -------------
 
     @Test
-    fun test_offline_refreshParsingProjects_advances_parsing_projection() = runBlocking {
+    fun test_offline_refreshProcessing_advances_parsing_projection() = runBlocking {
         val db = openDatabase()
         val repo = buildStack(db, scope())
         val cache = V25CacheStore(db)
@@ -214,7 +214,7 @@ class OfflineParseWaitTest {
         // force the detail read and fold the finished parse into the projection.
         backend.listParsed = false
         backend.detailParsed = true
-        repo.refreshParsingProjects()
+        repo.refreshProcessing()
 
         val projection = cache.readProject("u-1", "p-1")
         assertEquals(
@@ -240,7 +240,7 @@ class OfflineParseWaitTest {
         // The server verdict: the PDF parse failed and every PDF is FAILED with no usable
         // chapter source, so the project aggregates to PARSE_FAILED.
         backend.detailFailed = true
-        repo.refreshParsingProjects()
+        repo.refreshProcessing()
 
         val projection = cache.readProject("u-1", "p-1")
         assertEquals(V25ProjectStatus.PARSE_FAILED, projection?.status)
