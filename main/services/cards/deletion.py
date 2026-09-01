@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from domain.deletion_batch import UNDO_WINDOW_SECONDS
-from infra.db.models import Card, CardDeletionBatch
+from infra.db.models import Card, CardDeletionBatch, Deck
 from infra.db.session import format_utc
 from services.cards.service import _owned_card
 
@@ -72,10 +72,17 @@ def finalize_expired_batches(session: Session, *, user_id: str, now: str) -> int
     ).all():
         if batch.undo_until > now:
             continue
-        for card in _batch_cards(session, batch_id=batch.delete_batch_id):
+        cards = _batch_cards(session, batch_id=batch.delete_batch_id)
+        deck_ids = {c.deck_id for c in cards if c.deck_id is not None}
+        for card in cards:
             session.delete(card)  # FK 级联 review_states/review_events
         batch.status = "FINALIZED"
         batch.updated_at = now
+        if deck_ids:
+            # 卡片真正移除（4.5 V25-D-34）：刷新所属牌组版本，客户端缓存据此感知
+            session.execute(
+                update(Deck).where(Deck.deck_id.in_(deck_ids)).values(version=now, updated_at=now)
+            )
         finalized += 1
     return finalized
 

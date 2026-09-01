@@ -17,10 +17,10 @@
 ## 3. Room 投影 `shanka-v25.db`
 
 - 全部业务表带 `user_id` 列（物理查询隔离，不跨账号展示）；服务器 UUID 以 String 保存；schema export + 显式 migration，禁止 `fallbackToDestructiveMigration`。
-- 表：`projects`、`project_files`、`project_chapters`、`decks`、`cards`、`review_states`（服务器快照）、`review_queue`、`study_plan`、`today_plan`（主键 `user_id + study_date`）、`today_plan_cards`、`project_progress`、`dashboard_snapshot`、`cache_metadata`、`review_outbox`。
+- 表：`projects`、`project_materials`、`project_chapters`、`generation_tasks`、`decks`、`cards`、`review_states`（服务器快照）、`review_queue`、`study_plan`、`today_plan`（主键 `user_id + study_date`）、`today_plan_cards`、`project_progress`、`dashboard_snapshot`、`cache_metadata`、`review_outbox`。
 - 列表刷新在事务内替换所属范围（delete+insert 同 scope）；网络失败不触碰写路径，最后成功缓存保全。
 - 类型化缓存元数据：资源键、服务器版本/updated_at（存在时）、抓取时间、schema 版本；不把未建模的完整 HTTP JSON 当长期列。
-- stale-while-revalidate：Room Flow 立即给已有数据，后台按 TTL 刷新——项目/牌组/卡片 5 分钟，今日计划/进度/统计 60 秒；显式用户刷新 FORCE 覆盖。解析等待链路（智能制卡章节页轮询、进页首载）对 `GET /projects/{id}` 使用强制远端读（`forceRefresh`），绕过项目 5 分钟缓存；强制读失败时回退缓存快照，保证离线重进仍可渲染。
+- stale-while-revalidate：Room Flow 立即给已有数据，后台按 TTL 刷新——项目/牌组/卡片 5 分钟，今日计划/进度/统计 60 秒；显式用户刷新 FORCE 覆盖。处理中的资源不受 TTL 约束：观察引擎（§6）对在途解析/任务的轮询读一律强制远端读，终态由服务端版本跃迁（契约 4.5，V25-D-34）保证可被项目/牌组列表感知；强制读失败时回退缓存快照，保证离线重进仍可渲染。
 - 跨日语义：`today_plan` 按 `user_id + study_date` 保存；无网且只有旧日缓存时返回可判定的 stale/empty 状态，不把旧今日计划伪装成当天权威队列。
 - 登出：取消该用户同步与内存订阅；默认保留账号隔离的非敏感缓存。凭据仍由 Keystore SessionStore 负责，不写 Room。
 
@@ -38,9 +38,9 @@
 - 前台写（评分/首载）立即派发，不排在后台刷新之后；后台刷新 lane 并发上限 1、可整体取消、相同资源 GET single-flight（键 `<user>:<resource>`）。
 - 无进程级固定请求间隔（原 220ms pacer 已删除）；突发上限由服务端 IP 令牌桶承担（见 `../Architecture/structure-contract.md` 1.6），客户端不为 IP 维度自行排队。
 
-## 6. 解析等待的读侧对账（parse-wait reconcile）
+## 6. 处理状态观察（观察引擎，V25-D-34）
 
-- 解析等待不阻塞 UI：智能制卡章节页不使用全屏等待弹窗，等待态由 ViewModel 轮询器驱动（退避 1s→5s、窗口 3 分钟、连续 5 次失败判为未决），用户可离开页面；轮询每拍均为强制远端读。
-- 终态语义：`AWAITING_CHAPTER_CONFIRMATION`/`READY` 结束等待并合并刷新项目列表一次；`PARSE_FAILED` 展示后端 `error_code` 并提供"重新上传 PDF"（复用 FAILED 项目的 `replace-pdf` 契约）；超时/失败给出可重试出口，不存在无终点的等待。
-- 读侧对账：回前台（ON_RESUME）对 `status=PARSING` 的项目各做一次强制详情读，把已完成的解析回写投影；登录时入队一次性 + 15 分钟周期的 `ParseSyncWorker`（CONNECTED 约束）作为后台兜底。前台对账为主路径，周期任务仅覆盖 App 退后台场景。
-- 边界：PDF 上传本身仍为 online-only（见 §1），不进入离线写队列；本节只约定"解析结果的读侧同步"，不引入上传 outbox。
+- 单一观察引擎（ObservationEngine）承担全部"在途资源 → 终态"的轮询：解析中的项目（`status=PARSING`）与非终态制卡任务。轮询每拍均为强制远端读（解析读项目详情、任务读任务详情），退避间隔（解析 1s→5s、任务约 2.5s），结果只写 Room 投影；界面从投影流读取状态自动刷新，**不设超时终局**——离开页面的等待在资源终态或引擎暂停时自然停止，回前台对账后恢复。
+- 本地终态驱动：Room 流观察到解析终态（`AWAITING_CHAPTER_CONFIRMATION`/`READY`/`PARSE_FAILED`）或任务终态（`COMPLETED`/`FAILED`/`ABANDONED`）后自动停止对应轮询；任务进入终态触发一次牌组/今日计划/看板合并刷新。
+- 读侧对账：回前台（ON_RESUME）由引擎做一次强制刷新（项目列表 + 活跃任务列表）并恢复在途轮询；登录时入队一次性 + 15 分钟周期的 `ProcessingSyncWorker`（CONNECTED 约束）作为后台兜底。前台对账为主路径，周期任务仅覆盖 App 退后台场景。
+- 边界：PDF 上传与任务创建仍为 online-only（见 §1），不进入离线写队列；本节只约定"处理结果的读侧同步"，不引入上传 outbox。历史 §6 的"ViewModel 轮询器（窗口 3 分钟）"机制已被本引擎替代删除。

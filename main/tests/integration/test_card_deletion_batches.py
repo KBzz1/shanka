@@ -442,6 +442,11 @@ def test_card_deletion_batches_finalizer_idempotent_rerun(db_engine: Engine) -> 
         assert batch.updated_at == expired
         # 重跑：不再命中任何过期批（幂等）
         assert finalize_expired_batches(session, user_id=user_id, now=expired) == 0
+        # 契约 4.5（V25-D-34）：卡片真正移除必须刷新所属牌组版本
+        deck = session.get(Deck, deck_id)
+        assert deck is not None
+        assert deck.version == expired
+        assert deck.updated_at == expired
 
 
 def test_card_deletion_batches_undo_restores_review_state(db_engine: Engine) -> None:

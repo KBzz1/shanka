@@ -20,12 +20,20 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings
 from app.errors import AppError, ErrorCode
 from infra.clock import SystemClock
-from infra.db.models import Chapter, PdfFile
+from infra.db.models import Chapter, Material, PdfFile
 from infra.db.session import format_utc
 from services.pdf.parser import extract_pages, parse_pdf
 from services.pdf.text_chunks import persist_text_chunks
+from services.projects.versioning import bump_project_version
 
 logger = logging.getLogger(__name__)
+
+
+def _bump_owner_project(session: Session, *, file_id: str, now: str) -> None:
+    """解析终态发布后刷新所属项目版本（契约 4.5）；无所属 material 行则跳过。"""
+    project_id = session.scalar(select(Material.project_id).where(Material.material_id == file_id))
+    if project_id is not None:
+        bump_project_version(session, project_id=project_id, now=now)
 
 
 def validate_upload(
@@ -166,6 +174,7 @@ def process_pending(session: Session, *, storage: Any) -> int:
             session.rollback()
             logger.info("pdf parse result discarded", extra={"file_id": file_id})
             return 1
+        _bump_owner_project(session, file_id=file_id, now=now)
     except AppError as exc:
         logger.warning(
             "pdf parse failed",
@@ -192,6 +201,8 @@ def process_pending(session: Session, *, storage: Any) -> int:
         )
         if failed.rowcount != 1:
             session.rollback()
+        else:
+            _bump_owner_project(session, file_id=file_id, now=now)
     except Exception:  # noqa: BLE001
         logger.warning("pdf parse unexpected failure", extra={"error_code": "PDF_PARSE_FAILED"})
         session.rollback()
@@ -215,6 +226,8 @@ def process_pending(session: Session, *, storage: Any) -> int:
         )
         if failed.rowcount != 1:
             session.rollback()
+        else:
+            _bump_owner_project(session, file_id=file_id, now=now)
     return 1
 
 

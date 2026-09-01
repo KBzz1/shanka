@@ -17,7 +17,16 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.schemas.samples import DifficultyRatio, GenerationConfig
-from infra.db.models import Base, Card, KnowledgePoint, Material, Task, TextChunk, User
+from infra.db.models import (
+    Base,
+    Card,
+    KnowledgePoint,
+    LearningProject,
+    Material,
+    Task,
+    TextChunk,
+    User,
+)
 from infra.db.session import create_db_engine, create_session_factory
 from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
@@ -350,6 +359,12 @@ def test_executor_completes_task_and_inserts_cards(session_factory: Callable[[],
     assert len(cards) == len(kps)  # 每知识点一张卡
     assert task.generated_card_count == len(cards)
     assert all(c.source == "GENERATED" for c in cards)
+    # 契约 4.5（V25-D-34）：任务终态必须刷新所属项目版本
+    with session_factory() as session:
+        project = session.get(LearningProject, task.project_id)
+        assert project is not None
+        assert project.version != "2026-08-11T00:00:00.000Z"
+        assert project.updated_at == project.version
 
 
 def test_executor_no_duplicate_generation_items(session_factory: Callable[[], Session]) -> None:
@@ -452,6 +467,11 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
     assert task.ended_at == task.updated_at
     assert len(cards) == 1  # 第 1 批已入库卡保留（4.1）
     assert after - before == 1.0  # 8.3：系统级失败也计数
+    # 契约 4.5（V25-D-34）：FAILED 同样是终态跃迁，刷新所属项目版本
+    with session_factory() as session:
+        project = session.get(LearningProject, task.project_id)
+        assert project is not None
+        assert project.version != "2026-08-11T00:00:00.000Z"
 
 
 def test_executor_full_flow_plan_then_generate(

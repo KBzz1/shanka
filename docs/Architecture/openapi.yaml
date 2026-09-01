@@ -1897,7 +1897,7 @@ components:
           format: date-time
         version:
           type: string
-          description: 缓存刷新与并发检查
+          description: 缓存刷新与并发检查;状态终态跃迁(解析/任务,契约 4.5)必刷新
 
     ProjectStudySettings:
       type: object

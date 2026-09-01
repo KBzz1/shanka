@@ -51,6 +51,7 @@ from services.generation.quota import estimate_task_units, task_unit_budget
 from services.generation.samples import config_fingerprint
 from services.generation.validate import validate_config
 from services.pdf.text_chunks import load_pages
+from services.projects.versioning import bump_project_version
 from services.tasks.lease import TaskLease, require_lease
 from services.tasks.operations import (
     begin_operation,
@@ -545,6 +546,8 @@ def abandon_task(session: Session, *, user_id: str, task_id: str, now: str) -> T
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "仅正式生成前任务可放弃")
     session.refresh(task)
     finish_operation(session, task_id=task_id, status="ABANDONED", now=now, reason="USER_ABANDON")
+    if task.project_id is not None:
+        bump_project_version(session, project_id=task.project_id, now=now)  # 4.5
     return task
 
 

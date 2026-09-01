@@ -102,12 +102,21 @@ def test_scanner_process_pending_parses_sample(
     with session_factory() as session:
         storage_key = storage.save(SAMPLE.read_bytes())
         file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
+        project_id = session.scalar(
+            select(Material.project_id).where(Material.material_id == file_id)
+        )
         session.commit()
     with session_factory() as session:
         n = process_pending(session, storage=storage)
         session.commit()
         row = session.get(PdfFile, file_id)
         chapters = session.scalars(select(Chapter).where(Chapter.file_id == file_id)).all()
+        # 契约 4.5（V25-D-34）：解析终态发布必须刷新所属项目版本
+        assert project_id is not None
+        project = session.get(LearningProject, project_id)
+        assert project is not None
+        assert project.version != "2026-08-11T00:00:00.000Z"
+        assert project.updated_at == project.version
     assert n == 1
     assert row is not None
     assert row.status == "PARSED"
@@ -118,16 +127,23 @@ def test_scanner_process_pending_parses_sample(
 def test_scanner_process_pending_failed_keeps_file(
     session_factory: sessionmaker[Session], storage: LocalStorage
 ) -> None:
-    """损坏 PDF → FAILED + error_code，原始文件保留。"""
+    """损坏 PDF → FAILED + error_code，原始文件保留；失败同样是终态跃迁，bump 项目版本。"""
     user = _uuid()
     with session_factory() as session:
         storage_key = storage.save(b"not a real pdf content")
         file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
+        project_id = session.scalar(
+            select(Material.project_id).where(Material.material_id == file_id)
+        )
         session.commit()
     with session_factory() as session:
         n = process_pending(session, storage=storage)
         session.commit()
         row = session.get(PdfFile, file_id)
+        assert project_id is not None
+        project = session.get(LearningProject, project_id)
+        assert project is not None
+        assert project.version != "2026-08-11T00:00:00.000Z"  # 4.5
     assert n == 1
     assert row is not None
     assert row.status == "FAILED"

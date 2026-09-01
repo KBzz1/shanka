@@ -279,11 +279,11 @@ NEW → LEARNING → REVIEW ⇄ RELEARNING
 
 ### 5.1 项目制卡主流程（PDF → 生成）
 
-1. `POST /projects` 上传 PDF 建立项目（带 Idempotency-Key）→ 轮询 `GET /projects/{project_id}` 直到解析 `PARSED`（拿章节列表）。
+1. `POST /projects` 上传 PDF 建立项目（带 Idempotency-Key）→ 观察 `GET /projects/{project_id}`（或项目列表）直到解析 `PARSED`（拿章节列表）。解析终态会刷新项目 `version`/`updated_at`（契约 4.5），客户端可凭版本变化感知，无需无条件穿透缓存。
 2. （可选）`PATCH` 修改章节边界 → `POST .../confirm-chapters` 确认章节。
 3. `PUT /api-key` 保存 DeepSeek Key（如未保存；无 Key 时后续任务动作会失败并提示 `API_KEY_NOT_SET`）。
 4. `POST /projects/{project_id}/tasks` 建立 DRAFT 任务（自动保存）→ `POST /tasks/{task_id}/samples` 预览样卡（不满可 `PATCH` 改配置后重新生成）。
-5. `POST /tasks/{task_id}/start` 确认样卡进入生成 → 按 5.2 轮询至终态；失败可 `retry`。
+5. `POST /tasks/{task_id}/start` 确认样卡进入生成 → 按 5.2 轮询至终态；失败可 `retry`。任务进入终态同样刷新所属项目 `version`。
 6. `COMPLETED` 后卡片进入目标牌组，可复习。
 
 ### 5.2 长任务轮询
@@ -291,6 +291,7 @@ NEW → LEARNING → REVIEW ⇄ RELEARNING
 - `GET /tasks/{task_id}` 返回 status / `internal_stage` / `generated_card_count` / 批次进度 / `updated_at`。
 - 轮询间隔建议 2-3 秒；`updated_at` 用于区分"还在跑"与"卡住"。
 - 后台任务在 API 进程内执行（进程内调度器，无外部队列）；服务端重启后由租约/心跳机制重新抢占恢复，客户端只需继续轮询。
+- 客户端实现约定（V25-D-34）：对在途资源（解析中项目、非终态任务）的轮询由统一观察引擎承担，结果写入本地 Room 投影，界面从投影流读取——禁止各界面自建轮询循环。
 
 ### 5.3 复习评级（幂等重点）
 

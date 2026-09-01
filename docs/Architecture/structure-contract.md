@@ -432,7 +432,7 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | `deck_count` | int | ✓ | 派生 |
 | `task_count` | int | ✓ | 派生 |
 | `tasks` | Task[] | ✗ | 仅项目详情可选返回;列表可省略,用于恢复草稿/样卡/生成中任务 |
-| `created_at` / `updated_at` / `version` | - | ✓ | 缓存刷新与并发检查 |
+| `created_at` / `updated_at` / `version` | - | ✓ | 缓存刷新与并发检查;`version`/`updated_at` 同时是处理状态缓存失效信号——凡 4.5 矩阵标注"bump 项目"的跃迁都必须刷新二者,客户端可只凭版本变化感知解析/任务终态 |
 
 规则:一个项目包含 0~N 份资料(V25-D-29 资料集合)。`status` 由资料状态与 `chapters_confirmed_at`
 聚合派生,不建立可漂移的第二套状态列:无资料 → `EMPTY`;任一 PDF 为 `PENDING`/`PARSING` →
@@ -631,6 +631,23 @@ NEW → LEARNING → REVIEW →(AGAIN)→ RELEARNING →(GOOD/EASY)→ REVIEW
 - **进程内调度器**：PDF 解析、规划 worker、生成 worker、评分 worker 由 API 进程内后台循环扫描执行；各 worker 以 DB 原子租约 + fencing token 抢占，任务/批次状态与游标存 DB（**DB 即状态**），LLM 调用尝试与全阶段 token 以 `llm_call_attempts` 账本为权威，不引入外部任务队列（Celery/RQ/Redis）。生成 worker 每轮最多处理配置的批次数（默认 4），超大任务通过下一轮继续，避免独占调度循环。
 - **多实例演进**：孤儿 RUNNING 心跳恢复（30 分钟）+ DB 条件更新抢占已支持多 worker；未来多实例仅增加 DB 轮询调度，业务逻辑不变。
 - 禁止以性能为由提前引入任务队列。
+
+### 4.5 处理状态矩阵与版本跃迁规则(V25-D-34)
+
+服务端不变式:**任何客户端可见的异步处理终态跃迁,必须刷新拥有者资源的版本字段**。客户端缓存
+(以版本为失效信号)只需重读拥有者资源即可感知处理进度,不允许出现"状态已变而版本不动"的盲区。
+
+| 处理过程 | 状态载体 | 关键跃迁 | 版本责任 |
+| --- | --- | --- | --- |
+| PDF 解析 | `pdf_files.status`(PENDING/PARSING/PARSED/FAILED) | 发布 `PARSED` 或 `FAILED` | **bump 所属学习项目** version/updated_at(经 `materials.material_id = file_id` 反查;无所属项目则跳过) |
+| 制卡任务 | `tasks.status`(4.1 七态) | 进入 `COMPLETED` / `FAILED` / `ABANDONED`(用户 abandon、执行器失败/发布、样卡失败;删除取消路径经资料删除自身的项目版本刷新覆盖) | **bump 所属学习项目** version/updated_at |
+| 卡片删除批 | `card_deletion_batches.status` | `FINALIZED`(卡片真正移除) | **bump 所属牌组** version/updated_at |
+| 复习评级 | `review_states` / `review_events` | 每次评级 | 不 bump(高频写,客户端经 outbox 补传后的合并刷新链路感知) |
+| 任务运行期 | `tasks.internal_stage` / `updated_at` 心跳 | PLANNING→GENERATING→SCORING→PUBLISHING | 不 bump(运行期观测口径,观察方直接读任务资源) |
+
+规则:版本刷新与引发它的状态写入同事务提交;解析/任务对项目的反查不得引入 `services` 内新环形依赖
+(经 `services/projects.versioning` 提供的单一入口)。中间态(PARSING、GENERATING 等)不要求 bump——
+观察方以直接读取该资源为口径; bump 只保证"终态必被项目/牌组列表看到"。
 
 ## 5. 复习排程(FSRS-6)
 

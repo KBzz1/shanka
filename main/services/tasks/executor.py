@@ -58,6 +58,7 @@ from services.generation.ledger import mark_stale_unknown
 from services.generation.planning_executor import claim_planning_task, run_planning
 from services.generation.samples import config_fingerprint, sample_cards_llm
 from services.generation.scoring import enter_scoring_stage, run_scoring_stage
+from services.projects.versioning import bump_project_version
 from services.tasks.lease import (
     TaskLease,
     claim_task,
@@ -223,6 +224,8 @@ def publish_generated_cards(
                 now=now,
                 reason=ErrorCode.TASK_ZERO_CARDS.value,
             )
+            if task.project_id is not None:
+                bump_project_version(session, project_id=task.project_id, now=now)  # 4.5
             _observe_task_result(task, "FAILED")  # 8.3（R1 M-3）：0 卡整体失败也计数
             logger.warning(
                 "task publish failed, zero valid cards",
@@ -255,6 +258,8 @@ def publish_generated_cards(
     ):
         session.refresh(task)
         finish_operation(session, task_id=task.task_id, status="COMPLETED", now=now)
+        if task.project_id is not None:
+            bump_project_version(session, project_id=task.project_id, now=now)  # 4.5
         logger.info(
             "task published",
             extra={"task_id": task.task_id, "published_cards": staged},
@@ -354,6 +359,8 @@ def _fail_task(
         now=now,
         reason=error_code,
     )
+    if task.project_id is not None:
+        bump_project_version(session, project_id=task.project_id, now=now)  # 4.5
     _observe_task_result(task, "FAILED")  # 8.3：系统级失败也计数（仅实际转移时）
 
 
@@ -428,6 +435,8 @@ def _complete_sample_task(
                 now=failed_now,
                 reason=ErrorCode.GENERATION_FAILED.value,
             )
+            if task.project_id is not None:
+                bump_project_version(session, project_id=task.project_id, now=failed_now)  # 4.5
             logger.warning(
                 "task sample generation failed",
                 extra={"task_id": task.task_id, "internal_reason": "SAMPLE_INPUT_INVALID"},
