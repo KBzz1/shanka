@@ -120,6 +120,7 @@ def ctx(tmp_path: Path) -> Iterator[tuple[TestClient, Path]]:
     settings = Settings(
         database_url=f"sqlite:///{db_path}",
         storage_path=tmp_path / "storage",
+        metrics_auth_exempt=True,  # 指标断言走 /metrics；认证维度由 test_auth_middleware 覆盖
         task_scan_interval_seconds=3600.0,  # 测试不依赖后台循环，显式 scan_tasks
         rate_limit_ip_per_second=100,  # IP 限流隔离（本文件单测多次快速请求）
     )

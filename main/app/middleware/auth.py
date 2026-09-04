@@ -14,17 +14,20 @@ from collections.abc import Awaitable, Callable
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
+from app.config import Settings
 from app.errors import AppError, ErrorCode, http_status
 from infra.clock import SystemClock
 from infra.db.session import format_utc
 from services.auth.service import renew_session_if_due, resolve_principal
 from services.auth.tokens import hash_session_token
 
-_AUTH_EXEMPT_PATHS = {
+# 基础豁免：探针/接口文档与无鉴权端点（6.11）。/metrics 默认不豁免（生产收敛，
+# R25-07 同批加固）：需 Bearer 抓取或经 METRICS_AUTH_EXEMPT=true 本地调试打开。
+_AUTH_EXEMPT_BASE = {
     "/healthz",
     "/readyz",
-    "/metrics",
     "/openapi.json",
     "/auth/register",
     "/auth/login",
@@ -32,10 +35,16 @@ _AUTH_EXEMPT_PATHS = {
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: ASGIApp, *, settings: Settings) -> None:
+        super().__init__(app)
+        self._exempt_paths = _AUTH_EXEMPT_BASE | (
+            {"/metrics"} if settings.metrics_auth_exempt else set()
+        )
+
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if request.url.path in _AUTH_EXEMPT_PATHS:
+        if request.url.path in self._exempt_paths:
             return await call_next(request)
         header = request.headers.get("Authorization")
         if header is None or not header.strip():

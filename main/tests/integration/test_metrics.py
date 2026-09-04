@@ -19,7 +19,9 @@ def _metric_value(text: str, metric_line: str) -> float:
 
 def test_metrics_endpoint_returns_prometheus_text(tmp_path: Path) -> None:
     settings = Settings(
-        database_url=f"sqlite:///{tmp_path / 'm.db'}", storage_path=tmp_path / "storage"
+        database_url=f"sqlite:///{tmp_path / 'm.db'}",
+        storage_path=tmp_path / "storage",
+        metrics_auth_exempt=True,  # 本文件验证指标内容而非认证；/metrics 默认已收紧
     )
     with TestClient(create_app(settings)) as client:
         resp = client.get("/metrics")
@@ -31,7 +33,9 @@ def test_metrics_endpoint_returns_prometheus_text(tmp_path: Path) -> None:
 
 def test_metrics_tracks_http_requests(tmp_path: Path) -> None:
     settings = Settings(
-        database_url=f"sqlite:///{tmp_path / 'm2.db'}", storage_path=tmp_path / "storage"
+        database_url=f"sqlite:///{tmp_path / 'm2.db'}",
+        storage_path=tmp_path / "storage",
+        metrics_auth_exempt=True,
     )
     healthz_line = 'http_requests_total{method="GET",path="/healthz",status="200"}'
     with TestClient(create_app(settings)) as client:
@@ -75,6 +79,7 @@ def test_metrics_rate_limit_hit_recorded(tmp_path: Path) -> None:
     settings = Settings(
         database_url=f"sqlite:///{tmp_path / 'm3.db'}",
         storage_path=tmp_path / "storage",
+        metrics_auth_exempt=True,
         rate_limit_write_per_minute=1,
         rate_limit_ip_per_second=100,  # IP 维度隔离：Bearer 注册请求计入 IP 桶，显式调高隔离
     )

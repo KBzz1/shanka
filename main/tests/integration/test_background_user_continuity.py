@@ -48,6 +48,7 @@ def ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[TestC
         rate_limit_ip_per_second=100,
         task_scan_interval_seconds=3600.0,
         api_key_encryption_key="aa" * 32,
+        metrics_auth_exempt=True,  # 指标内容断言用；生产默认 Bearer 收紧（R25-07 同批）
     )
     monkeypatch.setattr("app.api.api_key.DeepSeekClient", FakeClient)
     with TestClient(create_app(settings)) as client:
@@ -239,7 +240,7 @@ def test_cross_user_task_404_and_observability_isolated(ctx: tuple[TestClient, P
 
 
 def test_metrics_endpoint_has_no_identity(ctx: tuple[TestClient, Path]) -> None:
-    """匿名 /metrics 无身份聚合（不含 user_id/username/session_id 字样）。"""
+    """指标输出无身份聚合（不含 user_id/username/session_id 字样；拉取豁免仅测试 fixture）。"""
     client, _db_path = ctx
     resp = client.get("/metrics")
     assert resp.status_code == 200

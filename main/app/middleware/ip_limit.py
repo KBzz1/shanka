@@ -28,6 +28,7 @@ from starlette.types import ASGIApp
 from app.api.metrics import RATE_LIMIT_HIT_TOTAL
 from app.config import Settings
 from app.errors import AppError, ErrorCode, http_status
+from app.middleware.client_ip import resolve_client_ip
 from app.middleware.rate_limit import ClockLike
 from app.middleware.token_bucket import TokenBucket
 
@@ -58,7 +59,7 @@ class IpRateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = resolve_client_ip(request)  # Tunnel 部署取 CF-Connecting-IP（client_ip.py）
         allowed, retry_after = self._ip_limiter.check(client_ip)
         if not allowed:
             return self._rate_limited(request, retry_after)

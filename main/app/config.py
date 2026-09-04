@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     rate_limit_api_key_per_hour: int = 10
     rate_limit_samples_per_hour: int = 20
     rate_limit_pdf_per_hour: int = 10
+    # /metrics 是否豁免 Bearer（默认收紧需认证；本地调试/抓取器经 env METRICS_AUTH_EXEMPT=true 打开）
+    metrics_auth_exempt: bool = False
     # 账号认证（DESIGN §4.2/§4.3：可运维调整，客户端不得硬编码）
     auth_session_ttl_days: int = 30
     rate_limit_auth_per_hour: int = 20

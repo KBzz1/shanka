@@ -6,12 +6,16 @@
 `Architecture/structure-contract.md` / `openapi.yaml` / `database-design.md`）。
 两份实施计划只负责细化任务，不得各自另建总状态表。
 
-最后事实审计：2026-08-31（第三次）。审计手段：全量后端测试复跑
-（**862 通过 / 0 失败 / 862 项**；v6 资产翻面 + `LearningProject.chapters` 守卫修复后全绿）
-+ v6 难度锚定真实验收（任务 `3b83fb78`：同书同章同配置，18 卡 [12,25]、COMPLETED、覆盖 100%、
-难度分布偏差 2.2pp；双裁判盲评难度维 1.83→2.44/2.78，报告见
-`Architecture/generation-quality-metrics.md` v6 小节）+ 提交/契约/迁移证据核对
-（32052e9 单栈收敛、2bbd080 设备验收、29cf2d5 文档刷新、cdfe3f8 多资料 Android）。
+最后事实审计：2026-09-04（第五次）。审计手段：全量后端测试复跑
+（**867 通过 / 0 失败 / 867 项**；ruff + mypy strict 全绿）+ 安全/部署加固批——
+限流客户端 IP 确定性采信 `CF-Connecting-IP`（`app/middleware/client_ip.py`，Tunnel 部署
+键维度修正）；`/metrics` 默认 Bearer 收紧（`METRICS_AUTH_EXEMPT` 开关，测试断言更新）；
+单进程约束显式写入 run.sh 与 deployment.md（uvicorn 显式 --proxy-headers）；R25-07
+并发压力测试落地（HTTP 端到端，详见风险表）；GitHub Actions CI 上线
+（`.github/workflows/ci.yml`：ruff/mypy/契约守卫快通道 + 全量 pytest，依赖按
+`requirements*.lock` 锁装）+ 生产锁文件 `requirements.lock`。前次审计（第四次，
+2026-09-04）：860 项全绿 + openapi.yaml 路径覆盖补齐（47/47 业务端点双向守卫）+
+R25-10 material deletion-preflight + A5 文档核对 + fake.py 清理。
 
 ---
 
@@ -32,8 +36,8 @@
 | --- | --- | --- |
 | V2.5 总 PRD + 7 模块 PRD | `DONE` | 已确认 v1.0；8 文件内部链接和 diff 格式检查通过 |
 | V2.5 目标 Architecture | `DONE` | 已转正（2026-08-31）：目标设计已原子同步到现行契约，状态头与转正记录见 `Architecture/v2.5-target-architecture.md` |
-| 当前机器契约 | `DONE`（V2.5 实现事实） | `structure-contract.md`（v2.5）、`openapi.yaml`（2.5.0）、`database-design.md`（v2.5）均自标 V2.5 实现事实，contract 守卫套件通过 |
-| V2.5 多资料项目（V25-D-29~32） | `DOING` | A1 契约 + A2/A4 后端（迁移 b7e4c2a91d50，862/862 绿，commit ed7a5a9）+ A3 前端翻面（236 单测绿 + assembleDebug，Room 显式 Migration 1→2）已落；A5 文档收尾（backend-integration.md / offline-data-layer.md 端点与投影核对）与真机验收证据未登记。遗留缺口见 R25-10 |
+| 当前机器契约 | `DONE`（V2.5 实现事实） | `structure-contract.md`（v2.5）、`openapi.yaml`（2.5.0，2026-09-04 路径覆盖补齐至全部 47 个业务端点，probes/metrics 按 R-04 有意排除）、`database-design.md`（v2.5）均自标 V2.5 实现事实，contract 守卫套件通过（含 app 路由 ↔ openapi 双向路径守卫） |
+| V2.5 多资料项目（V25-D-29~32） | `DOING` | A1 契约 + A2/A4 后端（迁移 b7e4c2a91d50，862/862 绿，commit ed7a5a9）+ A3 前端翻面（236 单测绿 + assembleDebug，Room 显式 Migration 1→2）已落；A5 文档收尾完成（2026-09-04：backend-integration.md 多资料端点核对——两步创建/materials 系列/material replace、offline-data-layer.md Room 15 表投影核对一致；R25-10 preflight 缺口同批关闭）；真机验收证据未登记 |
 | V2.5 后端/数据库实现 | `DONE` | V2.5 契约迁移已落（`0f8b9f33b769_v2_5_contract` 等共 15 个迁移，含 `a3f8d21c9e47` coverage_tier）；projects/study/tasks 七态/删除批次/重写预览等 V2.5 服务与路由齐全；密度制数量编排上线（V25-D-25~28，`knowledge_points.coverage_tier` 已补应用到运行库）；2026-08-31 全量 pytest 868/868 通过，真实验收证据见 `Architecture/generation-quality-metrics.md` |
 | V2.5 Android 视觉实现 | `DOING` | 视觉实现已大量落地：UI 拆分为约 30 个屏幕文件、design-system 402dp 体系应用、真机截图证据在 `releases/visual-evidence/`；但 V-01~V-08 逐包验收证据（Preview 矩阵、浅深色/大字体、UI tests）未登记 |
 | V2.5 Android data/Release | `DONE` | offline-foundation-v1 设备验收关闭（commit 2bbd080）：统一 NetworkStack + Room 投影 `shanka-v25.db` + 评分 outbox（`docs/frontend/offline-data-layer.md`）；debug 与正式包安装隔离（commit 1d175a6）；Release 编译期固定 `https://shanka.kbzz1.top`；Release APK 2.5.0 + SHA-256 已产出（`releases/`） |
@@ -143,9 +147,9 @@
 | R25-04 | `RESOLVED` | 当前难度校验要求三档均大于 0，且仍使用 APPLICATION | 已迁移为 10% 整数比例（允许 0、不可全 0）与 `DEEP_QUESTION` 枚举（openapi `DifficultyRatio`）；非法配置创建/修改时即拒绝 |
 | R25-05 | `RESOLVED` | 当前任务存在 PAUSED/resume/cancel，与 V2.5 用户状态冲突 | 用户侧 PAUSED/resume/cancel API 已删除（openapi 无对应路径）；内部恢复走租约/心跳重新抢占；历史 PAUSED 迁为 FAILED(LEGACY_PAUSED_TASK) |
 | R25-06 | `RESOLVED` | 当前 `AppViewModel` 混合运行时 Mock、JSONObject 和网络编排 | 单栈收敛（commit 32052e9）：统一 Retrofit/OkHttp NetworkStack + Room 投影 + 评分 outbox，AppViewModel 网络编排移除；设备验收关闭（2bbd080）；Release 零 Mock 终验归 V-07/G3 |
-| R25-07 | `OPEN` | SQLite 单写者下生成长事务可能阻塞撤销/设置写入 | LLM 调用已移出写事务（租约/短事务发布），但 NV-08 压测未执行，证据未登记 |
+| R25-07 | `RESOLVED` | SQLite 单写者下生成长事务可能阻塞撤销/设置写入 | 设计缓解（LLM 调用移出写事务、租约/短事务发布）原有 service 级验证；2026-09-04 补 HTTP 端到端并发压力测试 `test_http_write_pressure.py`（同用户 GENERATING 任务批次写推进 + 3 线程 × 20 轮评分/偏好/牌组混合写并发，全 2xx 零锁死、任务收敛 COMPLETED、删除撤销路径复验），入 CI 可复跑。真机 30 分钟长稳仍归 NV-08/G4 发布闸门 |
 | R25-08 | `RESOLVED` | `test_operation_key_task_domain_and_ledger_idempotent` 断言未覆盖 V2.5 持久化样卡的 `sample:` 账本前缀 | 2026-08-31 密度制批次中更新断言纳入 `sample:` 前缀并按新配额校正计数；全量 pytest 868/868 通过 |
-| R25-10 | `OPEN` | 资料删除确认页未展示“将影响的卡片数量”（PRD V25-GEN-FR-02 要求展示数量；Material 级删除无 preflight 端点，前端仅给保留/一并删除两选项文案） | 多资料批次（A3）遗漏项；候选方案：新增 `GET /projects/{id}/materials/{mid}/deletion-preflight`（按资料章节计数）或修订 PRD 措辞；同时 openapi LearningProject 已补 `chapters` 详情字段声明 |
+| R25-10 | `RESOLVED` | 资料删除确认页未展示“将影响的卡片数量”（PRD V25-GEN-FR-02 要求展示数量；Material 级删除无 preflight 端点，前端仅给保留/一并删除两选项文案） | 2026-09-04 新增 `GET /projects/{id}/materials/{mid}/deletion-preflight`：`impact.affected_card_count` 按统一可见谓词计数（STAGED/删除批次排除）、`silently_cancelled_task_count` 展示静默取消任务数（V25-D-30 无 blocker 语义，`can_delete` 恒 true）；集成测试 `test_projects_material_deletion_preflight_counts_and_silent_cancel`（计数口径 + 跨用户/不存在 404）；openapi.yaml 路径条目与 structure-contract 6.2 端点表同步登记 |
 | R25-09 | `OPEN` | alembic 对运行库操作必须显式指定 URL，否则回落 alembic.ini 占位库 | 2026-08-31 事故：`coverage_tier` 迁移未应用到 `main/data/shanka.db`（运行库），代码写新列致规划阶段 flush 失败、任务 30 分钟空转重试循环；已用 `DATABASE_URL=sqlite:////…/main/data/shanka.db alembic upgrade head` 补齐并自愈。纪律：对运行库执行迁移/检查一律显式带 URL，不以 cwd 相对路径兜底 |
 
 风险关闭时保留原记录，改为 `RESOLVED` 并附提交/测试证据，不删除历史。

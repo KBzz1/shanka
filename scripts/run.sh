@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # 启动脚本（契约 4.1：端口检测 → 本应用已在运行则幂等退出；被其他程序占用则换 8001 并提示同步 Tunnel 回源路由）
+#
+# 单进程约束（deployment.md）：限流器为进程内存状态、PDF 扫描器与任务执行器为进程内
+# daemon 线程——uvicorn 必须单进程启动，禁止 --workers（多 worker 会双跑后台循环并使
+# 限流失效）；扩容前须先把限流迁共享存储。--forwarded-allow-ips 显式信任回环 XFF
+# （cloudflared 回源直连 127.0.0.1）；限流真实客户端 IP 另由 CF-Connecting-IP 承担
+#（app/middleware/client_ip.py）。
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -42,4 +48,5 @@ set -a
 # shellcheck disable=SC1091
 source ../.env
 set +a
-exec conda run -n shanka-backend uvicorn app.main:app --host 127.0.0.1 --port "${PORT}"
+exec conda run -n shanka-backend uvicorn app.main:app --host 127.0.0.1 --port "${PORT}" \
+  --proxy-headers --forwarded-allow-ips=127.0.0.1

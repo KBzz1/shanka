@@ -141,7 +141,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(BodyCaptureMiddleware)  # 添加序最前 → 运行序最内（路由前）
     app.add_middleware(LoggingMiddleware)
     app.add_middleware(RateLimitMiddleware, settings=settings)  # 运行序位于 Auth 内层
-    app.add_middleware(BearerAuthMiddleware)  # P4-3：运行序位于 RateLimit 外层（先认证再限流）
+    app.add_middleware(
+        BearerAuthMiddleware, settings=settings
+    )  # P4-3：运行序位于 RateLimit 外层（先认证再限流）
     app.add_middleware(
         IpRateLimitMiddleware, settings=settings
     )  # fix round 1：运行序位于 Auth 外层（IP 总闸门覆盖未认证流量）

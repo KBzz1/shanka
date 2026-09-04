@@ -58,7 +58,6 @@ def test_unknown_token_401_auth_invalid(client: TestClient) -> None:
 
 def test_exempt_paths_do_not_require_bearer(client: TestClient) -> None:
     assert client.get("/healthz").status_code == 200
-    assert client.get("/metrics").status_code == 200
     assert (
         client.post(
             "/auth/register",
@@ -72,3 +71,30 @@ def test_exempt_paths_do_not_require_bearer(client: TestClient) -> None:
         ).status_code
         == 200
     )
+
+
+def test_metrics_requires_bearer_by_default(client: TestClient) -> None:
+    """R25-07 同批收敛：/metrics 默认不再豁免（METRICS_AUTH_EXEMPT 缺省 false）。"""
+    r = client.get("/metrics")
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "AUTH_REQUIRED"
+    assert r.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_metrics_exempt_via_settings_flag(tmp_path: Path) -> None:
+    """本地调试开关：METRICS_AUTH_EXEMPT=true 时 /metrics 免 Bearer（Prometheus 抓取口）。"""
+    from alembic import command
+    from alembic.config import Config
+
+    db_path = tmp_path / "metrics-open.db"
+    cfg = Config(str(REPO_ROOT / "main" / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+    command.upgrade(cfg, "head")
+    settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        storage_path=tmp_path / "storage",
+        rate_limit_ip_per_second=100,
+        metrics_auth_exempt=True,
+    )
+    with TestClient(create_app(settings)) as open_client:
+        assert open_client.get("/metrics").status_code == 200
