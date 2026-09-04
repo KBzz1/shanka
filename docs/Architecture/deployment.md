@@ -23,13 +23,27 @@ Android 前端 ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，DNS +
 | dev.api.<domain> | 开发联调(可选,未配置) | 同上或独立端口 |
 
 ## 4. 接入步骤(P3-4 执行)
+
+环境依赖（可复现）:Python 3.12 环境按锁安装——生产 `pip install -r main/requirements.lock`
+后 `pip install --no-deps -e main`;开发/CI 用 `main/requirements-dev.lock`(含 dev extra)。
+两份锁均由 `pip-compile` 自 `main/pyproject.toml` 生成,依赖声明变更后须重编译再提交。
+
+运行形态约束（单进程）:限流器为进程内存状态(token bucket/固定窗口,`app/middleware/`),
+PDF 扫描器与任务执行器为进程内 daemon 线程(`app/main.py` lifespan)——uvicorn 必须
+**单进程**启动(`run.sh` 无 --workers),多 worker 会双跑后台循环并使限流失效;扩容前
+须先把限流迁移到共享存储。真实客户端 IP:uvicorn 仅绑 127.0.0.1(`run.sh` 显式
+--proxy-headers --forwarded-allow-ips=127.0.0.1 信任回环 XFF),限流维度键优先采信
+Cloudflare 注入的 `CF-Connecting-IP`(`app/middleware/client_ip.py`)——外部无法直连
+伪造。`/metrics` 默认需 Bearer(`METRICS_AUTH_EXEMPT` 缺省 false);确需外部抓取时经
+dev 子域名或 Cloudflare Access 暴露,不在生产主域名豁免。
+
 1. 端口检测:启动前检查占用;端口上已运行本应用(`uvicorn app.main:app`)则幂等退出,被其他程序占用才换端口并同步 Tunnel 路由;FastAPI 监听端口为配置项(环境变量覆盖)。
 2. Cloudflare Zero Trust → Networks → Tunnels → 创建命名隧道 `shanka`,记录 Tunnel Token。
 3. WSL2 安装 cloudflared:向导无「WSL」选项(WSL 非系统,真实发行版为 Ubuntu),选 **Debian** apt 源即可(官方对 Ubuntu 的指令即用 Debian 源,deb 包 Debian/Ubuntu 通用);apt 源不顺时兜底:直接下载官方二进制 `cloudflared-linux-amd64` 放 `/usr/local/bin/cloudflared`。
 4. WSL2 常驻:`wsl.conf` 加 `[boot] systemd=true`;以 `cloudflared service install` 注册为 systemd 服务(非手写 unit,unit 文件权限加固为 600,令牌来自根 `.env` 的 `CLOUDFLARED_SERVICE_INSTALL_TOKEN`);后端由 `scripts/run.sh` 拉起(端口占用检测:本应用已运行则幂等退出,被其他程序占用则换端口并同步 Tunnel 路由)。
 5. 公共主机名配置:`shanka.kbzz1.top` → `localhost:<port>`。
 6. TLS:边缘自动 HTTPS;回源走 Tunnel 内部加密,不暴露端口。
-7. 可选加固:WAF 自定义规则(限流);`/metrics` 只走 dev 子域名或加 Access。
+7. 可选加固:WAF 自定义规则(限流);`/metrics` 已默认 Bearer 收敛,确需外部抓取再经 dev 子域名或 Access 暴露。
 
 ## 5. 与契约衔接
 - 契约 1.7(HTTPS):边缘层 TLS 终止,天然满足。

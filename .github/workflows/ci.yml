@@ -1,0 +1,65 @@
+# CI（契约驱动防漂移闸门）：lint 快通道 + 契约守卫 + 全量测试。
+#
+# - lint-and-contract：秒级~分钟级反馈（ruff format/lint、mypy strict、tests/contract
+#   守卫套件——schemas↔openapi、ORM↔database-design、错误码、app 路由↔openapi 路径）。
+# - test：全量 pytest。样书 PDF（res/*.pdf 被 git 忽略）缺失时相关用例按设计条件跳过；
+#   tests/live 为驱动脚本非 pytest 用例；无需任何密钥（测试显式构造 Settings，无 .env）。
+# - 依赖按锁安装（requirements-dev.lock，pip-compile 产物）：CI 环境与本地可复现对齐；
+#   main 包本身 --no-deps 源码安装（版本约束以两份 lock 为准）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-contract:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: main
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: main/requirements-dev.lock
+      - name: Install dependencies (locked)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.lock
+          python -m pip install --no-deps -e .
+      - name: Ruff format check
+        run: python -m ruff format --check .
+      - name: Ruff lint
+        run: python -m ruff check .
+      - name: mypy strict
+        run: python -m mypy .
+      - name: Contract guards
+        run: python -m pytest tests/contract -q
+
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: main
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: main/requirements-dev.lock
+      - name: Install dependencies (locked)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.lock
+          python -m pip install --no-deps -e .
+      - name: Full test suite
+        run: python -m pytest -q --tb=short

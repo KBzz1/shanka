@@ -26,5 +26,7 @@ __pycache__/
 /test-platform/logs/
 # Codex 会话/临时文件
 /.codex/
+# ZCode 会话/临时文件
+/.zcode/
 # 仓库根运行时日志（与 main/data/ 同类产物）
 /data/
