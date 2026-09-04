@@ -1,13 +1,13 @@
 """学习项目路由（structure-contract 6.2；openapi /projects；V2.5）。handler 只做 HTTP 映射。
 
-- POST /projects 与 POST /{project_id}/replace-pdf：multipart 上传幂等顺序沿用 /pdfs 上传
-  定式（文件读取 + 三重校验 + 页数 hint + storage.save 在幂等外，biz 只做 DB 元数据写入）；
-  存储补偿（删除/替换时 storage 失败回滚元数据）见 services/projects/service.py。
+- POST /projects/{project_id}/materials/pdf 与 material replace：multipart 上传幂等顺序沿用
+  V1 PDF 上传定式（文件读取 + 三重校验 + 页数 hint + storage.save 在幂等外，biz 只做
+  DB 元数据写入）；存储补偿（删除/替换时 storage 失败回滚元数据）见 services/projects/service.py。
 - DELETE /projects/{project_id}?retain_decks=：两种用户决策（保留或删除全部项目牌组）；
   活跃任务由服务端自动取消，解析中项目由版本栅栏安全删除；章节删除 ?delete_cards= 同款
   保护与两决策。
 - 幂等：写接口强制 Idempotency-Key 并走 execute_idempotent（契约 1.3）。
-- 路径无 /v1 前缀：/v1 语义由部署层 openapi servers url 承担（与 pdfs/decks 同理）。
+- 路径无 /v1 前缀：/v1 语义由部署层 openapi servers url 承担（与 decks 同理）。
 """
 
 from typing import Annotated, Any
@@ -51,6 +51,7 @@ from services.projects.service import (
     get_study_settings,
     list_materials,
     list_projects,
+    material_deletion_preflight,
     project_deletion_preflight,
     rename_project,
     replace_pdf,
@@ -278,6 +279,29 @@ def add_text_material_endpoint(
     )
     session.commit()
     return JSONResponse(status_code=status, content=body)
+
+
+@router.get(
+    "/{project_id}/materials/{material_id}/deletion-preflight", response_model=DeletionPreflight
+)
+def material_deletion_preflight_endpoint(
+    request: Request,
+    project_id: str,
+    material_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """资料删除确认页预检（PRD V25-GEN-FR-02）：只读返回将影响的卡片数量。
+
+    引用该资料的活跃任务在删除时由服务端静默取消（V25-D-30，不向用户暴露
+    任务选项），故无 blocker 语义，计数仅作展示提示；DELETE 在自身写事务内
+    重复检查，客户端不得把预检当预留。"""
+    body = material_deletion_preflight(
+        session,
+        user_id=request.state.principal.user_id,
+        project_id=project_id,
+        material_id=material_id,
+    )
+    return JSONResponse(content=body)
 
 
 @router.delete("/{project_id}/materials/{material_id}", status_code=200)

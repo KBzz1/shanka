@@ -407,6 +407,67 @@ def delete_material(
     return project_view(session, project)
 
 
+def material_deletion_preflight(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    material_id: str,
+) -> dict[str, Any]:
+    """资料级删除预检（GET /materials/{mid}/deletion-preflight，PRD V25-GEN-FR-02）。
+
+    只读：返回该资料产出卡片数（删除确认页展示"将影响的卡片数量"）与将被静默
+    取消的活跃任务数。资料删除总能进行（引用任务由服务端静默取消并 fencing，
+    V25-D-30 不向用户暴露任务选项），故无 blocker 语义；DELETE 在自身写事务内
+    重复检查，客户端不得把预检当预留。
+    """
+    _owned_project(session, user_id=user_id, project_id=project_id)
+    material = session.get(Material, material_id)
+    if material is None or material.project_id != project_id:
+        raise AppError(ErrorCode.MATERIAL_NOT_FOUND, "资料不存在")
+    chapter_ids = list(
+        session.scalars(select(Chapter.chapter_id).where(Chapter.material_id == material_id)).all()
+    )
+    affected_card_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(Card)
+            .where(
+                Card.user_id == user_id,
+                Card.chapter_id.in_(chapter_ids),
+                text(VISIBLE_PREDICATE_SQL),
+            )
+        )
+        or 0
+    )
+    active_tasks = resource_tasks(session, user_id=user_id, project_id=project_id)
+    silently_cancelled_task_count = sum(
+        1 for task in active_tasks if _snapshot_references_material(task, material_id)
+    )
+    return {
+        "resource_type": "MATERIAL",
+        "resource_id": material_id,
+        "can_delete": True,
+        "blockers": [],
+        "abandonable_task_ids": [],
+        "has_uncancellable_tasks": False,
+        "cancelable_task_ids": [],
+        "can_cancel": False,
+        "actions": [],
+        "impact": {
+            "project_id": project_id,
+            "material_type": material.type,
+            "material_name": material.name,
+            "chapter_count": len(chapter_ids),
+            "affected_card_count": affected_card_count,
+            "silently_cancelled_task_count": silently_cancelled_task_count,
+            "retain_cards_hint": (
+                "retain_cards=true 保留该资料产出卡片(chapter_id 置空脱离);false 连同删除"
+            ),
+        },
+    }
+
+
 def _snapshot_items(task: Task) -> list[dict[str, Any]]:
     try:
         snapshot = json.loads(task.selected_chapters)

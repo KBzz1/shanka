@@ -365,6 +365,99 @@ def test_projects_material_list_and_cross_project_404(client: TestClient, tmp_pa
     assert resp.status_code == 404
 
 
+def _seed_preflight_cards(
+    db_path: Path, user_id: str, deck_id: str, chapter_ids: list[str]
+) -> None:
+    """预检计数口径种子：可见 2 张（第 1 章）+ STAGED 1 张 + 已入删除批次 1 张。"""
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from infra.db.models import Card, CardDeletionBatch
+    from infra.db.session import create_db_engine
+
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    batch_id = str(uuid.uuid4())
+    now = "2026-09-04T00:00:00.000Z"
+
+    def _card(position: int, chapter_id: str, **extra: Any) -> Card:
+        return Card(
+            card_id=str(uuid.uuid4()),
+            deck_id=deck_id,
+            user_id=user_id,
+            source="GENERATED",
+            position=position,
+            front=f"卡{position}",
+            back="背",
+            card_type="QUESTION",
+            chapter_id=chapter_id,
+            version=now,
+            created_at=now,
+            updated_at=now,
+            **extra,
+        )
+
+    with factory() as session:
+        session.add(
+            CardDeletionBatch(
+                delete_batch_id=batch_id,
+                user_id=user_id,
+                status="PENDING",
+                undo_until=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.flush()
+        session.add_all(
+            [
+                _card(1, chapter_ids[0]),
+                _card(2, chapter_ids[0]),
+                _card(3, chapter_ids[0], publication_state="STAGED"),
+                _card(4, chapter_ids[0], delete_batch_id=batch_id),
+            ]
+        )
+        session.commit()
+    engine.dispose()
+
+
+def test_projects_material_deletion_preflight_counts_and_silent_cancel(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """R25-10：资料删除确认页预检（PRD V25-GEN-FR-02）——将影响卡片数按可见谓词计数，
+    引用任务为静默取消语义（无 blocker，can_delete 恒 true）。"""
+    user = _user(client)
+    db = tmp_path / "projects_api.db"
+    uid = _user_id(db)
+    seed = _seed_parsed_project(db, uid, chapters=2, confirmed=True)
+    pid, mid = seed["project_id"], seed["file_id"]
+    deck = _seed_deck(db, uid, pid)
+    _seed_preflight_cards(db, uid, deck, seed["chapter_ids"])
+    _seed_task(db, uid, pid, mid, status="GENERATING", chapter_ids=seed["chapter_ids"][:1])
+    resp = client.get(f"/projects/{pid}/materials/{mid}/deletion-preflight", headers=user)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["resource_type"] == "MATERIAL"
+    assert body["resource_id"] == mid
+    assert body["can_delete"] is True
+    assert body["blockers"] == []  # V25-D-30：静默取消，不向用户暴露任务选项
+    impact = body["impact"]
+    assert impact["affected_card_count"] == 2  # STAGED 与删除批次中的卡不可见，不计入
+    assert impact["chapter_count"] == 2
+    assert impact["silently_cancelled_task_count"] == 1
+    # 跨用户与他项目资料 → 统一 404（不暴露存在性）
+    other = _user(client, username="bob", password="secret-pass-2")
+    assert (
+        client.get(f"/projects/{pid}/materials/{mid}/deletion-preflight", headers=other).status_code
+        == 404
+    )
+    assert (
+        client.get(
+            f"/projects/{pid}/materials/{uuid.uuid4()}/deletion-preflight", headers=user
+        ).status_code
+        == 404
+    )
+
+
 def test_projects_create_requires_idempotency_key(client: TestClient) -> None:
     """写接口强制 Idempotency-Key（契约 1.3）。"""
     user = _user(client)

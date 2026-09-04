@@ -25,8 +25,6 @@ tags:
     description: 账号偏好(V2.5:覆盖深度、整数比例、每日目标、学习时区、当前项目)
   - name: projects
     description: 学习项目、PDF 与章节(V2.5)
-  - name: pdf
-    description: PDF 兼容路径(过渡期委托项目接口)
   - name: api-key
     description: DeepSeek API Key 校验与状态(FR-17,决策 D-03)
   - name: tasks
@@ -39,6 +37,8 @@ tags:
     description: 复习(FR-15,FSRS-6)
   - name: stats
     description: 数据看板(FR-16;V2.5 服务端时区/周目标)
+  - name: observability
+    description: 跨任务质量聚合观测(O-4;非产品接口,联调与质量核验用)
 
 paths:
   # ---------- 账号(V2.2,决策 D-05) ----------
@@ -548,13 +548,44 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
-  /projects/{project_id}/replace-pdf:
+  /projects/{project_id}/materials/{material_id}/deletion-preflight:
     parameters:
       - $ref: '#/components/parameters/ProjectId'
+      - name: material_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [projects]
+      summary: 资料删除确认页预检(PRD V25-GEN-FR-02;只读返回将影响的卡片数量与静默取消任务数)
+      operationId: materialDeletionPreflight
+      responses:
+        '200':
+          description: 删除影响(引用任务删除时静默取消,无 blocker 语义;计数仅展示提示)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionPreflight'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{project_id}/materials/{material_id}/replace:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: material_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
     post:
       tags: [projects]
-      summary: 仅 FAILED 的 PDF 资料可原位替换并重新解析(不影响项目内其他资料)
-      operationId: replaceProjectPdf
+      summary: 仅 FAILED 的 PDF 资料可原位替换并重新解析(不影响项目内其他资料;旧 /replace-pdf 兼容别名同 handler)
+      operationId: replaceProjectMaterialPdf
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -570,7 +601,7 @@ paths:
                   format: binary
       responses:
         '200':
-          description: 已替换并进入解析
+          description: 已替换并进入解析;返回更新后的项目(聚合状态)
           content:
             application/json:
               schema:
@@ -712,7 +743,997 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
-  # ---------- PDF ----------
+  # ---------- API Key(FR-17,决策 D-03;结构契约 6.3) ----------
+  /api-key:
+    put:
+      tags: [api-key]
+      summary: 验证并保存 DeepSeek API Key;返回 ApiKey(仅状态与脱敏标识,永不回显明文)
+      operationId: saveApiKey
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyPutRequest'
+      responses:
+        '200':
+          description: 已验证并保存(status=AVAILABLE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKey'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: Key 无效(API_KEY_INVALID)或余额不足(API_KEY_INSUFFICIENT_BALANCE)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api-key/status:
+    get:
+      tags: [api-key]
+      summary: 查询已保存 Key 状态;未保存时 200 + status=UNKNOWN、masked_key=""(不产生错误响应)
+      operationId: getApiKeyStatus
+      responses:
+        '200':
+          description: 当前 Key 状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ---------- 制卡任务(V2.5 目标 4.3;结构契约 6.4) ----------
+  /projects/{project_id}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [tasks]
+      summary: 建立 DRAFT 任务(保存章节、目标牌组与配置,自动保存语义;请求不携带 API Key)
+      operationId: createTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateRequest'
+      responses:
+        '201':
+          description: DRAFT 任务已建立
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 项目状态冲突(如未 READY)或牌组/章节不属于该项目
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /tasks:
+    get:
+      tags: [tasks]
+      summary: 学习页任务区与历史列表(user 域;支持 project/status 过滤)
+      operationId: listTasks
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/TaskStatus'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /tasks/{task_id}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: 任务详情(七态、internal_stage、样卡、失败码、operation_id)
+      operationId: getTask
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [tasks]
+      summary: 修改任务配置;仅 DRAFT/AWAITING_SAMPLE_CONFIRMATION 可改,修改后样卡失效(清空 sample_* 字段)
+      operationId: updateTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskUpdateRequest'
+      responses:
+        '200':
+          description: 更新后的任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: TASK_STATE_CONFLICT(非可改状态)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      tags: [tasks]
+      summary: 删除终态任务;按参数保留或删除已发布卡
+      operationId: deleteTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: delete_generated_cards
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: true=连同该任务已发布卡与学习记录一并删除;false=保留卡片,source_task_id 置空
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: TASK_STATE_CONFLICT(非终态任务须先放弃/完成)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /tasks/{task_id}/samples:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: 持久化生成 1~3 张样卡(比例>0 的难度各 1 张);幂等键防重复触发
+      operationId: generateTaskSamples
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 任务进入 SAMPLE_GENERATING 并携带样卡(完成后 AWAITING_SAMPLE_CONFIRMATION)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: TASK_STATE_CONFLICT(仅 DRAFT 可触发)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /tasks/{task_id}/start:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: 确认样卡后进入 GENERATING(校验 sample_config_hash 一致;不一致须重新生成样卡)
+      operationId: startTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 任务已进入 GENERATING
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: TASK_STATE_CONFLICT(仅 AWAITING_SAMPLE_CONFIRMATION 可开始)
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: 配置已变化须重新生成样卡
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /tasks/{task_id}/abandon:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: 放弃任务(只允许正式生成前状态,进入 ABANDONED)
+      operationId: abandonTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 任务已进入 ABANDONED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: TASK_STATE_CONFLICT(GENERATING 及终态不可放弃;历史 PAUSED 已迁 FAILED)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /tasks/{task_id}/retry:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: 失败任务创建关联新任务(retry_of_task_id 指向原任务;可沿用已确认样卡)
+      operationId: retryTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: 新 DRAFT 任务已建立
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: TASK_STATE_CONFLICT(仅 FAILED 可重试)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /tasks/{task_id}/batches:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: 任务批次观测列表(3.7;含单卡 Rubric 汇总、质量分布与 Prompt Cache 记录,供 AC-07 联调核验)
+      operationId: listTaskBatches
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Batch'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ---------- 牌组、卡片与撤销(V2.5 目标 4.4;结构契约 6.5) ----------
+  /decks:
+    get:
+      tags: [decks]
+      summary: 牌组列表(含真实进度摘要;支持 project_id 归属过滤,跨用户 → 404)
+      operationId: listDecks
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: 按归属项目过滤;缺省返回全部(含独立牌组)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Deck'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [decks]
+      summary: 新建牌组(手动独立牌组 project_id 缺省 null;归属校验在服务内)
+      operationId: createDeck
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeckCreate'
+      responses:
+        '201':
+          description: 牌组已建立(响应含真实进度视图,与 GET 详情同形)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /decks/{deck_id}:
+    parameters:
+      - $ref: '#/components/parameters/DeckId'
+    get:
+      tags: [decks]
+      summary: 牌组详情 + 进度(card_count/due_count/mastered/review_count/mastery_ratio)
+      operationId: getDeck
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deck'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [decks]
+      summary: 牌组改名;version 递增供缓存刷新,返回含真实进度
+      operationId: renameDeck
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeckUpdateRequest'
+      responses:
+        '200':
+          description: 更新后的牌组
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      tags: [decks]
+      summary: 删除牌组(服务端自动取消关联活跃任务并一并删除卡片与学习记录)
+      operationId: deleteDeck
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /decks/{deck_id}/deletion-preflight:
+    parameters:
+      - $ref: '#/components/parameters/DeckId'
+    get:
+      tags: [decks]
+      summary: 删除牌组预检(只读;返回影响范围与活跃任务可执行动作,不预留资源)
+      operationId: deckDeletionPreflight
+      parameters:
+        - name: cancel_active_tasks
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: 预检是否展示"取消活跃任务并删除"动作;不修改数据
+      responses:
+        '200':
+          description: 当前删除影响与阻塞任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeletionPreflight'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /decks/{deck_id}/cards:
+    parameters:
+      - $ref: '#/components/parameters/DeckId'
+    get:
+      tags: [decks]
+      summary: 自由刷题(不改排程):位置序/会话稳定随机 + 内容难度 + 掌握度过滤
+      operationId: listCards
+      parameters:
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [position, random]
+            default: position
+        - name: content_difficulty
+          in: query
+          required: false
+          schema:
+            type: [string, 'null']
+            enum: [BASIC, UNDERSTANDING, DEEP_QUESTION, UNLABELED, null]
+          description: 按生成时目标难度过滤;UNLABELED=手动/导入卡
+        - name: mastery
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all, mastered, unmastered]
+            default: all
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: 枚举参数非法
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [decks]
+      summary: 手动新增卡片(分配 position;source=MANUAL)
+      operationId: createCard
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardCreate'
+      responses:
+        '201':
+          description: 卡片已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /decks/{deck_id}/cards/import:
+    parameters:
+      - $ref: '#/components/parameters/DeckId'
+    post:
+      tags: [decks]
+      summary: 批量导入(客户端解析预览后提交最终列表;原子写入,返回逐张结果,不产生部分成功)
+      operationId: importCards
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cards]
+              properties:
+                cards:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [front, back]
+                    properties:
+                      front:
+                        type: string
+                        minLength: 1
+                      back:
+                        type: string
+                        minLength: 1
+      responses:
+        '201':
+          description: 已导入(逐张 CREATED/FAILED 结果)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: IMPORT_PARSE_ERROR(导入列表为空或 front/back 缺失,整体失败)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /decks/{deck_id}/review:
+    parameters:
+      - $ref: '#/components/parameters/DeckId'
+    get:
+      tags: [review]
+      summary: 独立牌组/指定牌组到期复习队列(due <= now,按 due、position 排序;不改排程)
+      operationId: getReviewQueue
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReviewQueueItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /cards/{card_id}:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    patch:
+      tags: [decks]
+      summary: 编辑卡片(内容覆盖 + ReviewState 重置为新卡,旧记忆不适用;version 递增)
+      operationId: updateCard
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardUpdateRequest'
+      responses:
+        '200':
+          description: 更新后的卡片
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      tags: [decks]
+      summary: 删除单卡(进入 10 秒撤销批次,不立即硬删);提供 delete_batch_id 且该批仍 PENDING → 合并追加并整批重计时
+      operationId: deleteCard
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: delete_batch_id
+          in: query
+          required: false
+          schema:
+            type: [string, 'null']
+            format: uuid
+          description: 追加到既有撤销批次;缺省新建批
+      responses:
+        '200':
+          description: 撤销批次(含 undo_until)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardDeletionBatch'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 追加的批次已过期/已终结(CARD_DELETE_WINDOW_EXPIRED)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /card-deletion-batches/pending:
+    get:
+      tags: [decks]
+      summary: App 重启恢复仍有效的撤销批次(服务端持久化;读取时惰性清理过期批)
+      operationId: listPendingDeletionBatches
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CardDeletionBatch'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /card-deletion-batches/{delete_batch_id}/undo:
+    parameters:
+      - $ref: '#/components/parameters/DeleteBatchId'
+    post:
+      tags: [decks]
+      summary: 撤销整批删除(窗口内恢复全部卡片)
+      operationId: undoDeletionBatch
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已恢复
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardDeletionBatch'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: 撤销窗口已过(CARD_DELETE_WINDOW_EXPIRED)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /cards/{card_id}/rewrite-previews:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+    post:
+      tags: [decks]
+      summary: AI 重写第一步:生成并持久化预览(24 小时有效),不改原卡;仅来源仍存在的 GENERATED 卡可预览
+      operationId: createRewritePreview
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                custom_requirements:
+                  type: string
+                  description: 可选重写要求;不保存完整 Prompt
+      responses:
+        '201':
+          description: 预览已生成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardRewritePreview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: CARD_REWRITE_UNAVAILABLE(来源失效或非生成卡)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /cards/{card_id}/rewrite-previews/{rewrite_id}:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+      - $ref: '#/components/parameters/RewriteId'
+    delete:
+      tags: [decks]
+      summary: 取消重写预览(可幂等:重复取消/取消已应用均 204)
+      operationId: cancelRewritePreview
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '204':
+          description: 已取消
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /cards/{card_id}/rewrite-previews/{rewrite_id}/apply:
+    parameters:
+      - $ref: '#/components/parameters/CardId'
+      - $ref: '#/components/parameters/RewriteId'
+    post:
+      tags: [decks]
+      summary: AI 重写第二步:版本一致时原子替换原卡(CAS,零 LLM 调用);同事务递增 version 并重置 ReviewState
+      operationId: applyRewritePreview
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已替换;返回更新后的卡片
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Card'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: CARD_VERSION_CONFLICT(预览基于旧版本,原卡不变)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  # ---------- 学习、复习与看板(V2.5 目标 4.5;结构契约 6.6/6.7) ----------
+  /study/plan:
+    get:
+      tags: [study]
+      summary: 读取今日计划配置(当前项目、计划卡组、新学/巩固双目标;首次访问落默认行)
+      operationId: getStudyPlan
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudyPlan'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags: [study]
+      summary: 原子保存计划配置(目标为 0~200 的 10 倍数且不可同时为 0)
+      operationId: updateStudyPlan
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StudyPlanUpdateRequest'
+      responses:
+        '200':
+          description: 保存后的计划
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudyPlan'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: 项目或卡组不存在/非本用户
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /study/today:
+    get:
+      tags: [study]
+      summary: 当前项目今日计划(服务端账号时区分桶、同日同卡去重;含到期/新卡混合有序队列)
+      operationId: getTodayStudyPlan
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TodayStudyPlan'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /study/today/backlog:
+    get:
+      tags: [study]
+      summary: 读取超过巩固软目标的到期卡(与主计划同一排序来源切片,主动加练用;不改排程)
+      operationId: getStudyBacklog
+      parameters:
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, offset, limit, total]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TodayPlanCard'
+                  offset:
+                    type: integer
+                  limit:
+                    type: integer
+                  total:
+                    type: integer
+                    description: 超出巩固目标的到期总数
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /review-events:
+    post:
+      tags: [review]
+      summary: 提交评级(FSRS-6 服务端排程;不再要求 device_timezone);双幂等:Idempotency-Key 优先,client_event_id 兜底
+      operationId: submitReviewEvent
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewEventRequest'
+      responses:
+        '200':
+          description: 已记录;返回更新后的 ReviewState 与本次学习日期
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewSubmitResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: REVIEW_EVENT_INVALID(评级非法)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: REVIEW_EVENT_CONFLICT(同 client_event_id 但 card_id/rating 与首次不一致)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /stats/dashboard:
+    get:
+      tags: [stats]
+      summary: 当前自然周看板(服务端按账号学习时区与偏好派生,无 timezone/weekly_goal 查询参数)
+      operationId: getStatsDashboard
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsDashboard'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ---------- 质量聚合观测(O-4;结构契约 6.9,非产品接口) ----------
+  /observability/quality-summary:
+    get:
+      tags: [observability]
+      summary: 跨任务质量聚合(Rubric 各维均分、覆盖/重复率、任务完成率、成本估算;user 域隔离)
+      operationId: getQualitySummary
+      parameters:
+        - name: group_by
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [model, pdf, difficulty]
+            default: model
+        - name: days
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 30
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QualitySummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
 components:
   securitySchemes:
     BearerAuth:
@@ -857,6 +1878,15 @@ components:
             details:
               type: [object, 'null']
               additionalProperties: true
+
+    ApiKeyPutRequest:
+      type: object
+      required: [api_key]
+      properties:
+        api_key:
+          type: string
+          minLength: 1
+          description: 明文 Key 仅出现在本请求体;服务端加密存储,任何响应/日志/任务明细只允许脱敏标识
 
     ApiKey:
       type: object
@@ -1357,6 +2387,28 @@ components:
           type: string
           description: 版本号,客户端刷新缓存用
 
+    DeckCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        project_id:
+          type: [string, 'null']
+          format: uuid
+          description: 可选归属项目(校验归属);缺省为手动独立牌组
+
+    DeckUpdateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+
     Card:
       type: object
       required:
@@ -1464,6 +2516,55 @@ components:
           type: string
           format: date-time
 
+    CardCreate:
+      type: object
+      required: [front, back]
+      properties:
+        front:
+          type: string
+          minLength: 1
+        back:
+          type: string
+          minLength: 1
+
+    CardUpdateRequest:
+      type: object
+      required: [front, back]
+      description: 内容覆盖 + ReviewState 重置为新卡(内容已变则旧记忆不适用);version 递增
+      properties:
+        front:
+          type: string
+          minLength: 1
+        back:
+          type: string
+          minLength: 1
+
+    ImportResult:
+      type: object
+      required: [index, status]
+      properties:
+        index:
+          type: integer
+        status:
+          type: string
+          enum: [CREATED, FAILED]
+        card_id:
+          type: [string, 'null']
+          format: uuid
+        error:
+          type: [object, 'null']
+          additionalProperties:
+            type: string
+
+    ImportResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImportResult'
+
     ReviewState:
       type: object
       required:
@@ -1558,6 +2659,17 @@ components:
           properties:
             review_state:
               $ref: '#/components/schemas/ReviewState'
+
+    ReviewSubmitResponse:
+      type: object
+      required: [review_state, study_date]
+      properties:
+        review_state:
+          $ref: '#/components/schemas/ReviewState'
+        study_date:
+          type: string
+          format: date
+          description: 账号学习时区下的本次学习日期
 
     StatsDashboard:
       type: object
@@ -2109,7 +3221,7 @@ components:
       properties:
         resource_type:
           type: string
-          enum: [PROJECT, DECK]
+          enum: [PROJECT, DECK, MATERIAL]
         resource_id:
           type: string
           format: uuid

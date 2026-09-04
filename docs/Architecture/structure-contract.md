@@ -725,7 +725,8 @@ Scheduler(
 | POST | `/v1/projects/{project_id}/materials/text` | JSON `{name, content}`;≤30000 字,单章节+段落多 chunk,即时就绪(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials` | 资料列表(各自状态;TEXT 附单章节) | - |
 | DELETE | `/v1/projects/{project_id}/materials/{material_id}?retain_cards=true\|false` | 资料级删除:静默取消引用该资料的活跃任务并 fencing;按参数保留或删除该资料产出卡片;删最后一份资料后项目转 `EMPTY`(重置章节确认) | ✓ |
-| POST | `/v1/projects/{project_id}/replace-pdf` | 仅 `FAILED` PDF 资料可原位替换并重新解析(不重置其他资料) | ✓ |
+| GET | `/v1/projects/{project_id}/materials/{material_id}/deletion-preflight` | 删除确认页预检(V25-GEN-FR-02):返回将影响的卡片数量与静默取消任务数;只读、无 blocker 语义(引用任务删除时静默取消) | - |
+| POST | `/v1/projects/{project_id}/materials/{material_id}/replace` | 仅 `FAILED` PDF 资料可原位替换并重新解析(不重置其他资料;旧 `/replace-pdf` 为同 handler 兼容别名) | ✓ |
 | PATCH | `/v1/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页(TEXT 章节仅名称) | ✓ |
 | DELETE | `/v1/projects/{project_id}/chapters/{chapter_id}?delete_cards=false` | 活跃任务保护;保留卡时 `chapter_id` 置空 | ✓ |
 | POST | `/v1/projects/{project_id}/confirm-chapters` | 确认目录,使项目进入 READY | ✓ |

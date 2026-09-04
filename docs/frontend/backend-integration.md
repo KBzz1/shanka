@@ -75,7 +75,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | 注册/登录 | 按来源 IP 与规范化邮箱分桶（运维可调） | 防分布式猜测 |
 | PUT /api-key | 10 次/小时/用户 | |
 | 样卡生成 `POST /tasks/{task_id}/samples` | 20 次/小时/用户 | 样卡消耗模型配额 |
-| PDF 上传 | 10 次/小时/用户 | |
+| PDF 资料上传（`materials/pdf`） | 10 次/小时/用户 | |
 
 超限 → `429 RATE_LIMITED` + `Retry-After` 响应头（按头里秒数等待后重试；服务端按下一个令牌可用时间向上取整，最少 1 秒）。客户端离线补传串行发送 + 指数退避即可，无需为 IP 维度自行排队。
 
@@ -103,26 +103,32 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 
 - 制卡页的默认生成配置来源于此；学习时区驱动今日计划与统计分桶。
 
-### 3.3 学习项目、PDF 与章节（V2.5 制卡入口）
+### 3.3 学习项目、资料与章节（V2.5 制卡入口，多资料）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/projects` | **上传 PDF 即建立学习项目**（multipart，字段 `file`，≤100MB、≤1000 页；可选 `name` 缺省取文件名），PDF 异步解析 |
+| POST | `/projects` | **JSON `{name}` 建立空项目**（两步创建第一步；资料经 materials 端点添加） |
 | GET | `/projects` | 当前用户项目列表（真实空态） |
-| GET | `/projects/{project_id}` | 项目详情 + PDF 状态 + 章节列表；`PARSING` 时轮询 |
+| GET | `/projects/{project_id}` | 项目详情 + 资料集合状态 + 跨资料章节列表；任一资料 `PARSING` 时轮询 |
 | PATCH | `/projects/{project_id}` | 更新项目名 |
 | DELETE | `/projects/{project_id}` | 删除项目；活跃任务由服务端同事务取消，预检接口见下 |
 | GET | `/projects/{project_id}/deletion-preflight` | 删除预检（只读诊断，不是资源锁） |
+| POST | `/projects/{project_id}/materials/pdf` | 添加 PDF 资料（multipart 字段 `file`，≤100MB、≤1000 页；异步解析；重置章节确认） |
+| POST | `/projects/{project_id}/materials/text` | 添加粘贴文本资料（`{name, content}`，≤30000 字；单章节即时就绪） |
+| GET | `/projects/{project_id}/materials` | 资料列表（各自状态；TEXT 附单章节） |
+| DELETE | `/projects/{project_id}/materials/{material_id}?retain_cards=` | 资料级删除：引用任务服务端静默取消；`retain_cards` 选择保留或一并删除该资料产出卡片 |
+| GET | `/projects/{project_id}/materials/{material_id}/deletion-preflight` | **资料删除确认页预检**：返回将影响的卡片数量与静默取消任务数（PRD V25-GEN-FR-02） |
+| POST | `/projects/{project_id}/materials/{material_id}/replace` | 仅 `FAILED` 的 PDF 资料原位替换并重新解析（不影响其他资料） |
 | GET | `/projects/{project_id}/progress` | 项目进度投影（card_count / 各状态计数 / due_count 等） |
 | GET | `/projects/{project_id}/stats/weekly` | 项目周统计 |
-| PATCH / DELETE | `/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称/起止页；删除章节（关联知识点 chapter_id 置空，历史任务快照不受影响） |
-| POST | `/projects/{project_id}/confirm-chapters` | 确认章节选择，进入制卡 |
-| GET / PUT | `/projects/{project_id}/study-settings` | 项目级学习设置 |
+| PATCH / DELETE | `/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称/起止页（TEXT 章节仅名称）；删除章节（保留卡时 chapter_id 置空进"未归属章节"） |
+| POST | `/projects/{project_id}/confirm-chapters` | 确认目录，项目进入 READY |
+| GET / PATCH | `/projects/{project_id}/study-settings` | 项目级学习设置 |
 | POST | `/projects/{project_id}/decks/{deck_id}/attach` | 将已有牌组挂到项目 |
-| POST | `/projects/{project_id}/replace-pdf` | 替换项目 PDF（重新解析） |
 
-- `PdfFile.status`：`PENDING` → `PARSING` → `PARSED` / `FAILED`；`FAILED` + `error_code`（`PDF_PARSE_FAILED` 文本层失败 / `PDF_TOC_MISSING` 无目录）——**前端应终止流程**，没有 AI/OCR 兜底。扫描版 PDF 无文本层属预期边界，如需支持应作为 OCR 能力另行排期。
-- 兼容路径 `/pdfs*`（上传/列表/章节）保留过渡期，内部委托项目接口同一业务语义；**新代码一律走 `/projects`**。
+- **项目是资料集合**（V25-D-29）：可同时含 PDF 与文本资料；项目状态由全部资料聚合（`EMPTY` → `PARSING`/`AWAITING_CHAPTER_CONFIRMATION` → `READY`，全 PDF 失败 → `PARSE_FAILED`）；新增/删除任一资料都会重置章节确认。
+- `Material.status`（PDF）：`PENDING` → `PARSING` → `PARSED` / `FAILED`；`FAILED` + `error_code`（`PDF_PARSE_FAILED` 文本层失败 / `PDF_TOC_MISSING` 无目录）——**前端应终止流程**，没有 AI/OCR 兜底，仅支持原位替换。扫描版 PDF 无文本层属预期边界，如需支持应作为 OCR 能力另行排期。
+- 旧 `/pdfs` 兼容路径已随多资料改造移除（structure-contract 6.2）；一律走 `/projects` 系列。
 
 ### 3.4 API Key——DeepSeek 密钥
 
@@ -263,9 +269,9 @@ FAILED ──retry──→ 新任务 DRAFT（retry_of_task_id 指向原任务�
 - `FAILED` 对应系统级不可恢复错误（API Key 失效、上游持续不可用）或 0 张有效卡，响应含 `failure_stage` + `error_code`（如 `API_KEY_NOT_SET`）。批次级失败不置 `FAILED`——该批 `SKIPPED`，任务继续。
 - `internal_stage`（`PLANNING → GENERATING → SCORING → PUBLISHING`）仅为运行期观测，不作为用户状态。
 
-### PdfFile（解析）
+### Material（PDF 资料解析；TEXT 恒为 READY）
 
-`PENDING` → `PARSING` → `PARSED`（成功）/ `FAILED`（终态，带 error_code）
+`PENDING` → `PARSING` → `PARSED`（成功）/ `FAILED`（终态，带 error_code；仅此状态支持原位替换）
 
 ### 卡片复习（FSRS-6，服务端计算）
 
@@ -279,7 +285,7 @@ NEW → LEARNING → REVIEW ⇄ RELEARNING
 
 ### 5.1 项目制卡主流程（PDF → 生成）
 
-1. `POST /projects` 上传 PDF 建立项目（带 Idempotency-Key）→ 观察 `GET /projects/{project_id}`（或项目列表）直到解析 `PARSED`（拿章节列表）。解析终态会刷新项目 `version`/`updated_at`（契约 4.5），客户端可凭版本变化感知，无需无条件穿透缓存。
+1. `POST /projects`（JSON `{name}`）建立空项目 → `POST /projects/{project_id}/materials/pdf` 上传 PDF 资料（带 Idempotency-Key）→ 观察 `GET /projects/{project_id}`（或项目列表）直到解析 `PARSED`（拿跨资料章节列表）。解析终态会刷新项目 `version`/`updated_at`（契约 4.5），客户端可凭版本变化感知，无需无条件穿透缓存。
 2. （可选）`PATCH` 修改章节边界 → `POST .../confirm-chapters` 确认章节。
 3. `PUT /api-key` 保存 DeepSeek Key（如未保存；无 Key 时后续任务动作会失败并提示 `API_KEY_NOT_SET`）。
 4. `POST /projects/{project_id}/tasks` 建立 DRAFT 任务（自动保存）→ `POST /tasks/{task_id}/samples` 预览样卡（不满可 `PATCH` 改配置后重新生成）。
@@ -321,7 +327,7 @@ POST /review-events
 | `INVALID_PREFERENCES` / `INVALID_LEARNING_TIMEZONE` | 400 | 偏好校验失败：比例/目标非法、时区非 IANA |
 | `PDF_UPLOAD_INVALID` | 400 | 提示文件不合规（非 PDF/损坏/超 100MB/超 1000 页） |
 | `PDF_PARSE_FAILED` / `PDF_TOC_MISSING` | 422 | 提示解析失败/无目录，终止流程 |
-| `PROJECT_NOT_FOUND` / `PROJECT_STATE_CONFLICT` | 404 / 409 | 项目不存在 / 状态冲突（刷新后重试） |
+| `PROJECT_NOT_FOUND` / `MATERIAL_NOT_FOUND` / `PROJECT_STATE_CONFLICT` | 404 / 409 | 项目/资料不存在（含跨用户） / 状态冲突（刷新后重试） |
 | `CHAPTER_NOT_FOUND` | 404 | 章节不存在（可能已被删除） |
 | `API_KEY_NOT_SET` | 422 | 引导用户先保存 API Key |
 | `API_KEY_UNAVAILABLE` | 502 | 上游校验不可用，稍后重试 |

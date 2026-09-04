@@ -1,4 +1,4 @@
-"""api_key.py：Key 保存/状态路由（structure-contract 6.2；openapi /api-key）。
+"""api_key.py：Key 保存/状态路由（structure-contract 6.3；openapi /api-key）。
 
 - PUT /api-key：校验（validate_key）+ 仅 AVAILABLE 落库；幂等（同 key 同 body 重放，重放不重校验）；
   DeepSeekClient 请求级构造，try/finally close（biz 抛异常也释放）；加密密钥缺失 → 500 配置错误。
