@@ -6,40 +6,35 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pure gates of the Figma 977:4937 plan page: the save button must stay off
- * until a first-time user has picked a project and a learnable deck, and the
- * 72dp wheel must shrink three-digit values into their slot.
+ * Pure gates of the Figma 977:4937 plan page: every user — first-time or
+ * configured — must have a project and a learnable deck picked before the save
+ * button unlocks, and the 72dp wheel must shrink three-digit values into their
+ * slot.
  */
 class StudyGoalFormTest {
 
     @Test
-    fun `configured user saves with valid seeded goals alone`() {
+    fun `complete form saves`() {
         assertTrue(
             studyGoalCanSave(
-                configured = true, seeded = true, saving = false,
-                validGoals = true, hasProject = false, hasLearnableSelection = false,
+                seeded = true, saving = false,
+                validGoals = true, hasProject = true, hasLearnableSelection = true,
             )
         )
     }
 
     @Test
-    fun `first configuration requires a project and a learnable deck selection`() {
+    fun `missing project or missing learnable deck selection blocks saving`() {
         assertFalse(
             studyGoalCanSave(
-                configured = false, seeded = true, saving = false,
+                seeded = true, saving = false,
                 validGoals = true, hasProject = false, hasLearnableSelection = true,
             )
         )
         assertFalse(
             studyGoalCanSave(
-                configured = false, seeded = true, saving = false,
+                seeded = true, saving = false,
                 validGoals = true, hasProject = true, hasLearnableSelection = false,
-            )
-        )
-        assertTrue(
-            studyGoalCanSave(
-                configured = false, seeded = true, saving = false,
-                validGoals = true, hasProject = true, hasLearnableSelection = true,
             )
         )
     }
@@ -48,19 +43,19 @@ class StudyGoalFormTest {
     fun `unsaved in-flight or unseeded or invalid goal states never save`() {
         assertFalse(
             studyGoalCanSave(
-                configured = true, seeded = false, saving = false,
+                seeded = false, saving = false,
                 validGoals = true, hasProject = true, hasLearnableSelection = true,
             )
         )
         assertFalse(
             studyGoalCanSave(
-                configured = true, seeded = true, saving = true,
+                seeded = true, saving = true,
                 validGoals = true, hasProject = true, hasLearnableSelection = true,
             )
         )
         assertFalse(
             studyGoalCanSave(
-                configured = true, seeded = true, saving = false,
+                seeded = true, saving = false,
                 validGoals = false, hasProject = true, hasLearnableSelection = true,
             )
         )

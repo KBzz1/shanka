@@ -52,12 +52,10 @@ import com.qiuzhao.flashcards.ui.navigation.AppRoute
 import kotlinx.coroutines.launch
 
 /**
- * Figma 977:4937 — the one plan-configuration page. A user whose plan already
- * exists sees exactly the Figma goal form and saves through the one atomic
- * PUT /study/plan, passing the loaded currentProjectId and selectedDeckIds
- * straight back so the simplified form can never clear them. A first-time user
- * gets the same Figma card language extended with 选择项目/选择卡组 sections and
- * saves the complete plan (the old dedicated StudyPlanScreen is retired).
+ * Figma 977:4937 — the one plan-configuration page. Every user manages
+ * 选择项目 / 选择卡组 / 每日目标 together: a configured user arrives with the real
+ * plan's project, decks and goals pre-filled and saves them through the one
+ * atomic PUT /study/plan, while a first-time user starts with nothing picked.
  */
 @Composable
 internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
@@ -68,7 +66,6 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
     var newGoal by remember { mutableIntStateOf(10) }
     var reviewGoal by remember { mutableIntStateOf(40) }
     var seeded by remember { mutableStateOf(false) }
-    // First-configuration selections; configured users ride along on the loaded plan instead.
     var selectedProjectId by remember { mutableStateOf<String?>(null) }
     var selectedDeckIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
@@ -81,6 +78,11 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
         if (plan.loaded && !seeded) {
             newGoal = plan.dailyNewGoal
             reviewGoal = plan.dailyReviewGoal
+            if (plan.configured) {
+                // Restore the real current selection; a fresh user picks from scratch.
+                selectedProjectId = plan.currentProjectId
+                selectedDeckIds = plan.selectedDeckIds.toSet()
+            }
             seeded = true
         }
     }
@@ -103,12 +105,11 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
         projectDecks.any { it.id == id && it.cardCount > 0 }
     }
     val canSave = studyGoalCanSave(
-        configured = configured,
         seeded = seeded,
         saving = plan.saving,
         validGoals = validGoals,
-        hasProject = configured || project != null,
-        hasLearnableSelection = configured || hasLearnableSelection,
+        hasProject = project != null,
+        hasLearnableSelection = hasLearnableSelection,
     )
 
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
@@ -129,63 +130,61 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
                             .padding(horizontal = 16.dp, vertical = 16.dp),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        if (!configured) {
-                            PlanSectionCard("选择项目", "folder_open") {
-                                if (projects.isEmpty()) {
-                                    PlanSectionHint("先创建项目并导入资料")
-                                } else {
-                                    projects.forEach { item ->
-                                        PlanChoiceRow(
-                                            title = item.name,
-                                            supporting = null,
-                                            selected = item.id == selectedProjectId,
-                                            onClick = { selectedProjectId = item.id },
-                                        )
-                                    }
+                        PlanSectionCard("选择项目", "folder_open") {
+                            if (projects.isEmpty()) {
+                                PlanSectionHint("先创建项目并导入资料")
+                            } else {
+                                projects.forEach { item ->
+                                    PlanChoiceRow(
+                                        title = item.name,
+                                        supporting = null,
+                                        selected = item.id == selectedProjectId,
+                                        onClick = { selectedProjectId = item.id },
+                                    )
                                 }
                             }
-                            PlanSectionCard("选择卡组", "list_alt_check") {
-                                when {
-                                    project == null -> PlanSectionHint("先选择一个项目")
-                                    !projectDecks.any { it.cardCount > 0 } ->
-                                        PlanSectionHint("先导入资料并生成卡组")
-                                    else -> projectDecks.forEach { deck ->
-                                        PlanChoiceRow(
-                                            title = deck.name,
-                                            supporting = "${deck.cardCount} 张卡片 · 待巩固 ${deck.dueCount}",
-                                            selected = deck.id in selectedDeckIds,
-                                            onClick = {
-                                                selectedDeckIds = if (deck.id in selectedDeckIds) {
-                                                    selectedDeckIds - deck.id
-                                                } else {
-                                                    selectedDeckIds + deck.id
-                                                }
-                                            },
-                                        )
-                                    }
-                                }
-                                if (project != null && independentDecks.isNotEmpty()) {
-                                    AppText(
-                                        "独立卡组", AppTextRole.Label,
-                                        color = AppColors.TextIconDark.copy(alpha = .6f)
-                                    )
-                                    independentDecks.forEach { deck ->
-                                        Row(
-                                            Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Column(Modifier.weight(1f)) {
-                                                AppText(deck.name, AppTextRole.CardTitle, color = AppColors.TextIconDark)
-                                                AppText(
-                                                    "${deck.cardCount} 张卡片", AppTextRole.Supporting,
-                                                    color = AppColors.TextIconDark.copy(alpha = .6f)
-                                                )
+                        }
+                        PlanSectionCard("选择卡组", "list_alt_check") {
+                            when {
+                                project == null -> PlanSectionHint("先选择一个项目")
+                                !projectDecks.any { it.cardCount > 0 } ->
+                                    PlanSectionHint("先导入资料并生成卡组")
+                                else -> projectDecks.forEach { deck ->
+                                    PlanChoiceRow(
+                                        title = deck.name,
+                                        supporting = "${deck.cardCount} 张卡片 · 待巩固 ${deck.dueCount}",
+                                        selected = deck.id in selectedDeckIds,
+                                        onClick = {
+                                            selectedDeckIds = if (deck.id in selectedDeckIds) {
+                                                selectedDeckIds - deck.id
+                                            } else {
+                                                selectedDeckIds + deck.id
                                             }
-                                            TextButton(onClick = {
-                                                viewModel.attachDeckToProject(project.id, deck.id)
-                                            }) { Text("归入当前项目") }
+                                        },
+                                    )
+                                }
+                            }
+                            if (project != null && independentDecks.isNotEmpty()) {
+                                AppText(
+                                    "独立卡组", AppTextRole.Label,
+                                    color = AppColors.TextIconDark.copy(alpha = .6f)
+                                )
+                                independentDecks.forEach { deck ->
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(Modifier.weight(1f)) {
+                                            AppText(deck.name, AppTextRole.CardTitle, color = AppColors.TextIconDark)
+                                            AppText(
+                                                "${deck.cardCount} 张卡片", AppTextRole.Supporting,
+                                                color = AppColors.TextIconDark.copy(alpha = .6f)
+                                            )
                                         }
+                                        TextButton(onClick = {
+                                            viewModel.attachDeckToProject(project.id, deck.id)
+                                        }) { Text("归入当前项目") }
                                     }
                                 }
                             }
@@ -212,11 +211,11 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
             onClick = {
                 if (canSave) {
                     viewModel.clearUiMessage()
-                    // Goals change; a configured plan's project and deck selection ride
-                    // along unchanged, while a first configuration submits its own picks.
+                    // One atomic save of the whole form; a configured user's picks were
+                    // seeded from the loaded plan, so an untouched save preserves them.
                     viewModel.saveStudyPlan(
-                        currentProjectId = if (configured) plan.currentProjectId.orEmpty() else selectedProjectId.orEmpty(),
-                        selectedDeckIds = if (configured) plan.selectedDeckIds else selectedDeckIds.toList(),
+                        currentProjectId = selectedProjectId.orEmpty(),
+                        selectedDeckIds = selectedDeckIds.toList(),
                         dailyNewGoal = newGoal,
                         dailyReviewGoal = reviewGoal,
                     ) {
@@ -247,17 +246,16 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
 }
 
 /**
- * The single save gate: a configured user only needs seeded valid goals, while a
- * first-time user must also have picked a project and at least one learnable deck.
+ * The single save gate, shared by first-time and configured users alike: the
+ * form needs a picked project and at least one learnable deck, plus valid goals.
  */
 internal fun studyGoalCanSave(
-    configured: Boolean,
     seeded: Boolean,
     saving: Boolean,
     validGoals: Boolean,
     hasProject: Boolean,
     hasLearnableSelection: Boolean,
-): Boolean = seeded && !saving && validGoals && (configured || (hasProject && hasLearnableSelection))
+): Boolean = seeded && !saving && validGoals && hasProject && hasLearnableSelection
 
 /** Figma 977:4937 card language: #EEF4FA r36, 20dp padding, 16dp item gap. */
 @Composable
