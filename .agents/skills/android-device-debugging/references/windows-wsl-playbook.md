@@ -1,4 +1,4 @@
-# Windows + WSL Android physical-device playbook
+# Windows + WSL Android debugging playbook
 
 Use this reference when exact commands or a deeper fault split is needed. Replace every placeholder; never invent a serial, package, component, runner, or port.
 
@@ -210,3 +210,41 @@ unzip -p <gradle-cache>/androidx.test/runner/<ver>/<hash>/runner-<ver>.aar class
 unzip -p /tmp/c.jar androidx/test/runner/AndroidJUnitRunner.class | strings | grep -i delay
 # then confirm it actually delayed: compare "Start proc" vs "TestRunner: run started" timestamps in logcat
 ```
+
+## 9. Windows-side emulator target (validated 2026-09-05)
+
+When no phone is needed, run the desktop emulator on Windows and treat it as just another adb target. This machine's SDK `emulator/opengl32sw.dll` is missing, so the default graphics stack wedges the guest: black framebuffer, no boot completion, adb stuck in `unauthorized` because the RSA dialog cannot render. Launch with the software GPU every time:
+
+```bash
+ADB="/mnt/c/Users/97949/AppData/Local/Android/Sdk/platform-tools/adb.exe"
+
+# 1. Build in WSL (frontend/Front; debug appId com.qiuzhao.flashcards.debug)
+cd frontend/Front && ./gradlew assembleDebug; cd -
+
+# 2. Launch detached in background; -gpu swiftshader_indirect and -memory 4096 are mandatory here
+/mnt/c/Users/97949/AppData/Local/Android/Sdk/emulator/emulator.exe \
+  -avd Medium_Phone_API_36.1 -gpu swiftshader_indirect -memory 4096 \
+  -no-snapshot -no-boot-anim &
+
+# 3. Poll boot; expect state=device and boot_completed=1 within ~20 s (auto-authorizes:
+#    the Windows adbkey is already trusted in this AVD's data)
+"$ADB" devices
+"$ADB" -s emulator-5554 shell getprop sys.boot_completed
+
+# 4. adb.exe cannot read WSL paths — copy the APK to a Windows path first
+cp frontend/Front/app/build/outputs/apk/debug/app-debug.apk /mnt/c/Users/97949/AppData/Local/Temp/
+"$ADB" -s emulator-5554 install -r 'C:\Users\97949\AppData\Local\Temp\app-debug.apk'
+
+# 5. Launch and capture
+"$ADB" -s emulator-5554 shell am start -n com.qiuzhao.flashcards.debug/com.qiuzhao.flashcards.MainActivity
+"$ADB" -s emulator-5554 exec-out screencap -p > /tmp/emulator_screen.png
+```
+
+Fault split when the guest looks dead:
+
+- `unauthorized` + black guest frame + no boot progress for minutes → the host render-stack fault above, not a slow boot. Kill `qemu-system-x86_64` (and the `emulator` launcher) via `taskkill.exe /PID <pid> /F`, relaunch with `-gpu swiftshader_indirect`. A guest that boots this way does not need its data wiped.
+- The Xiaomi phone is usually attached to the same adb server; every command needs `-s`. `more than one device/emulator` is a targeting error, not an adb failure.
+- Guest-frame capture while adb is not yet authorized: TCP console on `127.0.0.1:5554` (run from Windows PowerShell), `auth` with the token at `C:\Users\97949\.emulator_console_auth_token` (user root, **not** `.android\`), then `screenrecord screenshot C:\Users\97949\emu_frame.png`.
+- If a clean boot still stops at `unauthorized`, the RSA dialog may be visible on the now-rendering emulator window — check it before deeper diagnosis; `Always allow` persists the key for future boots.
+- Backend connectivity from the emulator uses the guest's `10.0.2.2` host alias (or `adb reverse tcp:<port> tcp:<port>`); verify it as a separate layer per the workflow above.
+- Tap coordinates must come from `uiautomator dump` bounds (device pixels, 1080×2400). Never eyeball them off a screencap in the conversation UI: the image is downscaled (~0.83× here), so a point read off the picture lands ~1.2× off and silently taps the wrong element. Read rendered text bounds (not just the label) for buttons whose hit area is larger than their text.

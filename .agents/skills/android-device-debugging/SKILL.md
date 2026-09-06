@@ -1,6 +1,6 @@
 ---
 name: android-device-debugging
-description: Install or update Android APKs and diagnose physical-device ADB, signing, adb reverse, Windows-to-WSL backend access, instrumentation, screen state, and vendor background restrictions. Use for real phones connected to a Windows host while development runs in Windows or WSL; do not use for emulator-only work or production release-signing design.
+description: Install or update Android APKs, build and run the app in the Windows-side Android Emulator from WSL with screenshots, and diagnose physical-device ADB, signing, adb reverse, Windows-to-WSL backend access, instrumentation, screen state, and vendor background restrictions. Use for real phones connected to a Windows host AND for any emulator request on this WSL2 machine (launch emulator, run app, screencap) — the android-emulator plugin's desktop-emulator flow is unsupported on Linux hosts; do not use for production release-signing design.
 ---
 
 # Android Device Debugging
@@ -9,7 +9,7 @@ Build an evidence chain instead of labeling every timeout an ADB, USB, backend, 
 
 ## Operating boundary
 
-- Let the Windows SDK `adb.exe` own USB transports. Do not start a competing WSL ADB server.
+- Let the Windows SDK `adb.exe` own device transports (USB phones and the Windows-side emulator). Do not start a competing WSL ADB server.
 - Enumerate `adb devices -l` first and select the exact serial. Never guess when multiple devices exist.
 - Treat source tests, APK build, package installation, reverse transport, app networking, and business acceptance as separate evidence layers.
 - Do not uninstall, clear data, revoke permissions, change AppOps, disable verification, or alter device-wide security settings without explicit authorization.
@@ -27,6 +27,14 @@ Build an evidence chain instead of labeling every timeout an ADB, USB, backend, 
 8. Run business/offline acceptance only after the transport probe passes.
 
 Use [scripts/android-device-debug.ps1](scripts/android-device-debug.ps1) for routine Windows-side actions. From WSL, convert its path with `wslpath -w` and invoke Windows PowerShell; pass Windows or UNC APK paths.
+
+## Windows-side emulator (WSL host)
+
+The `android-emulator` plugin's desktop-emulator workflow is unusable here: its `android_preflight` rejects Linux hosts, and installing an emulator inside WSL is not the fix. Run the emulator on Windows and drive it like any other adb target with `adb.exe -s emulator-5554`.
+
+This machine has a known host fault: the SDK `emulator/` directory is missing `opengl32sw.dll`, so the default graphics stack wedges the guest — the framebuffer stays black, boot never completes, and adb sits in `unauthorized` for minutes because the RSA dialog itself cannot render. Treat "unauthorized + black guest frame + no boot progress" as that host fault, not a slow boot: kill the emulator and relaunch with `-gpu swiftshader_indirect` (full sequence in playbook §9). Do not wipe data or recreate the AVD for this.
+
+Guest-frame evidence when adb is not yet authorized: console over TCP `127.0.0.1:5554`, `auth` with the token from `C:\Users\<user>\.emulator_console_auth_token` (user root, not `.android`), then `screenrecord screenshot`. Once authorized, plain `adb exec-out screencap -p` is enough.
 
 ## Device-specific routing
 
