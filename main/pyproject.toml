@@ -29,6 +29,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "pytest-cov>=5.0",  # 覆盖率基线报告（CI test job 输出，基线先行暂不设门槛）
+  "pytest-timeout>=2.3",  # 并发/锁竞争测试挂死保险（signal 方法，CI 与本地一致）
   "ruff>=0.6",
   "mypy>=1.11",
   "pre-commit>=3.7",
@@ -43,6 +45,19 @@ packages = ["app", "domain", "services", "infra"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+timeout = 300  # pytest-timeout：单用例 5 分钟上限，防并发/锁竞争用例挂死卡 CI
+markers = [
+  "perf: 性能基线回归（千级数据播种 + 采样计时，本地可用 -m 'not perf' 排除）",
+  "pressure: 并发压力测试（线程池 + SQLite 锁竞争，本地可用 -m 'not pressure' 排除）",
+]
+
+[tool.coverage.run]
+source = ["app", "domain", "services", "infra"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1
 
 [tool.ruff]
 line-length = 100

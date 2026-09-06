@@ -20,6 +20,7 @@ concurrency:
 jobs:
   lint-and-contract:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: main
@@ -46,6 +47,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: main
@@ -62,4 +64,13 @@ jobs:
           python -m pip install -r requirements-dev.lock
           python -m pip install --no-deps -e .
       - name: Full test suite
-        run: python -m pytest -q --tb=short
+        # 覆盖率基线先行：只输出报告（term + xml artifact），不设 fail-under 门槛，
+        # 首轮基线数字落 Progress.md 后再议阈值。
+        run: python -m pytest -q --tb=short --cov --cov-report=term-missing --cov-report=xml
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: main/coverage.xml
+          retention-days: 14

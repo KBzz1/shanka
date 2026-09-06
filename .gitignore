@@ -13,6 +13,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+# 覆盖率报告产物（pytest-cov，CI 以 artifact 上传，不入 Git）
+/main/.coverage
+/main/coverage.xml
+/htmlcov/
 /.claude/worktrees/
 
 # Claude Code 插件技能（本地安装，非项目文件）
