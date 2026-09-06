@@ -43,7 +43,8 @@ def asset_versions() -> dict[str, str]:
     """manifest 全部资产版本（spec §5.1 版本布局）。
 
     扩展键供调用级观测（Task 7 起 llm_call_attempts 按调用记录具体 asset name/version，
-    避免用一个 schema_version 混写 card v1 与三个 output schema v2）；保留兼容键
+    避免用一个 schema_version 混写 card v1 与三个 output schema，版本以 manifest 为准）；
+    保留兼容键
     prompt_version（=generator prompt）与 schema_version（=generator-output schema，
     Batch.schema_version 语义）供既有消费者。
     """
@@ -68,8 +69,8 @@ def asset_versions() -> dict[str, str]:
 def load_schema_asset(name: str) -> dict[str, Any]:
     """加载 manifest schemas 节 JSON Schema 资产并解析为 dict（spec §5.6 输出校验层）。
 
-    供 planner/generator/scoring validator 加载原始 output schema v2（本文件不承担
-    业务校验，只负责版本化加载与解析失败兜底）。
+    供 planner/generator/scoring validator 加载原始 output schema（版本以 manifest 为准；
+    本文件不承担业务校验，只负责版本化加载与解析失败兜底）。
     """
     try:
         data = json.loads(load_asset("schemas", name))

@@ -12,6 +12,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -37,6 +38,7 @@ def _upgrade(db_path: Path) -> None:
     command.upgrade(cfg, "head")
 
 
+@pytest.mark.pressure
 def test_http_write_pressure_generation_and_user_writes_concurrent(tmp_path: Path) -> None:
     db_path = tmp_path / "pressure.db"
     _upgrade(db_path)

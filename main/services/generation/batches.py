@@ -9,7 +9,8 @@
   user 三区块：<GENERATION_SPEC> 学习目标/锚定难度/锚定卡型/覆盖层级 +
   <SOURCE_MATERIAL> 有序页文本 + <USER_REQUIREMENTS> 自定义要求，V25-D-27）→ 账本记账（operation_key=f"generating:{batch_id}"，输入指纹 = 单元学习目标/
   锚定/有序页 id+content_sha256/资产版本；调用前 STARTED 占位 + 抢占同事务提交 →
-  事务外 chat → 终态与卡入库同事务）→ 输出校验（generator-output schema v2 → 卡型=
+  事务外 chat → 终态与卡入库同事务）→ 输出校验（generator-output schema（manifest 当前
+  版本）→ 卡型=
   锚定 → 数量=1 → Card v1 投影后校验）→ SUCCEEDED / FAILED（重试）/ SKIPPED（预算
   耗尽或合法弃权）。
 - 重试预算（generation_retry_limit，共 1+limit 次尝试）以账本尝试数为权威：

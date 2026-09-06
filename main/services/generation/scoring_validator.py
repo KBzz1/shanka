@@ -1,7 +1,7 @@
 """scoring_validator.py：评分输出校验（spec §5.4/§5.6/§8；Task 11）。
 
-- scoring-output schema v2（load_schema_asset("scoring_output")）负责根包装/结构/必填/
-  四维 0~3/禁止额外字段；代码负责 ID 集合守恒与派生总分（模型不输出总分——schema v2
+- scoring-output schema（load_schema_asset("scoring_output")，版本以 manifest 为准）负责根包装/结构/必填/
+  四维 0~3/禁止额外字段；代码负责 ID 集合守恒与派生总分（模型不输出总分——schema
   无 rubric_total_score 且 additionalProperties:false，prompt 亦要求不输出）。
 - 兼容裁决（spec §8 权威补充 2）：plan 测试 raw 携带 rubric_total_score——预处理剥离
   声称的 total → schema 校验 → 代码计算四维和 → raw 携带 total 且 ≠ 计算值 → 拒绝；
@@ -21,14 +21,14 @@ _DIMENSIONS = ("evidence_score", "correctness_score", "difficulty_score", "learn
 
 
 def validate_scores(raw: dict[str, Any], requested_ids: set[str]) -> dict[str, dict[str, int]]:
-    """评分响应校验：剥离声称总分 → schema v2 → ID 集合守恒 → 代码计算总分。
+    """评分响应校验：剥离声称总分 → schema 校验 → ID 集合守恒 → 代码计算总分。
 
     返回 `{generation_item_id: {四维, rubric_total_score}}`（总分恒为服务端计算值）。
     任何违规抛 AppError(GENERATION_FAILED)（整次 FAILED，不落部分分数）。
     """
     if not requested_ids:
         raise AppError(ErrorCode.GENERATION_FAILED, "评分请求 ID 集合为空")
-    # 1. 预处理：剥离模型声称的 rubric_total_score（schema v2 禁止该字段；
+    # 1. 预处理：剥离模型声称的 rubric_total_score（schema 禁止该字段；
     #    plan 测试兼容——声称值与计算值失配 → 拒绝）
     claimed: dict[str, object] = {}
     scores = raw.get("scores") if isinstance(raw, dict) else None
@@ -45,7 +45,7 @@ def validate_scores(raw: dict[str, Any], requested_ids: set[str]) -> dict[str, d
                 claimed[str(copied.get("generation_item_id", ""))] = total
             items.append(copied)
         stripped["scores"] = items
-    # 2. scoring-output schema v2 原子校验（根包装/必填/四维 0~3/禁止额外字段）
+    # 2. scoring-output schema 原子校验（根包装/必填/四维 0~3/禁止额外字段）
     validator = jsonschema.Draft202012Validator(load_schema_asset("scoring_output"))
     if list(validator.iter_errors(stripped)):
         raise AppError(ErrorCode.GENERATION_FAILED, "评分输出格式非法")

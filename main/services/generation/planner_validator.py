@@ -2,7 +2,7 @@
 
 分层校验（schema 负责结构，代码负责来源/锚定/配额）：
 
-- Schema：`load_schema_asset("planner_output")`（planner-output v2）负责根包装、结构、
+- Schema：`load_schema_asset("planner_output")`（planner-output，版本以 manifest 为准）负责根包装、结构、
   必填、枚举、范围和禁额外键；违反 → AppError(GENERATION_FAILED)（§6.3 输出非法）。
 - 代码层逐单元校验：`source_chunk_ids` ⊆ 本次调用页集合；单元页数 ≤ max_pages_per_unit、
   来源字符和 ≤ max_chars_per_unit；违反 → AppError(GENERATION_FAILED)。

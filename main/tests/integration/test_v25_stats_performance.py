@@ -128,6 +128,7 @@ def seeded_session_factory(tmp_path: Path) -> Callable[[], Session]:
     return factory
 
 
+@pytest.mark.perf
 def test_dashboard_aggregation_within_baseline_volume(
     seeded_session_factory: Callable[[], Session],
 ) -> None:

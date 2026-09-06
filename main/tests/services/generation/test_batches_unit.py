@@ -566,7 +566,7 @@ def test_process_batch_budget_exhausted_skipped(session_factory: Callable[[], Se
 
 
 def test_process_batch_prompt_shape_and_page_input(session_factory: Callable[[], Session]) -> None:
-    """请求形状：稳定 system（generator v3 + generator-output schema v2 原文）+ 动态
+    """请求形状：稳定 system（generator prompt + generator-output schema，按 manifest 当前版本逐字节原文）+ 动态
     user（三区块：GENERATION_SPEC 规范 / SOURCE_MATERIAL 有序页文本 / USER_REQUIREMENTS 自定义要求）；max_tokens=768；
     原文中的信封边界字符转义（可逆）。"""
     user = _uuid()
@@ -590,7 +590,7 @@ def test_process_batch_prompt_shape_and_page_input(session_factory: Callable[[],
     messages = body["messages"]
     assert [m["role"] for m in messages] == ["system", "user"]
     system = messages[0]["content"]
-    # 稳定资产在前、逐字节原文（generator v3 + schema v2 原文）
+    # 稳定资产在前、逐字节原文（manifest 当前版本）
     assert system.startswith(load_asset("prompts", "generator"))
     assert "<GENERATOR_OUTPUT_SCHEMA>" in system
     assert load_asset("schemas", "generator_output") in system

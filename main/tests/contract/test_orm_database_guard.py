@@ -62,7 +62,7 @@ def test_orm_type_mapping_follows_convention() -> None:
 
 
 def test_orm_idempotency_pk_order_matches_design() -> None:
-    """database-design 2.12 主键注释 `PRIMARY KEY (device_id, path, idempotency_key)` 为权威列序。"""
+    """database-design 2.12 主键注释 `PRIMARY KEY (user_id, path, idempotency_key)` 为权威列序。"""
     text = DATABASE_DESIGN_PATH.read_text(encoding="utf-8")
     m = re.search(r"主键:`PRIMARY KEY \(([a-z_, ]+)\)`", text)
     assert m is not None, "database-design 2.12 缺少主键注释行"

@@ -444,8 +444,10 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
         - _labeled_value(before, "llm_tokens_total", ['kind="output"'])
     ) == 75.0  # 15 次 × 5
     assert (
-        _plain_value(after, "llm_request_duration_seconds_count")
-        - _plain_value(before, "llm_request_duration_seconds_count")
+        _labeled_value(after, "llm_request_duration_seconds_count", ['model="deepseek-v4-flash"'])
+        - _labeled_value(
+            before, "llm_request_duration_seconds_count", ['model="deepseek-v4-flash"']
+        )
     ) == 15.0
     # generation（1 个任务 COMPLETED）
     assert (

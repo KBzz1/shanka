@@ -196,6 +196,17 @@ class Task(Base):
         Index("ix_tasks_status_stage_updated", "status", "stage", "updated_at"),
         Index("ix_tasks_project_status_updated", "project_id", "status", "updated_at"),
         Index("ix_tasks_deck_status_updated", "deck_id", "status", "updated_at"),
+        # Created by migration c5d6e7f8a9b0; mirrored here so create_all test databases carry
+        # the same queue-claim/operation lookup paths as migrated production databases.
+        Index(
+            "ix_tasks_queue_claim",
+            "status",
+            "stage",
+            "next_attempt_at",
+            "lease_until",
+            "updated_at",
+        ),
+        Index("ix_tasks_operation_id", "operation_id"),
     )
 
     task_id: Mapped[str] = mapped_column(String, primary_key=True)

@@ -64,8 +64,9 @@ def _manifest_versions() -> set[str]:
     return versions
 
 
-def test_manifest_pins_v4_v3_versions_and_paths() -> None:
-    """manifest 升版：prompts v4、schemas（除 card v1）v3、rubrics v3，path 指向新目录。"""
+def test_manifest_pins_current_asset_versions_and_paths() -> None:
+    """manifest 当前版本（V25-D-33 密度制升版后）：planner/generator v6、rewrite v4、
+    scoring v3，schemas（除 card v1）v3/v4，rubrics v3，path 指向对应版本目录。"""
     manifest = load_manifest()
     assert manifest["prompts"]["planner"]["version"] == "v6"
     assert manifest["prompts"]["generator"]["version"] == "v6"
