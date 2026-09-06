@@ -74,7 +74,7 @@
 - 唯一幸存任务 f5084097（1 章 4267 字，COMPACT，3 卡）：总分 12/10/12（均 11.3）；
   四维均分 3.0/3.0/2.67/2.67；低分占比 0%；coverage 100%、duplicate 0%、难度偏差 0pp。
 - 效率：全程 23.0s（≈7.7s/卡）；每卡 ≈2 次 LLM 调用；每卡输出 ≈133 token；模型
-  deepseek-v4-flash；评分链路 prompt v4 / rubric v3 全 SUCCESS。
+  deepseek-v4-flash；评分链路 scoring prompt v3 / rubric v3 全 SUCCESS。
 - 可靠性：历史任务成功率 5/12；6 次失败全部集中于 8/28-29 环境故障期（API Key 未配置
   ×3、样卡阶段 ×4 归因），8/31 起 0 失败。
 
@@ -82,7 +82,8 @@
 
 任务：`435598b1`，第 1 章 AI Agent 入门（页 15-35，33518 字），COMPACT/40/40/20，
 生成 18 卡，COMPLETED，评分覆盖 18/18。执行链路：planner v5 / generator v5 /
-planner-output v4 / scoring v2 + rubric v3（manifest 同步）。
+planner-output v4 / scoring prompt v3 + rubric v3（manifest 同步；scoring prompt 自
+2026-08-16 起即为 v3）。
 
 ### B5 客观门禁核验
 
@@ -94,7 +95,7 @@ planner-output v4 / scoring v2 + rubric v3（manifest 同步）。
 | 难度分布偏差 ≤10pp | ⚠️ BASIC +1.1pp 达标；UNDERSTANDING +15.6pp、DEEP -14.4pp 超差 |
 
 难度超差定性：规划下发的难度区间为 BASIC [5,10] / UNDERSTANDING [5,10] / DEEP [2,5]，
-实际 7/10/1——全部落在硬上界内；DEEP 低于软下限属 V25-D-25"区间内按内容取舍、薄内容
+实际 7/10/1——全部落在硬上界内；DEEP 低于软下限属 V25-D-26"区间内按内容取舍、薄内容
 不注水"的规划自治（入门章深挖素材薄）。±10pp 门禁沿自硬配额语义，与自治语义在小样本
 （18 卡，1 卡 = 5.6pp）下冲突：门禁口径待首批 ≥50 卡校准后再定，DEEP 偏弱转 B6 观测。
 

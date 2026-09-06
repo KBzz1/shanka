@@ -72,7 +72,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | parse_version | INTEGER | NOT NULL DEFAULT 0 | 删除/替换时递增的解析 fencing 版本 |
 | created_at | TEXT | NOT NULL | |
 
-索引:`(user_id, created_at DESC)`(最近使用列表)。
+索引:`(user_id, created_at)`(最近使用列表)。
 
 ### 2.4 chapters
 
@@ -106,12 +106,12 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | sample_config_hash | TEXT | NULL | V2.5 样卡配置指纹,防止确认过期样卡 |
 | sample_confirmed_at | TEXT | NULL | V2.5 样卡确认时间 |
 | cursor | TEXT | NULL | `{ "completed_batch_count": int }`(JSON);游标为唯一源,与 `completed_batch_count` 列同事务原子写入 |
-| generated_card_count | INTEGER | NOT NULL DEFAULT 0 | V2.5 只统计已发布卡;失败任务为 0 |
+| generated_card_count | INTEGER | NOT NULL;应用层默认 0 | V2.5 只统计已发布卡;失败任务为 0 |
 | total_batch_count | INTEGER | NULL | 规划完成后写入 |
 | completed_batch_count | INTEGER | NULL | |
 | completion_reason | TEXT | NULL | 空单元三分支:`NO_GENERATION_UNITS`(全组成功但 0 个合法单元,COMPLETED) |
 | skipped_planning_group_count | INTEGER | NOT NULL DEFAULT 0 | 部分规划组失败被跳过的组数 |
-| resumable | INTEGER | NOT NULL DEFAULT 0 | V2.5 内部租约恢复判定用(不暴露用户 API) |
+| resumable | INTEGER | NOT NULL;应用层默认 0 | V2.5 内部租约恢复判定(只读观测字段,随 Task 响应返回;无 resume API) |
 | failure_stage | TEXT | NULL | `PLANNING / GENERATING / SCORING / PUBLISHING` |
 | error_code | TEXT | NULL | |
 | claimed_by | TEXT | NULL | 当前 worker 标识;与 `lease_token` / `lease_until` 同时为空或同时非空 |
@@ -130,8 +130,10 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 测试建表为兼容历史 fixture 额外接受旧 `PENDING/RUNNING/PAUSED`，这些值不得进入升级后的
 生产库。
 
-索引:`(user_id, created_at DESC)`、`(project_id)`、`(status, stage, updated_at)`、
-`(project_id, status, updated_at)`、`(deck_id, status, updated_at)`。
+索引:`(user_id, created_at)`、`(project_id)`、`(status, stage, updated_at)`、
+`(project_id, status, updated_at)`、`(deck_id, status, updated_at)`、
+`(status, stage, next_attempt_at, lease_until, updated_at)`(`ix_tasks_queue_claim`,worker 队列领取扫描)、
+`(operation_id)`(`ix_tasks_operation_id`)。
 
 ### 2.5.1 generation_operations
 
@@ -165,7 +167,7 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 | topic | TEXT | NOT NULL | 学习目标(Planner 输出,语义复用;不再"第X章-知识点N"占位) |
 | target_difficulty | TEXT | NULL | 规划锚定:`BASIC / UNDERSTANDING / DEEP_QUESTION`(V2.5 改名);旧数据无值,新数据保证必填;历史 `APPLICATION` 经迁移映射为 `DEEP_QUESTION` |
 | card_type | TEXT | NULL | 规划锚定:`QUESTION / TRUE_FALSE`;旧数据无值,新数据保证必填 |
-| coverage_tier | TEXT | NULL | Planner 覆盖层级:`CORE / IMPORTANT / LOW_FREQUENCY`(V25-D-25 落库并注入生成 spec;历史行为 NULL) |
+| coverage_tier | TEXT | NULL | Planner 覆盖层级:`CORE / IMPORTANT / LOW_FREQUENCY`(V25-D-26 分层口径、V25-D-27 注入生成 spec;历史行为 NULL) |
 | priority | INTEGER | NOT NULL | 全局顺序(服务端按章序、组序、数组顺序合并分配) |
 | status | TEXT | NOT NULL | `PENDING / PROCESSED / SKIPPED` |
 
@@ -182,8 +184,8 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 | generation_unit_id | TEXT | NULL, FK → knowledge_points ON DELETE SET NULL | 生成单元外键;新数据保证必填;迁移列为 NULL 仅兼容旧批次 |
 | batch_index | INTEGER | NOT NULL | 批次序号(游标)= 单元序号(1..N) |
 | status | TEXT | NOT NULL | `PENDING / PROCESSING / SUCCEEDED / FAILED / SKIPPED` |
-| generated_item_ids | TEXT | NOT NULL DEFAULT '[]' | 本批 `generation_item_id` 列表(JSON;每单元 1 卡,成功时为单值) |
-| retry_count | INTEGER | NOT NULL DEFAULT 0 | 重试计数(生成阶段兼容投影;尝试数与重试预算以 `llm_call_attempts` 为权威) |
+| generated_item_ids | TEXT | NOT NULL;应用层默认 '[]' | 本批 `generation_item_id` 列表(JSON;每单元 1 卡,成功时为单值) |
+| retry_count | INTEGER | NOT NULL;应用层默认 0 | 重试计数(生成阶段兼容投影;尝试数与重试预算以 `llm_call_attempts` 为权威) |
 | coverage_rate / duplicate_rate | REAL | NULL | 质量观测(FR-10);`coverage_rate` = 该单元是否产出合法卡(0/1,不再恒 1.0),SKIPPED 批次 = 0 |
 | difficulty_distribution / chapter_distribution / card_type_distribution | TEXT | NULL | JSON,同上;批=单元后为单值分布 |
 | difficulty_deviation | REAL | NULL | 难度偏差(契约 3.7,审核修复) |
@@ -208,7 +210,7 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 | version | TEXT | NOT NULL | 变更版本,客户端缓存刷新用 |
 | created_at / updated_at | TEXT | NOT NULL | |
 
-索引:`(user_id, updated_at DESC)`、`(project_id)`。
+索引:`(user_id, updated_at)`、`(project_id)`。
 
 ### 2.9 cards
 
@@ -241,7 +243,7 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 
 约束与索引:
 
-- **部分唯一索引**(SQLite 支持):`CREATE UNIQUE INDEX idx_cards_gen_item ON cards(generation_item_id) WHERE source = 'GENERATED' AND generation_item_id IS NOT NULL`(AC-05 重复入库率为 0)。
+- **部分唯一索引**(SQLite 支持):`CREATE UNIQUE INDEX ix_cards_gen_item_partial ON cards(generation_item_id) WHERE source = 'GENERATED' AND generation_item_id IS NOT NULL`(AC-05 重复入库率为 0)。
 - 唯一索引:`UNIQUE (deck_id, position)`(追加 position 分配的并发保护)。
 - 索引:`(user_id, deck_id)`、`(source_task_id)`、`(chapter_id)`、`(publication_state, delete_batch_id)`(统一可见谓词,契约 3.9)。
 
@@ -258,8 +260,8 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 | difficulty | REAL | NOT NULL | FSRS 难度(1~10,py-fsrs 口径);`CHECK (difficulty >= 1 AND difficulty <= 10)` |
 | due | TEXT | NOT NULL | 下次到期(服务端时间,统一时间格式) |
 | last_review | TEXT | NULL | |
-| reps | INTEGER | NOT NULL DEFAULT 0 | 复习次数 |
-| lapses | INTEGER | NOT NULL DEFAULT 0 | 遗忘次数 |
+| reps | INTEGER | NOT NULL;应用层默认 0 | 复习次数 |
+| lapses | INTEGER | NOT NULL;应用层默认 0 | 遗忘次数 |
 | last_rating | TEXT | NULL | `AGAIN / HARD / GOOD / EASY` |
 | updated_at | TEXT | NOT NULL | |
 
@@ -281,7 +283,7 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 约束与索引:
 
 - 唯一约束:`UNIQUE (user_id, client_event_id)`(离线重试去重,AC-10)。
-- 索引:`(user_id, reviewed_at DESC)`(看板聚合);`(card_id)`。
+- 索引:`(user_id, reviewed_at)`(看板聚合);`(card_id)`。
 
 不可变记录:不提供 UPDATE / DELETE。
 
@@ -334,7 +336,7 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | call_id | TEXT | PK | |
 | user_id | TEXT | NULL, FK → users | 数据归属(V2.2,决策 D-05);新写入保证必填 |
 | scope_type / scope_id | TEXT | NOT NULL | `TASK` / `CARD`;任务链路 scope_id=task_id,单卡重写 scope_id=card_id |
-| task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | 可空;删除任务时先解除引用以保留账本 |
+| task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | 可空;删除任务时先解除引用以保留账本(实际库存在 CASCADE 已知偏差,见下) |
 | operation_id | TEXT | NULL, FK → generation_operations ON DELETE SET NULL | 跨阶段操作归属 |
 | stage | TEXT | NOT NULL | `SAMPLE / PLANNING / GENERATING / SCORING / REWRITE` |
 | operation_key | TEXT | NOT NULL | 规划含 chapter/group/input fingerprint;生成含 batch_id;评分含确定性 group key;重写含 card_id/card_version/Idempotency-Key hash |
@@ -347,13 +349,21 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | cache_hit / cache_miss / output_tokens | INTEGER | NULL | usage 原样 |
 | http_status | INTEGER | NULL | 上游 HTTP 状态 |
 | duration_ms | INTEGER | NULL | 请求耗时 |
-| status | TEXT | NOT NULL DEFAULT 'STARTED' | `STARTED / SUCCESS / FAILED / UNKNOWN` |
+| status | TEXT | NOT NULL;应用层默认 'STARTED' | `STARTED / SUCCESS / FAILED / UNKNOWN` |
 | error_code | TEXT | NULL | 失败类别 |
 | normalized_result | TEXT | NULL | PLANNING 成功时保存规范化 units JSON、SAMPLE 成功时保存规范化样卡 JSON;不保存原文、完整 Prompt 或原始模型响应 |
 | created_at / finished_at | TEXT | 按需 | 调用占位与结束时间 |
 
 唯一约束:`UNIQUE (scope_type, scope_id, stage, operation_key, attempt_no)`。
-索引:`(user_id, created_at)`、`(task_id, stage, operation_key)`。
+索引:`(user_id, created_at)`、`(task_id, stage, operation_key)`、
+`(operation_id, stage, operation_key)`(`ix_llm_call_attempts_operation`)。
+
+> **已知偏差(外键级联)**:历史迁移 `0003_llm_pipeline_upgrade` 将 `task_id` 外键实际建为
+> `ON DELETE CASCADE`,后续迁移 `c5d6e7f8a9b0` 保留未重建;设计语义为本表的 SET NULL
+> (ORM `Base.metadata` 测试建表即 SET NULL,与生产迁移库存在差异)。删除服务在同一写事务内
+> 先把 `task_id` 置空再删除任务行,账本因此保留;但绕过应用层的裸 SQL 删除任务会级联删掉
+> 账本行。待后续迁移统一重建为 SET NULL 后移除本注记。
+
 规则:
 
 - 重试判定:该 operation_key 的 STARTED/SUCCESS/FAILED/UNKNOWN 尝试总数达到预算 → 不再发请求;孤儿 STARTED 转 UNKNOWN 并计数,不能仅统计 FAILED。
@@ -549,7 +559,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 | 表 | 契约资源 |
 | --- | --- |
 | api_keys | 3.1 ApiKey |
-| users / auth_sessions | 3.14 AuthUser / 3.15 AuthSessionResponse(V2.2,已随数据地基迁移落地) |
+| users / auth_sessions | 3.14 AuthUser / 3.24 AuthSessionResponse(V2.2,已随数据地基迁移落地) |
 | pdf_files / chapters | 3.2 PdfFile / 3.3 Chapter |
 | materials | 3.2a Material(V2.5 多资料新增;PDF 资料 material_id == file_id) |
 | tasks / generation_config | 3.4 GenerationTask / 3.5 GenerationConfig |

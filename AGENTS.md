@@ -13,14 +13,14 @@
   - 分层依赖：`app → services → infra` 单向，均可依赖 `domain/`；禁止在 handler 中直接暴露 ORM 对象。
 - `frontend/Front` — Android 客户端（Kotlin + Compose，Gradle 工程）：Retrofit/OkHttp 网络栈、`shanka-v25.db` Room 投影 + 评分 outbox（离线恰好一次）；对接规则见 `docs/frontend/AGENTS.md`。
 - `agent_evolution/` — agent 版本化资产（prompt/schema/rubric + manifest.json），`main/infra/llm/` 按 manifest 加载；资产演进 = 新版本目录 + 更新 manifest + CHANGELOG，属技术评审级变更。
-- `scripts/` — run.sh / stop.sh（启动/停止，语义见 `docs/Architecture/deployment.md` 契约 4.1）、gen_sample_cards.py（样卡真实生成演示，见 `scripts/AGENTS.md`）。
+- `scripts/` — run.sh / stop.sh（启动/停止，语义见 `docs/Architecture/deployment.md` 契约 4.1）、gen_sample_cards.py（样卡真实生成演示）、run_b5_acceptance.py（密度制 B5 验收）、task_quality_report.py（单任务质量报告），见 `scripts/AGENTS.md`。
 - `res/` — 样书 PDF 夹具（只读引用，勿替换，规则见 `main/services/pdf/AGENTS.md`）。
 
 ## 一致性红线（改动前先确认下游）
 
 1. `app/schemas/` ↔ `openapi.yaml` ↔ `structure-contract.md` 资源模型，三处一致。
 2. `infra/db/` ORM ↔ `database-design.md` 表结构一致。
-3. 幂等键、设备 ID 头、错误码格式的实现在 `app/middleware/` 统一，禁止散落各处。
+3. 幂等键、错误码格式的实现在 `app/middleware/` 统一，禁止散落各处（设备 ID 头已随 V2.3 设备架构清除，不再存在）。
 4. API Key 只出现在 `infra/llm/` 调用路径：任何日志、响应、任务明细不得引用明文；`PUT /api-key` 请求体强制掩码；llm 层异常统一脱敏为 `API_KEY_*` / `GENERATION_FAILED` 错误码。
 5. 文档变更同步：资源模型变更 → openapi schema + 数据库表；`structure-contract.md` 的 `prompt_version` / `schema_version` / `rubric_version` 必须与 `agent_evolution/manifest.json` 一致。
 
@@ -29,7 +29,7 @@
 - Python 环境统一使用 Conda 环境 `shanka-backend`（Python 3.12）；交互会话先 `conda activate shanka-backend`，Agent/脚本优先使用 `conda run -n shanka-backend ...`，禁止把项目依赖安装到 base 或系统 Python。
 - Conda 只负责解释器与环境隔离；Python 依赖及 lint 配置仍以 `main/pyproject.toml` 为唯一事实源，不另建重复依赖清单。
 - 依赖与 lint 配置唯一事实源：`main/pyproject.toml`（ruff line-length 100、mypy strict）。
-- 测试：`cd main && conda run -n shanka-backend python -m pytest`。各层职责见 `main/tests/*/AGENTS.md`；命名规范 `test_<模块>_<行为>`。
+- 测试：`cd main && conda run -n shanka-backend python -m pytest`。各层职责见 `main/tests/{acceptance,contract,integration,live,unit}/AGENTS.md`；命名规范 `test_<模块>_<行为>`。
 - pre-commit：ruff-format → ruff → mypy（`main/.pre-commit-config.yaml`）。
 - CI：GitHub Actions（`.github/workflows/ci.yml`）push/PR 触发——ruff format/lint + mypy strict + 契约守卫（`tests/contract`）快通道 + 全量 pytest；依赖按 `main/requirements-dev.lock` 锁安装。
 - 依赖锁：生产 `main/requirements.lock`、开发 `main/requirements-dev.lock`（均由 pip-compile 自 `main/pyproject.toml` 生成）；改依赖声明后必须重编译两份锁再提交。

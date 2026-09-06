@@ -11,6 +11,8 @@
 | openapi.yaml | OpenAPI 3.1 接口机器契约：路径、请求/响应 schema | 前后端（代码生成与校验） |
 | database-design.md | 表、列、索引、唯一约束、幂等键 | 后端 |
 | deployment.md | Cloudflare Tunnel 接入与迁移阶梯 | 部署（P3-4） |
+| v2.5-target-architecture.md | V2.5 目标架构设计（2026-08-31 已原子转正进现行契约，留档） | 文档维护、追溯 |
+| generation-quality-metrics.md | 生成质量量化指标、B5 验收门禁与真实验收观测记录 | 后端、验收 |
 | `agent_evolution/`（仓库根目录） | agent 版本化资产（prompt/schema/rubric），manifest 为运行时加载入口 | 后端 infra/llm |
 
 ## 单一事实来源（防漂移规则）

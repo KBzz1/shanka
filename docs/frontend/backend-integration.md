@@ -22,7 +22,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
                     FastAPI（WSL2，端口 8000）
 ```
 
-- **路径无 `/v1` 前缀**：契约与实现一致，均为 `/decks`、`/projects/{project_id}/tasks` 等无前缀路径。
+- **路径无 `/v1` 前缀**：与 openapi.yaml 及实现一致，均为 `/decks`、`/projects/{project_id}/tasks` 等无前缀路径；`structure-contract.md` 第 6 章人读清单沿用历史 `/v1` 前缀书写，实际调用**不要加** `/v1`。
 - 全部接口**必须走 HTTPS**（契约 1.7）。
 - 探活：`GET /healthz`（存活）、`GET /readyz`（DB + 存储就绪，失败 503），豁免鉴权，可用于 App 的启动连通性检查。
 - 前端本地联调环境、Debug 包后端地址与真机调试见 [local-dev.md](local-dev.md)；客户端离线数据层（Room 投影 + 评分 outbox）契约见 [offline-data-layer.md](offline-data-layer.md)。
@@ -33,7 +33,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 
 | 头 | 必填 | 说明 |
 | --- | --- | --- |
-| `Authorization: Bearer <token>` | 所有业务接口（除 /auth/register、/auth/login、/healthz、/readyz、/metrics、/openapi.json） | 注册/登录后获得的 opaque session token；token 只保存在客户端安全存储 |
+| `Authorization: Bearer <token>` | 所有业务接口（除 /auth/register、/auth/login、/healthz、/readyz、/openapi.json） | 注册/登录后获得的 opaque session token；token 只保存在客户端安全存储。`/metrics` 自 R25-07 起默认需要 Bearer（运维端点，客户端不消费；本地调试可设 `METRICS_AUTH_EXEMPT=true` 豁免） |
 | `Idempotency-Key` | 所有写操作 | 客户端生成 **UUID v4** |
 
 **token 等同于密码**：泄漏后在被撤销或过期前可被冒用。不要写日志、不要展示；受保护接口 401 时按 `WWW-Authenticate: Bearer` + `localization_key` 回登录页（离线网络失败不得误判为会话失效）。
@@ -117,10 +117,10 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | POST | `/projects/{project_id}/materials/text` | 添加粘贴文本资料（`{name, content}`，≤30000 字；单章节即时就绪） |
 | GET | `/projects/{project_id}/materials` | 资料列表（各自状态；TEXT 附单章节） |
 | DELETE | `/projects/{project_id}/materials/{material_id}?retain_cards=` | 资料级删除：引用任务服务端静默取消；`retain_cards` 选择保留或一并删除该资料产出卡片 |
-| GET | `/projects/{project_id}/materials/{material_id}/deletion-preflight` | **资料删除确认页预检**：返回将影响的卡片数量与静默取消任务数（PRD V25-GEN-FR-02） |
+| GET | `/projects/{project_id}/materials/{material_id}/deletion-preflight` | **资料删除确认页预检**：返回将影响的卡片数量与静默取消任务数（PRD V25-GEN-FR-02）；App 暂未接入，待资料删除确认页改版（R25-10） |
 | POST | `/projects/{project_id}/materials/{material_id}/replace` | 仅 `FAILED` 的 PDF 资料原位替换并重新解析（不影响其他资料） |
 | GET | `/projects/{project_id}/progress` | 项目进度投影（card_count / 各状态计数 / due_count 等） |
-| GET | `/projects/{project_id}/stats/weekly` | 项目周统计 |
+| GET | `/projects/{project_id}/stats/weekly` | 项目周统计（App 暂未使用，联调/统计核验用） |
 | PATCH / DELETE | `/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称/起止页（TEXT 章节仅名称）；删除章节（保留卡时 chapter_id 置空进"未归属章节"） |
 | POST | `/projects/{project_id}/confirm-chapters` | 确认目录，项目进入 READY |
 | GET / PATCH | `/projects/{project_id}/study-settings` | 项目级学习设置 |

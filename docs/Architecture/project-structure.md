@@ -44,7 +44,7 @@ main/
 ├── app/                         # 应用层:HTTP 出入口
 │   ├── api/                     # 路由与 handler,按契约接口分组
 │   │   ├── auth.py  preferences.py  projects.py  study.py        # V2.5 账号/偏好/项目/今日计划
-│   │   ├── pdfs.py  api_key.py  tasks.py                          # PDF(兼容路径)/Key/制卡任务
+│   │   ├── api_key.py  tasks.py                                   # API Key/制卡任务
 │   │   ├── decks.py  cards.py  review.py  stats.py                # 牌组卡片/复习/看板
 │   │   └── metrics.py  observability.py  probes.py                # 观测与探针
 │   ├── middleware/              # Bearer 认证、Idempotency-Key 幂等、IP 令牌桶限流、

@@ -97,11 +97,19 @@ paths:
       tags: [auth]
       summary: 撤销当前会话
       operationId: logout
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '204':
           description: 当前会话已撤销
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /auth/me:
     get:
       tags: [auth]
@@ -120,6 +128,8 @@ paths:
                     $ref: '#/components/schemas/AuthUser'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     patch:
       tags: [auth]
       summary: 修改昵称或预设头像({username?, avatar_key?},至少一个字段;email 只读)
@@ -147,6 +157,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -165,6 +177,8 @@ paths:
                 $ref: '#/components/schemas/UserPreferences'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     patch:
       tags: [preferences]
       summary: 部分更新偏好;比例、目标、IANA 时区服务端校验
@@ -190,6 +204,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -225,6 +241,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
     get:
@@ -246,13 +264,15 @@ paths:
                       $ref: '#/components/schemas/LearningProject'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /projects/{project_id}:
     parameters:
       - $ref: '#/components/parameters/ProjectId'
     get:
       tags: [projects]
-      summary: 项目详情(含 file/chapters 摘要与派生计数;PARSING 时轮询)
+      summary: 项目详情(含 materials/chapters 摘要与派生计数;PARSING 时轮询)
       operationId: getProject
       responses:
         '200':
@@ -265,6 +285,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     patch:
       tags: [projects]
       summary: 重命名(去首尾空白后 1~60 字符,可重名)
@@ -296,6 +318,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
     delete:
@@ -313,6 +337,8 @@ paths:
       responses:
         '204':
           description: 已删除
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -354,6 +380,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /projects/{project_id}/progress:
     parameters:
@@ -373,6 +401,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /projects/{project_id}/stats/weekly:
     parameters:
@@ -392,6 +422,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /projects/{project_id}/decks/{deck_id}/attach:
     parameters:
@@ -416,6 +448,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /projects/{project_id}/materials:
     parameters:
@@ -441,6 +477,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /projects/{project_id}/materials/pdf:
     parameters:
@@ -476,6 +514,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -507,8 +547,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-        '400':
-          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -541,10 +581,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LearningProject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -572,6 +616,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /projects/{project_id}/materials/{material_id}/replace:
     parameters:
@@ -646,6 +692,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
     delete:
@@ -663,6 +711,8 @@ paths:
       responses:
         '204':
           description: 已删除
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -688,6 +738,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LearningProject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -715,6 +767,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     patch:
       tags: [projects]
       summary: 更新项目学习设置
@@ -740,6 +794,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -759,7 +815,7 @@ paths:
               $ref: '#/components/schemas/ApiKeyPutRequest'
       responses:
         '200':
-          description: 已验证并保存(status=AVAILABLE)
+          description: 校验结果经 200 + status 返回(AVAILABLE 已加密保存;INVALID/INSUFFICIENT_BALANCE 校验失败,不落库不覆盖旧 Key,不产生错误响应)
           content:
             application/json:
               schema:
@@ -768,9 +824,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-          description: Key 无效(API_KEY_INVALID)或余额不足(API_KEY_INSUFFICIENT_BALANCE)
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
   /api-key/status:
@@ -787,6 +842,8 @@ paths:
                 $ref: '#/components/schemas/ApiKey'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ---------- 制卡任务(V2.5 目标 4.3;结构契约 6.4) ----------
   /projects/{project_id}/tasks:
@@ -819,7 +876,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-          description: 项目状态冲突(如未 READY)或牌组/章节不属于该项目
+          description: 项目状态冲突(如未 READY;牌组/章节不属于该项目为 404)
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -855,6 +912,8 @@ paths:
                       $ref: '#/components/schemas/Task'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /tasks/{task_id}:
     parameters:
@@ -874,6 +933,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     patch:
       tags: [tasks]
       summary: 修改任务配置;仅 DRAFT/AWAITING_SAMPLE_CONFIRMATION 可改,修改后样卡失效(清空 sample_* 字段)
@@ -920,6 +981,8 @@ paths:
       responses:
         '204':
           description: 已删除
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -946,6 +1009,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -972,16 +1037,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-          description: TASK_STATE_CONFLICT(仅 AWAITING_SAMPLE_CONFIRMATION 可开始)
-        '422':
-          $ref: '#/components/responses/Unprocessable'
-          description: 配置已变化须重新生成样卡
+          description: TASK_STATE_CONFLICT(仅 AWAITING_SAMPLE_CONFIRMATION 可开始);SAMPLE_STALE(sample_config_hash 与当前配置不一致,须重新生成样卡)
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -1001,6 +1065,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1027,6 +1093,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1061,6 +1129,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ---------- 牌组、卡片与撤销(V2.5 目标 4.4;结构契约 6.5) ----------
   /decks:
@@ -1093,6 +1163,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     post:
       tags: [decks]
       summary: 新建牌组(手动独立牌组 project_id 缺省 null;归属校验在服务内)
@@ -1118,6 +1190,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -1139,6 +1213,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     patch:
       tags: [decks]
       summary: 牌组改名;version 递增供缓存刷新,返回含真实进度
@@ -1164,6 +1240,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
     delete:
@@ -1175,10 +1253,14 @@ paths:
       responses:
         '204':
           description: 已删除
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -1208,6 +1290,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /decks/{deck_id}/cards:
     parameters:
@@ -1258,6 +1342,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     post:
       tags: [decks]
       summary: 手动新增卡片(分配 position;source=MANUAL)
@@ -1283,6 +1369,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -1323,10 +1411,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ImportResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/Unprocessable'
           description: IMPORT_PARSE_ERROR(导入列表为空或 front/back 缺失,整体失败)
@@ -1357,6 +1449,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /cards/{card_id}:
     parameters:
@@ -1386,6 +1480,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
     delete:
@@ -1408,6 +1504,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CardDeletionBatch'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1438,6 +1536,8 @@ paths:
                       $ref: '#/components/schemas/CardDeletionBatch'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /card-deletion-batches/{delete_batch_id}/undo:
     parameters:
@@ -1455,6 +1555,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CardDeletionBatch'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1516,10 +1618,14 @@ paths:
       responses:
         '204':
           description: 已取消
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -1540,6 +1646,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Card'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1565,6 +1673,8 @@ paths:
                 $ref: '#/components/schemas/StudyPlan'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     put:
       tags: [study]
       summary: 原子保存计划配置(目标为 0~200 的 10 倍数且不可同时为 0)
@@ -1591,6 +1701,8 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
           description: 项目或卡组不存在/非本用户
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -1608,6 +1720,8 @@ paths:
                 $ref: '#/components/schemas/TodayStudyPlan'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /study/today/backlog:
     get:
@@ -1654,6 +1768,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /review-events:
     post:
@@ -1702,6 +1818,8 @@ paths:
                 $ref: '#/components/schemas/StatsDashboard'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ---------- 质量聚合观测(O-4;结构契约 6.9,非产品接口) ----------
   /observability/quality-summary:
@@ -1733,6 +1851,8 @@ paths:
                 $ref: '#/components/schemas/QualitySummary'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
 components:
   securitySchemes:
@@ -1898,8 +2018,9 @@ components:
           type: string
           description: 脱敏标识,如 sk-****abcd,禁止返回完整 Key(决策 D-03)
         updated_at:
-          type: string
+          type: [string, 'null']
           format: date-time
+          description: 保存/更新时间;status=UNKNOWN(从未保存过 Key)时为 null
 
     Chapter:
       type: object
@@ -2591,7 +2712,7 @@ components:
           description: FSRS 稳定性(天)
         difficulty:
           type: number
-          description: FSRS 难度(0~10)
+          description: FSRS 难度(1~10,py-fsrs 口径)
         due:
           type: string
           format: date-time
@@ -2741,7 +2862,7 @@ components:
           description: 非首次事件中 GOOD 数 / 非首次事件数,分母为 0 时 null
         streak_days:
           type: integer
-          description: 截至用户本地当天连续有复习事件的自然日数;按本次请求 timezone 分桶,不按各事件 device_timezone
+          description: 截至用户本地当天连续有复习事件的自然日数;按账号学习时区分桶(V2.5 起无请求级 timezone 参数)
         mastered_card_count:
           type: integer
           description: 掌握卡片数(state=REVIEW 且 stability>=21 天)
@@ -3442,7 +3563,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     Unprocessable:
-      description: 业务校验失败(如 PDF_TOC_MISSING、API_KEY_INVALID)
+      description: 业务校验失败(如 PDF_TOC_MISSING)
       content:
         application/json:
           schema:

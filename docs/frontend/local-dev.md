@@ -24,8 +24,8 @@
 
 | 头 | 必填 | 说明 |
 | --- | --- | --- |
-| `Authorization: Bearer <token>` | 所有业务接口（除 register/login、探活/metrics） | 注册/登录获得，等同密码，勿写日志 |
-| `Idempotency-Key` | 所有写操作 | UUID v4；新操作新键、重试同键；`POST /samples` 豁免 |
+| `Authorization: Bearer <token>` | 所有业务接口（除 register/login、探活；/metrics 默认也需 Bearer，本地调试可设 `METRICS_AUTH_EXEMPT=true`） | 注册/登录获得，等同密码，勿写日志 |
+| `Idempotency-Key` | 所有写操作 | UUID v4；新操作新键、重试同键（register/login 与探活类端点除外） |
 
 ## 4. 待办与已知问题
 
@@ -44,12 +44,12 @@
 - [ ] Windows 侧：Android Studio 打开 `\\wsl$\<发行版>\home\kbzz1\shanka_backend\frontend\Front`（首次打开会下载 Gradle 依赖，较慢属正常）
 - [ ] 运行目标：启动 AVD 模拟器（或真机 USB 调试），App 的 debug 后端地址指向 `http://10.0.2.2:8000`
 - [ ] 链路实测：模拟器内访问 `GET http://10.0.2.2:8000/healthz` 返回 200
-- [ ] 请求头就绪：先 `POST /auth/register`（或 `/auth/login`）拿 token，业务请求带 `Authorization: Bearer`；写操作带 `Idempotency-Key`（`POST /samples` 豁免）
+- [ ] 请求头就绪：先 `POST /auth/register`（或 `/auth/login`）拿 token，业务请求带 `Authorization: Bearer`；写操作带 `Idempotency-Key`（含样卡 `POST /tasks/{task_id}/samples`）
 
 ## 7. 联调数据说明
 
-- 联调产生的业务数据（牌组/卡片/PDF/任务/统计）与加密 API Key 全部落在后端 `main/shanka.db`（SQLite，git 忽略）。
-- 需要干净起点时：停止后端 → 备份该文件（如 `cp main/shanka.db main/shanka.db.bak`）→ 删除原文件 → 重启后端（空库自动迁移建表）；删除后需重新注册/登录并重新 `PUT /api-key` 保存密钥。
+- 联调产生的业务数据（牌组/卡片/PDF/任务/统计）与加密 API Key 全部落在后端 `main/data/shanka.db`（SQLite，git 忽略；`.env` 的 `DATABASE_URL=sqlite:///./data/shanka.db` 相对 `main/` 解析；R25-09 起运行库在 `data/` 子目录，`main/shanka.db` 为更早的遗留文件）。
+- 需要干净起点时：停止后端 → 备份该文件（如 `cp main/data/shanka.db main/data/shanka.db.bak`）→ 删除原文件 → 重启后端（空库自动迁移建表）；删除后需重新注册/登录并重新 `PUT /api-key` 保存密钥。
 - 账号即数据主体：登录的 `user_id` 决定看到哪份数据，联调时建议固定一个测试用户名便于对照日志。
 
 ## 8. Debug 后端地址与真机（USB）联调

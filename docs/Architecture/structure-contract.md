@@ -9,7 +9,7 @@
 ### 1.1 数据主体与鉴权(决策 D-05)
 
 - 用户经邮箱+密码**注册或登录**获得 opaque Bearer session token(注册另附 username 展示名);受保护请求携带 `Authorization: Bearer <token>`(FR-19)。
-- 注册/登录接口(6.11)无鉴权;探针与匿名系统端点(8.2/8.3)豁免 Bearer;其余业务接口全部需要 Bearer。
+- 注册/登录接口(6.10)无鉴权;探针与匿名系统端点(8.2/8.3)豁免 Bearer;其余业务接口全部需要 Bearer。
 - 所有资源按 `user_id` 隔离;服务端校验资源归属,禁止仅凭资源 ID 访问他人数据;跨用户访问统一 404,不暴露存在性。
 - 缺失/非法/撤销/过期 token → `401 AUTH_REQUIRED` / `AUTH_INVALID`,一律携带 `WWW-Authenticate: Bearer` 响应头。
 - **凭据规则**:登录凭据为邮箱+密码——邮箱 3~254 位(含 `@`、无空白)、服务端统一转小写、全库唯一;username 为展示名 1~24 位、中文/字母/数字/`._-`、可重名、不强制小写;密码 8~128 字符、不截断、不做 normalization;密码 Argon2id(≥ memory_cost=19456 KiB / time_cost=2 / parallelism=1);登录失败统一 `401 INVALID_CREDENTIALS`(邮箱不存在时做固定 dummy 校验),邮箱冲突 `409 EMAIL_TAKEN`。
@@ -79,8 +79,8 @@
 | 注册/登录 | 按来源 IP(默认阈值运维可调) | `POST /auth/register`、`POST /auth/login` |
 | 登录(邮箱分桶) | 按规范化邮箱(默认阈值运维可调) | `POST /auth/login`(防单账号分布式猜测) |
 | `PUT /api-key` | 10 次/时/user | Key 校验(校验 oracle) |
-| `POST /samples` | 20 次/时/user | 样卡生成(消耗模型配额) |
-| PDF 上传 | 10 次/时/user | `POST /pdfs` |
+| `POST /tasks/{task_id}/samples` | 20 次/时/user | 样卡生成(消耗模型配额) |
+| PDF 上传 | 10 次/时/user | `POST /projects/{project_id}/materials/pdf` |
 
 超限返回 `429 RATE_LIMITED` + `Retry-After` 响应头;阈值可运维调整,客户端不得硬编码。
 
@@ -112,19 +112,18 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | --- | --- | --- | --- |
 | `status` | enum | ✓ | `AVAILABLE` / `INVALID` / `INSUFFICIENT_BALANCE` / `UNKNOWN`;未保存 Key 时返回 `UNKNOWN` |
 | `masked_key` | string | ✓ | 脱敏标识,如 `sk-****abcd`;未保存时为 `""` |
-| `updated_at` | datetime | ✓ | 最近校验时间 |
+| `updated_at` | datetime \| null | ✓ | 最近保存/校验时间;status=UNKNOWN(从未保存过 Key)时为 null |
 
 ### 3.2 PdfFile
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `material_id` | uuid | ✓ | V2.5 起以学习资料(3.2a Material)承载归属;`file_id` 保留为资料 ID 同义词(兼容既有任务快照字段) |
+| `file_id` | uuid | ✓ | 资料物证标识;V2.5 起与 `material_id` 同义(保留字段名兼容既有任务快照),归属关系由 3.2a Material 承载(PDF 行不再直接挂 `project_id`) |
 | `filename` | string | ✓ | |
 | `size_bytes` | int | ✓ | |
 | `status` | enum | ✓ | `PENDING` / `PARSING` / `PARSED` / `FAILED` |
 | `error_code` | string | ✗ | 解析失败码(`PDF_PARSE_FAILED` / `PDF_TOC_MISSING`) |
 | `chapters` | Chapter[] | ✗ | 解析成功后返回 |
-| `project_id` | uuid | ✗ | V2.5 归属项目(`materials` 表持久化;PDF 表不重复存 project_id) |
 | `created_at` | datetime | ✓ | |
 
 规则:目录解析失败 → `FAILED` + `error_code`,前端终止流程,不提供 AI 猜测兜底(PRD 5.2)。
@@ -181,6 +180,11 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `sample_config_hash` | string | ✗ | 样卡对应的配置指纹,防止确认过期样卡 |
 | `sample_confirmed_at` | datetime | ✗ | 样卡确认时间 |
 | `generated_card_count` | int | ✓ | 只统计已发布卡;失败任务为 0 |
+| `total_batch_count` / `completed_batch_count` | int \| null | ✗ | 批次进度观测;规划未完成时为 null |
+| `cursor` | TaskCursor | ✗ | 断点续跑游标(内部租约恢复判定用);null 表示从头开始 |
+| `completion_reason` | string | ✗ | 终态补充说明:`NO_GENERATION_UNITS`(全组规划成功但 0 个合法单元的业务空结果,任务 COMPLETED) |
+| `skipped_planning_group_count` | int | ✓ | 部分规划组失败被跳过的组数(仅部分成功时 > 0) |
+| `resumable` | bool | ✓ | 内部租约恢复判定(只读观测;用户侧无 resume API) |
 | `error_code` | string | ✗ | 用户安全失败码 |
 | `failure_stage` | enum | ✗ | `PLANNING` / `GENERATING` / `SCORING` / `PUBLISHING` |
 | `created_at` / `started_at` / `ended_at` | datetime | 按需 | |
@@ -446,13 +450,15 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `resource_type` | enum | ✓ | `PROJECT` / `DECK` |
+| `resource_type` | enum | ✓ | `PROJECT` / `DECK` / `MATERIAL` |
 | `resource_id` | uuid | ✓ | 待删除资源 |
 | `can_delete` | bool | ✓ | 当前快照下是否无阻塞 |
 | `blockers` | DeletionTaskBlocker[] | ✓ | 活跃任务摘要与允许动作 |
 | `abandonable_task_ids` | uuid[] | ✓ | `DRAFT`/样卡阶段可在删除事务内放弃的任务 |
 | `has_uncancellable_tasks` | bool | ✓ | 是否存在正式 `GENERATING` 任务 |
-| `actions` | string[] | ✓ | `ABANDON_AND_RETRY` / `WAIT_FOR_TERMINAL` / `VIEW_TASKS` |
+| `cancelable_task_ids` | uuid[] | ✓ | 可随资源一并取消的活跃制卡任务 |
+| `can_cancel` | bool | ✓ | 是否允许采用"取消任务后删除"的决策 |
+| `actions` | string[] | ✓ | `ABANDON_AND_RETRY` / `CANCEL_AND_DELETE` / `WAIT_FOR_TERMINAL` / `VIEW_TASKS` |
 | `impact` | object | ✓ | 资源数量与当前项目状态;仅展示用途,不作为删除授权 |
 
 预检是只读建议;实际删除必须在同一写事务内重新检查。项目/牌组确认删除后服务端自动取消全部关联活跃任务（含正式生成中任务），并用租约 fencing 使迟到 worker 写入失效。
@@ -563,7 +569,7 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 
 项目周统计只查询当前项目计划所选卡组;账号总体活动仍由 `StatsDashboard`(3.12) 提供,不受项目目标过滤。
 
-### 3.15 AuthSessionResponse(会话,V2.2 新增)
+### 3.24 AuthSessionResponse(会话,V2.2 新增)
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -698,7 +704,8 @@ Scheduler(
 
 ## 6. 接口清单(人读版)
 
-机器可读权威见 `openapi.yaml`。除特别注明外,写操作均需 `Idempotency-Key`。
+机器可读权威见 `openapi.yaml`。除特别注明外,写操作均需 `Idempotency-Key`。本章路径沿用历史 `/v1`
+前缀书写;实际服务挂载**无 `/v1` 前缀**(以 `openapi.yaml` 与 `main/app/main.py` 装配为准)。
 
 ### 6.1 账号与偏好(V2.5 目标 4.1)
 
@@ -709,7 +716,7 @@ Scheduler(
 | GET | `/v1/preferences` | 返回 UserPreferences(3.15) | - |
 | PATCH | `/v1/preferences` | 部分更新;比例、目标、IANA 时区服务端校验 | ✓ |
 
-规则:email 只读不可 PATCH;`avatar_key` 只接受 `mood_01`~`mood_12`;API-key 字段不进入 profile/preferences 载荷。注册/登录/logout 继续沿用 6.12。
+规则:email 只读不可 PATCH;`avatar_key` 只接受 `mood_01`~`mood_12`;API-key 字段不进入 profile/preferences 载荷。注册/登录/logout 继续沿用 6.10。
 
 ### 6.2 学习项目与章节(V2.5 目标 4.2)
 
@@ -824,13 +831,13 @@ MVP 无可视化后台;观测数据经此接口 + 卡片详情(Rubric 单卡字�
 - **分组键定义**：`model` = `Batch.model`；`pdf` = 任务所属 `file_id`；`difficulty` = `Batch.generation_unit_id` → 对应单元的 `target_difficulty`（**不能只依赖 Card**，否则生成失败、没有 Card 的 coverage=0 批次丢失；单元缺失/锚定缺失 → `unknown`）。聚合结果按 `rubric_version` 拆子组——查询窗口同时包含多版本时不得无标识混算。
 - **评分样本口径**：各评分维度只以对应字段非 NULL 的卡为分母（NULL 不计 0 分、不进分母）；`eligible_card_count` = 经批次归属的卡数，`scored_card_count` = `rubric_total_score` 非 NULL 的卡数，`sampling_rate` = `scored/eligible`（分母 0 时返回 null）；覆盖/重复率均值含 SKIPPED 批次（coverage=0 计入分母）。
 - 成本汇总（O-6）：按"价格配置常量"换算 `cache_hit_tokens` / `cache_miss_tokens` / `output_tokens` 为估算金额，hit/miss/output 分开计价；价格常量取 DeepSeek 官方定价、标注生效日期，不固化进 DB。**成本口径：`cost_estimate` 为 generation-stage-only**（Batch token 列为生成阶段兼容投影），不得冒充全链路成本；全链路成本按 `llm_call_attempts` 账本分 stage 汇总，禁止把 Batch 投影再次相加造成双计。
-- `/healthz`（存活）、`/readyz`（就绪:DB 连接 + 存储可写，失败 503）、`/metrics`（Prometheus 文本）、`/openapi.json`（接口文档，前端对接在线拉取）为运行观测基础端点，**豁免 Bearer 鉴权**（探针/采集器无账号上下文）；`POST /auth/register`、`POST /auth/login` 同样豁免（6.11）。
+- `/healthz`（存活）、`/readyz`（就绪:DB 连接 + 存储可写，失败 503）、`/openapi.json`（接口文档，前端对接在线拉取）为运行观测基础端点，**豁免 Bearer 鉴权**（探针无账号上下文）；`GET /metrics` 默认**需要 Bearer**（R25-07 收紧；确需豁免时经 `METRICS_AUTH_EXEMPT=true` 打开，见 deployment 4.4）；`POST /auth/register`、`POST /auth/login` 同样豁免（6.10）。
 
 ### 6.10 账号（FR-19,决策 D-05;V2.2 新增;V2.5 增量）
 
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |
-| POST | `/v1/auth/register` | 创建用户并建立会话;`{ username, email, password }`;201 返回 AuthSessionResponse(3.15);email 冲突 → `409 EMAIL_TAKEN` | - |
+| POST | `/v1/auth/register` | 创建用户并建立会话;`{ username, email, password }`;201 返回 AuthSessionResponse(3.24);email 冲突 → `409 EMAIL_TAKEN` | - |
 | POST | `/v1/auth/login` | 校验凭据并建立新会话;`{ email, password }`;200 返回 AuthSessionResponse;失败统一 `401 INVALID_CREDENTIALS`(邮箱或密码错误) | - |
 | POST | `/v1/auth/logout` | 撤销当前会话(仅当前);204 | 幂等键(并发双发单副作用) |
 | GET | `/v1/auth/me` | 返回当前用户资料 AuthUser(3.14,含 email/avatar_key);PATCH 见 6.1 | - |
@@ -864,7 +871,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `PROJECT_NOT_FOUND` | 404 | V2.5 项目不存在或跨用户 |
 | | `MATERIAL_NOT_FOUND` | 404 | V2.5 学习资料不存在或跨项目（统一 404） |
 | | `PROJECT_STATE_CONFLICT` | 409 | V2.5 当前项目状态不允许操作 |
-| | `PROJECT_HAS_ACTIVE_TASK` | 409 | V2.5 删除被活跃任务阻止 |
+| | `PROJECT_HAS_ACTIVE_TASK` | 409 | 保护性冲突:放弃路径遇不可中断的正式 `GENERATING` 任务、或章节/资源被活跃任务引用(项目/牌组确认删除主路径在同一事务自动取消关联活跃任务,V25-D-17,不再以本码阻止) |
 | API Key | `API_KEY_UNAVAILABLE` | 502 | Key 缺失/解密失败、chat 上游 401/429/5xx 或校验链路(validate_key)上游不可用(含网络);生成链路中 401(Key 错误)不可重试 → 任务 `FAILED`,429/5xx 可重试(账本预算内);生成链路网络/超时与响应解析失败内部记 `GENERATION_FAILED`(重试预算同) |
 | | `API_KEY_NOT_SET` | 422 | 样卡 / 任务启动时未保存 Key |
 | 任务 | `TASK_NOT_FOUND` | 404 | |
@@ -902,7 +909,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 
 ### 8.3 指标（O-3）
 
-`GET /metrics`(Prometheus 文本格式),豁免 Bearer 鉴权,生产子域名默认不暴露:
+`GET /metrics`(Prometheus 文本格式),默认需要 Bearer 鉴权(`METRICS_AUTH_EXEMPT=true` 时豁免;R25-07 起默认收紧,历史版本曾默认豁免),生产子域名默认不暴露:
 
 | 指标 | 类型 | labels |
 | --- | --- | --- |
@@ -915,6 +922,14 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | `llm_tokens_total` | counter | kind(cache_hit/cache_miss/output) |
 | `http_requests_total` | counter | method/path/status |
 | `http_request_duration_seconds` | histogram | - |
+
+duration histogram 桶（分位数证据的正确性前提，桶集合在指标注册时固化）：
+
+- `http_request_duration_seconds`:prometheus 默认桶(0.005~10s,API 请求秒级以内,粒度足够)。
+- `llm_request_duration_seconds`:`0.5/1/2/5/10/20/30/60/120/300`(s)——DeepSeek 单调用典型秒~分钟级,默认桶上限 10s 会使大部分观测落 +Inf、p99 失真。
+- `generation_tasks_duration_seconds`:`5/10/30/60/120/300/600/1800`(s)——任务全生命周期分钟~十分钟级。
+
+`http_requests_total` 的 path label 归一化为路由模板(如 `/tasks/{task_id}`),动态段不产生高基数序列;未匹配任何路由的请求(auth 短路、404 探测)统一记 `unmatched`,基数有界。桶边界或归一化规则变更须同步本表并保留守卫测试(test_metrics)。
 
 ### 8.4 成本观测（O-6）
 
@@ -932,11 +947,27 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
   Schema v3 / 投影后 card Schema v1;Scoring Prompt v3 / scoring-output Schema v3 / Rubric v3。
   具体 path 以 manifest 为唯一权威,禁止运行时绕过 manifest 读取相对路径。
 - `rubric_version` / `prompt_version` / `schema_version` 按每次调用实际使用的入口记录,不能用
-  单个全局 schema_version 混写 card v1 与 generator/planner/scoring output v2。
+  单个全局 schema_version 混写 card v1 与 generator/planner/scoring 的 output schema
+  (版本随 manifest 演进,当前登记见上)。
 - **调用账本(`llm_call_attempts`)逐调用记录**实际使用的 `prompt_name/prompt_version`、
   `schema_name/schema_version`、`rubric_version`(不适用列 NULL)以及 usage/状态/错误码;
   账本是重试预算、调用上限与全阶段 token 的权威(4.2/6.10/8.4)。
 - 评分请求记录:prompt 版本 + 输入摘要 + 输出分;不落完整 prompt。
+
+### 8.6 服务端延迟基线（G4 性能闸门的证据出口）
+
+数据基线沿用验收统一口径(V25-REL-FR-05:千级卡片、万级复习事件,SQLite 单进程);客户端时间门槛归 V25-REL-FR-06,服务端按端点分类设初始参考值(经验设定,不具备统计效力,首轮实测后修订):
+
+| 端点类别 | 覆盖 | 初始参考值* | 支撑的决策 |
+| --- | --- | --- | --- |
+| 读 | 牌组/卡片列表、stats dashboard、study/today | p95 ≤ 500ms | FR-06 网络操作 500ms 加载态阈值 − 大陆 RTT 预算(deployment §6) |
+| 写 | review-events(幂等写)、卡片/牌组变更 | p95 ≤ 800ms | 写路径含幂等键查重与级联校验,预算放宽 |
+
+- 证据出口:8.3 duration histogram(PromQL 分位数)+ `tests/integration/test_api_latency_baseline.py` 的 `[PERF]` 实测记录(数据集规模、环境、逐次采样),格式同《generation-quality-metrics.md》观测段。
+- AI 生成不设延迟承诺(V25-REL-FR-05:不承诺固定完成秒数),仅要求后台执行不阻塞用户写(4.4 单进程约束,R25-07)。
+- 校准纪律:参考值修订必须在本节留痕(日期 + 样本量 + 旧值 → 新值 + 依据任务 ID);延迟参考值不构成单请求自动门禁,回归判定以性能测试的宽松中位数上限为准(CI 抖动余量)。
+
+首轮基线快照(2026-09-05,n=20/端点,WSL2 | 20 CPU | python 3.12,千卡/万事件播种,`test_api_latency_baseline.py -s`):GET /decks p50=13.8ms·p95≈18.1ms;GET /decks/{deck_id}/cards p50=6.8ms·p95≈7.9ms;GET /stats/dashboard p50=92.1ms·p95≈144.1ms;GET /study/today p50=3.9ms·p95≈31.4ms;POST /review-events p50=11.2ms·p95≈12.2ms——全部低于初始参考值,参考值维持不修订。
 
 ## 9. 与 PRD 的对照
 
@@ -954,8 +985,9 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | 3.9 Rubric 与关联字段 | 5.9 / 5.6 / 6.3 / AC-07 | 修复(审核) |
 | 8 运行可观测性 / 6.10 聚合观测 | PRD 8 核心指标 / FR-10 / FR-11 | 新增(设计规格 6422765) |
 | 3.5/3.6 生成单元与锚定 / 3.7 批=单元 / 4.1 任务状态机 / 6.10 分组键 | 5.4.1 / 5.6 / 5.7 | 一致(LLM 链路升级工作包契约同步) |
-| 3.14/3.15 账号与会话 / 6.11 账号接口 / 1.6 限流 / 7 账号错误码 | V2.2 FR-19 / AC-12、D-05 | 新增(账号登录工作包契约同步) |
+| 3.14/3.24 账号与会话 / 6.10 账号接口 / 1.6 限流 / 7 账号错误码 | V2.2 FR-19 / AC-12、D-05 | 新增(账号登录工作包契约同步) |
 | 1.1 归属声明(设备架构清除) / database-design 表结构 | V2.3(决策翻转 D-06→V2.3) | 一致(清理收尾与补做验证工作包契约同步) |
-| 3.14/3.15 账号与会话 / 6.11 账号接口 / 1.6 限流 / 7 账号错误码 | V2.4(email 登录键 / username 展示名 / 滑动续期) | 一致(email 登录与长期登录工作包契约同步) |
+| 3.14/3.24 账号与会话 / 6.10 账号接口 / 1.6 限流 / 7 账号错误码 | V2.4(email 登录键 / username 展示名 / 滑动续期) | 一致(email 登录与长期登录工作包契约同步) |
 | 1.2 学习时区 / 3.15 偏好 / 3.16 项目 / 3.17 项目设置 / 3.18 删除批次 / 3.19 重写预览 / 3.20 今日计划 / 3.4~3.9 增量 / 4.1 七态 / 6.1~6.7 接口 / 7 新错误码 | V2.5 总 PRD 及模块 PRD(V25-D-01~D-25) | 一致(非视觉计划 NV-01 原子转正) |
 | 1.6 IP 维度令牌桶语义（持续 5 req/s + 突发 10） | offline-foundation-v1（IP 限流突发容忍 + 离线补传幂等） | 修改(离线优先地基工作包契约同步；HTTP schema 无变化，openapi 不动) |
+| 8.3 指标桶边界与 path 归一化 / 8.6 服务端延迟基线 | V25-REL-FR-05/06（数据基线与性能门槛，方案由 Architecture 定义） | 新增(测试地基工作包契约同步；G4 证据出口) |
