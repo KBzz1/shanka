@@ -98,7 +98,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | file_id | TEXT | NULL, FK → pdf_files ON DELETE SET NULL | 删除 PDF 后任务保留,file_id 置空 |
 | deck_id | TEXT | NULL, FK → decks ON DELETE SET NULL | 目标牌组(必须同项目);删除牌组后置空,任务保留(审核修复) |
 | retry_of_task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | V2.5 只指向同用户失败任务 |
-| status | TEXT | NOT NULL | V2.5 `DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING / COMPLETED / FAILED / ABANDONED`(七态) |
+| status | TEXT | NOT NULL | V2.5 `DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING / AWAITING_CONFIRMATION / COMPLETED / FAILED / ABANDONED`(八态) |
 | stage | TEXT | NULL | V2.5 改名 `internal_stage` 语义:`PLANNING / GENERATING / SCORING / PUBLISHING`,仅运行期内部观测 |
 | selected_chapters | TEXT | NOT NULL | 章节快照(JSON,契约 3.4 Chapter[];每项含 `chapter_id/material_id/name/start_page/end_page`,TEXT 章节页码为 null),与源 chapter 解耦;开始正式生成前冻结快照 |
 | generation_config | TEXT | NOT NULL | coverage_mode/难度整数比例/deep_question/自定义要求(JSON,契约 3.5) |
@@ -109,7 +109,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | generated_card_count | INTEGER | NOT NULL;应用层默认 0 | V2.5 只统计已发布卡;失败任务为 0 |
 | total_batch_count | INTEGER | NULL | 规划完成后写入 |
 | completed_batch_count | INTEGER | NULL | |
-| completion_reason | TEXT | NULL | 空单元三分支:`NO_GENERATION_UNITS`(全组成功但 0 个合法单元,COMPLETED) |
+| completion_reason | TEXT | NULL | `NO_GENERATION_UNITS`(全组成功但 0 个合法单元,COMPLETED);`SUPERSEDED`(待确认任务被重新生成替代,ABANDONED) |
 | skipped_planning_group_count | INTEGER | NOT NULL DEFAULT 0 | 部分规划组失败被跳过的组数 |
 | resumable | INTEGER | NOT NULL;应用层默认 0 | V2.5 内部租约恢复判定(只读观测字段,随 Task 响应返回;无 resume API) |
 | failure_stage | TEXT | NULL | `PLANNING / GENERATING / SCORING / PUBLISHING` |
@@ -126,9 +126,10 @@ users 1──N idempotency_keys（V2.2 主键重建）
 `attempt_count`、`next_attempt_at`。三项租约指针必须同时为空或同时非空；worker 先以
 `UPDATE ... WHERE status/stage AND (lease_until IS NULL OR lease_until <= now)` 原子抢占并
 提交，再调用外部模型。所有结果写入带 token + version fencing，资源删除或租约回收会使旧
-worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V2.5 七态；`Base.metadata`
+worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V2.5 八态；`Base.metadata`
 测试建表为兼容历史 fixture 额外接受旧 `PENDING/RUNNING/PAUSED`，这些值不得进入升级后的
-生产库。
+生产库。`AWAITING_CONFIRMATION` 为静止态：park 时已清租约、`stage` 恒 NULL，无 worker
+扫描；转出该状态的唯一途径是用户 confirm/retry 或资源删除取消。
 
 索引:`(user_id, created_at)`、`(project_id)`、`(status, stage, updated_at)`、
 `(project_id, status, updated_at)`、`(deck_id, status, updated_at)`、

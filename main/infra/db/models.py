@@ -159,11 +159,13 @@ class GenerationOperation(Base):
 
 
 class Task(Base):
-    """2.5 tasks：生成任务（V2.5 七态；file_id/deck_id/project_id 删除后 SET NULL 保留任务）。
+    """2.5 tasks：生成任务（V2.5 八态；file_id/deck_id/project_id 删除后 SET NULL 保留任务）。
 
     V2.2：user_id 为数据主体隔离键；V2.3：device_id 遗留列随不可逆迁移删除。
-    V2.5：status 七态（DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION/GENERATING/
-    COMPLETED/FAILED/ABANDONED）；stage 列改名 internal_stage 语义（仅运行期内部观测）；
+    V2.5：status 八态（DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION/GENERATING/
+    AWAITING_CONFIRMATION/COMPLETED/FAILED/ABANDONED）——确认闭环：生成完毕 park 至
+    AWAITING_CONFIRMATION（卡保持 STAGED），用户 confirm 后发布；stage 列改名
+    internal_stage 语义（仅运行期内部观测，AWAITING_CONFIRMATION 恒 NULL）；
     project_id/retry_of_task_id 归属与重试关联；sample_cards 持久化样卡。
     """
 
@@ -173,7 +175,7 @@ class Task(Base):
         # migration normalizes them before installing the production-only V2.5 domain check.
         CheckConstraint(
             "status IN ('DRAFT','SAMPLE_GENERATING','AWAITING_SAMPLE_CONFIRMATION',"
-            "'GENERATING','COMPLETED','FAILED','ABANDONED',"
+            "'GENERATING','AWAITING_CONFIRMATION','COMPLETED','FAILED','ABANDONED',"
             "'PENDING','RUNNING','PAUSED')",
             name="ck_tasks_status_domain",
         ),

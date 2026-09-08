@@ -28,12 +28,13 @@ def _openapi_enum(schema_name: str, prop: str | None = None) -> set[str]:
     return set(schema["enum"])
 
 
-def test_task_status_matches_openapi_seven_states() -> None:
+def test_task_status_matches_openapi_eight_states() -> None:
     expected = {
         "DRAFT",
         "SAMPLE_GENERATING",
         "AWAITING_SAMPLE_CONFIRMATION",
         "GENERATING",
+        "AWAITING_CONFIRMATION",
         "COMPLETED",
         "FAILED",
         "ABANDONED",

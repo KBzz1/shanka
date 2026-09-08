@@ -26,8 +26,11 @@ LEGACY_PAUSED_TASK_ERROR_CODE = "LEGACY_PAUSED_TASK"
 DIFFICULTY_V25_MIGRATION: dict[str, str] = {"APPLICATION": "DEEP_QUESTION"}
 
 # 活跃（非终态）任务状态（structure-contract 4.1 删除保护）：DRAFT/SAMPLE_GENERATING/
-# AWAITING_SAMPLE_CONFIRMATION/GENERATING——项目/牌组/章节删除保护的统一口径。
-# V2.5 起运行期只写七态，集合不含迁移期旧态（PENDING/RUNNING/PAUSED）。
+# AWAITING_SAMPLE_CONFIRMATION/GENERATING/AWAITING_CONFIRMATION——项目/牌组/章节删除
+# 保护的统一口径。AWAITING_CONFIRMATION 为静止态（park 时已清租约，无 worker 工作；
+# 各 worker claim 均显式指定状态集合，不会接管该态），转出该状态的唯一途径是用户
+# confirm/retry 或资源删除取消。
+# V2.5 起运行期只写八态，集合不含迁移期旧态（PENDING/RUNNING/PAUSED）。
 ACTIVE_TASK_STATUSES: frozenset[str] = frozenset(
     status.value
     for status in (
@@ -35,6 +38,7 @@ ACTIVE_TASK_STATUSES: frozenset[str] = frozenset(
         TaskStatus.SAMPLE_GENERATING,
         TaskStatus.AWAITING_SAMPLE_CONFIRMATION,
         TaskStatus.GENERATING,
+        TaskStatus.AWAITING_CONFIRMATION,
     )
 )
 

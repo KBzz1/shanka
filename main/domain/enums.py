@@ -10,16 +10,19 @@ from enum import StrEnum
 
 
 class TaskStatus(StrEnum):
-    """GenerationTask 七态（structure-contract 4.1；openapi TaskStatus）。
+    """GenerationTask 八态（structure-contract 4.1；openapi TaskStatus）。
 
     V2.5：历史 PENDING→DRAFT、RUNNING→GENERATING、CANCELLED→ABANDONED、
     PAUSED→FAILED（LEGACY_PAUSED_TASK 占位，见 domain/task.py 迁移映射）。
+    V2.5 确认闭环：GENERATING 生成完毕 → AWAITING_CONFIRMATION（park，卡保持
+    STAGED），用户 confirm 后发布 → COMPLETED（发布时点=用户确认）。
     """
 
     DRAFT = "DRAFT"
     SAMPLE_GENERATING = "SAMPLE_GENERATING"
     AWAITING_SAMPLE_CONFIRMATION = "AWAITING_SAMPLE_CONFIRMATION"
     GENERATING = "GENERATING"
+    AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     ABANDONED = "ABANDONED"

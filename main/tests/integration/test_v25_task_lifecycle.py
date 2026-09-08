@@ -54,8 +54,8 @@ from services.tasks.service import (
 
 _NOW = "2026-08-15T00:00:00.000Z"
 
-# V2.5 七态（合法值域；结构契约 4.1）
-_SEVEN_STATES = {s.value for s in TaskStatus}
+# V2.5 八态（合法值域；结构契约 4.1）
+_TASK_STATES = {s.value for s in TaskStatus}
 # 迁移期旧任务状态（V2.5 前运行时写入；I-1 回归断言禁用）
 _LEGACY_STATES = {"PENDING", "RUNNING", "PAUSED", "CANCELLED"}
 
@@ -329,7 +329,7 @@ def test_state_transition_table(
             assert result.status == expected_status, f"{op}/{pre}: {result.status}"
             # 数据库审计：任何路径写入的状态必须落在七态内（I-1 回归）
             row = session.get(Task, task_id)
-            assert row is not None and row.status in _SEVEN_STATES
+            assert row is not None and row.status in _TASK_STATES
 
 
 # ---------- 创建与自动保存 ----------
@@ -770,7 +770,7 @@ def test_no_service_path_writes_legacy_task_status(
     def _assert_seven(session: Session) -> None:
         statuses = set(session.scalars(select(Task.status)).all())
         observed.extend(statuses)
-        assert statuses <= _SEVEN_STATES, f"发现旧状态写入: {statuses - _SEVEN_STATES}"
+        assert statuses <= _TASK_STATES, f"发现旧状态写入: {statuses - _TASK_STATES}"
 
     with session_factory() as session:
         task = _create_draft(session, ctx, user_id=user)
@@ -900,13 +900,15 @@ def test_sample_task_resumes_after_restart(session_factory: Callable[[], Session
 # ---------- 收敛断言（Task 4 汇合点） ----------
 
 
-def test_active_task_statuses_converged_to_seven_state_non_terminals() -> None:
-    """Task 4 汇合点：运行期只写七态后，项目删除保护只保留七态非终态（无迁移期旧态）。"""
+def test_active_task_statuses_converged_to_non_terminals() -> None:
+    """Task 4 汇合点：运行期只写八态后，删除保护集合=八态非终态（无迁移期旧态）。
+    AWAITING_CONFIRMATION 属活跃（静止态）：项目/牌组删除时被取消、章节删除被阻塞。"""
     assert _ACTIVE_TASK_STATUSES == {
         "DRAFT",
         "SAMPLE_GENERATING",
         "AWAITING_SAMPLE_CONFIRMATION",
         "GENERATING",
+        "AWAITING_CONFIRMATION",
     }
     assert _ACTIVE_TASK_STATUSES & _LEGACY_STATES == set()
 
