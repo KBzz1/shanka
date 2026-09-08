@@ -145,7 +145,7 @@ def test_task_continues_after_logout_and_new_session_reads(ctx: tuple[TestClient
     # 后台执行不依赖 session 有效性：executor 直接函数调用继续推进至 COMPLETED
     _run_executor_until_done(db_path)
 
-    # 重新登录（新 session）可读任务与卡片
+    # 重新登录（新 session）可读任务与卡片；confirm 发布（4.1 确认闭环）也可用
     login = client.post(
         "/auth/login", json={"email": "alice@example.com", "password": "secret-pass-1"}
     )
@@ -153,6 +153,12 @@ def test_task_continues_after_logout_and_new_session_reads(ctx: tuple[TestClient
     new_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
     task = client.get(f"/tasks/{task_id}", headers=new_headers)
     assert task.status_code == 200
+    assert task.json()["status"] == "AWAITING_CONFIRMATION"  # 后台已 park（不自动发布）
+    assert (
+        client.post(f"/tasks/{task_id}/confirm", headers={**new_headers, **_idem()}).status_code
+        == 200
+    )
+    task = client.get(f"/tasks/{task_id}", headers=new_headers)
     assert task.json()["status"] == "COMPLETED"
     assert task.json()["generated_card_count"] == 32
 
@@ -177,6 +183,12 @@ def test_task_continues_after_session_expiry(ctx: tuple[TestClient, Path]) -> No
     )
     assert login.status_code == 200
     new_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    task = client.get(f"/tasks/{task_id}", headers=new_headers)
+    assert task.json()["status"] == "AWAITING_CONFIRMATION"  # 后台已 park（不自动发布）
+    assert (
+        client.post(f"/tasks/{task_id}/confirm", headers={**new_headers, **_idem()}).status_code
+        == 200
+    )
     assert client.get(f"/tasks/{task_id}", headers=new_headers).json()["status"] == "COMPLETED"
 
 

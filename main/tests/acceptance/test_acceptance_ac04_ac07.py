@@ -183,6 +183,15 @@ def _idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
 
 
+def _confirm(client: TestClient, user: dict[str, str], task_id: str) -> dict[str, object]:
+    """park 后确认发布（4.1 确认闭环）：POST confirm → 断言 COMPLETED，返回任务视图。"""
+    resp = client.post(f"/tasks/{task_id}/confirm", headers={**user, **_idem()})
+    assert resp.status_code == 200
+    body: dict[str, object] = resp.json()
+    assert body["status"] == "COMPLETED"
+    return body
+
+
 def _user_id(db_path: Path, username: str = "alice") -> str:
     """注册用户（alice）的 user_id（users 表按 username 查询）。"""
     engine = create_db_engine(f"sqlite:///{db_path}")
@@ -365,8 +374,7 @@ def test_acceptance_ac04_valid_cards_inserted_and_completed(
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=_valid_cards())
-    body = client.get(f"/tasks/{task_id}", headers=user).json()
-    assert body["status"] == "COMPLETED"
+    body = _confirm(client, user, task_id)
     assert body["generated_card_count"] == 6  # 6 批 × 1 卡，全部入库
     assert body["total_batch_count"] == 6 and body["completed_batch_count"] == 6
     with _db_factory(db_path)() as session:
@@ -421,8 +429,7 @@ def test_acceptance_ac04_rubric_no_auto_fix_prune_or_regenerate(
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=_valid_cards(), scores=_LOW_SCORES)
-    body = client.get(f"/tasks/{task_id}", headers=user).json()
-    assert body["status"] == "COMPLETED"
+    body = _confirm(client, user, task_id)
     with _db_factory(db_path)() as session:
         cards = session.scalars(
             select(Card).where(Card.deck_id == cast(str, seed["deck_id"]))
@@ -502,8 +509,7 @@ def test_acceptance_ac07_abnormal_cache_data_does_not_gate_insertion(
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     task_id = _create_and_start(client, db_path, user=user, seed=seed)
     _run_to_completed(db_path, cards=_valid_cards(), with_usage=False)
-    body = client.get(f"/tasks/{task_id}", headers=user).json()
-    assert body["status"] == "COMPLETED"
+    body = _confirm(client, user, task_id)
     assert body["generated_card_count"] == 6  # 入库规则不受 cache 异常影响
     resp = client.get(f"/tasks/{task_id}/batches", headers=user)
     assert resp.status_code == 200

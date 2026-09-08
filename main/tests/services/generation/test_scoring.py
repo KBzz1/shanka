@@ -503,11 +503,12 @@ def test_plan_groups_cap_reduction_by_layer_quota(
 
 
 def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Session]) -> None:
-    """评分成功：Card 5 字段非 NULL（总分 = 代码计算 9）、任务经 PUBLISHING 原子发布
-    COMPLETED（4.1）、账本 stage=SCORING SUCCESS（scoring_output schema v2 /
-    rubric v2；不写 normalized_result）。"""
+    """评分成功：Card 5 字段非 NULL（总分 = 代码计算 9）、任务经 PUBLISHING park 至
+    AWAITING_CONFIRMATION → confirm 单事务发布 COMPLETED（4.1 确认闭环）、账本
+    stage=SCORING SUCCESS（scoring_output schema v2 / rubric v2；不写 normalized_result）。"""
     from services.generation.scoring import run_scoring_stage
-    from services.tasks.executor import publish_generated_cards
+    from services.tasks.executor import park_generated_cards
+    from services.tasks.service import confirm_task
 
     user = _uuid()
     with session_factory() as session:
@@ -523,7 +524,11 @@ def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Sessi
         run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
         session.refresh(task)
         assert task.status == "GENERATING" and task.stage == "PUBLISHING"  # 4.1 内部阶段
-        publish_generated_cards(session, task=task)  # 原子发布（同短事务）
+        park_generated_cards(session, task=task)  # park（同短事务，卡保持 STAGED）
+        session.commit()
+        session.refresh(task)
+        assert task.status == "AWAITING_CONFIRMATION" and task.stage is None
+        confirm_task(session, user_id=user, task_id=task_id, now=_NOW)  # 用户确认发布
         session.commit()
     with session_factory() as session:
         task, cards, units = _task_with_cards(session, task_id=task_id)
@@ -531,7 +536,7 @@ def test_scoring_writes_scores_and_completes(session_factory: Callable[[], Sessi
         batch = session.scalars(select(Batch).where(Batch.task_id == task_id)).one()
     assert calls == 1
     assert task.status == "COMPLETED"
-    assert task.stage == "PUBLISHING"  # internal_stage 终值（4.1：…→SCORING→PUBLISHING）
+    assert task.stage is None  # park 清空 internal_stage（AWAITING_CONFIRMATION 恒 null）
     assert task.ended_at is not None
     assert task.generated_card_count == 1  # 发布时按已发布卡统计（3.4）
     assert cards[0].publication_state == "PUBLISHED"  # 整批发布（STAGED → PUBLISHED）
@@ -608,9 +613,10 @@ def test_scoring_preserves_dedup_duplicate_rate(
 def test_scoring_version_drift_rejected(session_factory: Callable[[], Session]) -> None:
     """评分调用后、回写前改 Card.version（模拟用户编辑）→ 整组 finish_failed
     （STALE_SCORING_INPUT 内部原因入日志、error_code 兜底 GENERATION_FAILED）、
-    卡评分保持 NULL、任务仍经原子发布 COMPLETED（非阻塞）。"""
+    卡评分保持 NULL、任务仍 park + confirm COMPLETED（非阻塞）。"""
     from services.generation.scoring import run_scoring_stage
-    from services.tasks.executor import publish_generated_cards
+    from services.tasks.executor import park_generated_cards
+    from services.tasks.service import confirm_task
 
     user = _uuid()
     with session_factory() as session:
@@ -632,7 +638,9 @@ def test_scoring_version_drift_rejected(session_factory: Callable[[], Session]) 
 
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
-        publish_generated_cards(session, task=task)  # 4.1：原子发布（组失败不阻塞）
+        park_generated_cards(session, task=task)  # 4.1：park（组失败不阻塞）
+        session.commit()
+        confirm_task(session, user_id=user, task_id=task_id, now=_NOW)
         session.commit()
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)
@@ -647,9 +655,10 @@ def test_scoring_version_drift_rejected(session_factory: Callable[[], Session]) 
 
 def test_scoring_failure_non_blocking(session_factory: Callable[[], Session]) -> None:
     """评分 chat 抛 RetryableUpstreamError → 不重试（attempt_count == 1）、卡保留
-    （card_count 不变）、任务仍经原子发布 COMPLETED、账本记 FAILED。"""
+    （card_count 不变）、任务仍 park + confirm COMPLETED、账本记 FAILED。"""
     from services.generation.scoring import run_scoring_stage
-    from services.tasks.executor import publish_generated_cards
+    from services.tasks.executor import park_generated_cards
+    from services.tasks.service import confirm_task
 
     user = _uuid()
     with session_factory() as session:
@@ -663,7 +672,9 @@ def test_scoring_failure_non_blocking(session_factory: Callable[[], Session]) ->
 
         task, cards, _ = _task_with_cards(session, task_id=task_id)
         run_scoring_stage(session, task=task, settings=_SETTINGS, client=_client(handler))
-        publish_generated_cards(session, task=task)  # 4.1：原子发布（失败不阻塞）
+        park_generated_cards(session, task=task)  # 4.1：park（失败不阻塞）
+        session.commit()
+        confirm_task(session, user_id=user, task_id=task_id, now=_NOW)
         session.commit()
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)
@@ -679,9 +690,10 @@ def test_scoring_failure_non_blocking(session_factory: Callable[[], Session]) ->
 
 
 def test_scoring_invalid_output_group_failed(session_factory: Callable[[], Session]) -> None:
-    """评分输出非法（非 JSON）→ 整组 FAILED（不落部分分数）、任务仍经原子发布 COMPLETED。"""
+    """评分输出非法（非 JSON）→ 整组 FAILED（不落部分分数）、任务仍 park + confirm COMPLETED。"""
     from services.generation.scoring import run_scoring_stage
-    from services.tasks.executor import publish_generated_cards
+    from services.tasks.executor import park_generated_cards
+    from services.tasks.service import confirm_task
 
     user = _uuid()
     with session_factory() as session:
@@ -690,7 +702,9 @@ def test_scoring_invalid_output_group_failed(session_factory: Callable[[], Sessi
         run_scoring_stage(
             session, task=task, settings=_SETTINGS, client=_client(lambda r: _ok("no"))
         )
-        publish_generated_cards(session, task=task)  # 4.1：原子发布（失败不阻塞）
+        park_generated_cards(session, task=task)  # 4.1：park（失败不阻塞）
+        session.commit()
+        confirm_task(session, user_id=user, task_id=task_id, now=_NOW)
         session.commit()
     with session_factory() as session:
         task, cards, _ = _task_with_cards(session, task_id=task_id)
@@ -731,10 +745,11 @@ def test_scoring_stage_failed_guarded(session_factory: Callable[[], Session]) ->
 
 def test_scoring_cap_reached_still_completes(session_factory: Callable[[], Session]) -> None:
     """账本 SCORING 尝试数已达 max_scoring_calls_per_task（恢复/上限调整边缘）→ 剩余组
-    跳过不发调用，任务仍走最终条件更新 PUBLISHING + 原子发布 COMPLETED（不悬挂）。"""
+    跳过不发调用，任务仍走最终条件更新 PUBLISHING + park + confirm COMPLETED（不悬挂）。"""
     from services.generation.ledger import create_attempt
     from services.generation.scoring import run_scoring_stage
-    from services.tasks.executor import publish_generated_cards
+    from services.tasks.executor import park_generated_cards
+    from services.tasks.service import confirm_task
 
     user = _uuid()
     settings = Settings(
@@ -774,14 +789,16 @@ def test_scoring_cap_reached_still_completes(session_factory: Callable[[], Sessi
         task = session.get(Task, task_id)
         assert task is not None
         run_scoring_stage(session, task=task, settings=settings, client=_client(handler))
-        publish_generated_cards(session, task=task)  # 4.1：原子发布（不悬挂）
+        park_generated_cards(session, task=task)  # 4.1：park（不悬挂）
+        session.commit()
+        confirm_task(session, user_id=user, task_id=task_id, now=_NOW)
         session.commit()
     with session_factory() as session:
         task = session.get(Task, task_id)
         attempts = _scoring_attempts(session, task_id=task_id)
     assert calls == 0  # 上限已占 → 不再付费调用
     assert task is not None and task.status == "COMPLETED"  # 不悬挂
-    assert task.stage == "PUBLISHING"
+    assert task.stage is None
     assert len(attempts) == 2  # 未新增尝试
 
 
@@ -806,9 +823,11 @@ def test_enter_scoring_stage_transitions(session_factory: Callable[[], Session])
 
 
 def test_executor_runs_scoring_after_generation(session_factory: Callable[[], Session]) -> None:
-    """executor 接线：批循环结束 → enter_scoring_stage → 评分回写 → 原子发布 COMPLETED
-    （4.1：PUBLISHING 终态）；同一 client 先服务生成调用（GENERATOR_INPUT）再服务
-    评分调用（SCORING_INPUT）。"""
+    """executor 接线：批循环结束 → enter_scoring_stage → 评分回写 → park 至
+    AWAITING_CONFIRMATION（4.1 确认闭环：卡保持 STAGED）→ confirm 发布 COMPLETED；
+    同一 client 先服务生成调用（GENERATOR_INPUT）再服务评分调用（SCORING_INPUT）。"""
+    from services.tasks.service import confirm_task
+
     user = _uuid()
     with session_factory() as session:
         task_id = _seed_scoring_task(session, user_id=user, stage="GENERATING", generate=False)
@@ -826,12 +845,18 @@ def test_executor_runs_scoring_after_generation(session_factory: Callable[[], Se
         )
         session.commit()
         task, cards, _ = _task_with_cards(session, task_id=task_id)
+        assert task.status == "AWAITING_CONFIRMATION"  # park（不自动发布）
+        assert task.stage is None
+        assert all(c.publication_state == "STAGED" for c in cards)
+        confirm_task(session, user_id=user, task_id=task_id, now=_NOW)
+        session.commit()
+        task, cards, _ = _task_with_cards(session, task_id=task_id)
     assert n == 1
     assert task.status == "COMPLETED"
-    assert task.stage == "PUBLISHING"  # internal_stage 终值（4.1）
+    assert task.stage is None  # park 清空 internal_stage
     assert len(cards) == 1
     assert cards[0].rubric_total_score == 9  # 生成 + 评分全链路
-    assert cards[0].publication_state == "PUBLISHED"  # 原子发布
+    assert cards[0].publication_state == "PUBLISHED"  # confirm 发布
 
 
 def test_scan_takes_over_scoring_orphan(session_factory: Callable[[], Session]) -> None:
@@ -880,7 +905,7 @@ def test_scan_takes_over_scoring_orphan(session_factory: Callable[[], Session]) 
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
         attempts = _scoring_attempts(session, task_id=task_id)
     assert n == 1  # 接管一个 SCORING 孤儿
-    assert task.status == "COMPLETED"
+    assert task.status == "AWAITING_CONFIRMATION"  # 孤儿接管落点=待确认（不自动发布）
     # 已尝试组跳过（STARTED→UNKNOWN 计为已尝试游标）；未尝试组续跑 SUCCESS
     assert [a.status for a in attempts] == ["UNKNOWN", "SUCCESS"]
     scored = [c for c in cards if c.rubric_total_score is not None]

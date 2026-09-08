@@ -710,7 +710,7 @@ def test_batch_ledger_same_transaction_crash_recovery(
     assert batch.retry_count == 0
     assert card_count == 0  # 卡未入库（同事务回滚）
     # 阶段 2：executor 扫描恢复（心跳超时 → 遗留 STARTED→UNKNOWN + PROCESSING→FAILED）
-    # → 重试（尝试 2，预算含 UNKNOWN）→ SUCCEEDED + 卡入库 + 任务 COMPLETED
+    # → 重试（尝试 2，预算含 UNKNOWN）→ SUCCEEDED + 卡入库 + park 待确认
     with session_factory() as session:
         n = process_active_tasks(
             session,
@@ -727,7 +727,7 @@ def test_batch_ledger_same_transaction_crash_recovery(
         assert task is not None and task.deck_id is not None
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
     assert n == 1
-    assert task.status == "COMPLETED"
+    assert task.status == "AWAITING_CONFIRMATION"  # park（4.1 确认闭环，不自动发布）
     assert batch.status == "SUCCEEDED"
     assert batch.retry_count == 1  # 尝试 2 - 1 成功次
     # 孤儿 STARTED → UNKNOWN（GENERATING 账本行；T11 起任务完成后经 SCORING 阶段，

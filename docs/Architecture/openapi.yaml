@@ -883,7 +883,7 @@ paths:
   /tasks:
     get:
       tags: [tasks]
-      summary: 学习页任务区与历史列表(user 域;支持 project/status 过滤)
+      summary: 学习页任务区与历史列表(user 域;支持 project/status/deck 过滤,deck 供卡组任务状态渲染)
       operationId: listTasks
       parameters:
         - name: project_id
@@ -897,6 +897,13 @@ paths:
           required: false
           schema:
             $ref: '#/components/schemas/TaskStatus'
+        - name: deck_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: 按目标牌组过滤(仅过滤不做归属校验;跨用户 deck → 空列表)
       responses:
         '200':
           description: OK
@@ -920,7 +927,7 @@ paths:
       - $ref: '#/components/parameters/TaskId'
     get:
       tags: [tasks]
-      summary: 任务详情(七态、internal_stage、样卡、失败码、operation_id)
+      summary: 任务详情(八态、internal_stage、样卡、失败码、operation_id)
       operationId: getTask
       responses:
         '200':
@@ -1049,6 +1056,64 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /tasks/{task_id}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [tasks]
+      summary: 确认生成结果并发布(仅 AWAITING_CONFIRMATION → COMPLETED;单事务整批 STAGED → PUBLISHED)
+      operationId: confirmTask
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 任务已 COMPLETED,卡片发布进入复习队列/今日计划/统计
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: TASK_STATE_CONFLICT(仅待确认任务可确认发布;异键重复确认同理)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /tasks/{task_id}/cards:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      tags: [tasks]
+      summary: 卡片列表复审页数据源(仅 AWAITING_CONFIRMATION 可读;确认前唯一 STAGED 只读出口,确认后走 /decks/{deck_id}/cards)
+      operationId: listTaskCards
+      responses:
+        '200':
+          description: 按 position, card_id 排序的生成卡(含 STAGED)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Card'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+          description: TASK_STATE_CONFLICT(仅待确认任务可查看生成卡)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /tasks/{task_id}/abandon:
     parameters:
       - $ref: '#/components/parameters/TaskId'
@@ -1082,13 +1147,13 @@ paths:
       - $ref: '#/components/parameters/TaskId'
     post:
       tags: [tasks]
-      summary: 失败任务创建关联新任务(retry_of_task_id 指向原任务;可沿用已确认样卡)
+      summary: 重新生成(FAILED → 关联新任务可沿用样卡;AWAITING_CONFIRMATION → 单事务 supersede:原任务 ABANDONED/SUPERSEDED+硬删 STAGED 卡+新 DRAFT 不携带样卡)
       operationId: retryTask
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '201':
-          description: 新 DRAFT 任务已建立
+          description: 新 DRAFT 任务已建立(待确认来源重走样卡流程)
           content:
             application/json:
               schema:
@@ -1101,7 +1166,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
-          description: TASK_STATE_CONFLICT(仅 FAILED 可重试)
+          description: TASK_STATE_CONFLICT(仅 FAILED/AWAITING_CONFIRMATION 可重试;确认后不可重新生成)
         '429':
           $ref: '#/components/responses/RateLimited'
 

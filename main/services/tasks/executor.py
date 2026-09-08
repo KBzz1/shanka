@@ -1,6 +1,6 @@
 """executor.py：任务执行器（4.4 定式：进程内 DB 驱动；V5A adapter 分批执行）。
 
-扫描一轮 = 样卡 worker + 规划 worker + 生成 worker + 评分 worker（V2.5 七态）：
+扫描一轮 = 样卡 worker + 规划 worker + 生成 worker + 评分 worker（V2.5 八态）：
 
 - 样卡 worker：扫描 `status='SAMPLE_GENERATING'` 任务 → 按任务配置生成 1~3 张样卡
   （比例>0 的难度各 1 张，fake 确定性生成，不入库）→ 条件更新持久化样卡 + 配置
@@ -16,17 +16,19 @@
   task.updated_at（服务端时钟，孤儿恢复判据）并 commit（批次事务粒度：批次状态+游标+
   心跳同事务落库，长任务中间状态可观测，崩溃后已完成批次保留、未完成批次可恢复）→
   批循环结束 → enter_scoring_stage（条件更新 stage=GENERATING → SCORING）→
-  run_scoring_stage（评分回写，内部条件更新 GENERATING+SCORING → COMPLETED）。
+  run_scoring_stage（评分回写，内部条件更新 GENERATING+SCORING → PUBLISHING）。
 - 评分 worker：扫描 `status='GENERATING' AND stage IN ('SCORING','PUBLISHING')` 任务——
   心跳超时的孤儿（在途 worker 崩溃）经 CAS 条件更新接管：SCORING 孤儿
   mark_stale_unknown + 重跑 run_scoring_stage（账本为已尝试游标）；PUBLISHING 孤儿
-  （崩溃于 SCORING→PUBLISHING 提交与发布之间）直接执行原子发布（无 LLM）。心跳新鲜
+  （崩溃于 SCORING→PUBLISHING 提交与 park 之间）直接执行 park（无 LLM）。心跳新鲜
   （在途 worker 存活）不干预。
-- 原子发布（4.1）：任务进入 PUBLISHING 后，同一短事务内 CAS 门卫（WHERE
-  GENERATING+PUBLISHING）→ 校验 ≥1 张 STAGED 卡 → 全部置 PUBLISHED → 任务
-  COMPLETED + generated_card_count（只统计已发布卡，3.4）；0 张有效卡 → 任务
-  FAILED + TASK_ZERO_CARDS（V25-D-23）。任何阶段失败 → FAILED，STAGED 卡继续
-  隔离，用户侧零部分可见。
+- 生成结果 park（4.1 确认闭环）：任务进入 PUBLISHING 后，同一短事务内 CAS 门卫（WHERE
+  GENERATING+PUBLISHING）→ 清点 STAGED：0 张有效卡 → FAILED + TASK_ZERO_CARDS
+  （V25-D-23）；≥1 张 → 任务 `AWAITING_CONFIRMATION`（stage=NULL、卡保持 STAGED、
+  ended_at 不写、operation 保持 ACTIVE）——发布由用户 `POST /tasks/{id}/confirm`
+  触发（service 层单事务），park 不变量：AWAITING_CONFIRMATION 任务必有 ≥1 张 STAGED
+  卡，confirm 前对一切用户读不可见。任何阶段失败 → FAILED，STAGED 卡继续隔离，
+  用户侧零部分可见。
 系统级错误（adapter 抛 API_KEY_UNAVAILABLE/GENERATION_FAILED）→ 任务 FAILED（4.1），
 failure_stage 按 task.stage 归因（PLANNING/GENERATING/SCORING/PUBLISHING）；
 批次级失败（Schema 重试达上限）→ 批次 SKIPPED，任务继续（4.2）。V4 fake 不再用于任务执行
@@ -52,7 +54,6 @@ from infra.db.models import ApiKey, Batch, Card, KnowledgePoint, Task
 from infra.db.session import format_utc
 from infra.llm.crypto import decrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient, LlmChatClient
-from infra.metrics import GENERATION_TASKS_DURATION_SECONDS, GENERATION_TASKS_TOTAL
 from services.generation.batches import plan_batches, process_next_batch
 from services.generation.ledger import mark_stale_unknown
 from services.generation.planning_executor import claim_planning_task, run_planning
@@ -67,6 +68,7 @@ from services.tasks.lease import (
     renew_task,
     require_lease,
 )
+from services.tasks.metrics import observe_task_result
 from services.tasks.operations import finish_operation
 from services.tasks.service import complete_samples
 
@@ -81,25 +83,6 @@ def _require_str(value: str | None, message: str) -> str:
     if value is None:
         raise AppError(ErrorCode.GENERATION_FAILED, message)
     return value
-
-
-def _observe_task_result(task: Task, result: str) -> None:
-    """8.3 generation_tasks_total(result) + generation_tasks_duration_seconds（started_at→ended_at）。"""
-    GENERATION_TASKS_TOTAL.labels(result=result).inc()
-    seconds = _duration_seconds(task.started_at, task.ended_at)
-    if seconds is not None:
-        GENERATION_TASKS_DURATION_SECONDS.observe(seconds)
-
-
-def _duration_seconds(start: str | None, end: str | None) -> float | None:
-    """UTC ISO 字符串（format_utc 格式）耗时秒数；解析失败/缺失 → None（不观测）。"""
-    if not start or not end:
-        return None
-    try:
-        seconds = datetime.fromisoformat(end) - datetime.fromisoformat(start)
-    except ValueError:
-        return None
-    return max(seconds.total_seconds(), 0.0)
 
 
 def _decrypt_api_key(session: Session, *, task: Task, settings: Settings) -> str:
@@ -173,16 +156,17 @@ def _publish_guard_update(
     return result.rowcount == 1
 
 
-def publish_generated_cards(
-    session: Session, *, task: Task, lease: TaskLease | None = None
-) -> None:
-    """整批原子发布（4.1）：同一短事务内——CAS 门卫（GENERATING+PUBLISHING）→ 校验
-    ≥1 张 STAGED 卡 → 全部置 PUBLISHED → 任务 COMPLETED + generated_card_count
-    （只统计已发布卡）；0 张有效卡 → 任务 FAILED + TASK_ZERO_CARDS（V25-D-23，
-    不显示"完成 0 张"）。调用方 commit；并发 worker 已发布 → rowcount=0 不覆盖不复活。
+def park_generated_cards(session: Session, *, task: Task, lease: TaskLease | None = None) -> None:
+    """生成结果 park（4.1 确认闭环）：同一短事务内——CAS 门卫（GENERATING+PUBLISHING）→
+    清点 STAGED：0 张 → 任务 FAILED + TASK_ZERO_CARDS（V25-D-23，不显示"完成 0 张"，
+    STAGED 卡继续隔离）；≥1 张 → 任务 `AWAITING_CONFIRMATION`（stage=NULL、卡保持
+    STAGED、ended_at 不写、operation 保持 ACTIVE），发布由用户 `POST /tasks/{id}/confirm`
+    单事务触发（service 层）。调用方 commit；并发 worker 已转移 → rowcount=0 不覆盖
+    不复活。
 
-    发布无 LLM 调用——纯短事务（R-17 不持锁义务天然满足）；失败路径同样条件更新，
-    不信任 identity map（并发转移不覆盖）。
+    park 无 LLM 调用——纯短事务（R-17 不持锁义务天然满足）；零卡失败路径同样条件
+    更新，不信任 identity map（并发转移不覆盖）。park 不变量：AWAITING_CONFIRMATION
+    任务必有 ≥1 张 STAGED 卡（confirm 只做发布，不做业务校验）。
     """
     now = format_utc(SystemClock().now_utc())
     if not _publish_guard_update(session, task=task, values={"updated_at": now}, lease=lease):
@@ -226,27 +210,19 @@ def publish_generated_cards(
             )
             if task.project_id is not None:
                 bump_project_version(session, project_id=task.project_id, now=now)  # 4.5
-            _observe_task_result(task, "FAILED")  # 8.3（R1 M-3）：0 卡整体失败也计数
+            observe_task_result(task, "FAILED")  # 8.3（R1 M-3）：0 卡整体失败也计数
             logger.warning(
                 "task publish failed, zero valid cards",
                 extra={"task_id": task.task_id, "error_code": ErrorCode.TASK_ZERO_CARDS.value},
             )
         return
-    session.execute(
-        update(Card)
-        .where(
-            Card.source_task_id == task.task_id,
-            Card.publication_state == "STAGED",
-        )
-        .values(publication_state="PUBLISHED")
-    )
     if _publish_guard_update(
         session,
         task=task,
         values={
-            "status": "COMPLETED",
+            "status": "AWAITING_CONFIRMATION",
+            "stage": None,
             "generated_card_count": staged,
-            "ended_at": now,
             "resumable": 0,
             "updated_at": now,
             "claimed_by": None,
@@ -257,12 +233,11 @@ def publish_generated_cards(
         lease=lease,
     ):
         session.refresh(task)
-        finish_operation(session, task_id=task.task_id, status="COMPLETED", now=now)
         if task.project_id is not None:
             bump_project_version(session, project_id=task.project_id, now=now)  # 4.5
         logger.info(
-            "task published",
-            extra={"task_id": task.task_id, "published_cards": staged},
+            "task parked awaiting confirmation",
+            extra={"task_id": task.task_id, "staged_cards": staged},
         )
 
 
@@ -361,7 +336,7 @@ def _fail_task(
     )
     if task.project_id is not None:
         bump_project_version(session, project_id=task.project_id, now=now)  # 4.5
-    _observe_task_result(task, "FAILED")  # 8.3：系统级失败也计数（仅实际转移时）
+    observe_task_result(task, "FAILED")  # 8.3：系统级失败也计数（仅实际转移时）
 
 
 def _complete_sample_task(
@@ -699,7 +674,7 @@ def process_active_tasks(
                 session.commit()
             session.info.pop(_lease_info_key(task.task_id), None)
     # 评分 worker 扫描：GENERATING + stage IN (SCORING, PUBLISHING)（spec §8 + 4.1：
-    # 心跳超时孤儿可 CAS 接管——SCORING 重跑评分、PUBLISHING 直接发布；心跳新鲜 =
+    # 心跳超时孤儿可 CAS 接管——SCORING 重跑评分、PUBLISHING 直接 park；心跳新鲜 =
     # 在途 worker 存活，跳过）
     scoring_tasks = session.scalars(
         select(Task)
@@ -838,14 +813,13 @@ def _execute_task(
             session.refresh(task)
             run_scoring_stage(session, task=task, settings=settings, client=client)
             session.refresh(task)
-            # 原子发布（4.1）：run_scoring_stage 终态条件更新 SCORING → PUBLISHING 成功后，
-            # 同一短事务校验 STAGED 卡 → 全部 PUBLISHED → COMPLETED（或 TASK_ZERO_CARDS FAILED）；
-            # stage 未到 PUBLISHING（并发转移）→ 不发布，终态由其他 worker 决定
+            # 生成结果 park（4.1 确认闭环）：run_scoring_stage 条件更新 SCORING → PUBLISHING
+            # 成功后，同短事务清点 STAGED → 任务 AWAITING_CONFIRMATION（卡保持 STAGED，发布
+            # 由用户 confirm 触发）；stage 未到 PUBLISHING（并发转移）→ 不 park，落点由其他
+            # worker 决定。COMPLETED 观测移至 confirm（service 层）
             if task.status == "GENERATING" and task.stage == "PUBLISHING":
-                publish_generated_cards(session, task=task, lease=lease)
+                park_generated_cards(session, task=task, lease=lease)
                 session.refresh(task)
-            if task.status == "COMPLETED":
-                _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
     finally:
         client.close()
 
@@ -862,9 +836,9 @@ def _execute_scoring_task(
     GENERATING+SCORING/PUBLISHING 任务可被接管（新鲜心跳 = 在途 worker 存活，跳过不干预）。
 
     - SCORING：CAS 条件更新接管 → mark_stale_unknown（遗留 STARTED → UNKNOWN，仍计上限）
-      → 重跑 run_scoring_stage（账本为已尝试游标：已尝试组跳过、未尝试组续跑）→ 原子发布。
-    - PUBLISHING（崩溃于 SCORING→PUBLISHING 提交与发布之间）：CAS 条件更新接管 →
-      直接执行原子发布（无 LLM 调用）。
+      → 重跑 run_scoring_stage（账本为已尝试游标：已尝试组跳过、未尝试组续跑）→ park。
+    - PUBLISHING（崩溃于 SCORING→PUBLISHING 提交与 park 之间）：CAS 条件更新接管 →
+      直接执行 park（无 LLM 调用）——接管落点=待确认，不自动发布。
     返回实际行动数（1 = 接管，0 = 跳过）。"""
     _require_str(task.updated_at, "任务数据不完整（缺少时间戳）")
     lease = lease or _lease_for(session, task.task_id)
@@ -901,11 +875,9 @@ def _execute_scoring_task(
         if result.rowcount == 0:
             return 0  # 已被其他 worker 接管或状态已转移
         session.refresh(task)
-        session.commit()  # 接管心跳提交（发布无 LLM，不持写事务义务）
-        publish_generated_cards(session, task=task, lease=lease)
+        session.commit()  # 接管心跳提交（park 无 LLM，不持写事务义务）
+        park_generated_cards(session, task=task, lease=lease)
         session.refresh(task)
-        if task.status == "COMPLETED":
-            _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
         return 1
     result = cast(
         CursorResult[Any],
@@ -949,13 +921,11 @@ def _execute_scoring_task(
     try:
         run_scoring_stage(session, task=task, settings=settings, client=client)
         session.refresh(task)
-        # 原子发布（4.1）：run_scoring_stage 终态条件更新 SCORING → PUBLISHING 成功后
-        # 同短事务发布；stage 未到 PUBLISHING（并发转移）→ 不发布
+        # 生成结果 park（4.1 确认闭环）：run_scoring_stage 条件更新 SCORING → PUBLISHING
+        # 成功后同短事务 park；stage 未到 PUBLISHING（并发转移）→ 不 park
         if task.status == "GENERATING" and task.stage == "PUBLISHING":
-            publish_generated_cards(session, task=task, lease=lease)
+            park_generated_cards(session, task=task, lease=lease)
             session.refresh(task)
-        if task.status == "COMPLETED":
-            _observe_task_result(task, "COMPLETED")  # 8.3：任务结果/耗时上报
     finally:
         client.close()
     return 1

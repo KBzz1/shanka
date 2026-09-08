@@ -29,7 +29,7 @@ from services.generation.batches import plan_batches, process_next_batch
 from services.generation.samples import config_fingerprint
 from services.generation.scoring import enter_scoring_stage, run_scoring_stage
 from services.tasks.executor import _fail_task, process_active_tasks
-from services.tasks.service import delete_task, retry_task, start_task
+from services.tasks.service import confirm_task, delete_task, retry_task, start_task
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
 _SETTINGS = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
@@ -280,7 +280,7 @@ def test_concurrency_heartbeat_updates_updated_at(session_factory: Callable[[], 
     assert task is not None
     assert task.updated_at is not None and created_at is not None
     assert task.updated_at > created_at  # 心跳刷新（批处理后时间推进）
-    assert task.status == "COMPLETED"
+    assert task.status == "AWAITING_CONFIRMATION"  # park（4.1 确认闭环，不自动发布）
 
 
 def test_concurrency_batch_commit_survives_crash(
@@ -552,7 +552,7 @@ def test_concurrency_llm_call_holds_no_write_transaction(
     assert n == 1
     with session_factory() as session:
         task = session.get(Task, task_id)
-        assert task is not None and task.status == "COMPLETED"
+        assert task is not None and task.status == "AWAITING_CONFIRMATION"  # park（不自动发布）
 
 
 def test_concurrency_worker_crash_recovery_single_effect(
@@ -609,6 +609,8 @@ def test_concurrency_worker_crash_recovery_single_effect(
     with session_factory() as session:
         n = process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
+        confirm_task(session, user_id=user, task_id=task_id, now="2026-08-10T01:00:00.000Z")
+        session.commit()
         task = session.get(Task, task_id)
         assert task is not None and task.deck_id is not None
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
@@ -617,15 +619,15 @@ def test_concurrency_worker_crash_recovery_single_effect(
     assert task.generated_card_count == 3
     assert len(cards) == 3
     assert len({c.generation_item_id for c in cards}) == 3  # 无重复卡
-    assert all(c.publication_state == "PUBLISHED" for c in cards)  # 恢复后原子发布
+    assert all(c.publication_state == "PUBLISHED" for c in cards)  # 恢复 park 后确认发布
 
 
 def test_concurrency_publishing_orphan_recovered(
     session_factory: Callable[[], Session],
 ) -> None:
-    """PUBLISHING 孤儿恢复：worker 崩溃于 SCORING→PUBLISHING 提交之后、发布之前
-    → 下一轮扫描（GENERATING+PUBLISHING + 心跳超时）CAS 接管 → 直接发布（无 LLM）
-    → COMPLETED。发布条件更新幂等：不重复发布。"""
+    """PUBLISHING 孤儿恢复：worker 崩溃于 SCORING→PUBLISHING 提交之后、park 之前
+    → 下一轮扫描（GENERATING+PUBLISHING + 心跳超时）CAS 接管 → 直接 park（无 LLM，
+    落点=待确认，**不自动发布**——4.1 确认闭环）。条件更新幂等：不重复处理。"""
     user = _uuid()
     with session_factory() as session:
         task_id = _seed_task(session, user_id=user, n_units=1)
@@ -639,7 +641,7 @@ def test_concurrency_publishing_orphan_recovered(
         assert enter_scoring_stage(session, task_id=task_id, settings=_SETTINGS)
         session.commit()
         run_scoring_stage(session, task=task, settings=_SETTINGS, client=client)
-        session.commit()  # 模拟崩溃于 PUBLISHING 提交后、发布前
+        session.commit()  # 模拟崩溃于 PUBLISHING 提交后、park 前
         task_row = session.get(Task, task_id)
         assert task_row is not None
         assert task_row.status == "GENERATING" and task_row.stage == "PUBLISHING"
@@ -652,17 +654,17 @@ def test_concurrency_publishing_orphan_recovered(
         assert task is not None and task.deck_id is not None
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
     assert n == 1  # 评分 worker 接管 PUBLISHING 孤儿（无 LLM 调用）
-    assert task.status == "COMPLETED"
+    assert task.status == "AWAITING_CONFIRMATION"  # 接管落点=待确认（而非发布）
     assert task.generated_card_count == 1
-    assert [c.publication_state for c in cards] == ["PUBLISHED"]
-    # 幂等：COMPLETED 后再次扫描不再发布/复活
+    assert [c.publication_state for c in cards] == ["STAGED"]  # confirm 前保持 STAGED
+    # 幂等：park 后再次扫描不再处理/复活
     with session_factory() as session:
         n2 = process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
     assert n2 == 0
     with session_factory() as session:
         task = session.get(Task, task_id)
-        assert task is not None and task.status == "COMPLETED"
+        assert task is not None and task.status == "AWAITING_CONFIRMATION"
         assert task.generated_card_count == 1
 
 
@@ -745,10 +747,12 @@ def test_concurrency_retry_after_failure_publishes_replacement(
         )
         session.commit()
         assert started.status == "GENERATING" and started.stage == "PLANNING"
-    # 第二轮：替代任务全流程（规划→生成→评分→原子发布）→ COMPLETED
+    # 第二轮：替代任务全流程（规划→生成→评分→park）→ confirm 发布 COMPLETED
     run_phase["fail_run"] = False  # 替代任务不再注入失败
     with session_factory() as session:
         n = process_active_tasks(session, settings=_SETTINGS, client_factory=factory)
+        session.commit()
+        confirm_task(session, user_id=user, task_id=new_task_id, now="2026-08-10T02:00:00.000Z")
         session.commit()
         replacement = session.get(Task, new_task_id)
         original_row = session.get(Task, original_task_id)
@@ -824,6 +828,10 @@ def test_concurrency_task_delete_cleans_staged_residuals(
         delete_task_id = _seed_task(session, user_id=user, n_units=1)
     with session_factory() as session:
         process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
+        session.commit()
+        # park 后先确认发布（删除仅终态任务可删，4.1 确认闭环）
+        confirm_task(session, user_id=user, task_id=keep_task_id, now="2026-08-10T00:00:00.000Z")
+        confirm_task(session, user_id=user, task_id=delete_task_id, now="2026-08-10T00:00:00.000Z")
         session.commit()
         keep_task = session.get(Task, keep_task_id)
         del_task_row = session.get(Task, delete_task_id)

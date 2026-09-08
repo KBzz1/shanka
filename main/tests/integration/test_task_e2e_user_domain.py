@@ -207,15 +207,20 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
     resp = client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()})
     assert resp.status_code == 200
 
-    # 5. executor 显式扫描 → COMPLETED（COMPACT 2 章 = 6 单元 → 6 卡）
-    final: dict[str, object] = {}
+    # 5. executor 显式扫描 → park 至 AWAITING_CONFIRMATION（4.1 确认闭环）→
+    #    POST confirm 发布 → COMPLETED（COMPACT 2 章 = 6 单元 → 6 卡）
+    parked: dict[str, object] = {}
     for _ in range(10):
         scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
         resp = client.get(f"/tasks/{task_id}", headers=user)
         assert resp.status_code == 200
-        final = resp.json()
-        if final["status"] == "COMPLETED":
+        parked = resp.json()
+        if parked["status"] == "AWAITING_CONFIRMATION":
             break
+    assert parked["status"] == "AWAITING_CONFIRMATION"
+    resp = client.post(f"/tasks/{task_id}/confirm", headers={**user, **_idem()})
+    assert resp.status_code == 200
+    final = resp.json()
     assert final["status"] == "COMPLETED"
     assert final["generated_card_count"] == 32
     assert final["ended_at"] is not None

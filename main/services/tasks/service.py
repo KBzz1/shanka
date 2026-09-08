@@ -1,9 +1,10 @@
-"""tasks/service.py：任务用例（创建/列表/修改/样卡请求/start/abandon/retry/删除 + 七态状态机）。
+"""tasks/service.py：任务用例（创建/列表/修改/样卡请求/start/confirm/复审卡列表/
+abandon/retry/删除 + 八态状态机）。
 
-V2.5（structure-contract 4.1/6.4）：七态 DRAFT / SAMPLE_GENERATING /
-AWAITING_SAMPLE_CONFIRMATION / GENERATING / COMPLETED / FAILED / ABANDONED。
-用户侧无 PAUSED/resume/cancel——执行器内部经租约/心跳恢复，不暴露用户状态
-（resume_task/cancel_task 已删除；abandon 取代取消语义）。
+V2.5（structure-contract 4.1/6.4）：八态 DRAFT / SAMPLE_GENERATING /
+AWAITING_SAMPLE_CONFIRMATION / GENERATING / AWAITING_CONFIRMATION / COMPLETED /
+FAILED / ABANDONED。用户侧无 PAUSED/resume/cancel——执行器内部经租约/心跳恢复，
+不暴露用户状态（resume_task/cancel_task 已删除；abandon 取代取消语义）。
 
 状态门卫集中在本模块（各操作前置状态表 _STATE_GATES）：
 - 请求样卡：仅 DRAFT → SAMPLE_GENERATING；样卡由执行器 worker 后台完成
@@ -12,9 +13,15 @@ AWAITING_SAMPLE_CONFIRMATION / GENERATING / COMPLETED / FAILED / ABANDONED。
   （sample_cards/sample_config_hash/sample_confirmed_at 清空 → DRAFT）。
 - start：仅 AWAITING_SAMPLE_CONFIRMATION，校验 sample_config_hash（失配 →
   409 SAMPLE_STALE）→ GENERATING + internal_stage=PLANNING。
+- confirm：仅 AWAITING_CONFIRMATION → COMPLETED（4.1 确认闭环：发布时点=用户确认，
+  单事务整批 STAGED → PUBLISHED）；前置由执行器 park（executor.park_generated_cards）
+  保证 ≥1 张 STAGED。
+- 任务卡复审列表：仅 AWAITING_CONFIRMATION 可读——确认前唯一 sanctioned 的
+  STAGED 读出口（显式绕过统一可见谓词 3.9）；确认后走 GET /decks/{deck_id}/cards。
 - abandon：仅 DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION → ABANDONED。
-- retry：仅 FAILED → 关联新任务（可沿用已确认样卡）；历史遗留任务（project/file
-  缺失）只读不可重试。
+- retry：仅 FAILED / AWAITING_CONFIRMATION → 关联新任务（FAILED 可沿用已确认样卡；
+  AWAITING_CONFIRMATION 走 supersede 单事务：原任务 ABANDONED(SUPERSEDED) + 硬删
+  STAGED 卡 + 新 DRAFT 不携带样卡）；历史遗留任务（project/file 缺失）只读不可重试。
 - delete：仅终态任务（COMPLETED/FAILED/ABANDONED）；STAGED 残留卡随删除级联清理
   （绝不转无来源可见卡），delete_generated_cards 决定已发布卡去留（保留 →
   卡片 source_task_id SET NULL）。
@@ -53,6 +60,7 @@ from services.generation.validate import validate_config
 from services.pdf.text_chunks import load_pages
 from services.projects.versioning import bump_project_version
 from services.tasks.lease import TaskLease, require_lease
+from services.tasks.metrics import observe_task_result
 from services.tasks.operations import (
     begin_operation,
     bind_operation_task,
@@ -322,19 +330,43 @@ def get_task(session: Session, *, user_id: str, task_id: str) -> Task:
 
 
 def list_tasks(
-    session: Session, *, user_id: str, project_id: str | None = None, status: str | None = None
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str | None = None,
+    status: str | None = None,
+    deck_id: str | None = None,
 ) -> list[Task]:
-    """任务列表（6.4 GET /tasks）：user 域 + 可选 project/status 过滤；project 跨用户
-    → 404；status 非法 → 400。按 created_at 倒序（同毫秒以 task_id 次级键稳定）。"""
+    """任务列表（6.4 GET /tasks）：user 域 + 可选 project/status/deck 过滤（deck 过滤
+    供卡组四态渲染）；project 跨用户 → 404；status 非法 → 400；deck_id 只做过滤不做
+    归属校验（任务本就 user 域，跨用户 deck → 空列表，无泄露）。按 created_at 倒序
+    （同毫秒以 task_id 次级键稳定）。"""
     stmt = select(Task).where(Task.user_id == user_id)
     if project_id is not None:
         _owned_project(session, user_id=user_id, project_id=project_id)
         stmt = stmt.where(Task.project_id == project_id)
+    if deck_id is not None:
+        stmt = stmt.where(Task.deck_id == deck_id)
     if status is not None:
         if status not in {s.value for s in TaskStatus}:
             raise AppError(ErrorCode.VALIDATION_ERROR, "非法任务状态筛选")
         stmt = stmt.where(Task.status == status)
     return list(session.scalars(stmt.order_by(Task.created_at.desc(), Task.task_id.desc())).all())
+
+
+def list_task_cards(session: Session, *, user_id: str, task_id: str) -> list[Card]:
+    """任务生成卡复审列表（6.4 GET /tasks/{task_id}/cards）：仅 AWAITING_CONFIRMATION
+    可读——**确认前唯一 sanctioned 的 STAGED 读出口**（显式绕过统一可见谓词 3.9，
+    除此之外一切用户侧查询仍只可见 PUBLISHED）；确认后走 GET /decks/{deck_id}/cards。
+    按 position, card_id 排序（复审页展示序）。"""
+    task = _owned_task(session, user_id=user_id, task_id=task_id)
+    if task.status != TaskStatus.AWAITING_CONFIRMATION.value:
+        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "仅待确认任务可查看生成卡")
+    return list(
+        session.scalars(
+            select(Card).where(Card.source_task_id == task_id).order_by(Card.position, Card.card_id)
+        ).all()
+    )
 
 
 def update_task(
@@ -517,6 +549,51 @@ def start_task(session: Session, *, user_id: str, task_id: str, now: str) -> Tas
     return task
 
 
+def confirm_task(session: Session, *, user_id: str, task_id: str, now: str) -> Task:
+    """确认生成结果并发布（6.4 POST /tasks/{task_id}/confirm；4.1 确认闭环）：仅
+    AWAITING_CONFIRMATION → COMPLETED，单事务——CAS 转移（含 ended_at，park 时刻不写）
+    → 整批 STAGED → PUBLISHED（generated_card_count=实际发布数）→ operation
+    COMPLETED(USER_CONFIRMED) → 项目版本号 bump。发布瞬间即进入调度（ReviewState 行
+    生成期已存在，翻转 publication_state 后立即对队列/计划/统计可见，无需调度回填）。
+
+    不做业务校验——"≥1 张 STAGED"由 park 不变量保证（executor.park_generated_cards）；
+    确认前这些卡对一切用户读不可见（3.9 统一可见谓词）。并发：异键双端同时确认 →
+    后者 CAS 失败 409；confirm 与 retry 竞态 → 都 CAS 于 AWAITING_CONFIRMATION，
+    串行化后一方 409，无中间态。
+    """
+    task = _owned_task(session, user_id=user_id, task_id=task_id)
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(Task)
+            .where(
+                Task.task_id == task_id,
+                Task.user_id == user_id,
+                Task.status == TaskStatus.AWAITING_CONFIRMATION.value,
+            )
+            .values(status="COMPLETED", ended_at=now, updated_at=now)
+        ),
+    )
+    if result.rowcount != 1:
+        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "仅待确认任务可确认发布")
+    published = cast(
+        CursorResult[Any],
+        session.execute(
+            update(Card)
+            .where(Card.source_task_id == task_id, Card.publication_state == "STAGED")
+            .values(publication_state="PUBLISHED")
+        ),
+    )
+    task.generated_card_count = int(published.rowcount)
+    session.flush()
+    finish_operation(session, task_id=task_id, status="COMPLETED", now=now, reason="USER_CONFIRMED")
+    if task.project_id is not None:
+        bump_project_version(session, project_id=task.project_id, now=now)  # 4.5
+    session.refresh(task)
+    observe_task_result(task, "COMPLETED")  # 8.3：发布时点=用户确认，完成观测自 executor 移此
+    return task
+
+
 def abandon_task(session: Session, *, user_id: str, task_id: str, now: str) -> Task:
     """abandon（4.1）：仅正式生成前状态（DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_
     CONFIRMATION）→ ABANDONED 终态；SAMPLE_GENERATING 时后台样卡写入无害（CAS）。"""
@@ -560,13 +637,20 @@ def retry_task(
     settings: Settings | None = None,
     operation_key: str | None = None,
 ) -> Task:
-    """失败重试（6.4/PRD V25-GEN-FR-07）：仅 FAILED；创建关联新任务（retry_of_task_id
-    指向原任务），复制项目/PDF/牌组/章节/配置。已确认样卡沿用（正式生成失败 → 新任务
-    直接可 start）；无已确认样卡（样卡阶段失败）→ 新任务 DRAFT 重新生成样卡。
-    原失败任务保留；历史遗留任务（project/file 缺失）只读不可重试。"""
+    """重新生成（6.4/PRD V25-GEN-FR-07）：仅 FAILED / AWAITING_CONFIRMATION。
+
+    - FAILED（不变）：创建关联新任务（retry_of_task_id 指向原任务），复制项目/PDF/
+      牌组/章节/配置；已确认样卡沿用（正式生成失败 → 新任务直接可 start），无已确认
+      样卡（样卡阶段失败）→ 新任务 DRAFT 重新生成样卡。原失败任务保留。
+    - AWAITING_CONFIRMATION（supersede，单事务）：CAS 原任务 → ABANDONED
+      （completion_reason='SUPERSEDED'）+ ended_at → 硬删其全部 STAGED 卡（此时不可
+      能有学习记录）→ 新建 DRAFT 任务（同章节同配置快照，**不携带样卡**——重走样卡
+      流程）。确认后（COMPLETED）不可重新生成（保护学习记录，状态门卫 409）。
+    历史遗留任务（project/file 缺失）只读不可重试。"""
     original = _owned_task(session, user_id=user_id, task_id=task_id)
-    if original.status != TaskStatus.FAILED.value:
-        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "仅失败任务可重试")
+    supersede = original.status == TaskStatus.AWAITING_CONFIRMATION.value
+    if original.status not in (TaskStatus.FAILED.value, TaskStatus.AWAITING_CONFIRMATION.value):
+        raise AppError(ErrorCode.TASK_STATE_CONFLICT, "仅失败或待确认任务可重试")
     if original.project_id is None:
         raise AppError(ErrorCode.TASK_STATE_CONFLICT, "历史遗留任务不可重试")
     if original.deck_id is None:
@@ -605,12 +689,40 @@ def retry_task(
             deck_id=original.deck_id,
             chapter_snapshot=snapshot,
             generation_config=config.model_dump(),
-            behavior_version="generation-retry-v1",
+            behavior_version="generation-retry-v2",
         ),
         now=now,
     )
     if existing_task is not None:
         return existing_task
+    if supersede:
+        # 单事务 supersede（确认前重新生成）：CAS 原任务 ABANDONED + 硬删 STAGED 卡。
+        # 重放路径在上方 existing_task 短路返回，不会二次弃置。
+        if not _cas_transition(
+            session,
+            task_id=task_id,
+            from_statuses=frozenset({TaskStatus.AWAITING_CONFIRMATION.value}),
+            values={
+                "status": "ABANDONED",
+                "stage": None,
+                "completion_reason": "SUPERSEDED",
+                "ended_at": now,
+                "resumable": 0,
+                "updated_at": now,
+                "claimed_by": None,
+                "lease_token": None,
+                "lease_until": None,
+                "lease_version": Task.lease_version + 1,
+            },
+        ):
+            raise AppError(ErrorCode.TASK_STATE_CONFLICT, "任务状态刚刚变化，请刷新后重试")
+        for card in session.scalars(
+            select(Card).where(Card.source_task_id == task_id, Card.publication_state == "STAGED")
+        ).all():
+            session.delete(card)  # 待确认卡从未可见 → 不可能有学习记录，直接硬删
+        session.flush()
+        finish_operation(session, task_id=task_id, status="ABANDONED", now=now, reason="SUPERSEDED")
+        bump_project_version(session, project_id=original.project_id, now=now)  # 4.5
     new_task = Task(
         task_id=_uuid4(),
         user_id=user_id,
@@ -629,11 +741,13 @@ def retry_task(
         operation_id=operation.operation_id,
     )
     if (
-        original.sample_confirmed_at is not None
+        not supersede
+        and original.sample_confirmed_at is not None
         and original.sample_config_hash is not None
         and original.sample_cards
     ):
-        # 沿用已确认样卡（配置原样复制 → hash 一致）：新任务待确认可直接 start
+        # 沿用已确认样卡（仅 FAILED 路径；配置原样复制 → hash 一致）：新任务待确认可直接
+        # start；supersede 重走样卡流程（新任务恒 DRAFT，不复制样卡字段）
         new_task.status = TaskStatus.AWAITING_SAMPLE_CONFIRMATION.value
         new_task.sample_cards = original.sample_cards
         new_task.sample_config_hash = original.sample_config_hash

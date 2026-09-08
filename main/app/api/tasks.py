@@ -1,11 +1,14 @@
 """任务接口（structure-contract 6.4；openapi /projects/{project_id}/tasks + /tasks）。
 handler 只做 HTTP 映射。
 
-V2.5 七态生命周期：POST /projects/{project_id}/tasks（DRAFT 自动保存）→
+V2.5 八态生命周期：POST /projects/{project_id}/tasks（DRAFT 自动保存）→
 POST /tasks/{task_id}/samples（SAMPLE_GENERATING，worker 后台完成）→
-POST /tasks/{task_id}/start（校验样卡 hash → GENERATING）→ 轮询 GET → 终态；
-PATCH 配置变更（样卡失效 → DRAFT）；abandon（正式生成前）；retry（FAILED 关联
-新任务）；DELETE（终态任务）。用户侧无 pause/resume/cancel（执行器内部租约恢复）。
+POST /tasks/{task_id}/start（校验样卡 hash → GENERATING）→ worker 生成完毕 park 至
+AWAITING_CONFIRMATION（卡保持 STAGED）→ POST /tasks/{task_id}/confirm（确认发布 →
+COMPLETED）或 retry（待确认 supersede / FAILED 重试）；GET /tasks/{task_id}/cards
+（复审页只读数据源，仅待确认可读）；PATCH 配置变更（样卡失效 → DRAFT）；
+abandon（正式生成前）；DELETE（终态任务）。用户侧无 pause/resume/cancel
+（执行器内部租约恢复）。
 
 写操作幂等接线：handler 内 execute_idempotent(session, ...) → session.commit()，
 幂等记录与业务副作用同事务（get_db_session 只负责创建/关闭，不提交）。
@@ -27,18 +30,22 @@ from app.middleware.idempotency import (
     get_idempotency_key,
     request_body_hash,
 )
+from app.schemas.cards import Card as CardSchema
 from app.schemas.tasks import Batch as BatchSchema
 from app.schemas.tasks import Task as TaskSchema
 from app.schemas.tasks import TaskCreateRequest, TaskUpdateRequest
 from infra.clock import SystemClock
 from infra.db.models import Batch
 from infra.db.session import format_utc, get_db_session
+from services.cards.service import card_view
 from services.generation.cost import estimate_cost
 from services.tasks.service import (
     abandon_task,
+    confirm_task,
     create_task,
     delete_task,
     get_task,
+    list_task_cards,
     list_tasks,
     request_samples,
     retry_task,
@@ -113,13 +120,16 @@ def list_tasks_endpoint(
     session: Annotated[Session, Depends(get_db_session)],
     project_id: Annotated[str | None, Query()] = None,
     status: Annotated[str | None, Query()] = None,
+    deck_id: Annotated[str | None, Query()] = None,
 ) -> JSONResponse:
-    """学习页任务区与历史列表（6.4）：user 域 + 可选 project/status 过滤。"""
+    """学习页任务区与历史列表（6.4）：user 域 + 可选 project/status/deck 过滤
+    （deck 供前端按卡组渲染任务四态）。"""
     tasks = list_tasks(
         session,
         user_id=request.state.principal.user_id,
         project_id=project_id,
         status=status,
+        deck_id=deck_id,
     )
     return JSONResponse(content={"items": [task_view(t) for t in tasks]})
 
@@ -192,6 +202,25 @@ def start_task_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
+@router.post("/tasks/{task_id}/confirm", response_model=TaskSchema)
+def confirm_task_endpoint(
+    request: Request,
+    task_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """确认生成结果并发布（4.1 确认闭环）：仅 AWAITING_CONFIRMATION → COMPLETED，
+    单事务整批 STAGED → PUBLISHED；发布后卡片进入复习队列/今日计划/统计。"""
+    user_id: str = request.state.principal.user_id
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        task = confirm_task(session, user_id=user_id, task_id=task_id, now=_now())
+        return 200, task_view(task)
+
+    _replayed, status, body = _write(session, request, path=f"/tasks/{task_id}/confirm", biz=biz)
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
 @router.post("/tasks/{task_id}/abandon", response_model=TaskSchema)
 def abandon_task_endpoint(
     request: Request,
@@ -216,7 +245,9 @@ def retry_task_endpoint(
     task_id: str,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    """失败任务创建关联新任务（可沿用已确认样卡；retry_of_task_id 指向原任务）。"""
+    """重新生成：FAILED → 关联新任务（可沿用已确认样卡；retry_of_task_id 指向原任务）；
+    AWAITING_CONFIRMATION → 单事务 supersede（原任务 ABANDONED/SUPERSEDED + 硬删
+    STAGED 卡 + 新 DRAFT 不携带样卡）。"""
     user_id: str = request.state.principal.user_id
     settings: Settings = request.app.state.settings
 
@@ -259,6 +290,18 @@ def delete_task_endpoint(
     _replayed, status, _body = _write(session, request, path=f"/tasks/{task_id}", biz=biz)
     session.commit()
     return Response(status_code=status)
+
+
+@router.get("/tasks/{task_id}/cards", response_model=dict[str, list[CardSchema]])
+def list_task_cards_endpoint(
+    request: Request,
+    task_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """卡片列表复审页数据源（6.4）：仅待确认任务可读其生成卡（STAGED 只读出口，
+    确认后走 GET /decks/{deck_id}/cards）。"""
+    cards = list_task_cards(session, user_id=request.state.principal.user_id, task_id=task_id)
+    return JSONResponse(content={"items": [card_view(card) for card in cards]})
 
 
 @router.get("/tasks/{task_id}/batches", response_model=dict[str, list[BatchSchema]])

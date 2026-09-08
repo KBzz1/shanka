@@ -3,7 +3,7 @@
 Task 视图：selected_chapters 为 Chapter 对象数组快照（契约 3.4/3.6，章节删除后名称可还原）。
 KnowledgePoint 为内部资源（契约 3.6；本期无独立接口，经任务详情/批次观测间接呈现）——
 视图模型作为守卫锚点（红线 1：app/schemas ↔ openapi 三处一致）。
-V2.5：七态 + internal_stage + project_id/retry_of_task_id/样卡持久化字段；
+V2.5：八态 + internal_stage + project_id/retry_of_task_id/样卡持久化字段；
 TaskCreateRequest 的 project_id 取自路径（openapi 描述），file_id 由项目派生。
 """
 
@@ -59,7 +59,7 @@ class KnowledgePoint(BaseModel):
 
 
 class Task(BaseModel):
-    """任务视图（openapi Task；structure-contract 3.4，V2.5 七态）。"""
+    """任务视图（openapi Task；structure-contract 3.4，V2.5 八态）。"""
 
     task_id: str
     project_id: str | None
@@ -67,8 +67,10 @@ class Task(BaseModel):
     deck_id: str | None
     retry_of_task_id: str | None = None
     operation_id: str | None = None
-    status: str  # V2.5 七态（DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION/GENERATING/COMPLETED/FAILED/ABANDONED）
-    internal_stage: str | None = None  # PLANNING/GENERATING/SCORING/PUBLISHING（运行期观测）
+    status: str  # V2.5 八态（DRAFT/SAMPLE_GENERATING/AWAITING_SAMPLE_CONFIRMATION/GENERATING/AWAITING_CONFIRMATION/COMPLETED/FAILED/ABANDONED）
+    internal_stage: str | None = (
+        None  # PLANNING/GENERATING/SCORING/PUBLISHING（运行期观测；AWAITING_CONFIRMATION 恒 null）
+    )
     selected_chapters: list[Chapter]
     generation_config: GenerationConfig
     sample_cards: list[SampleCard] | None = None
@@ -78,7 +80,9 @@ class Task(BaseModel):
     generated_card_count: int
     total_batch_count: int | None = None
     completed_batch_count: int | None = None
-    completion_reason: str | None = None  # NO_GENERATION_UNITS 等空单元三分支（spec §6.4）
+    completion_reason: str | None = (
+        None  # NO_GENERATION_UNITS（空单元三分支）/SUPERSEDED（待确认被重新生成替代）
+    )
     skipped_planning_group_count: int  # 部分规划组失败被跳过的组数（spec §6.4）
     resumable: bool
     failure_stage: str | None = None  # PLANNING/GENERATING/SCORING/PUBLISHING

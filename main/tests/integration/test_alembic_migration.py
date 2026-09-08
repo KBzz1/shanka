@@ -203,6 +203,47 @@ def _unique_constraint_column_sets(conn: Connection, table: str) -> list[set[str
     return sets
 
 
+def test_alembic_tasks_status_domain_eight_states(alembic_env: tuple[Config, Path]) -> None:
+    """3e7b9d2c5f14：生产版 ck_tasks_status_domain 为八态（含 AWAITING_CONFIRMATION），
+    不含 legacy PENDING/RUNNING/PAUSED；CHECK 真实拦截非法状态写入（行为验证）。"""
+    from sqlalchemy.exc import IntegrityError
+
+    config, db_path = alembic_env
+    command.upgrade(config, "head")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        sql_text = conn.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'")
+        ).scalar()
+    assert sql_text is not None
+    for state in (
+        "DRAFT",
+        "SAMPLE_GENERATING",
+        "AWAITING_SAMPLE_CONFIRMATION",
+        "GENERATING",
+        "AWAITING_CONFIRMATION",
+        "COMPLETED",
+        "FAILED",
+        "ABANDONED",
+    ):
+        assert f"'{state}'" in sql_text, f"八态缺 {state}"
+    for legacy in ("PENDING", "RUNNING", "PAUSED"):
+        assert f"'{legacy}'" not in sql_text, f"生产约束不应接受 legacy {legacy}"
+    # 行为验证：AWAITING_CONFIRMATION 可写入、legacy PAUSED 被 CHECK 拒绝
+    insert_base = (
+        "INSERT INTO tasks (task_id, status, selected_chapters, generation_config, "
+        "generated_card_count, resumable, created_at, updated_at) "
+        "VALUES ('t-await', 'AWAITING_CONFIRMATION', '[]', '{}', 1, 0, "
+        "'2026-09-08T00:00:00.000Z', '2026-09-08T00:00:00.000Z')"
+    )
+    with engine.begin() as conn:
+        conn.execute(text(insert_base))
+    with engine.begin() as conn, pytest.raises(IntegrityError):
+        conn.execute(
+            text(insert_base.replace("'t-await', 'AWAITING_CONFIRMATION'", "'t-legacy', 'PAUSED'"))
+        )
+
+
 def _pk_column_order(conn: Connection, table: str) -> list[str]:
     """PRAGMA table_info 按主键序号（第 6 列，1-based）升序取列名 = 复合主键列序。"""
     rows = [r for r in conn.execute(text(f"PRAGMA table_info('{table}')")) if r[5]]

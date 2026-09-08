@@ -171,18 +171,18 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `project_id` | uuid | 新任务必填 | 归属学习项目;迁移前已失去 PDF 的终态历史任务可为 null(只读历史,不可重试) |
 | `file_id` | uuid | 新任务必填 | 任务创建时锁定的 PDF 资料(3.2a);纯文本项目任务为 null;删除被任务引用的资料时任务被服务端静默取消 |
 | `deck_id` | uuid | 新任务必填 | 目标牌组,必须属于同一项目;删除牌组后置 `null`(任务保留) |
-| `retry_of_task_id` | uuid | ✗ | 失败重试关联:只指向同用户失败任务 |
-| `status` | enum | ✓ | 七态,见 4.1 |
-| `internal_stage` | enum | ✗ | `PLANNING` / `GENERATING` / `SCORING` / `PUBLISHING`,仅运行期内部观测,不直接作为用户状态 |
+| `retry_of_task_id` | uuid | ✗ | 重新生成关联:只指向同用户 FAILED/AWAITING_CONFIRMATION 任务 |
+| `status` | enum | ✓ | 八态,见 4.1 |
+| `internal_stage` | enum | ✗ | `PLANNING` / `GENERATING` / `SCORING` / `PUBLISHING`,仅运行期内部观测,不直接作为用户状态;`AWAITING_CONFIRMATION` 恒 null |
 | `selected_chapters` | Chapter[] | ✓ | 开始正式生成前冻结快照(快照冻结语义见 4.1) |
 | `generation_config` | GenerationConfig | ✓ | 任务独立配置,见 3.5 |
 | `sample_cards` | SampleCard[] | ✗ | 持久化 1~3 张样卡;配置变化时清空(见 4.1) |
 | `sample_config_hash` | string | ✗ | 样卡对应的配置指纹,防止确认过期样卡 |
 | `sample_confirmed_at` | datetime | ✗ | 样卡确认时间 |
-| `generated_card_count` | int | ✓ | 只统计已发布卡;失败任务为 0 |
+| `generated_card_count` | int | ✓ | 只统计已发布卡;失败任务为 0(park 时点为 STAGED 清点数,confirm 后=实际发布数) |
 | `total_batch_count` / `completed_batch_count` | int \| null | ✗ | 批次进度观测;规划未完成时为 null |
 | `cursor` | TaskCursor | ✗ | 断点续跑游标(内部租约恢复判定用);null 表示从头开始 |
-| `completion_reason` | string | ✗ | 终态补充说明:`NO_GENERATION_UNITS`(全组规划成功但 0 个合法单元的业务空结果,任务 COMPLETED) |
+| `completion_reason` | string | ✗ | 终态补充说明:`NO_GENERATION_UNITS`(全组规划成功但 0 个合法单元的业务空结果,任务 COMPLETED);`SUPERSEDED`(待确认任务被重新生成替代,任务 ABANDONED) |
 | `skipped_planning_group_count` | int | ✓ | 部分规划组失败被跳过的组数(仅部分成功时 > 0) |
 | `resumable` | bool | ✓ | 内部租约恢复判定(只读观测;用户侧无 resume API) |
 | `error_code` | string | ✗ | 用户安全失败码 |
@@ -583,7 +583,7 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 
 ## 4. 状态机
 
-### 4.1 GenerationTask(V2.5 七态)
+### 4.1 GenerationTask(V2.5 八态)
 
 ```text
 POST /projects/{project_id}/tasks → DRAFT(自动保存,创建即返回,幂等保持)
@@ -591,8 +591,10 @@ DRAFT ──请求样卡──→ SAMPLE_GENERATING ──成功──→ AWAITI
 DRAFT | SAMPLE_GENERATING | AWAITING_SAMPLE_CONFIRMATION ──配置变更──→ DRAFT(样卡清空、hash 置空)
 DRAFT | SAMPLE_GENERATING | AWAITING_SAMPLE_CONFIRMATION ──abandon──→ ABANDONED
 AWAITING_SAMPLE_CONFIRMATION ──start(校验 sample_config_hash)──→ GENERATING
-GENERATING ──整批成功发布──→ COMPLETED(generated_card_count=最终发布数)
+GENERATING ──生成完毕 park(≥1 张 STAGED)──→ AWAITING_CONFIRMATION(卡保持 STAGED、ended_at 不写)
 GENERATING ──任一失败──→ FAILED(零部分可见)
+AWAITING_CONFIRMATION ──confirm──→ COMPLETED(单事务整批 STAGED→PUBLISHED;generated_card_count=实际发布数)
+AWAITING_CONFIRMATION ──retry──→ ABANDONED(SUPERSEDED)+ 同事务硬删 STAGED 卡 + 新任务 DRAFT(不携带样卡,重走样卡流程)
 FAILED ──retry──→ 新任务 DRAFT(retry_of_task_id 指向原任务;正式生成失败可沿用已确认样卡)
 ```
 
@@ -600,8 +602,9 @@ FAILED ──retry──→ 新任务 DRAFT(retry_of_task_id 指向原任务;正
 - **样卡生成**:`POST /tasks/{task_id}/samples` 持久化生成 1~3 张样卡(只为比例>0 的难度各 1 张),写入 `sample_config_hash`(配置指纹);幂等键防重复触发。比例全 0 为非法配置(`INVALID_PREFERENCES` 语义,创建/修改时即拒绝)。
 - **start 校验**:`POST /tasks/{task_id}/start` 校验当前配置 hash 与 `sample_config_hash` 一致(不一致 → `409 SAMPLE_STALE`)且样卡存在,置 `sample_confirmed_at` 并进入 `GENERATING`。
 - **内部阶段**:`internal_stage` 依次 `PLANNING → GENERATING → SCORING → PUBLISHING`,仅为运行期观测,不直接作为用户状态。规划阶段语义沿用:worker CAS 抢占,同一短事务内按快照 `chapter_id` 重读章节最新 `name/start_page/end_page` 覆盖并冻结为规划快照;所选章节已删除或已不属于该 PDF → 任务 `FAILED`(`failure_stage=PLANNING`,内部原因区分 `CHAPTER_SNAPSHOT_STALE`)。
-- **STAGED 隔离与整批发布**:正式生成写入的卡均为 `STAGED`(可见谓词 3.9 排除);发布在同一短事务内校验至少一张合法卡 → 全部置 `PUBLISHED` → 任务 `COMPLETED` + `generated_card_count`;任何阶段失败 → 任务 `FAILED`,`STAGED` 卡继续隔离,用户侧零部分可见。0 张有效卡整体失败(`TASK_ZERO_CARDS`,V25-D-23)。
-- **失败重试**:`POST /tasks/{task_id}/retry` 只允许失败任务,创建关联新任务(复制已确认配置;正式生成失败可沿用已确认样卡),原失败任务保留并显示关联(PRD 5.13)。
+- **STAGED 隔离与确认发布**:正式生成写入的卡均为 `STAGED`(可见谓词 3.9 排除)。**发布时点=用户确认**:生成完毕的任务先 park 至 `AWAITING_CONFIRMATION`(同一短事务内校验至少一张合法卡;卡保持 `STAGED`、`ended_at` 不写、operation 保持 `ACTIVE`,park 不变量=待确认任务必有 ≥1 张 `STAGED` 卡),用户 `POST /tasks/{id}/confirm` 后单事务整批置 `PUBLISHED` → 任务 `COMPLETED` + `generated_card_count` + `ended_at`。未确认期间卡组不进今日计划/复习队列/统计/卡组计数(既有可见谓词天然覆盖,跨端一致)。PUBLISHING 孤儿(在途 worker 崩溃)被接管后落点=待确认(不自动发布)。任何阶段失败 → 任务 `FAILED`,`STAGED` 卡继续隔离,用户侧零部分可见。0 张有效卡在 park 时点整体失败(`TASK_ZERO_CARDS`,V25-D-23,不经过待确认)。
+- **确认前只读复审**:`GET /tasks/{task_id}/cards` 是确认前唯一 sanctioned 的 `STAGED` 读出口(仅 `AWAITING_CONFIRMATION` 可读,按 `position, card_id` 排序);确认后走 `GET /decks/{deck_id}/cards`。STAGED 卡不开放 PATCH/DELETE(逐卡编辑/删除仅在确认后经卡组卡片列表提供)。
+- **失败与重新生成**:`POST /tasks/{task_id}/retry` 允许 `FAILED`(原语义:创建关联新任务,复制已确认配置;正式生成失败可沿用已确认样卡,原失败任务保留)与 `AWAITING_CONFIRMATION`(supersede 单事务:CAS 原任务 `ABANDONED`+`completion_reason='SUPERSEDED'`+`ended_at` → 硬删其全部 `STAGED` 卡(此时不可能有学习记录) → 新建 `DRAFT` 任务(同章节同配置快照,**不携带样卡**,重走样卡流程))。确认后(`COMPLETED`)不可重新生成(保护学习记录,409)。
 - **用户侧无暂停/取消**:`PAUSED`/`resume`/`cancel` 用户 API 全部删除;执行器内部恢复经同一状态的租约/心跳重新抢占,不暴露用户状态。历史 `PAUSED` 任务迁为 `FAILED` 并写 `LEGACY_PAUSED_TASK`(5.2)。
 - **abandon**:`POST /tasks/{task_id}/abandon` 只允许 `DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION`(正式生成前),进入 `ABANDONED` 终态;`SAMPLE_GENERATING` 时后台请求完成后样卡写入无害。
 - **删除处理**:项目或牌组删除不再把任务处理选项暴露给用户；服务端在同一写事务内 CAS 取消全部关联活跃任务（`DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING`），并使旧 worker 的租约/fencing 写入失效。删除预检仍为只读诊断接口，不能成为资源锁。
@@ -646,7 +649,7 @@ NEW → LEARNING → REVIEW →(AGAIN)→ RELEARNING →(GOOD/EASY)→ REVIEW
 | 处理过程 | 状态载体 | 关键跃迁 | 版本责任 |
 | --- | --- | --- | --- |
 | PDF 解析 | `pdf_files.status`(PENDING/PARSING/PARSED/FAILED) | 发布 `PARSED` 或 `FAILED` | **bump 所属学习项目** version/updated_at(经 `materials.material_id = file_id` 反查;无所属项目则跳过) |
-| 制卡任务 | `tasks.status`(4.1 七态) | 进入 `COMPLETED` / `FAILED` / `ABANDONED`(用户 abandon、执行器失败/发布、样卡失败;删除取消路径经资料删除自身的项目版本刷新覆盖) | **bump 所属学习项目** version/updated_at |
+| 制卡任务 | `tasks.status`(4.1 八态) | 进入 `COMPLETED` / `FAILED` / `ABANDONED`(用户 abandon、执行器失败、park/confirm;删除取消路径经资料删除自身的项目版本刷新覆盖) | **bump 所属学习项目** version/updated_at |
 | 卡片删除批 | `card_deletion_batches.status` | `FINALIZED`(卡片真正移除) | **bump 所属牌组** version/updated_at |
 | 复习评级 | `review_states` / `review_events` | 每次评级 | 不 bump(高频写,客户端经 outbox 补传后的合并刷新链路感知) |
 | 任务运行期 | `tasks.internal_stage` / `updated_at` 心跳 | PLANNING→GENERATING→SCORING→PUBLISHING | 不 bump(运行期观测口径,观察方直接读任务资源) |
@@ -760,13 +763,15 @@ Scheduler(
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |
 | POST | `/v1/projects/{project_id}/tasks` | 建立 `DRAFT`,保存章节、目标牌组和配置(自动保存语义) | ✓ |
-| GET | `/v1/tasks?project_id=&status=` | 学习页任务区与历史列表 | - |
-| GET | `/v1/tasks/{task_id}` | 任务详情(七态、internal_stage、样卡、失败码、operation_id) | - |
+| GET | `/v1/tasks?project_id=&status=&deck_id=` | 学习页任务区与历史列表;deck 过滤供卡组任务状态渲染 | - |
+| GET | `/v1/tasks/{task_id}` | 任务详情(八态、internal_stage、样卡、失败码、operation_id) | - |
 | PATCH | `/v1/tasks/{task_id}` | 仅 `DRAFT`/`AWAITING_SAMPLE_CONFIRMATION` 可改配置,修改后样卡失效 | ✓ |
 | POST | `/v1/tasks/{task_id}/samples` | 持久化生成 1~3 张样卡(比例>0 的难度各 1 张);幂等键防重复触发 | ✓ |
 | POST | `/v1/tasks/{task_id}/start` | 校验 `sample_config_hash` 后进入 `GENERATING` | ✓ |
+| POST | `/v1/tasks/{task_id}/confirm` | 确认生成结果并发布:仅 `AWAITING_CONFIRMATION` → `COMPLETED`,单事务整批 `STAGED`→`PUBLISHED` | ✓ |
+| GET | `/v1/tasks/{task_id}/cards` | 卡片列表复审页数据源:仅待确认任务可读(确认前唯一 `STAGED` 只读出口);确认后走 `GET /decks/{deck_id}/cards` | - |
 | POST | `/v1/tasks/{task_id}/abandon` | 只允许正式生成前状态,进入 `ABANDONED` | ✓ |
-| POST | `/v1/tasks/{task_id}/retry` | 失败任务创建关联新任务(可沿用已确认样卡) | ✓ |
+| POST | `/v1/tasks/{task_id}/retry` | 重新生成:`FAILED` 创建关联新任务(可沿用已确认样卡);`AWAITING_CONFIRMATION` 单事务 supersede(原任务 `ABANDONED`/`SUPERSEDED` + 硬删 `STAGED` 卡 + 新 `DRAFT` 不携带样卡) | ✓ |
 | DELETE | `/v1/tasks/{task_id}?delete_generated_cards=false` | 终态任务;按参数保留或删除已发布卡 | ✓ |
 
 删除用户侧 `/resume`、`/cancel`、暂停状态与按钮;执行器内部恢复经租约/心跳,不暴露 `PAUSED`。删除确认只表达保留或删除卡组，任务处理由服务端默认完成。

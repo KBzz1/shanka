@@ -134,7 +134,10 @@ def test_http_write_pressure_generation_and_user_writes_concurrent(tmp_path: Pat
         status = session.execute(
             text("SELECT status FROM tasks WHERE task_id = :t"), {"t": task_id}
         ).scalar_one()
-    assert status == "COMPLETED", f"生成线程未收敛终态: {status}"
+    assert status == "AWAITING_CONFIRMATION", f"生成线程未收敛 park 态: {status}"
+    # 4.1 确认闭环：park 后用户 confirm 单事务发布（同库并发压力面下验证）
+    confirmed = client.post(f"/tasks/{task_id}/confirm", headers=_write_headers())
+    assert confirmed.status_code == 200 and confirmed.json()["status"] == "COMPLETED"
     # 撤销写路径也纳入压力面：删除批次进入 + 撤销（与评分后的卡并发无冲突）
     batch = client.delete(f"/cards/{card_ids[0]}", headers=_write_headers()).json()
     undone = client.post(

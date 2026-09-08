@@ -43,6 +43,7 @@ from services.generation.samples import config_fingerprint
 from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.service import (
     abandon_task,
+    confirm_task,
     create_task,
     delete_task,
     list_tasks,
@@ -241,6 +242,7 @@ def test_state_transition_table(
         ("samples", "SAMPLE_GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("samples", "AWAITING_SAMPLE_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("samples", "GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("samples", "AWAITING_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("samples", "COMPLETED", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("samples", "FAILED", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("samples", "ABANDONED", ErrorCode.TASK_STATE_CONFLICT, ""),
@@ -249,6 +251,7 @@ def test_state_transition_table(
         ("patch", "SAMPLE_GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("patch", "AWAITING_SAMPLE_CONFIRMATION", None, "DRAFT"),
         ("patch", "GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("patch", "AWAITING_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("patch", "COMPLETED", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("patch", "FAILED", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("patch", "ABANDONED", ErrorCode.TASK_STATE_CONFLICT, ""),
@@ -257,30 +260,43 @@ def test_state_transition_table(
         ("start", "SAMPLE_GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("start", "AWAITING_SAMPLE_CONFIRMATION", None, "GENERATING"),
         ("start", "GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("start", "AWAITING_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("start", "COMPLETED", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("start", "FAILED", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("start", "ABANDONED", ErrorCode.TASK_STATE_CONFLICT, ""),
+        # confirm（4.1 确认闭环）：仅 AWAITING_CONFIRMATION 合法 → COMPLETED
+        ("confirm", "DRAFT", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("confirm", "SAMPLE_GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("confirm", "AWAITING_SAMPLE_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("confirm", "GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("confirm", "AWAITING_CONFIRMATION", None, "COMPLETED"),
+        ("confirm", "COMPLETED", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("confirm", "FAILED", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("confirm", "ABANDONED", ErrorCode.TASK_STATE_CONFLICT, ""),
         # abandon：仅正式生成前状态合法 → ABANDONED
         ("abandon", "DRAFT", None, "ABANDONED"),
         ("abandon", "SAMPLE_GENERATING", None, "ABANDONED"),
         ("abandon", "AWAITING_SAMPLE_CONFIRMATION", None, "ABANDONED"),
         ("abandon", "GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("abandon", "AWAITING_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("abandon", "COMPLETED", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("abandon", "FAILED", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("abandon", "ABANDONED", ErrorCode.TASK_STATE_CONFLICT, ""),
-        # retry：仅 FAILED 合法（新任务创建见专测）
+        # retry：仅 FAILED / AWAITING_CONFIRMATION 合法（新任务创建见专测）
         ("retry", "DRAFT", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("retry", "SAMPLE_GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("retry", "AWAITING_SAMPLE_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("retry", "GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
-        ("retry", "COMPLETED", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("retry", "AWAITING_CONFIRMATION", None, "DRAFT"),  # supersede：新任务 DRAFT
+        ("retry", "COMPLETED", ErrorCode.TASK_STATE_CONFLICT, ""),  # 确认后不可重新生成
         ("retry", "FAILED", None, "DRAFT"),  # 无已确认样卡 → 新任务 DRAFT
         ("retry", "ABANDONED", ErrorCode.TASK_STATE_CONFLICT, ""),
-        # delete：仅终态合法
+        # delete：仅终态合法（待确认任务不可删——retry 或删卡组）
         ("delete", "DRAFT", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("delete", "SAMPLE_GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("delete", "AWAITING_SAMPLE_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("delete", "GENERATING", ErrorCode.TASK_STATE_CONFLICT, ""),
+        ("delete", "AWAITING_CONFIRMATION", ErrorCode.TASK_STATE_CONFLICT, ""),
         ("delete", "COMPLETED", None, ""),
         ("delete", "FAILED", None, ""),
         ("delete", "ABANDONED", None, ""),
@@ -307,6 +323,8 @@ def test_state_transition_table(
                     )
                 elif op == "start":
                     result = start_task(session, user_id=user, task_id=task_id, now=_NOW)
+                elif op == "confirm":
+                    result = confirm_task(session, user_id=user, task_id=task_id, now=_NOW)
                 elif op == "abandon":
                     result = abandon_task(session, user_id=user, task_id=task_id, now=_NOW)
                 elif op == "retry":
@@ -327,7 +345,7 @@ def test_state_transition_table(
                 continue
             assert expected_code is None, f"{op}/{pre}: 应抛 {expected_code}，实际成功"
             assert result.status == expected_status, f"{op}/{pre}: {result.status}"
-            # 数据库审计：任何路径写入的状态必须落在七态内（I-1 回归）
+            # 数据库审计：任何路径写入的状态必须落在八态内（I-1 回归）
             row = session.get(Task, task_id)
             assert row is not None and row.status in _TASK_STATES
 

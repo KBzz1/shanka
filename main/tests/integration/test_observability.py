@@ -261,8 +261,9 @@ def _payload(seed: dict[str, object]) -> dict[str, object]:
 
 
 def _run_task(client: TestClient, db_path: Path, *, user: dict[str, str]) -> tuple[str, str]:
-    """V2.5 完整生命周期：POST 创建 DRAFT → 请求样卡 → 显式扫描（样卡 worker）→
-    start → 显式扫描（规划/生成/评分衔接）→ 返回 (task_id, file_id)。"""
+    """V2.5 完整生命周期（确认闭环）：POST 创建 DRAFT → 请求样卡 → 显式扫描（样卡
+    worker）→ start → 显式扫描（规划/生成/评分衔接 → park）→ POST confirm 发布 →
+    返回 (task_id, file_id)。"""
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     resp = client.post(
         f"/projects/{seed['project_id']}/tasks",
@@ -278,10 +279,12 @@ def _run_task(client: TestClient, db_path: Path, *, user: dict[str, str]) -> tup
     assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
     n = scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory)
     assert n >= 1  # 规划 + 首轮生成（work_quantum 4 批/轮）
-    # worker 单轮受 generation_work_quantum_batches 限制：排空至无进展 → COMPLETED
+    # worker 单轮受 generation_work_quantum_batches 限制：排空至无进展 → park 待确认
     for _ in range(10):
         if scan_tasks(factory, settings=_SETTINGS, client_factory=_client_factory) == 0:
             break
+    resp = client.post(f"/tasks/{task_id}/confirm", headers={**user, **_idem()})
+    assert resp.status_code == 200 and resp.json()["status"] == "COMPLETED"
     return task_id, str(seed["file_id"])
 
 

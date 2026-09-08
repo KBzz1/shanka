@@ -500,9 +500,11 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     assert gen_objectives.count("知识点1") == 2  # 崩溃 + 孤儿恢复重试
 
     body = client.get(f"/tasks/{task_id}", headers=user).json()
-    assert body["status"] == "COMPLETED"
+    assert body["status"] == "AWAITING_CONFIRMATION"  # 恢复完成后 park（4.1 确认闭环）
     assert body["generated_card_count"] == 5  # 批 1 + 批 3..6 新入库（批 2 dedup 命中不增计数）
     assert body["completed_batch_count"] == 6 and body["total_batch_count"] == 6  # 游标到终值
+    confirmed = client.post(f"/tasks/{task_id}/confirm", headers={**user, **_idem()})
+    assert confirmed.status_code == 200 and confirmed.json()["status"] == "COMPLETED"
     with _db_factory(db_path)() as session:
         batches = _batches(session, task_id)
         cards = session.scalars(

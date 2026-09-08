@@ -58,7 +58,7 @@ from services.pdf.text_chunks import persist_text_chunks
 from services.review.service import review_queue, submit_review
 from services.stats.service import dashboard
 from services.tasks.executor import process_active_tasks
-from services.tasks.service import create_task
+from services.tasks.service import confirm_task, create_task
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
 _SETTINGS = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
@@ -852,7 +852,7 @@ def test_failure_persistence_crash_isolates_committed_cards(
     with session_factory() as session:
         visible = list_cards(session, user_id=user, deck_id=str(task.deck_id))
     assert visible == []  # 崩溃中间态用户侧零可见
-    # 恢复：心跳回拨 → 下一轮扫描孤儿恢复 → 全批完成 → 原子发布
+    # 恢复：心跳回拨 → 下一轮扫描孤儿恢复 → 全批完成 → park → confirm 发布
     with session_factory() as session:
         task_row = session.get(Task, task_id)
         assert task_row is not None
@@ -860,6 +860,10 @@ def test_failure_persistence_crash_isolates_committed_cards(
         session.commit()
     with session_factory() as session:
         n = process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
+        session.commit()
+        task = session.get(Task, task_id)
+        assert task is not None and task.status == "AWAITING_CONFIRMATION"  # 恢复后 park
+        confirm_task(session, user_id=user, task_id=task_id, now="2026-08-10T03:00:00.000Z")
         session.commit()
         task = session.get(Task, task_id)
         assert task is not None and task.deck_id is not None

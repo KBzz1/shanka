@@ -532,8 +532,10 @@ V25-D-29 起不再持有 `file_id` 唯一外键:资料归属权威 = `materials.
 - **任务租约并发防护**:worker 以 `BEGIN IMMEDIATE` 下的条件 UPDATE 抢占 `(status, stage)`，提交 `lease_token/version` 后才调用 LLM；每批/每组心跳续租，过期租约回收时递增 version。所有终态、样卡、发布和删除写入带原 token/version 的 CAS，旧 worker 只能得到 0 行更新，不得覆盖或复活已取消任务。
 - 新建卡片时同事务插入初始 `review_states`(state=NEW,初始排程参数,审核修复)。
 - 单卡重写(FR-13,决策 C-05):原地更新 `cards` 行(新内容、新 `generation_item_id`,`position` 不变,`updated_at` / `version` 递增),`review_states` 重置为新卡初始状态;旧 `generation_item_id` 随列覆盖自然作废。
-- **V2.5 原子事务(5.3)**,必须在同一事务完成:
-  - 正式任务成功:校验至少一张合法 STAGED 卡 → 全部改 PUBLISHED → task COMPLETED/generated_card_count 更新;
+- **V2.5 原子事务(5.3;确认闭环版)**,必须在同一事务完成:
+  - 生成结果 park:PUBLISHING 阶段完成时 CAS 校验 ≥1 张 STAGED 卡 → task `AWAITING_CONFIRMATION`/stage NULL/`generated_card_count`=清点数(卡保持 STAGED,`ended_at` 不写,operation 保持 ACTIVE);0 张 → task FAILED/TASK_ZERO_CARDS;
+  - 确认发布(用户 confirm):CAS `AWAITING_CONFIRMATION` → task COMPLETED/`ended_at` → 整批 STAGED 改 PUBLISHED(`generated_card_count`=实际发布数)→ operation COMPLETED(`USER_CONFIRMED`);
+  - 待确认重新生成(retry-supersede):CAS 原任务 ABANDONED/`SUPERSEDED`/`ended_at` → 硬删其全部 STAGED 卡(无学习记录) → 新建 DRAFT 任务(同章节/配置快照,不携带样卡);
   - 任意正式阶段失败:task FAILED,STAGED 卡继续隔离;
   - 项目删除:状态保护 → retain 选择对应 detach 或 delete → 删除 PDF/章节/任务/项目;
   - 卡片删除批追加、撤销和最终清理;

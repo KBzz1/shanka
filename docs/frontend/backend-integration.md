@@ -2,7 +2,7 @@
 
 给前端开发者的后端接入指南。**机器可读接口权威**：[openapi.yaml](../Architecture/openapi.yaml)（路径、请求/响应结构）；**行为契约权威**：[structure-contract.md](../Architecture/structure-contract.md)（状态机、幂等、FSRS 排程、错误码）。本文件是这两者的使用导览 + 部署环境信息，若与契约冲突以契约为准。
 
-V2.5 相对旧版的核心变化：数据主体从设备改为**账号**；制卡入口从独立 PDF/样卡/任务三接口收敛为**学习项目 + 七态任务**；新增账号偏好、今日学习计划、删除批次撤销与 AI 重写预览；任务用户侧**无暂停/取消**（改为放弃/重试）；路径**无 `/v1` 前缀**。
+V2.5 相对旧版的核心变化：数据主体从设备改为**账号**；制卡入口从独立 PDF/样卡/任务三接口收敛为**学习项目 + 八态任务**（生成完毕 park 至待确认，用户 confirm 后发布）；新增账号偏好、今日学习计划、删除批次撤销与 AI 重写预览；任务用户侧**无暂停/取消**（改为放弃/重试/确认）；路径**无 `/v1` 前缀**。
 
 ---
 
@@ -141,19 +141,21 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 - **`INVALID` 校验结果不覆盖已保存的有效 Key**（防冒用者替换他人有效 Key）；只有 `AVAILABLE` 才覆盖旧 Key。因此用户输入错误 Key 后查询状态可能仍是 `AVAILABLE`（旧 Key 仍有效）——UI 提示"密钥无效"即可，不要引导重存。
 - 客户端**不得持久化 Key 明文**、UI 不展示完整 Key；Key 只经 HTTPS 上传，任何日志/响应/任务明细不得出现明文。
 
-### 3.5 制卡任务（V2.5 七态）
+### 3.5 制卡任务（V2.5 八态）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/projects/{project_id}/tasks` | 建立 **DRAFT** 任务（自动保存语义；保存章节快照、目标牌组、生成配置） |
-| GET | `/tasks` | 学习页任务区与历史列表（支持 `project_id` / `status` 过滤） |
-| GET | `/tasks/{task_id}` | 任务详情（七态、`internal_stage`、样卡、失败码）；长任务轮询（见 5.2） |
+| GET | `/tasks` | 学习页任务区与历史列表（支持 `project_id` / `status` / `deck_id` 过滤；`deck_id` 供卡组任务状态渲染，仅过滤不做归属校验） |
+| GET | `/tasks/{task_id}` | 任务详情（八态、`internal_stage`、样卡、失败码）；长任务轮询（见 5.2） |
 | PATCH | `/tasks/{task_id}` | 仅 `DRAFT` / `AWAITING_SAMPLE_CONFIRMATION` 可改配置；修改后样卡失效 |
 | DELETE | `/tasks/{task_id}` | 删除终态任务（`delete_generated_cards` 选择是否删除其已发布卡） |
 | POST | `/tasks/{task_id}/samples` | 持久化生成 1~3 张样卡（只为比例大于 0 的难度各 1 张；幂等键防重复触发） |
 | POST | `/tasks/{task_id}/start` | 校验样卡 hash 后进入 `GENERATING`（过期样卡 → `409 SAMPLE_STALE`） |
+| POST | `/tasks/{task_id}/confirm` | **确认生成结果并发布**：仅 `AWAITING_CONFIRMATION` → `COMPLETED`，单事务整批 STAGED → PUBLISHED（需 Idempotency-Key） |
+| GET | `/tasks/{task_id}/cards` | **复审页数据源**：仅待确认任务可读其生成卡（按 `position` 排序，含 STAGED）；确认后 `409`，走 `GET /decks/{deck_id}/cards` |
 | POST | `/tasks/{task_id}/abandon` | 放弃任务（仅正式生成前状态，进入 `ABANDONED` 终态） |
-| POST | `/tasks/{task_id}/retry` | 失败任务创建关联新任务（`retry_of_task_id` 指向原任务；正式生成失败可沿用已确认样卡） |
+| POST | `/tasks/{task_id}/retry` | 重新生成：`FAILED` → 关联新任务（可沿用已确认样卡）；`AWAITING_CONFIRMATION` → 单事务 supersede（原任务 `ABANDONED`/`completion_reason=SUPERSEDED` + 硬删 STAGED 卡 + 新 **DRAFT** 不携带样卡，重走样卡流程） |
 | GET | `/tasks/{task_id}/batches` | 批次列表（联调/质量核验用，含 Rubric、token 用量、成本估算） |
 
 创建任务请求体（请求中**不携带 API Key**，服务端使用已保存 Key；`project_id` 取自路径）：
@@ -250,7 +252,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 
 ## 4. 关键状态机（前端需要理解的部分）
 
-### GenerationTask（V2.5 七态）
+### GenerationTask（V2.5 八态）
 
 ```text
 POST /projects/{project_id}/tasks → DRAFT（自动保存，创建即返回）
@@ -258,14 +260,17 @@ DRAFT ──POST /samples──→ SAMPLE_GENERATING ──成功──→ AWAIT
 DRAFT | SAMPLE_GENERATING | AWAITING_SAMPLE_CONFIRMATION ──PATCH 改配置──→ 样卡清空（回到待生成样卡）
 DRAFT | SAMPLE_GENERATING | AWAITING_SAMPLE_CONFIRMATION ──abandon──→ ABANDONED
 AWAITING_SAMPLE_CONFIRMATION ──start（校验样卡 hash）──→ GENERATING
-GENERATING ──整批成功发布──→ COMPLETED（generated_card_count = 最终发布数）
+GENERATING ──生成完毕 park（≥1 张 STAGED）──→ AWAITING_CONFIRMATION（卡保持 STAGED；ended_at 为空）
 GENERATING ──任一失败──→ FAILED（零部分可见）
+AWAITING_CONFIRMATION ──POST /confirm──→ COMPLETED（单事务整批发布；generated_card_count = 实际发布数）
+AWAITING_CONFIRMATION ──retry──→ ABANDONED（SUPERSEDED）+ 新任务 DRAFT（不携带样卡，重走样卡流程）
 FAILED ──retry──→ 新任务 DRAFT（retry_of_task_id 指向原任务）
 ```
 
-- **前端映射**：`GENERATING` = 生成中，`COMPLETED` = 完成，`FAILED` = 失败可重试，`ABANDONED` = 已放弃。
+- **前端映射**：`GENERATING` = 生成中，`AWAITING_CONFIRMATION` = 待确认（卡组"未确认"样式，不可选入今日计划——服务端 0 可见卡守卫天然拦截），`COMPLETED` = 完成，`FAILED` = 失败可重试，`ABANDONED` = 已放弃。
+- `AWAITING_CONFIRMATION` 为**静止态**：无需轮询（转出该状态的唯一途径是用户自己的 confirm/retry 请求或资源删除）；`internal_stage` 恒 `null`。
 - **用户侧无暂停/取消/断点续传接口**：`PAUSED` / `resume` / `cancel` 已随 V2.5 删除；`DRAFT` 自动保存语义下，页面切换、App 退出或换设备后重新读取任务即可继续配置。生成期内部恢复由服务端租约机制完成，不暴露用户状态。
-- **零部分可见**：正式生成写入的卡先为 `STAGED`（用户不可见），同一事务内整批发布；任何阶段失败 → 任务 `FAILED`，`STAGED` 卡继续隔离。0 张有效卡整体失败（`TASK_ZERO_CARDS`）。
+- **零部分可见 + 延迟发布**：正式生成写入的卡为 `STAGED`（用户不可见），生成完毕 park 至待确认；用户 `POST /confirm` 后同一事务整批发布；任何阶段失败 → 任务 `FAILED`，`STAGED` 卡继续隔离。0 张有效卡在 park 时点整体失败（`TASK_ZERO_CARDS`，不经过待确认）。确认前复审页只读（`GET /tasks/{task_id}/cards` 为唯一 STAGED 读出口）；确认后不可重新生成（409）。
 - `FAILED` 对应系统级不可恢复错误（API Key 失效、上游持续不可用）或 0 张有效卡，响应含 `failure_stage` + `error_code`（如 `API_KEY_NOT_SET`）。批次级失败不置 `FAILED`——该批 `SKIPPED`，任务继续。
 - `internal_stage`（`PLANNING → GENERATING → SCORING → PUBLISHING`）仅为运行期观测，不作为用户状态。
 
@@ -289,8 +294,9 @@ NEW → LEARNING → REVIEW ⇄ RELEARNING
 2. （可选）`PATCH` 修改章节边界 → `POST .../confirm-chapters` 确认章节。
 3. `PUT /api-key` 保存 DeepSeek Key（如未保存；无 Key 时后续任务动作会失败并提示 `API_KEY_NOT_SET`）。
 4. `POST /projects/{project_id}/tasks` 建立 DRAFT 任务（自动保存）→ `POST /tasks/{task_id}/samples` 预览样卡（不满可 `PATCH` 改配置后重新生成）。
-5. `POST /tasks/{task_id}/start` 确认样卡进入生成 → 按 5.2 轮询至终态；失败可 `retry`。任务进入终态同样刷新所属项目 `version`。
-6. `COMPLETED` 后卡片进入目标牌组，可复习。
+5. `POST /tasks/{task_id}/start` 确认样卡进入生成 → 按 5.2 轮询至 `AWAITING_CONFIRMATION`（生成完毕 park，卡保持 STAGED）；失败可 `retry`。
+6. 复审：`GET /tasks/{task_id}/cards` 只读查看生成卡 → `POST /tasks/{task_id}/confirm` 确认发布（或 `retry` 重新生成——单事务作废本次结果并新建 DRAFT 重走样卡）。park/confirm 同样刷新所属项目 `version`。
+7. `COMPLETED` 后卡片进入目标牌组，可复习。
 
 ### 5.2 长任务轮询
 

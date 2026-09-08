@@ -347,8 +347,9 @@ def test_tasks_create_idempotency_conflict_409(ctx: tuple[TestClient, Path]) -> 
 
 
 def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
-    """长任务轮询（V2.5 完整流程）：创建 DRAFT → 请求样卡 → 显式扫描（样卡 worker
-    完成）→ start → 显式扫描（规划/生成/评分衔接）→ GET 返回 COMPLETED。"""
+    """长任务轮询（V2.5 完整流程，确认闭环）：创建 DRAFT → 请求样卡 → 显式扫描（样卡
+    worker 完成）→ start → 显式扫描（规划/生成/评分衔接）→ park 至
+    AWAITING_CONFIRMATION → POST confirm（幂等键）→ GET 返回 COMPLETED。"""
     client, db_path = ctx
     user = _user(client)
     seed = _seed_context(db_path, user_id=_user_id(db_path))
@@ -362,19 +363,220 @@ def test_tasks_get_polls_until_completed(ctx: tuple[TestClient, Path]) -> None:
     resp = client.get(f"/tasks/{task_id}", headers=user)
     assert resp.status_code == 200
     assert resp.json()["status"] == "AWAITING_SAMPLE_CONFIRMATION"
-    # start（校验样卡 hash）→ 规划/生成/评分 worker → COMPLETED
+    # start（校验样卡 hash）→ 规划/生成/评分 worker → park 至 AWAITING_CONFIRMATION
     assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
-    final: dict[str, object] = {}
+    parked: dict[str, object] = {}
     for _ in range(10):
         scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
         resp = client.get(f"/tasks/{task_id}", headers=user)
         assert resp.status_code == 200
-        final = resp.json()
-        if final["status"] == "COMPLETED":
+        parked = resp.json()
+        if parked["status"] == "AWAITING_CONFIRMATION":
             break
+    assert parked["status"] == "AWAITING_CONFIRMATION"
+    assert parked["internal_stage"] is None
+    assert parked["ended_at"] is None  # park 不写 ended_at（confirm 时点写入）
+    # 用户确认发布 → COMPLETED（单事务整批 STAGED → PUBLISHED）
+    resp = client.post(f"/tasks/{task_id}/confirm", headers={**user, **_idem()})
+    assert resp.status_code == 200
+    final = resp.json()
     assert final["status"] == "COMPLETED"
     # COMPACT 2 章确定性 6 卡：mock planner 按请求配额产出 6 单元 → 6 批 → 每批 1 卡
     # （_client_factory docstring；配额 BASIC 3/UNDERSTANDING 2/DEEP_QUESTION 1）
     assert final["generated_card_count"] == 6
     assert final["ended_at"] is not None
     assert final["resumable"] is False
+
+
+# ---------- 4.1 确认闭环：park / confirm / retry-supersede / 复审读出口 ----------
+
+
+def _drive_to_parked(
+    client: TestClient, db_path: Path, user: dict[str, str], seed: dict[str, object]
+) -> str:
+    """完整推进至 park：创建 → 样卡 → start → 扫描排空 → AWAITING_CONFIRMATION。"""
+    resp = _post_task(client, seed, user)
+    assert resp.status_code == 201
+    task_id = str(resp.json()["task_id"])
+    task_factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+    assert client.post(f"/tasks/{task_id}/samples", headers={**user, **_idem()}).status_code == 200
+    scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
+    assert client.post(f"/tasks/{task_id}/start", headers={**user, **_idem()}).status_code == 200
+    for _ in range(10):
+        if scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory) == 0:
+            break
+    body = client.get(f"/tasks/{task_id}", headers=user).json()
+    assert body["status"] == "AWAITING_CONFIRMATION", f"未收敛 park 态: {body['status']}"
+    return task_id
+
+
+def test_tasks_confirm_publishes_and_unlocks_scheduling(ctx: tuple[TestClient, Path]) -> None:
+    """4.1 确认闭环可见性（交接 §11 后端验收 1）：park 后卡对 decks/study 全不可见、
+    卡组计数 0、不可入学习计划；confirm 后单事务全部可见且可入计划。"""
+    client, db_path = ctx
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    deck_id = str(seed["deck_id"])
+    project_id = str(seed["project_id"])
+    task_id = _drive_to_parked(client, db_path, user, seed)
+
+    # park 期间：STAGED 对一切用户读不可见；复审读出口是唯一例外
+    assert client.get(f"/decks/{deck_id}/cards", headers=user).json()["items"] == []
+    decks = client.get("/decks", headers=user).json()["items"]
+    parked_deck = next(d for d in decks if d["deck_id"] == deck_id)
+    assert parked_deck["card_count"] == 0
+    review = client.get(f"/tasks/{task_id}/cards", headers=user).json()["items"]
+    assert len(review) == 6
+    assert all(c["publication_state"] == "STAGED" for c in review)
+    assert [c["position"] for c in review] == sorted(c["position"] for c in review)
+    # park 时 operation 保持 ACTIVE（非终态——终结点在 confirm/retry/资源删除）
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        op_status, op_reason = conn.execute(
+            text("SELECT status, terminal_reason FROM generation_operations WHERE task_id = :t"),
+            {"t": task_id},
+        ).one()
+    assert op_status == "ACTIVE" and op_reason is None
+    # 计划守卫（Figma 1019-5568 语义）：仅含待确认卡的卡组不可加入学习计划
+    plan_payload = {
+        "project_id": project_id,
+        "selected_deck_ids": [deck_id],
+        "daily_new_goal": 20,
+        "daily_review_goal": 30,
+    }
+    resp = client.put("/study/plan", json=plan_payload, headers={**user, **_idem()})
+    assert resp.status_code == 400
+    assert "暂无可学习卡片" in resp.json()["error"]["message"]
+
+    # confirm → COMPLETED：单事务发布，卡组计数/可见卡/计划守卫全部恢复
+    resp = client.post(f"/tasks/{task_id}/confirm", headers={**user, **_idem()})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "COMPLETED"
+    assert resp.json()["ended_at"] is not None
+    with engine.connect() as conn:
+        op_status, op_reason = conn.execute(
+            text("SELECT status, terminal_reason FROM generation_operations WHERE task_id = :t"),
+            {"t": task_id},
+        ).one()
+    assert op_status == "COMPLETED" and op_reason == "USER_CONFIRMED"
+    assert len(client.get(f"/decks/{deck_id}/cards", headers=user).json()["items"]) == 6
+    decks = client.get("/decks", headers=user).json()["items"]
+    assert next(d for d in decks if d["deck_id"] == deck_id)["card_count"] == 6
+    resp = client.put("/study/plan", json=plan_payload, headers={**user, **_idem()})
+    assert resp.status_code == 200
+    # 确认后复审读出口关闭（确认后走 GET /decks/{deck_id}/cards）
+    assert client.get(f"/tasks/{task_id}/cards", headers=user).status_code == 409
+
+
+def test_tasks_confirm_idempotency_and_conflict(ctx: tuple[TestClient, Path]) -> None:
+    """confirm 并发规则：同键同体重放首次 200；异键重复确认 409；确认后 retry 409。"""
+    client, db_path = ctx
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    task_id = _drive_to_parked(client, db_path, user, seed)
+    key = _idem()
+    first = client.post(f"/tasks/{task_id}/confirm", headers={**user, **key})
+    assert first.status_code == 200
+    replay = client.post(f"/tasks/{task_id}/confirm", headers={**user, **key})
+    assert replay.status_code == 200  # 同键重放（幂等层）
+    conflict = client.post(f"/tasks/{task_id}/confirm", headers={**user, **_idem()})
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "TASK_STATE_CONFLICT"
+    # 确认后不可重新生成（保护学习记录）
+    retry = client.post(f"/tasks/{task_id}/retry", headers={**user, **_idem()})
+    assert retry.status_code == 409
+    assert retry.json()["error"]["code"] == "TASK_STATE_CONFLICT"
+
+
+def test_tasks_confirm_state_guards(ctx: tuple[TestClient, Path]) -> None:
+    """confirm 前置：非待确认任务 409；跨用户 404（不暴露存在性）。"""
+    client, db_path = ctx
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    resp = _post_task(client, seed, user)
+    assert resp.status_code == 201
+    draft_task_id = resp.json()["task_id"]
+    assert (
+        client.post(f"/tasks/{draft_task_id}/confirm", headers={**user, **_idem()}).status_code
+        == 409
+    )
+    other = auth_headers(client, username="bob")
+    assert (
+        client.post(f"/tasks/{draft_task_id}/confirm", headers={**other, **_idem()}).status_code
+        == 404
+    )
+    assert client.get(f"/tasks/{draft_task_id}/cards", headers=other).status_code == 404
+
+
+def test_tasks_retry_supersedes_awaiting_confirmation(ctx: tuple[TestClient, Path]) -> None:
+    """确认前重新生成（4.1 supersede 单事务）：原任务 ABANDONED/SUPERSEDED + STAGED 卡
+    硬删（无学习记录可丢）+ 新 DRAFT 任务（同配置快照、不携带样卡）；幂等重放不双建。"""
+    client, db_path = ctx
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    deck_id = str(seed["deck_id"])
+    task_id = _drive_to_parked(client, db_path, user, seed)
+
+    key = _idem()
+    resp = client.post(f"/tasks/{task_id}/retry", headers={**user, **key})
+    assert resp.status_code == 201
+    new_task = resp.json()
+    assert new_task["status"] == "DRAFT"  # 重走样卡流程
+    assert new_task["retry_of_task_id"] == task_id
+    assert new_task["sample_cards"] is None  # 不携带样卡
+    assert new_task["deck_id"] == deck_id
+
+    # 原任务：ABANDONED + completion_reason=SUPERSEDED + ended_at；STAGED 卡硬删
+    original = client.get(f"/tasks/{task_id}", headers=user).json()
+    assert original["status"] == "ABANDONED"
+    assert original["completion_reason"] == "SUPERSEDED"
+    assert original["ended_at"] is not None
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        staged_count = conn.execute(
+            text("SELECT COUNT(*) FROM cards WHERE source_task_id = :t"), {"t": task_id}
+        ).scalar_one()
+    assert staged_count == 0  # STAGED 卡硬删（此时不可能有学习记录）
+    # 幂等重放：同 operation key 返回同一新任务，不双建
+    replay = client.post(f"/tasks/{task_id}/retry", headers={**user, **key})
+    assert replay.status_code == 201
+    assert replay.json()["task_id"] == new_task["task_id"]
+    with engine.connect() as conn:
+        task_rows = conn.execute(text("SELECT COUNT(*) FROM tasks")).scalar_one()
+    assert task_rows == 2  # 原 + 新，重放不双建
+
+
+def test_tasks_list_deck_id_filter(ctx: tuple[TestClient, Path]) -> None:
+    """GET /tasks?deck_id= 过滤（前端卡组四态渲染）；无 deck_id 行为不变。"""
+    client, db_path = ctx
+    user = _user(client)
+    seed = _seed_context(db_path, user_id=_user_id(db_path))
+    task_factory = create_session_factory(create_db_engine(f"sqlite:///{db_path}"))
+    deck_id = str(seed["deck_id"])
+    # deck A：完整推进至 park；deck B：仅 DRAFT
+    parked_task_id = _drive_to_parked(client, db_path, user, seed)
+    with task_factory() as session:
+        other_deck = create_deck(
+            session,
+            user_id=_user_id(db_path),
+            name="B",
+            now="2026-08-15T00:00:00.000Z",
+            project_id=str(seed["project_id"]),
+        )
+        session.commit()
+        other_deck_id = other_deck.deck_id
+    resp = _post_task(client, {**seed, "deck_id": other_deck_id}, user)
+    assert resp.status_code == 201
+    draft_task_id = resp.json()["task_id"]
+
+    by_deck = client.get(f"/tasks?deck_id={deck_id}", headers=user).json()["items"]
+    assert [t["task_id"] for t in by_deck] == [parked_task_id]
+    by_other = client.get(f"/tasks?deck_id={other_deck_id}", headers=user).json()["items"]
+    assert [t["task_id"] for t in by_other] == [draft_task_id]
+    all_tasks = client.get("/tasks", headers=user).json()["items"]
+    assert {t["task_id"] for t in all_tasks} == {parked_task_id, draft_task_id}
+    # deck 过滤与 status 过滤可组合
+    parked_only = client.get(
+        f"/tasks?deck_id={deck_id}&status=AWAITING_CONFIRMATION", headers=user
+    ).json()["items"]
+    assert [t["task_id"] for t in parked_only] == [parked_task_id]

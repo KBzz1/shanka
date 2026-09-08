@@ -541,6 +541,60 @@ def test_delete_project_cancels_formal_generation_task(client: TestClient, tmp_p
     assert _scalar(db, "SELECT COUNT(*) FROM pdf_files") == 0
 
 
+def test_delete_project_cancels_awaiting_confirmation_and_clears_staged(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """4.1 确认闭环 × 删除（AWAITING_CONFIRMATION ∈ ACTIVE）：待确认任务随项目删除
+    自动取消；retain_decks=false 卡组与 STAGED 卡级联清空——无孤儿 STAGED 残留。"""
+    from infra.db.models import Card
+
+    user = _user(client)
+    db = tmp_path / "project_del.db"
+    user_id = _user_id(db)
+    project = _seed_project(db, user_id)
+    deck_id, _card_id = _seed_deck_with_card(db, user_id, str(project["project_id"]))
+    task_id = _seed_task(
+        db,
+        user_id,
+        str(project["project_id"]),
+        str(project["file_id"]),
+        status="AWAITING_CONFIRMATION",
+    )
+    factory, engine = _db(db)
+    with factory() as session:
+        session.add(
+            Card(
+                card_id=str(uuid.uuid4()),
+                deck_id=deck_id,
+                user_id=user_id,
+                source="GENERATED",
+                position=2,
+                front="q",
+                back="a",
+                card_type="QUESTION",
+                question="q",
+                answer="a",
+                source_task_id=task_id,
+                publication_state="STAGED",
+                version="v1",
+                created_at="2026-08-15T00:00:00.000Z",
+                updated_at="2026-08-15T00:00:00.000Z",
+            )
+        )
+        session.commit()
+    engine.dispose()
+    assert _scalar(db, "SELECT COUNT(*) FROM cards WHERE publication_state = 'STAGED'") == 1
+
+    resp = client.delete(
+        f"/projects/{project['project_id']}?retain_decks=false",
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 204, resp.text
+    assert _scalar(db, "SELECT COUNT(*) FROM tasks") == 0  # 任务取消并随项目清除
+    assert _scalar(db, "SELECT COUNT(*) FROM cards") == 0  # 卡组级联：STAGED 无残留
+    assert _scalar(db, "SELECT COUNT(*) FROM decks") == 0
+
+
 def test_delete_project_parsing_succeeds_and_fences_late_parser(
     client: TestClient, tmp_path: Path
 ) -> None:
@@ -698,6 +752,32 @@ def test_delete_chapter_active_task_conflict(client: TestClient, tmp_path: Path)
         str(project["project_id"]),
         str(project["file_id"]),
         status="AWAITING_SAMPLE_CONFIRMATION",
+        chapter_ids=[chapter_id],
+    )
+    resp = client.delete(
+        f"/projects/{project['project_id']}/chapters/{chapter_id}",
+        headers={**user, **_idem()},
+    )
+    assert resp.status_code == 409
+    assert _error_code(resp) == "PROJECT_HAS_ACTIVE_TASK"
+
+
+def test_delete_chapter_awaiting_confirmation_task_conflict(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """待确认任务引用的章节同样不可删除（AWAITING_CONFIRMATION ∈ ACTIVE 集合，
+    4.1 确认闭环删除保护）→ 409。"""
+    user = _user(client)
+    db = tmp_path / "project_del.db"
+    user_id = _user_id(db)
+    project = _seed_project(db, user_id)
+    chapter_id = str(project["chapter_ids"][0])
+    _seed_task(
+        db,
+        user_id,
+        str(project["project_id"]),
+        str(project["file_id"]),
+        status="AWAITING_CONFIRMATION",
         chapter_ids=[chapter_id],
     )
     resp = client.delete(

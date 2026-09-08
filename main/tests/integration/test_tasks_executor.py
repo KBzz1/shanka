@@ -32,10 +32,11 @@ from infra.llm.crypto import encrypt_key, key_from_settings
 from infra.llm.deepseek import DeepSeekClient
 from services.generation.batches import plan_batches
 from services.tasks.executor import process_active_tasks
-from services.tasks.service import create_task
+from services.tasks.service import confirm_task, create_task
 
 # _env_file=None：测试确定性——不加载仓库根 .env（真实 Key 不进测试进程）
 _SETTINGS = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
+_NOW = "2026-08-11T12:00:00.000Z"
 _TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
 assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
@@ -351,6 +352,12 @@ def test_executor_completes_task_and_inserts_cards(session_factory: Callable[[],
         n = process_active_tasks(session, settings=_SETTINGS, client_factory=_client_factory)
         session.commit()
         task = session.get(Task, task_id)
+        assert task is not None and task.status == "AWAITING_CONFIRMATION"  # park（4.1 确认闭环）
+        cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
+        assert all(c.publication_state == "STAGED" for c in cards)  # confirm 前保持 STAGED
+        confirm_task(session, user_id=user, task_id=task_id, now=_NOW)
+        session.commit()
+        task = session.get(Task, task_id)
         assert task is not None and task.deck_id is not None
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
@@ -359,6 +366,7 @@ def test_executor_completes_task_and_inserts_cards(session_factory: Callable[[],
     assert len(cards) == len(kps)  # 每知识点一张卡
     assert task.generated_card_count == len(cards)
     assert all(c.source == "GENERATED" for c in cards)
+    assert all(c.publication_state == "PUBLISHED" for c in cards)
     # 契约 4.5（V25-D-34）：任务终态必须刷新所属项目版本
     with session_factory() as session:
         project = session.get(LearningProject, task.project_id)
@@ -403,7 +411,7 @@ def test_executor_same_chapter_second_task_still_generates(
         for task_id in (task1, task2):
             task = session.get(Task, task_id)
             assert task is not None
-            assert task.status == "COMPLETED"
+            assert task.status == "AWAITING_CONFIRMATION"  # park（不自动发布）
             assert task.generated_card_count > 0  # 若无 task 维度，第二个任务会被全局去重清 0
 
 
@@ -555,6 +563,10 @@ def test_executor_full_flow_plan_then_generate(
 
     with session_factory() as session:
         n = process_active_tasks(session, settings=_SETTINGS, client_factory=client_factory)
+        session.commit()
+        task = session.get(Task, task_id)
+        assert task is not None and task.status == "AWAITING_CONFIRMATION"  # park（4.1 确认闭环）
+        confirm_task(session, user_id=user, task_id=task_id, now=_NOW)
         session.commit()
         task = session.get(Task, task_id)
         assert task is not None and task.deck_id is not None
