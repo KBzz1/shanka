@@ -29,7 +29,7 @@ class V25ContractTest {
             V25ProjectStatus.entries.map { it.name },
         )
         assertEquals(
-            listOf("DRAFT", "SAMPLE_GENERATING", "AWAITING_SAMPLE_CONFIRMATION", "GENERATING", "COMPLETED", "FAILED", "ABANDONED"),
+            listOf("DRAFT", "SAMPLE_GENERATING", "AWAITING_SAMPLE_CONFIRMATION", "GENERATING", "AWAITING_CONFIRMATION", "COMPLETED", "FAILED", "ABANDONED"),
             V25TaskStatus.entries.map { it.name },
         )
         assertEquals(
@@ -265,7 +265,6 @@ class V25ContractTest {
         val removed = repository.deleteProjectMaterial("project-1", "material-1", retainCards = false)
 
         assertTrue(kept is V25Result.Success)
-        assertEquals(V25ProjectStatus.EMPTY, (kept as V25Result.Success).value.status)
         assertTrue(removed is V25Result.Failure)
         assertEquals(V25ErrorCodes.MATERIAL_NOT_FOUND, (removed as V25Result.Failure).code)
     }
@@ -578,9 +577,9 @@ private class StubV25Repository : V25Repository {
         materialId: String,
         retainCards: Boolean,
         idempotencyKey: String?,
-    ): V25Result<V25LearningProject> =
+    ): V25Result<Unit> =
         if (deletedMaterialIds.add(materialId)) {
-            V25Result.Success(project.copy(materials = emptyList(), status = V25ProjectStatus.EMPTY))
+            V25Result.Success(Unit)
         } else {
             V25Result.Failure(V25ErrorCodes.MATERIAL_NOT_FOUND, "material.not_found", "资料不存在")
         }
@@ -675,6 +674,11 @@ private class StubV25Repository : V25Repository {
 
     override suspend fun retryTask(taskId: String): V25Result<V25GenerationTask> =
         V25Result.Success(task.copy(taskId = "task-retry", retryOfTaskId = taskId, status = V25TaskStatus.DRAFT))
+
+    override suspend fun confirmTask(taskId: String): V25Result<V25GenerationTask> =
+        V25Result.Success(task.copy(taskId = taskId, status = V25TaskStatus.COMPLETED, endedAt = now))
+
+    override suspend fun listTaskCards(taskId: String): V25Result<List<V25Card>> = V25Result.Success(listOf(card))
 
     override suspend fun deleteTask(taskId: String, deleteGeneratedCards: Boolean): V25Result<Unit> =
         V25Result.Success(Unit)

@@ -190,11 +190,12 @@ internal fun SecondaryHeaderActionBackgroundColor(theme: DeckTheme? = null): Col
 internal fun fixedSp(value: Float) = with(LocalDensity.current) { value.dp.toSp() }
 
 /**
- * The root navigation occupies 125dp at the device bottom (85dp bar, 16dp
- * outside inset and the system navigation inset). A 148dp scroll tail leaves
- * the Figma 16–24dp visual gap above it when a list reaches its final item.
+ * The root navigation occupies 109dp at the device bottom (68dp Figma 568:2326
+ * bar, 16dp outside inset and the system navigation inset). A 132dp scroll
+ * tail leaves the Figma 16–24dp visual gap above it when a list reaches its
+ * final item.
  */
-internal const val RootNavigationScrollTail = 148
+internal const val RootNavigationScrollTail = 132
 
 /**
  * Bottom spacing for a scrolling page which has no overlaying bottom control.
@@ -211,7 +212,7 @@ internal const val NaturalScrollTail = 32
  * screens from accumulating unrelated 140–188dp padding values.
  */
 internal fun fixedBottomControlScrollTail(
-    controlHeight: Int = 60,
+    controlHeight: Int = 68,
     bottomOffset: Int = 32,
     controlCount: Int = 1,
     gapBetweenControls: Int = 0
@@ -457,32 +458,24 @@ internal fun GenerationProgressRing(
 }
 
 /**
- * Figma 373:1691 shared hint/notice box. Radius 24dp; the box lifts to the
- * family Surface when its container is white, otherwise it returns to white.
- * Supporting copy, centred, in the 80% neutral ink.
+ * Figma 835:5505 / 1050:4956 — the small hint that sits at a card's
+ * bottom-left: 16/21 Card-Subtitle copy at 50% ink; `error = true` lifts it to
+ * the Figma #D23535 red for validation copy. Replaces the boxed hint cards.
  */
 @Composable
-internal fun HintBox(
+internal fun CardHint(
     text: String,
-    parentIsWhite: Boolean,
-    theme: DeckTheme,
-    designScale: Float,
-    modifier: Modifier = Modifier
+    designScale: Float = 1f,
+    error: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
-    Surface(
-        color = if (parentIsWhite) theme.cardPanel else AppColors.Card,
-        shape = RoundedCornerShape((AppNestedShapeRadius * designScale).dp),
-        modifier = modifier.fillMaxWidth()
-    ) {
-        AppText(
-            text,
-            AppTextRole.Supporting,
-            modifier = Modifier.fillMaxWidth().padding((24 * designScale).dp),
-            color = AppColors.TextIconDark,
-            designScale = designScale,
-            textAlign = TextAlign.Center
-        )
-    }
+    AppText(
+        text,
+        AppTextRole.CardSubtitle,
+        modifier = modifier.fillMaxWidth(),
+        color = if (error) AppColors.WarningStrong else Color.Black.copy(alpha = .5f),
+        designScale = designScale,
+    )
 }
 
 @Composable
@@ -552,23 +545,3 @@ internal fun MixedLanguageText(
     )
 }
 
-/** Figma 307:1419 — shared, text-only explanatory card used across import flows. */
-@Composable
-internal fun DescriptionInfoCard(text: String, scale: Float) {
-    Surface(
-        shape = RoundedCornerShape((AppNestedShapeRadius * scale).dp),
-        color = AppColors.Purple.background,
-        modifier = Modifier.fillMaxWidth().heightIn(min = (102 * scale).dp)
-    ) {
-        MixedLanguageText(
-            text = text,
-            modifier = Modifier.padding((24 * scale).dp),
-            color = AppColors.TextIconDark,
-            chineseFont = AppFonts.MiSansMedium,
-            latinFont = AppFonts.GoogleSansFlex,
-            fontSize = fixedSp(20 * scale),
-            lineHeight = fixedSp(24 * scale),
-            includeFontPadding = false
-        )
-    }
-}

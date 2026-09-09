@@ -2,6 +2,9 @@
 # 正式 APK 输出（V2.5 Release 构建契约:固定覆盖 releases/app-release.apk,不入 Git）
 /releases/
 /.env
+# 前端本地签名凭据（仅本机，永不提交；回流自 JIANGYOU3/Shanka 根 .gitignore）
+/frontend/Front/keystore.properties
+/frontend/Front/release.keystore
 # SDD 工作区（git-ignored scratch，ledger/brief/report/review-package）
 /.superpowers/
 # 运行时产物（F0 起；Task 3 起集中到 main/data/）

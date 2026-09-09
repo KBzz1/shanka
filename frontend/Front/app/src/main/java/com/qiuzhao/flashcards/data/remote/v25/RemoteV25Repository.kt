@@ -154,9 +154,10 @@ class RemoteV25Repository internal constructor(
         materialId: String,
         retainCards: Boolean,
         idempotencyKey: String?,
-    ): V25Result<V25LearningProject> = wire {
+    ): V25Result<Unit> = wire {
         // The retain decision is part of the idempotent operation: a replay must never flip it.
-        api.deleteProjectMaterial(projectId, materialId, if (retainCards) null else false, idempotencyKey ?: newKey()).toDomain()
+        api.deleteProjectMaterial(projectId, materialId, if (retainCards) null else false, idempotencyKey ?: newKey())
+        Unit
     }
 
     override suspend fun replaceProjectMaterialPdf(
@@ -268,6 +269,12 @@ class RemoteV25Repository internal constructor(
 
     override suspend fun retryTask(taskId: String): V25Result<V25GenerationTask> =
         wire { api.retryTask(taskId, newKey()).toDomain() }
+
+    override suspend fun confirmTask(taskId: String): V25Result<V25GenerationTask> =
+        wire { api.confirmTask(taskId, newKey()).toDomain() }
+
+    override suspend fun listTaskCards(taskId: String): V25Result<List<V25Card>> =
+        wire { api.listTaskCards(taskId).items.map { it.toCard() } }
 
     override suspend fun deleteTask(taskId: String, deleteGeneratedCards: Boolean): V25Result<Unit> =
         wire { api.deleteTask(taskId, if (deleteGeneratedCards) true else null, newKey()) }

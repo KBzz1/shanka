@@ -167,6 +167,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     val weeklyActivity by viewModel.weeklyActivity.collectAsState()
     val todayPlan by viewModel.todayPlan.collectAsState()
     val projectProgress by viewModel.projectProgress.collectAsState()
+    val tasks by viewModel.tasks.collectAsState()
     val accountBootstrap by viewModel.accountBootstrap.collectAsState()
     val account = accountBootstrap.account
     var projectSearchQuery by remember { mutableStateOf("") }
@@ -200,15 +201,10 @@ fun FlashcardsApp(viewModel: AppViewModel) {
         }
         entry<AppRoute.ProjectDetail> { route ->
             LaunchedEffect(route.id) {
-                viewModel.refreshProjectTasks(route.id)
                 viewModel.refreshProjectProgress(route.id)
             }
             val project = projects.firstOrNull { it.id == route.id }
             if (project == null) LoadingScreen() else {
-                // Live task statuses from the Room projection (V25-D-34): a generating task
-                // advances to its terminal state here without any screen-driven polling.
-                val tasks by viewModel.projectTasks(route.id)
-                    .collectAsState(initial = emptyList())
                 ProjectDetailScreen(
                     project,
                     decks.filter { it.projectId == project.id },
@@ -220,28 +216,17 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                             onFailure = { onResult(false) },
                         )
                     },
-                    onDeleteProject = { retainDecks, onResult ->
-                        viewModel.deleteProject(project.id, retainDecks, onResult)
-                    },
-                    tasks = tasks,
                     progress = projectProgress[route.id],
-                // Contract 3.16: status EMPTY means no materials yet — the guide replaces the
-                // generation surface until the first PDF/text material lands.
-                isEmptyProject = project.status == "EMPTY",
-                onAddPdfMaterial = {
-                    viewModel.beginMaterialImport()
-                    navigator.navigate(AppRoute.MaterialImport(projectId = project.id))
-                },
-                onAddTextMaterial = {
-                    navigator.navigate(
-                        AppRoute.ProjectTextEditor(
-                            materialId = null,
-                            themeKey = project.themeKey,
-                            projectId = project.id,
-                            editorTitle = "导入文本",
+                    // Contract 3.16: status EMPTY means no materials yet — the
+                    // 卡组管理 pane shows the notice until the first material lands.
+                    isEmptyProject = project.status == "EMPTY",
+                    tasks = tasks,
+                    onRetryDeckTask = { taskId ->
+                        viewModel.retryGenerationTask(
+                            taskId,
+                            onReady = { navigator.navigate(AppRoute.SmartCardSampleWait(project.id)) },
                         )
-                    )
-                },
+                    },
                 )
             }
         }
@@ -253,6 +238,10 @@ fun FlashcardsApp(viewModel: AppViewModel) {
             val project = projects.firstOrNull { it.id == route.projectId }
             if (project == null) LoadingScreen() else SmartCardChapterScreen(project, navigator, viewModel)
         }
+        entry<AppRoute.SmartCardSampleWait> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else SmartCardSampleWaitScreen(project, navigator, viewModel)
+        }
         entry<AppRoute.SmartCardPreview> { route ->
             val project = projects.firstOrNull { it.id == route.projectId }
             if (project == null) LoadingScreen() else SmartCardPreviewScreen(project, navigator, viewModel)
@@ -261,13 +250,15 @@ fun FlashcardsApp(viewModel: AppViewModel) {
             val project = projects.firstOrNull { it.id == route.projectId }
             if (project == null) LoadingScreen() else SmartCardGeneratingScreen(project, navigator, viewModel)
         }
+        entry<AppRoute.SmartCardReview> { route ->
+            SmartCardReviewScreen(route, navigator, viewModel)
+        }
         entry<AppRoute.MaterialManagement> { MaterialManagementScreen(project = null, viewModel, navigator) }
         entry<AppRoute.ProjectMaterialManagement> { route ->
             val project = projects.firstOrNull { it.id == route.projectId }
             if (project == null) LoadingScreen() else MaterialManagementScreen(project, viewModel, navigator)
         }
         entry<AppRoute.MaterialImport> { route -> MaterialImportScreen(route, viewModel, navigator) }
-        entry<AppRoute.ProjectMaterialPicker> { route -> ProjectMaterialPickerScreen(route, viewModel, navigator) }
         entry<AppRoute.Data> { DataScreen(dueCount, dashboard, weeklyActivity, navigator) }
         entry<AppRoute.Deck> { route ->
             val deck = decks.firstOrNull { it.id == route.id }
@@ -341,6 +332,10 @@ fun FlashcardsApp(viewModel: AppViewModel) {
                     onHome = { navigator.navigate(AppRoute.Home) },
                     onProject = { navigator.navigate(AppRoute.Project) },
                     onData = { navigator.navigate(AppRoute.Data) },
+                    onAddProject = {
+                        viewModel.resetProjectCreationDraft()
+                        navigator.navigate(AppRoute.ProjectCreate)
+                    },
                     modifier = Modifier.align(Alignment.BottomCenter)
                 )
             }
@@ -470,11 +465,10 @@ private fun TopInformationBarContent(
                     MaterialSymbol("arrow_back", "返回", tint = LocalContentColor.current, size = fixedSp(24 * scale), filled = true)
                 }
             }
+            // 统一规范（用户决策）：所有二级界面标题恒居中；60dp 对称留白避开
+            // 两侧 56dp 圆钮，切换页签/增删按钮都不会让标题移位。
             Row(
-                modifier = Modifier.align(Alignment.Center).padding(
-                    start = (60 * scale).dp,
-                    end = (if (onSecondaryTrailingAction == null) 60 * scale else 124 * scale).dp
-                ),
+                modifier = Modifier.align(Alignment.Center).padding(horizontal = (60 * scale).dp),
                 horizontalArrangement = Arrangement.spacedBy((16 * scale).dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -512,8 +506,10 @@ private fun TopInformationBarContent(
                     color = secondaryTrailingActionContainer,
                     contentColor = secondaryTrailingActionColor,
                     shape = RoundedCornerShape(999.dp),
+                    // 左右按钮贴边规范：删除钮独占右槽时贴屏幕右缘，只有与主
+                    // 按钮并排时才内缩 64dp 让出外侧位置。
                     modifier = Modifier.align(Alignment.CenterEnd)
-                        .padding(end = (64 * scale).dp)
+                        .padding(end = if (onTrailingAction != null) (64 * scale).dp else 0.dp)
                         .size((56 * scale).dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
@@ -540,6 +536,7 @@ private fun BottomNavBar(
     onHome: () -> Unit,
     onProject: () -> Unit,
     onData: () -> Unit,
+    onAddProject: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val selectedIndex = when (selected) {
@@ -555,6 +552,7 @@ private fun BottomNavBar(
             AppBottomNavigationItem("数据", "query_stats", onData)
         ),
         hazeState = hazeState,
+        onAddClick = onAddProject,
         modifier = modifier
     )
 }

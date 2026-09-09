@@ -1,5 +1,7 @@
 package com.qiuzhao.flashcards.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -70,6 +73,13 @@ internal fun DeckGenerationScreen(
     val materials = projectMats[project.id].orEmpty()
     val fileItems = materials.filter { it.type == ProjectDraftMaterialType.FILE }
     val textItems = materials.filter { it.type == ProjectDraftMaterialType.TEXT }
+    // Background material uploads from 完成设置: they land here one by one (refreshProjects
+    // projects each landed material with its PARSING status) while this screen shows live rows.
+    val uploadStates by viewModel.projectUploadStates.collectAsState()
+    val uploads = uploadStates[project.id].orEmpty()
+    val uploadingFiles = uploads.filter { it.isPdf && it.phase != MaterialUploadPhase.DONE }
+    val uploadingTexts = uploads.filter { !it.isPdf && it.phase != MaterialUploadPhase.DONE }
+    val uploadsBusy = uploads.isNotEmpty()
 
     var name by remember { mutableStateOf("") }
     var basicBoundary by remember { mutableFloatStateOf(40f) }
@@ -78,17 +88,18 @@ internal fun DeckGenerationScreen(
     var requirement by remember { mutableStateOf("") }
     var selectedFileIds by remember { mutableStateOf(setOf<String>()) }
     var selectedTextIds by remember { mutableStateOf(setOf<String>()) }
-    // Same contract as the material-management page: the bound PDF has no standalone delete,
-    // so its swipe-delete requests the project deletion flow with the advisory impact line.
-    var showProjectDeletion by remember { mutableStateOf(false) }
-    var projectDeletionInFlight by remember { mutableStateOf(false) }
-    var deletionPreflight by remember { mutableStateOf<com.qiuzhao.flashcards.domain.v25.V25DeletionPreflight?>(null) }
-    LaunchedEffect(showProjectDeletion) {
-        deletionPreflight = null
-        if (!showProjectDeletion) return@LaunchedEffect
-        viewModel.refreshProjectDeletionPreflight(project.id, retainDecks = true, allowCancel = false) { result ->
-            deletionPreflight = result
+    // 失败资料的「点击重试」= 换文件 replace 重传（V25-D-30），与导入资料页一致。
+    var replaceTarget by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
+    val replacePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val target = replaceTarget
+        if (uri != null && target?.materialId != null) {
+            viewModel.replaceProjectMaterial(project.id, target.materialId, uri) { _, _ -> }
         }
+        replaceTarget = null
+    }
+    // 设定替换目标后立即拉起系统文件选择器；取消时回调同样会清空目标。
+    LaunchedEffect(replaceTarget) {
+        if (replaceTarget != null) replacePicker.launch(arrayOf("application/pdf"))
     }
 
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
@@ -129,27 +140,21 @@ internal fun DeckGenerationScreen(
             item {
                 DeckGenerationMaterialSection(
                     title = "添加文件资料", icon = "files", materials = fileItems, theme = theme, scale = scale,
+                    uploading = uploadingFiles,
+                    onRetryUpload = { viewModel.retryProjectUploads(project.id) },
+                    onRetryMaterial = { material -> if (material.materialId != null) replaceTarget = material },
                     selectedIds = selectedFileIds,
-                    onToggle = { id -> selectedFileIds = if (id in selectedFileIds) selectedFileIds - id else selectedFileIds + id },
-                    onEditText = {},
-                    onDelete = { id ->
-                        val material = fileItems.firstOrNull { it.id == id }
-                        if (material?.projectId == null) viewModel.deleteProjectDraftMaterial(id)
-                        else showProjectDeletion = true
-                    }
+                    onToggle = { id -> selectedFileIds = if (id in selectedFileIds) selectedFileIds - id else selectedFileIds + id }
                 )
             }
             item {
                 DeckGenerationMaterialSection(
                     title = "添加文本资料", icon = "description", materials = textItems, theme = theme, scale = scale,
+                    uploading = uploadingTexts,
+                    onRetryUpload = { viewModel.retryProjectUploads(project.id) },
+                    onRetryMaterial = { material -> if (material.materialId != null) replaceTarget = material },
                     selectedIds = selectedTextIds,
-                    onToggle = { id -> selectedTextIds = if (id in selectedTextIds) selectedTextIds - id else selectedTextIds + id },
-                    onEditText = { material -> nav.navigate(AppRoute.ProjectTextEditor(material.id, theme.key, project.id, editorTitle = "编辑文本资料")) },
-                    onDelete = { id ->
-                        val material = textItems.firstOrNull { it.id == id }
-                        if (material?.projectId == null) viewModel.deleteProjectDraftMaterial(id)
-                        else showProjectDeletion = true
-                    }
+                    onToggle = { id -> selectedTextIds = if (id in selectedTextIds) selectedTextIds - id else selectedTextIds + id }
                 )
             }
         }
@@ -173,36 +178,22 @@ internal fun DeckGenerationScreen(
                     onReady = { ready -> if (ready) nav.navigate(AppRoute.SmartCardChapter(project.id)) },
                 )
             },
-            color = theme.primary, contentColor = theme.onPrimary,
+            // Figma 835:5466: 下一步 needs at least one ready material picked; while
+            // background uploads are in flight nothing may be submitted.
+            enabled = !uploadsBusy && (selectedFileIds + selectedTextIds).isNotEmpty(),
+            color = if (!uploadsBusy && (selectedFileIds + selectedTextIds).isNotEmpty()) {
+                theme.primary
+            } else {
+                theme.primary.copy(alpha = .45f)
+            }, contentColor = theme.onPrimary,
             shape = RoundedCornerShape((24 * scale).dp),
             modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
                 .padding(horizontal = (16 * scale).dp, vertical = (16 * scale).dp)
-                .fillMaxWidth().height((60 * scale).dp).zIndex(1f)
+                .fillMaxWidth().height((68 * scale).dp).zIndex(1f)
         ) {
             Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                 AppText("下一步", AppTextRole.Label, color = LocalContentColor.current, designScale = scale, maxLines = 1)
             }
-        }
-        if (showProjectDeletion) {
-            val impact = deletionPreflight?.impact
-            ProjectDeletionDialog(
-                projectName = project.name,
-                theme = theme,
-                deleting = projectDeletionInFlight,
-                impactText = impact?.let {
-                    "影响范围：${it.deckCount} 个牌组、${it.cardCount} 张卡片、${it.taskCount} 条制卡任务记录"
-                },
-                onConfirm = { retainDecks ->
-                    if (projectDeletionInFlight) return@ProjectDeletionDialog
-                    projectDeletionInFlight = true
-                    viewModel.deleteProject(project.id, retainDecks) { succeeded ->
-                        projectDeletionInFlight = false
-                        showProjectDeletion = false
-                        if (succeeded) nav.returnToTopLevel()
-                    }
-                },
-                onDismiss = { if (!projectDeletionInFlight) showProjectDeletion = false }
-            )
         }
     }
 }
@@ -452,10 +443,11 @@ private fun DeckGenerationMaterialSection(
     materials: List<ProjectDraftMaterial>,
     theme: DeckTheme,
     scale: Float,
+    uploading: List<MaterialUploadState> = emptyList(),
+    onRetryUpload: () -> Unit = {},
+    onRetryMaterial: (ProjectDraftMaterial) -> Unit = {},
     selectedIds: Set<String>,
-    onToggle: (String) -> Unit,
-    onEditText: (ProjectDraftMaterial) -> Unit,
-    onDelete: (String) -> Unit
+    onToggle: (String) -> Unit
 ) = Surface(
     color = theme.background,
     shape = RoundedCornerShape((AppShapeRadius * scale).dp),
@@ -469,14 +461,7 @@ private fun DeckGenerationMaterialSection(
             MaterialSymbol(icon, null, tint = theme.text, size = fixedSp(24 * scale), filled = true)
             AppText(title, AppTextRole.SectionTitle, color = theme.text, designScale = scale, maxLines = 1)
         }
-        HintBox(
-            text = if (title == "添加文件资料") "选择该项目已添加的文件资料\n右滑卡片可编辑文件名称/删除文件"
-            else "选择该项目已添加的文件资料\n右滑卡片可编辑内容/删除文件",
-            parentIsWhite = false,
-            theme = theme,
-            designScale = scale
-        )
-        if (materials.isEmpty()) {
+        if (materials.isEmpty() && uploading.isEmpty()) {
             AppText(
                 "暂无资料",
                 AppTextRole.Supporting,
@@ -485,22 +470,93 @@ private fun DeckGenerationMaterialSection(
                 modifier = Modifier.padding(horizontal = (8 * scale).dp)
             )
         }
+        uploading.forEach { state ->
+            DeckGenerationUploadCard(state, theme, scale, onRetry = onRetryUpload)
+        }
         materials.forEach { material ->
+            // 解析中/失败资料不可选（交接文档 4.5）；选中态用绿色系（Figma 796:6785）。
+            val selectable = materialCardState(material) == ProjectMaterialCardState.DONE
+            // Figma 807:4451 / 835:5466：资料卡统一为「状态图标块 + 标题胶囊」紧凑卡，
+            // 解析中转圈、失败红卡 + 卡下原因行（点击换文件重传）、就绪可点选。
             if (material.type == ProjectDraftMaterialType.FILE) {
-                ProjectDraftFileCard(
-                    material = material, theme = theme, scale = scale,
-                    onEdit = {}, selected = material.id in selectedIds,
-                    onSelect = { onToggle(material.id) },
-                    onDelete = { onDelete(material.id) }
+                ProjectCompactMaterialCard(
+                    material = material, theme = theme, scale = scale, doneIcon = "picture_as_pdf",
+                    onEdit = {}, onDelete = {},
+                    selected = material.id in selectedIds,
+                    onSelect = if (selectable) {
+                        { onToggle(material.id) }
+                    } else null,
+                    selectableOnly = true,
+                    onRetry = { onRetryMaterial(material) }
                 )
             } else {
                 ProjectDraftTextCard(
                     material = material, theme = theme, scale = scale,
-                    onEdit = { onEditText(material) }, onDelete = { onDelete(material.id) },
+                    onEdit = {}, onDelete = {},
                     selected = material.id in selectedIds,
-                    onSelect = { onToggle(material.id) },
+                    onSelect = if (selectable) {
+                        { onToggle(material.id) }
+                    } else null,
                     kind = ProjectMaterialTextCardKind.SELECTABLE,
-                    parentSurface = ProjectMaterialCardParentSurface.THEME_BACKGROUND
+                    parentSurface = ProjectMaterialCardParentSurface.THEME_BACKGROUND,
+                    selectableOnly = true,
+                    onRetry = { onRetryMaterial(material) }
+                )
+            }
+        }
+        // Figma 1050:4944 — the usage hint sits at the section's bottom-left.
+        CardHint("点击可选中文件。", designScale = scale)
+    }
+}
+
+/**
+ * One background material upload from 完成设置, in this screen's own visual language
+ * (family cardPanel body, 36dp silhouette, same 56dp icon tile as the draft cards).
+ * UPLOADING renders a progress ring; FAILED turns the tile Warning and tapping the card
+ * replays only the failed uploads with their fixed idempotency keys.
+ */
+@Composable
+private fun DeckGenerationUploadCard(
+    state: MaterialUploadState,
+    theme: DeckTheme,
+    scale: Float,
+    onRetry: () -> Unit
+) {
+    val failed = state.phase == MaterialUploadPhase.FAILED
+    Surface(
+        color = theme.cardPanel,
+        shape = RoundedCornerShape((36 * scale).dp),
+        onClick = onRetry,
+        enabled = failed,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(Modifier.fillMaxWidth().padding((16 * scale).dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(
+                color = if (failed) AppColors.Warning else theme.secondary,
+                shape = RoundedCornerShape((24 * scale).dp),
+                modifier = Modifier.size((56 * scale).dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    if (failed) {
+                        MaterialSymbol("wifi_off", null, tint = AppColors.WarningInk, size = fixedSp(24 * scale), filled = true)
+                    } else {
+                        CircularProgressIndicator(
+                            color = theme.primary,
+                            trackColor = theme.background,
+                            strokeWidth = (3 * scale).dp,
+                            modifier = Modifier.size((24 * scale).dp)
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.width((16 * scale).dp))
+            Column(verticalArrangement = Arrangement.spacedBy((2 * scale).dp)) {
+                AppText(state.name, AppTextRole.CardTitle, color = theme.text, designScale = scale, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                AppText(
+                    if (failed) "上传失败 · 点按重试" else "上传中…",
+                    AppTextRole.CardSubtitle,
+                    color = if (failed) AppColors.WarningInk else theme.text.copy(alpha = .5f),
+                    designScale = scale
                 )
             }
         }

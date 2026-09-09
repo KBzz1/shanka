@@ -213,11 +213,9 @@ internal fun CardListScreen(
                     verticalArrangement = Arrangement.spacedBy((16 * designScale).dp)
                 ) {
                     item {
-                        HintBox(
-                            text = "点击卡片可以查看答案。\n卡片左滑可进行编辑与删除。",
-                            parentIsWhite = true,
-                            theme = theme,
-                            designScale = designScale
+                        CardHint(
+                            "点击卡片可以查看答案。\n卡片左滑可进行编辑与删除。",
+                            designScale = designScale,
                         )
                     }
                     items(visibleCards, key = { it.id }) { card ->
@@ -246,7 +244,7 @@ internal fun CardListScreen(
             Row(
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
                     .padding(horizontal = (16 * designScale).dp, vertical = (16 * designScale).dp)
-                    .fillMaxWidth().height((60 * designScale).dp).zIndex(1f),
+                    .fillMaxWidth().height((68 * designScale).dp).zIndex(1f),
                 horizontalArrangement = Arrangement.spacedBy(((if (mode == CardListMode.EDIT) 16 else 12) * designScale).dp)
             ) {
                 if (mode == CardListMode.EDIT) {
