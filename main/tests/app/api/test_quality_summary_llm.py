@@ -17,6 +17,7 @@ KnowledgePoint/Batch/Card（不经执行器）——聚焦聚合语义：
 import json
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,11 +30,15 @@ from app.api.observability import _unit_difficulties
 from app.config import Settings
 from app.main import create_app
 from infra.db.models import Batch, Card, KnowledgePoint, PdfFile, Task, User
-from infra.db.session import create_db_engine, create_session_factory
+from infra.db.session import create_db_engine, create_session_factory, format_utc
 from services.decks.service import create_deck
 from tests.conftest import auth_headers
 
 REPO_ROOT = Path(__file__).resolve().parents[4]  # tests/app/api/ → 仓库根
+
+# 种子时间相对运行时钟：端点按 now-30 天开窗，固定日期会随日历漂出窗口
+# （2026-09-10 曾因此整批误红：种子 2026-08-11 恰好年满 30 天）
+_SEED_AT = format_utc(datetime.now(UTC) - timedelta(days=1))
 
 
 @pytest.fixture
@@ -92,8 +97,8 @@ def _seed_base(db_path: Path, *, user_id: str) -> tuple[str, str]:
                     username=f"u-{user_id[:8]}",
                     email=f"u-{user_id[:8]}@example.com",
                     password_hash="x",
-                    created_at="2026-08-11T00:00:00.000Z",
-                    updated_at="2026-08-11T00:00:00.000Z",
+                    created_at=_SEED_AT,
+                    updated_at=_SEED_AT,
                 )
             )
             session.flush()  # UoW 不按 FK 排序 INSERT（无 relationship）
@@ -104,11 +109,11 @@ def _seed_base(db_path: Path, *, user_id: str) -> tuple[str, str]:
             storage_key=_uuid(),
             size_bytes=10,
             status="PARSED",
-            created_at="2026-08-11T00:00:00.000Z",
+            created_at=_SEED_AT,
         )
         session.add(pdf)
         session.flush()
-        deck = create_deck(session, user_id=user_id, name="D", now="2026-08-11T00:00:00.000Z")
+        deck = create_deck(session, user_id=user_id, name="D", now=_SEED_AT)
         session.flush()
         session.commit()
         return pdf.file_id, deck.deck_id
@@ -180,7 +185,7 @@ def _seed_batch(
                 duplicate_rate=duplicate_rate,
                 model="deepseek-v4-flash",
                 rubric_version=rubric_version,
-                created_at="2026-08-11T00:00:00.000Z",
+                created_at=_SEED_AT,
             )
         )
         session.commit()
@@ -220,8 +225,8 @@ def _seed_card(
                 learning_value_score=learning,
                 rubric_total_score=total,
                 version="v1",
-                created_at="2026-08-11T00:00:00.000Z",
-                updated_at="2026-08-11T00:00:00.000Z",
+                created_at=_SEED_AT,
+                updated_at=_SEED_AT,
             )
         )
         session.commit()
