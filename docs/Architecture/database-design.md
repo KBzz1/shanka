@@ -340,7 +340,7 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | 可空;删除任务时先解除引用以保留账本(实际库存在 CASCADE 已知偏差,见下) |
 | operation_id | TEXT | NULL, FK → generation_operations ON DELETE SET NULL | 跨阶段操作归属 |
 | stage | TEXT | NOT NULL | `SAMPLE / PLANNING / GENERATING / SCORING / REWRITE` |
-| operation_key | TEXT | NOT NULL | 规划含 chapter/group/input fingerprint;生成含 batch_id;评分含确定性 group key;重写含 card_id/card_version/Idempotency-Key hash |
+| operation_key | TEXT | NOT NULL | 规划两阶段(V2.5.2)含 `planning:coarse:{chapter_id}` / `planning:fine:{chapter_id}:{batch_index}` / `planning:fine-wide:{chapter_id}:{topic_index}`(空产出主题恢复重试);生成含 batch_id;评分含确定性 group key;重写含 card_id/card_version/Idempotency-Key hash |
 | attempt_no | INTEGER | NOT NULL | 同一操作的第几次实际尝试 |
 | input_fingerprint | TEXT | NOT NULL | 输入身份(不保存完整 Prompt/原文) |
 | model | TEXT | NOT NULL | 实际模型值 |

@@ -521,21 +521,38 @@ def test_executor_full_flow_plan_then_generate(
                 },
                 ensure_ascii=False,
             )
-        elif calls == 1:  # 规划调用：从 <PLANNER_INPUT> 提取组页 → 合法单元
+        elif "<PLANNER_COARSE_INPUT>" in user:  # 粗规划：提取页 → 1 主题
             payload = json.loads(
-                user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
+                user.split("<PLANNER_COARSE_INPUT>", 1)[1].split("</PLANNER_COARSE_INPUT>", 1)[0]
             )
             chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
             content = json.dumps(
                 {
+                    "topics": [
+                        {
+                            "title": "全流程主题",
+                            "coverage_tier": "CORE",
+                            "source_chunk_ids": [chunk_ids[0]],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        elif "<PLANNER_INPUT>" in user:  # 精规划：按分配主题 → 1 单元
+            payload = json.loads(
+                user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
+            )
+            content = json.dumps(
+                {
                     "units": [
                         {
-                            "source_chunk_ids": [chunk_ids[0]],
+                            "topic_index": t["topic_index"],
+                            "source_chunk_ids": [t["source_chunk_ids"][0]],
                             "learning_objective": "全流程目标",
                             "target_difficulty": "BASIC",
                             "card_type": "QUESTION",
-                            "coverage_tier": "CORE",
                         }
+                        for t in payload["topics"]
                     ]
                 },
                 ensure_ascii=False,
@@ -573,7 +590,7 @@ def test_executor_full_flow_plan_then_generate(
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
         cards = session.scalars(select(Card).where(Card.deck_id == task.deck_id)).all()
     assert n == 1
-    assert calls == 3  # 1 次规划 + 1 次生成 + 1 次评分（同一扫描轮内衔接，T11 SCORING 阶段）
+    assert calls == 4  # 1 粗规划 + 1 精规划 + 1 生成 + 1 评分（同一扫描轮内衔接，V2.5.2 两阶段）
     assert task.status == "COMPLETED"
     assert len(kps) == 1
     assert kps[0].topic == "全流程目标"

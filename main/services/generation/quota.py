@@ -10,6 +10,7 @@ DEEP_QUESTION、章序、组序）消除随机性，各层均用最大余数法�
 """
 
 import math
+from typing import cast
 
 _DENSITY = {"COMPACT": 1, "BALANCED": 2, "EXTENSIVE": 3}
 _BASE_CHUNKS = 3  # 旧"章数×3×密度"估算口径保留（创建期快速守卫）
@@ -197,6 +198,53 @@ def allocate_task_quota(
         total_budget,
         ["BASIC", "UNDERSTANDING", "DEEP_QUESTION"],
     )
+
+
+def pack_topic_batches(
+    topics: list[dict[str, object]],
+    page_chars: dict[str, int],
+    *,
+    max_chars: int,
+    max_topics: int,
+) -> list[list[int]]:
+    """主题打包成精规划批（V2.5.2 两阶段）：按主题序贪心，批字符按批内页并集计。
+
+    topics 契约：`[{source_chunk_ids: list[str]}, ...]`（按 topic_index 升序）；
+    返回 0 基主题下标的批列表。单主题声明字符恒 ≤ max_source_chars_per_topic
+    （粗规划 validator 已过滤），故单主题批不会超 max_chars。
+    """
+    batches: list[list[int]] = []
+    current: list[int] = []
+    union: set[str] = set()
+    for i, topic in enumerate(topics):
+        ids = set(cast(list[str], topic["source_chunk_ids"]))
+        added_chars = sum(page_chars.get(cid, 0) for cid in ids - union)
+        if current and (
+            len(current) + 1 > max_topics
+            or _union_chars(union, page_chars) + added_chars > max_chars
+        ):
+            batches.append(current)
+            current = []
+            union = set()
+            added_chars = sum(page_chars.get(cid, 0) for cid in ids)
+        current.append(i)
+        union |= ids
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _union_chars(union: set[str], page_chars: dict[str, int]) -> int:
+    return sum(page_chars.get(cid, 0) for cid in union)
+
+
+def expand_page_window(positions: set[int], total_pages: int, margin: int) -> set[int]:
+    """精规划批页窗口：主题声明页位置 ∪ ±margin（夹在 [0, total_pages) 内）。"""
+    window: set[int] = set()
+    for pos in positions:
+        for p in range(max(pos - margin, 0), min(pos + margin, total_pages - 1) + 1):
+            window.add(p)
+    return window
 
 
 def allocate_chapter_quota(task_quota: dict[str, int], chapter_count: int) -> list[dict[str, int]]:

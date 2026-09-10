@@ -198,10 +198,12 @@ VERSION_KEYS: tuple[tuple[str, str], ...] = (
     ("schema_version", "schemas.generator_output"),
     ("generator_prompt_version", "prompts.generator"),
     ("planner_prompt_version", "prompts.planner"),
+    ("planner_coarse_prompt_version", "prompts.planner_coarse"),
     ("rewrite_prompt_version", "prompts.rewrite"),
     ("scoring_prompt_version", "prompts.scoring"),
     ("card_schema_version", "schemas.card"),
     ("planner_output_schema_version", "schemas.planner_output"),
+    ("planner_coarse_output_schema_version", "schemas.planner_coarse_output"),
     ("scoring_output_schema_version", "schemas.scoring_output"),
     ("rubric_version", "rubrics.main"),
 )

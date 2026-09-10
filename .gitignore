@@ -37,3 +37,5 @@ __pycache__/
 /.zcode/
 # 仓库根运行时日志（与 main/data/ 同类产物）
 /data/
+# 两阶段规划消融实验原始输出（子代理产物，含样书正文切块；harness 可重建，结论见 report.md）
+/scripts/planning_ablation/run/

@@ -43,28 +43,42 @@ _PER_BATCH_COST = pytest.approx(2 * 0.5e-6 + 8 * 2e-6 + 5 * 8e-6)  # 0.000057 �
 
 
 def _dispatch(request: httpx.Request) -> httpx.Response:
-    """mock transport 全链路分派（模块级，供失败注入工厂复用）：<PLANNER_INPUT> →
-    按请求配额产出锚定单元（引用请求内组页）；<SCORING_INPUT> → ID 守恒的确定性
-    分数；其余（<GENERATION_SPEC>）→ 1 张合法卡（1 单元 1 批）。usage 统一
-    hit=2/miss=8/output=5——cost 估算可算。"""
+    """mock transport 全链路分派（V2.5.2 两阶段，模块级供失败注入工厂复用）：
+    <PLANNER_COARSE_INPUT> → 主题清单（区间上限条）；<PLANNER_INPUT> → 按分配主题
+    逐个展开单元；<SCORING_INPUT> → ID 守恒的确定性分数；其余（<GENERATION_SPEC>）→
+    1 张合法卡（1 单元 1 批）。usage 统一 hit=2/miss=8/output=5——cost 估算可算。"""
 
     body = json.loads(request.content)
     user = body["messages"][-1]["content"]
-    if "<PLANNER_INPUT>" in user:
-        payload = json.loads(user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0])
+    if "<PLANNER_COARSE_INPUT>" in user:
+        payload = json.loads(
+            user.split("<PLANNER_COARSE_INPUT>", 1)[1].split("</PLANNER_COARSE_INPUT>", 1)[0]
+        )
         chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
-        units: list[dict[str, object]] = []
-        for difficulty, quota_i in payload["difficulty_interval"].items():
-            for _ in range(quota_i["max"]):
-                units.append(
-                    {
-                        "source_chunk_ids": [chunk_ids[0]],
-                        "learning_objective": f"知识点{len(units)}",
-                        "target_difficulty": difficulty,
-                        "card_type": "QUESTION",
-                        "coverage_tier": "CORE",
-                    }
-                )
+        count = payload["topic_interval"]["max"]
+        topics = [
+            {
+                "title": f"主题{i}",
+                "coverage_tier": "CORE",
+                "source_chunk_ids": [chunk_ids[i % len(chunk_ids)]],
+            }
+            for i in range(count)
+        ]
+        content = json.dumps({"topics": topics}, ensure_ascii=False)
+    elif "<PLANNER_INPUT>" in user:
+        payload = json.loads(user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0])
+        diffs = [d for d, b in payload["difficulty_interval"].items() if b["max"] > 0]
+        chapter_name = payload["chapter"]["name"]
+        units: list[dict[str, object]] = [
+            {
+                "topic_index": t["topic_index"],
+                "source_chunk_ids": [t["source_chunk_ids"][0]],
+                "learning_objective": f"知识点{chapter_name}{t['topic_index']}",
+                "target_difficulty": diffs[i % len(diffs)],
+                "card_type": "QUESTION",
+            }
+            for i, t in enumerate(payload["topics"])
+        ]
         content = json.dumps({"units": units}, ensure_ascii=False)
     elif "<SCORING_INPUT>" in user:
         payload = json.loads(user.split("<SCORING_INPUT>", 1)[1].split("</SCORING_INPUT>", 1)[0])
@@ -226,7 +240,7 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
         persist_text_chunks(
             session,
             file_id=pdf.file_id,
-            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2, 3)],
+            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 320} for pn in (1, 2, 3)],
             now="2026-08-11T00:00:00.000Z",
         )
         if session.scalar(select(ApiKey.user_id).where(ApiKey.user_id == user_id)) is None:
@@ -518,7 +532,11 @@ def test_quality_summary_excludes_staged_and_failed_task_cards(
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             user_msg = body["messages"][-1]["content"]
-            if "<PLANNER_INPUT>" in user_msg or "<SCORING_INPUT>" in user_msg:
+            if (
+                "<PLANNER_INPUT>" in user_msg
+                or "<PLANNER_COARSE_INPUT>" in user_msg
+                or "<SCORING_INPUT>" in user_msg
+            ):
                 return _dispatch(request)
             state["gen_calls"] += 1
             if state["gen_calls"] == 2:
@@ -535,7 +553,11 @@ def test_quality_summary_excludes_staged_and_failed_task_cards(
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             user_msg = body["messages"][-1]["content"]
-            if "<PLANNER_INPUT>" in user_msg or "<SCORING_INPUT>" in user_msg:
+            if (
+                "<PLANNER_INPUT>" in user_msg
+                or "<PLANNER_COARSE_INPUT>" in user_msg
+                or "<SCORING_INPUT>" in user_msg
+            ):
                 return _dispatch(request)
             state["gen_calls"] += 1
             if state["gen_calls"] == 2:

@@ -77,10 +77,12 @@ def _pipeline_factory(
     scores: dict[str, int] | None = None,
     with_usage: bool = True,
 ) -> Callable[[str], DeepSeekClient]:
-    """mock transport 全链路分派（planner → generator → scorer）。
+    """mock transport 全链路分派（V2.5.2 两阶段：coarse planner → fine planner →
+    generator → scorer）。
 
-    - <PLANNER_INPUT>：按请求配额产出锚定单元（引用请求内组页）；学习目标全局唯一
-      编号（跨规划调用共享计数器——生成卡内容可按目标序号定位）。
+    - <PLANNER_COARSE_INPUT>：主题清单（区间上限条，引用请求内页）。
+    - <PLANNER_INPUT>：按分配主题逐个展开单元；学习目标全局唯一编号（跨调用共享
+      计数器——生成卡内容可按目标序号定位）。
     - <GENERATION_SPEC>：从学习目标提取序号 → 每批 1 张卡（cards 按序号循环）。
     - <SCORING_INPUT>：ID 集合守恒的分数（scores 四维；缺省正常分数）。
     """
@@ -91,24 +93,40 @@ def _pipeline_factory(
         def handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             user = body["messages"][-1]["content"]
-            if "<PLANNER_INPUT>" in user:
+            if "<PLANNER_COARSE_INPUT>" in user:
+                payload = json.loads(
+                    user.split("<PLANNER_COARSE_INPUT>", 1)[1].split("</PLANNER_COARSE_INPUT>", 1)[
+                        0
+                    ]
+                )
+                chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+                count = payload["topic_interval"]["max"]
+                topics = [
+                    {
+                        "title": f"主题{i}",
+                        "coverage_tier": "CORE",
+                        "source_chunk_ids": [chunk_ids[i % len(chunk_ids)]],
+                    }
+                    for i in range(count)
+                ]
+                content = json.dumps({"topics": topics}, ensure_ascii=False)
+            elif "<PLANNER_INPUT>" in user:
                 payload = json.loads(
                     user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
                 )
-                chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+                diffs = [d for d, b in payload["difficulty_interval"].items() if b["max"] > 0]
                 units: list[dict[str, object]] = []
-                for difficulty, interval in payload["difficulty_interval"].items():
-                    for _ in range(interval["max"]):
-                        units.append(
-                            {
-                                "source_chunk_ids": [chunk_ids[0]],
-                                "learning_objective": f"知识点{counter[0]}",
-                                "target_difficulty": difficulty,
-                                "card_type": "QUESTION",
-                                "coverage_tier": "CORE",
-                            }
-                        )
-                        counter[0] += 1
+                for i, topic in enumerate(payload["topics"]):
+                    units.append(
+                        {
+                            "topic_index": topic["topic_index"],
+                            "source_chunk_ids": [topic["source_chunk_ids"][0]],
+                            "learning_objective": f"知识点{counter[0]}",
+                            "target_difficulty": diffs[i % len(diffs)],
+                            "card_type": "QUESTION",
+                        }
+                    )
+                    counter[0] += 1
                 content = json.dumps({"units": units}, ensure_ascii=False)
             elif "<SCORING_INPUT>" in user:
                 payload = json.loads(
@@ -281,11 +299,12 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
             )
         )
         session.flush()
-        # 章节 1（页 1-2）/ 章节 2（页 2-3）→ 页文本覆盖 1-3
+        # 章节 1（页 1-2）/ 章节 2（页 2-3）→ 页文本覆盖 1-3；V2.5.2 两阶段起加厚到
+        # 1600 字/页（每章 3200 字 → COMPACT 主题区间 [3,3]，2 章 6 主题 = 6 单元）
         persist_text_chunks(
             session,
             file_id=pdf.file_id,
-            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2, 3)],
+            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 320} for pn in (1, 2, 3)],
             now="2026-08-11T00:00:00.000Z",
         )
         session.commit()

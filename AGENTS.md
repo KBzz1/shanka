@@ -13,7 +13,7 @@
   - 分层依赖：`app → services → infra` 单向，均可依赖 `domain/`；禁止在 handler 中直接暴露 ORM 对象。
 - `frontend/Front` — Android 客户端（Kotlin + Compose，Gradle 工程）：Retrofit/OkHttp 网络栈、`shanka-v25.db` Room 投影 + 评分 outbox（离线恰好一次）；对接规则见 `docs/frontend/AGENTS.md`。
 - `agent_evolution/` — agent 版本化资产（prompt/schema/rubric + manifest.json），`main/infra/llm/` 按 manifest 加载；资产演进 = 新版本目录 + 更新 manifest + CHANGELOG，属技术评审级变更。
-- `scripts/` — run.sh / stop.sh（启动/停止，语义见 `docs/Architecture/deployment.md` 契约 4.1）、gen_sample_cards.py（样卡真实生成演示）、run_b5_acceptance.py（密度制 B5 验收）、task_quality_report.py（单任务质量报告），见 `scripts/AGENTS.md`。
+- `scripts/` — run.sh / stop.sh（启动/停止，语义见 `docs/Architecture/deployment.md` 契约 4.1）、gen_sample_cards.py（样卡真实生成演示）、run_b5_acceptance.py（密度制 B5 验收）、task_quality_report.py（单任务质量报告）、planning_ablation/（两阶段规划消融实验 harness 与结论报告），见 `scripts/AGENTS.md`。
 - `res/` — 样书 PDF 夹具（只读引用，勿替换，规则见 `main/services/pdf/AGENTS.md`）。
 
 ## 一致性红线（改动前先确认下游）

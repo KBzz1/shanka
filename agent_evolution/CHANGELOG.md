@@ -1,5 +1,6 @@
 # agent_evolution 演进日志
 
+
 ## v1（2026-08-10）
 
 - 初始资产：prompts（planner/generator）、schemas（card）、rubrics（main + scoring-prompt）。
@@ -110,3 +111,27 @@
 - **manifest** 切换到 planner v6 / generator v6；rewrite 保持 v4、scoring 保持 v3。
 - 依据：双裁判盲评量化短板 + LLM 出题研究共识（高阶认知题生成显著弱于低阶回忆题）+
   近失负例对上下文学习的强化效应 + Bloom 修订版动作动词口径。
+
+## 2026-09-09（v7 两阶段规划：粗规划主题盘点 + 精规划主题展开）
+
+- **prompts/planner v6 → v7（精规划）**：规划职责拆为两阶段，本资产承载第二阶段——只展开
+  服务端分配的主题（`topic_index` 锚定），默认一主题一单元、核心主题可按不同认知动作展开
+  2~3 条；新增"紧扣主题、不得漂移到相邻知识点"条款；输出单元含 `topic_index`、不再输出
+  `coverage_tier`（由服务端从主题注入，结构上杜绝层级越权）；难度锚定、卡型组合与目标写法
+  沿用 v6。
+- **新增 prompts/planner_coarse v7（粗规划）**：整章一次性知识盘点，输出主题清单
+  `{topics:[{title, coverage_tier, source_chunk_ids}]}`；`topic_interval` 数量目标沿用密度
+  锚点；覆盖层级语义表沿用 v6（coverage_mode → 允许层级）；主题粒度硬规则（并列必拆、
+  枚举必拆、复述合并）与逐小节/表格/边栏/脚注清点步骤——依据 2026-09-09 消融实验评委
+  反馈（原子性与低频覆盖为普遍弱项）强化。
+- **schemas/planner_output v4 → v7（精规划输出）**：units 增必填 `topic_index`（≥1 整数）、
+  删 `coverage_tier`（服务端注入）；其余字段与 v4 一致。
+- **新增 schemas/planner_coarse_output v7**：`{topics:[...]}` 结构，title 2~80 字、
+  coverage_tier 三值枚举、source_chunk_ids 1~8 项唯一。
+- **依据**：两阶段消融实验（scripts/planning_ablation/report.md，子代理驱动零 API）——
+  8/8 cell 命中密度区间，同章三档 25/49/81（旧单阶段架构 19/19 档位无区分）；tier 违规 0、
+  重复标题 0、B3 覆盖 0.86~1.00；`density_assessment` 密度自评变体四组对照全部误判 RICH 且
+  评委分无改善，**不采纳**，v7 保持纯锚点区间。
+- **manifest** 切换到 planner v7 / planner_coarse v7 / planner_output v7 /
+  planner_coarse_output v7；generator 保持 v6、rewrite 保持 v4、scoring 保持 v3、card 保持
+  v1、generator_output 保持 v3、scoring_output 保持 v3、rubric 保持 v3。

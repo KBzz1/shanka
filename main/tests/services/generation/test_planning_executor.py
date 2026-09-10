@@ -1,14 +1,15 @@
-"""规划执行集成测试（spec §6.1/§6.2/§6.4；Task 9）：CAS 抢占/快照冻结/分组调用/账本恢复/合并落库。
+"""两阶段规划执行集成测试（spec §6.1/§6.2/§6.4；V2.5.2 粗+精）。
 
-基座同 test_tasks_executor.py：真实 SQLite 全表建库 + mock transport client
-（brief 提及的 session/settings_override fixture 仓库不存在，按仓库约定用
-session_factory 定式——adaptation 见任务报告）。mock chat 从请求体提取当前组页
-（<PLANNER_INPUT> 内的 source_chunks），保证回复引用合法来源。
+基座同 test_tasks_executor.py：真实 SQLite 全表建库 + mock transport client。mock chat
+按 user message 信封分派：<PLANNER_COARSE_INPUT> → 主题清单响应；<PLANNER_INPUT> →
+按 payload.topics 逐主题展开单元（引用合法来源与 topic_index）。
+
+页文本默认加厚到 750 字/页（2 页 1500 字 → COMPACT 主题区间 [2,2]），保证默认用例
+能规划出 2 主题/2 单元——薄内容在密度制下合法地产出更少。
 """
 
 import json
 import logging
-import sys
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -41,15 +42,11 @@ from infra.llm.prompts import asset_versions
 from services.generation.ledger import create_attempt, finish_success
 from services.generation.planning_executor import (
     claim_planning_task,
-    group_fingerprint,
+    coarse_fingerprint,
+    fine_fingerprint,
     run_planning,
 )
-from services.generation.quota import (
-    allocate_chapter_intervals,
-    allocate_group_interval,
-    difficulty_interval,
-    interval_for_chapter,
-)
+from services.generation.quota import difficulty_interval, interval_for_chapter
 from services.pdf.text_chunks import persist_text_chunks
 from services.tasks.service import create_task
 
@@ -75,8 +72,16 @@ def _uuid() -> str:
 
 
 def _page_content(page_number: int) -> str:
-    """确定性页文本（chunk_id 由 (file_id, page, content) 决定，测试可复算）。"""
-    return f"第{page_number}页内容" * 20
+    """确定性页文本（约 750 字/页；chunk_id 由 (file_id, page, content) 决定，可复算）。"""
+    return f"第{page_number}页内容" * 150
+
+
+def _anchors(settings: Settings) -> dict[str, float]:
+    return {
+        "COMPACT": settings.cards_per_10k_compact,
+        "BALANCED": settings.cards_per_10k_balanced,
+        "EXTENSIVE": settings.cards_per_10k_extensive,
+    }
 
 
 def _seed_planning_task(
@@ -194,26 +199,77 @@ def _seed_planning_task(
     return task.task_id, ch.chapter_id, pdf.file_id
 
 
-def _planning_response_from_request(
-    request: httpx.Request, *, count: int = 1, difficulties: list[str] | None = None
-) -> str:
-    """从请求 user message 的 <PLANNER_INPUT> 提取当前组页 → 合法单元响应。"""
+def _parse_user_payload(request: httpx.Request) -> dict[str, Any]:
     body = json.loads(request.content)
     user = body["messages"][-1]["content"]
-    payload = json.loads(user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0])
+    for tag in ("<PLANNER_COARSE_INPUT>", "<PLANNER_INPUT>"):
+        if tag in user:
+            payload: dict[str, Any] = json.loads(
+                user.split(tag, 1)[1].split(tag.replace("<", "</"), 1)[0]
+            )
+            return payload
+    raise AssertionError(f"未知规划信封: {user[:60]}")
+
+
+def _default_coarse_topics(
+    payload: dict[str, Any], *, tiers: list[str] | None = None
+) -> list[dict[str, Any]]:
+    """默认粗规划响应：2 个主题（COMPACT 安全的 CORE 层级），引用首两页。"""
     chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
-    diffs = difficulties or ["BASIC"]
-    units = [
+    tier_list = tiers or ["CORE", "CORE"]
+    return [
         {
+            "title": f"主题{label}",
+            "coverage_tier": tier,
             "source_chunk_ids": [chunk_ids[i % len(chunk_ids)]],
-            "learning_objective": f"目标{i}",
-            "target_difficulty": diffs[i % len(diffs)],
-            "card_type": "QUESTION",
-            "coverage_tier": "CORE",
         }
-        for i in range(count)
+        for i, (label, tier) in enumerate(zip(("一", "二"), tier_list), start=0)
     ]
-    return json.dumps({"units": units}, ensure_ascii=False)
+
+
+def _default_fine_units(
+    payload: dict[str, Any], *, skip_topic: int | None = None
+) -> list[dict[str, Any]]:
+    """默认精规划响应：每主题 1 单元（难度轮转 BASIC/UNDERSTANDING，引用主题首来源）。"""
+    difficulties = ["BASIC", "UNDERSTANDING", "DEEP_QUESTION"]
+    units = []
+    for i, topic in enumerate(payload["topics"]):
+        if skip_topic is not None and topic["topic_index"] == skip_topic:
+            continue  # 模拟漏挖（触发 fine-wide 恢复）
+        units.append(
+            {
+                "topic_index": topic["topic_index"],
+                "source_chunk_ids": [topic["source_chunk_ids"][0]],
+                "learning_objective": f"说出主题{topic['topic_index']}的核心要点",
+                "target_difficulty": difficulties[i % len(difficulties)],
+                "card_type": "QUESTION",
+            }
+        )
+    return units
+
+
+def _two_stage_handler(
+    state: dict[str, int],
+    *,
+    coarse: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
+    fine: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
+) -> Callable[[httpx.Request], httpx.Response]:
+    """按信封分派的两阶段 mock：coarse/fine 可注入自定义响应构造器。"""
+
+    def read_marker(request: httpx.Request) -> str:
+        user = json.loads(request.content)["messages"][-1]["content"]
+        return "<PLANNER_COARSE_INPUT>" if "<PLANNER_COARSE_INPUT>" in user else "<PLANNER_INPUT>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state["calls"] += 1
+        payload = _parse_user_payload(request)
+        if read_marker(request) == "<PLANNER_COARSE_INPUT>":
+            topics = coarse(payload) if coarse else _default_coarse_topics(payload)
+            return _ok_response(json.dumps({"topics": topics}, ensure_ascii=False))
+        units = fine(payload) if fine else _default_fine_units(payload)
+        return _ok_response(json.dumps({"units": units}, ensure_ascii=False))
+
+    return handler
 
 
 def _client_with_handler(handler: Callable[[httpx.Request], httpx.Response]) -> DeepSeekClient:
@@ -236,30 +292,6 @@ def _ok_response(content: str) -> httpx.Response:
     )
 
 
-def _expected_sub_interval(pages: list[Any]) -> dict[str, dict[str, int]]:
-    """镜像 run_planning 的密度区间链（V25-D-25）：1 章 COMPACT 40/40/20 → 组区间。
-
-    测试页字符总量 < planner_max_input_chars → 单组，组区间 = 章难度区间。
-    """
-    from app.config import Settings
-
-    settings = Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
-    char_counts = [sum(p.char_count for p in pages)]
-    intervals = allocate_chapter_intervals(
-        char_counts,
-        "COMPACT",
-        0.4,
-        0.4,
-        0.2,
-        cards_per_10k={
-            "COMPACT": settings.cards_per_10k_compact,
-            "BALANCED": settings.cards_per_10k_balanced,
-            "EXTENSIVE": settings.cards_per_10k_extensive,
-        },
-    )
-    return intervals[0]
-
-
 def _claim_and_plan(
     session: Session, *, settings: Settings = _SETTINGS, client: DeepSeekClient
 ) -> Task:
@@ -269,6 +301,16 @@ def _claim_and_plan(
     run_planning(session, task, settings=settings, client=client)
     session.commit()
     return task
+
+
+def _load_pages(session: Session, file_id: str) -> list[Any]:
+    from infra.db.models import TextChunk
+
+    return list(
+        session.scalars(
+            select(TextChunk).where(TextChunk.file_id == file_id).order_by(TextChunk.page_number)
+        ).all()
+    )
 
 
 # ---------- CAS 抢占与快照冻结 ----------
@@ -320,12 +362,12 @@ def test_claim_cas2_orphan_takeover_marks_started_unknown(
             scope_id=task_id,
             task_id=task_id,
             stage="PLANNING",
-            operation_key=f"planning:{chapter_id}:0",
+            operation_key=f"planning:coarse:{chapter_id}:0",
             input_fingerprint="fp-stale",
             attempt_no=1,
             model="m",
-            prompt_name="planner",
-            prompt_version="v3",
+            prompt_name="planner-coarse",
+            prompt_version="v7",
             now="2026-08-12T00:00:00.000Z",
         )
         session.commit()
@@ -358,29 +400,18 @@ def test_claim_chapter_deleted_fails_task(
         assert task.error_code == "GENERATION_FAILED"
 
 
-# ---------- 规划执行 ----------
+# ---------- 规划执行（两阶段） ----------
 
 
 def test_planning_success_units_and_batches(
     session_factory: Callable[[], Session],
 ) -> None:
-    """成功规划 → GENERATING + KnowledgePoint（含新列/兼容投影）+ 每单元一批（generation_unit_id）。"""
+    """成功规划 → GENERATING + KnowledgePoint（tier 注入/兼容投影）+ 每单元一批。"""
     user = _uuid()
+    state: dict[str, int] = {"calls": 0}
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return _ok_response(
-                _planning_response_from_request(
-                    request, count=2, difficulties=["BASIC", "UNDERSTANDING"]
-                )
-            )
-
-        client = _client_with_handler(handler)
-        _claim_and_plan(session, client=client)
+        _claim_and_plan(session, client=_client_with_handler(_two_stage_handler(state)))
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
@@ -392,13 +423,14 @@ def test_planning_success_units_and_batches(
         batches = session.scalars(
             select(Batch).where(Batch.task_id == task_id).order_by(Batch.batch_index)
         ).all()
-    assert calls == 1
+    assert state["calls"] == 2  # 1 粗规划 + 1 精规划批
     assert task.stage == "GENERATING"
     assert task.status == "GENERATING"  # V2.5 全程 GENERATING（规划完成不转移用户状态）
     assert task.skipped_planning_group_count == 0
-    assert len(kps) == 2  # 每单元一个知识点（BASIC + UNDERSTANDING 各 1，配额内）
+    assert len(kps) == 2  # 2 主题各 1 单元（BASIC + UNDERSTANDING，区间内）
     assert [kp.target_difficulty for kp in kps] == ["BASIC", "UNDERSTANDING"]
     assert all(kp.card_type == "QUESTION" for kp in kps)
+    assert all(kp.coverage_tier == "CORE" for kp in kps)  # 服务端从主题注入
     assert all(
         json.loads(kp.source_chunk_ids or "[]")[0] == kp.source_chunk_id for kp in kps
     )  # 兼容投影（spec §3.1）
@@ -415,103 +447,171 @@ def test_planning_success_units_and_batches(
     }
 
 
-def test_planning_success_reuses_normalized(
+def test_planning_compact_filters_disallowed_tiers(
     session_factory: Callable[[], Session],
 ) -> None:
-    """账本已有同 operation_key+fingerprint 的 SUCCESS → 复用 normalized_result，0 次调用。"""
+    """COMPACT 混入 IMPORTANT/LOW_FREQUENCY 主题 → 服务端确定性过滤，仅 CORE 落库。"""
     user = _uuid()
+    state: dict[str, int] = {"calls": 0}
     with session_factory() as session:
-        task_id, chapter_id, file_id = _seed_planning_task(session, user_id=user)
-    # 计算 run_planning 会使用的 operation_key/fingerprint/子配额（镜像实现）
-    with session_factory() as session:
-        from infra.db.models import TextChunk
-
-        pages = list(
-            session.scalars(
-                select(TextChunk)
-                .where(TextChunk.file_id == file_id)
-                .order_by(TextChunk.page_number)
-            ).all()
+        task_id, _, _ = _seed_planning_task(session, user_id=user, coverage_mode="COMPACT")
+        handler = _two_stage_handler(
+            state, coarse=lambda p: _default_coarse_topics(p, tiers=["CORE", "IMPORTANT"])
         )
-        interval = _expected_sub_interval(pages)
-        op_key = f"planning:{chapter_id}:0"
-        fp = group_fingerprint(pages, interval, asset_versions(), "COMPACT")
-        units = [
-            {
-                "source_chunk_ids": [pages[0].chunk_id],
-                "learning_objective": "复用目标",
-                "target_difficulty": "BASIC",
-                "card_type": "QUESTION",
-                "priority": 1,
-            }
-        ]
-        attempt = create_attempt(
-            session,
-            user_id=user,
-            scope_type="TASK",
-            scope_id=task_id,
-            task_id=task_id,
-            stage="PLANNING",
-            operation_key=op_key,
-            input_fingerprint=fp,
-            attempt_no=1,
-            model="m",
-            prompt_name="planner",
-            prompt_version="v3",
-            now=_NOW,
-        )
-        finish_success(
-            session,
-            attempt,
-            usage={
-                "prompt_cache_hit_tokens": 0,
-                "prompt_cache_miss_tokens": 1,
-                "completion_tokens": 1,
-            },
-            http_status=200,
-            duration_ms=1,
-            normalized_result=json.dumps(units, ensure_ascii=False),
-            now=_NOW,
-        )
-        session.commit()
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return _ok_response(_planning_response_from_request(request))
-
-        client = _client_with_handler(handler)
-        _claim_and_plan(session, client=client)
+        _claim_and_plan(session, client=_client_with_handler(handler))
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
         kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
-    assert calls == 0  # find_success_result 命中复用，不重复付费调用
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
+        ).all()
+    assert state["calls"] == 2
+    assert all(kp.coverage_tier == "CORE" for kp in kps)  # IMPORTANT 主题被过滤
+    assert len(kps) == 1  # 只剩 CORE 主题 → 1 单元
+    assert {a.prompt_name for a in attempts} == {"planner-coarse", "planner"}
+
+
+def test_planning_empty_topic_recovery_fine_wide(
+    session_factory: Callable[[], Session],
+) -> None:
+    """精规划漏挖主题（批成功但 topic 2 为 0 单元）→ fine-wide 恢复调用补挖，2 单元齐。"""
+    user = _uuid()
+    state: dict[str, int] = {"calls": 0}
+    with session_factory() as session:
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
+
+        def fine(payload: dict[str, Any]) -> list[dict[str, Any]]:
+            # 批调用（含 2 主题）漏挖 topic 2；fine-wide 恢复调用（单主题）正常产出
+            if len(payload["topics"]) > 1:
+                return _default_fine_units(payload, skip_topic=2)
+            return _default_fine_units(payload)
+
+        handler = _two_stage_handler(state, fine=fine)
+        _claim_and_plan(session, client=_client_with_handler(handler))
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+        kps = session.scalars(
+            select(KnowledgePoint)
+            .where(KnowledgePoint.task_id == task_id)
+            .order_by(KnowledgePoint.priority)
+        ).all()
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.task_id == task_id)
+        ).all()
+    assert state["calls"] == 3  # 粗 + 批 + fine-wide 恢复
+    assert len(kps) == 2  # topic 2 经恢复补回
+    assert any("fine-wide" in a.operation_key and a.operation_key.endswith(":2") for a in attempts)
+
+
+def test_planning_success_reuses_normalized(
+    session_factory: Callable[[], Session],
+) -> None:
+    """账本已有粗+精同 operation_key+fingerprint 的 SUCCESS → 全链复用，0 次调用。"""
+    user = _uuid()
+    with session_factory() as session:
+        task_id, chapter_id, file_id = _seed_planning_task(session, user_id=user)
+        pages = _load_pages(session, file_id)
+        total_chars = sum(p.char_count for p in pages)
+        # 镜像 run_planning 推导：2 页 1500 字 → 单粗规划段 [2,2]；单精规划批（全页窗口）
+        seg_interval = interval_for_chapter(total_chars, "COMPACT", _anchors(_SETTINGS))
+        versions = asset_versions()
+        coarse_fp = coarse_fingerprint(pages, seg_interval, "COMPACT", versions)
+        topics = [
+            {
+                "title": "主题一",
+                "coverage_tier": "CORE",
+                "source_chunk_ids": [pages[0].chunk_id],
+                "topic_index": 1,
+            },
+            {
+                "title": "主题二",
+                "coverage_tier": "CORE",
+                "source_chunk_ids": [pages[1].chunk_id],
+                "topic_index": 2,
+            },
+        ]
+        batch_interval = difficulty_interval(seg_interval, 0.4, 0.4, 0.2)
+        fine_fp = fine_fingerprint(topics, pages, batch_interval, "COMPACT", versions)
+        units = [
+            {
+                "topic_index": 1,
+                "source_chunk_ids": [pages[0].chunk_id],
+                "learning_objective": "复用目标一",
+                "target_difficulty": "BASIC",
+                "card_type": "QUESTION",
+                "coverage_tier": "CORE",
+                "priority": 1,
+            },
+            {
+                "topic_index": 2,
+                "source_chunk_ids": [pages[1].chunk_id],
+                "learning_objective": "复用目标二",
+                "target_difficulty": "UNDERSTANDING",
+                "card_type": "QUESTION",
+                "coverage_tier": "CORE",
+                "priority": 2,
+            },
+        ]
+        for op_key, fp, normalized in (
+            (f"planning:coarse:{chapter_id}:0", coarse_fp, json.dumps(topics, ensure_ascii=False)),
+            (f"planning:fine:{chapter_id}:0", fine_fp, json.dumps(units, ensure_ascii=False)),
+        ):
+            attempt = create_attempt(
+                session,
+                user_id=user,
+                scope_type="TASK",
+                scope_id=task_id,
+                task_id=task_id,
+                stage="PLANNING",
+                operation_key=op_key,
+                input_fingerprint=fp,
+                attempt_no=1,
+                model="m",
+                prompt_name="planner",
+                prompt_version="v7",
+                now=_NOW,
+            )
+            finish_success(
+                session,
+                attempt,
+                usage={
+                    "prompt_cache_hit_tokens": 0,
+                    "prompt_cache_miss_tokens": 1,
+                    "completion_tokens": 1,
+                },
+                http_status=200,
+                duration_ms=1,
+                normalized_result=normalized,
+                now=_NOW,
+            )
+        session.commit()
+        state: dict[str, int] = {"calls": 0}
+        _claim_and_plan(session, client=_client_with_handler(_two_stage_handler(state)))
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+        kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
+    assert state["calls"] == 0  # find_success_result 命中复用，不重复付费调用
     assert task.stage == "GENERATING"
-    assert len(kps) == 1
-    assert kps[0].topic == "复用目标"
+    assert len(kps) == 2
+    assert {kp.topic for kp in kps} == {"复用目标一", "复用目标二"}
 
 
 def test_planning_budget_reset_prevented(
     session_factory: Callable[[], Session],
 ) -> None:
-    """账本已有 3 次尝试（预算耗尽）→ 组 SKIPPED、0 次调用、skipped 计数（预算不重置）。"""
+    """账本已有 3 次尝试（预算耗尽）→ 粗规划操作 SKIPPED、0 次调用、skipped 计数。"""
     user = _uuid()
     with session_factory() as session:
         task_id, chapter_id, file_id = _seed_planning_task(session, user_id=user)
-        from infra.db.models import TextChunk
-
-        pages = list(
-            session.scalars(
-                select(TextChunk)
-                .where(TextChunk.file_id == file_id)
-                .order_by(TextChunk.page_number)
-            ).all()
+        pages = _load_pages(session, file_id)
+        seg_interval = interval_for_chapter(
+            sum(p.char_count for p in pages), "COMPACT", _anchors(_SETTINGS)
         )
-        interval = _expected_sub_interval(pages)
-        op_key = f"planning:{chapter_id}:0"
-        fp = group_fingerprint(pages, interval, asset_versions(), "COMPACT")
+        op_key = f"planning:coarse:{chapter_id}:0"
+        fp = coarse_fingerprint(pages, seg_interval, "COMPACT", asset_versions())
         for attempt_no in (1, 2, 3):
             att = create_attempt(
                 session,
@@ -524,28 +624,21 @@ def test_planning_budget_reset_prevented(
                 input_fingerprint=fp,
                 attempt_no=attempt_no,
                 model="m",
-                prompt_name="planner",
-                prompt_version="v3",
+                prompt_name="planner-coarse",
+                prompt_version="v7",
                 now=_NOW,
             )
             # STARTED/FAILED/UNKNOWN 任意组合均计入预算（spec §9）
             att.status = ("STARTED", "FAILED", "UNKNOWN")[attempt_no - 1]
             att.finished_at = _NOW
         session.commit()
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return _ok_response(_planning_response_from_request(request))
-
-        client = _client_with_handler(handler)
-        _claim_and_plan(session, client=client)
+        state: dict[str, int] = {"calls": 0}
+        _claim_and_plan(session, client=_client_with_handler(_two_stage_handler(state)))
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
-    assert calls == 0
-    assert task.status == "FAILED"  # 全部组 SKIPPED → §6.4 分支 2
+    assert state["calls"] == 0
+    assert task.status == "FAILED"  # 全部操作 SKIPPED → §6.4 分支 2
     assert task.failure_stage == "PLANNING"
     assert task.skipped_planning_group_count == 1
 
@@ -553,15 +646,17 @@ def test_planning_budget_reset_prevented(
 def test_planning_empty_units_completed_no_units(
     session_factory: Callable[[], Session],
 ) -> None:
-    """全组成功但 0 个合法单元 → COMPLETED + NO_GENERATION_UNITS（§6.4 分支 1）。"""
+    """粗规划成功但 0 主题 → COMPLETED + NO_GENERATION_UNITS（§6.4 分支 1）。"""
     user = _uuid()
+    state: dict[str, int] = {"calls": 0}
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
-        client = _client_with_handler(lambda request: _ok_response('{"units": []}'))
-        _claim_and_plan(session, client=client)
+        handler = _two_stage_handler(state, coarse=lambda p: [])
+        _claim_and_plan(session, client=_client_with_handler(handler))
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
+    assert state["calls"] == 1  # 仅粗规划调用，无主题不分批
     assert task.status == "COMPLETED"
     assert task.completion_reason == "NO_GENERATION_UNITS"
     assert task.total_batch_count == 0
@@ -573,7 +668,7 @@ def test_planning_empty_units_completed_no_units(
 def test_planning_all_failed_fails_task(
     session_factory: Callable[[], Session],
 ) -> None:
-    """上游持续失败（retryable）→ 3 次尝试后组 SKIPPED、全组 SKIPPED → FAILED+PLANNING。"""
+    """上游持续失败（retryable）→ 3 次尝试后粗规划 SKIPPED、无主题 → FAILED+PLANNING。"""
     user = _uuid()
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
@@ -602,19 +697,14 @@ def test_planning_all_failed_fails_task(
 def test_planning_failed_final_condition_update(
     session_factory: Callable[[], Session],
 ) -> None:
-    """全部组成功后在最终事务前并发 FAILED（另一 worker 系统级失败）→ 条件更新
-    rowcount=0 → 不写 KnowledgePoint/Batch（V2.5 无 cancel，终态守卫以 FAILED 等价验证）。"""
+    """粗规划成功后在 guard 前并发 FAILED（另一 worker 系统级失败）→ 条件更新
+    rowcount=0 → 不写 KnowledgePoint/Batch（终态守卫以 FAILED 等价验证）。"""
     user = _uuid()
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
-        calls = 0
+        state: dict[str, int] = {"calls": 0}
         injected = False
         original_refresh = session.refresh
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return _ok_response(_planning_response_from_request(request))
 
         def refresh_with_cancel(
             instance: object,
@@ -622,8 +712,8 @@ def test_planning_failed_final_condition_update(
             with_for_update: Any = None,
         ) -> None:
             nonlocal injected
-            # 最终短事务前的 Task 刷新（chat 已完成后）→ 注入并发 FAILED（另一连接）
-            if not injected and isinstance(instance, Task) and calls >= 1:
+            # 首次 chat 完成后的 Task 刷新 → 注入并发 FAILED（另一连接）
+            if not injected and isinstance(instance, Task) and state["calls"] >= 1:
                 injected = True
                 with session_factory() as cancel_session:
                     task_row = cancel_session.get(Task, task_id)
@@ -635,7 +725,7 @@ def test_planning_failed_final_condition_update(
             original_refresh(instance, attribute_names, with_for_update)
 
         session.refresh = refresh_with_cancel  # type: ignore[method-assign]
-        _claim_and_plan(session, client=_client_with_handler(handler))
+        _claim_and_plan(session, client=_client_with_handler(_two_stage_handler(state)))
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
@@ -647,100 +737,85 @@ def test_planning_failed_final_condition_update(
         batch_count = session.scalar(
             select(func.count()).select_from(Batch).where(Batch.task_id == task_id)
         )
-    assert calls == 1
+    assert state["calls"] == 1  # 粗规划已调用
     assert task.status == "FAILED"  # 并发终态不被最终事务覆盖
     assert kp_count == 0  # 条件不成立 → 整事务回滚
     assert batch_count == 0
 
 
-def test_planning_groups_split_and_sub_quota(
-    session_factory: Callable[[], Session], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """按 planner_max_input_chars 连续页拆组：2 组各一次调用、每组只引用本组页。
-
-    密度制（V25-D-25）：页文本加厚到 300 字符（总 1200，EXTENSIVE 目标 2.4 张），
-    保证两组的难度区间上界都 ≥1——薄内容在密度制下合法地产出更少单元。
-    """
-    monkeypatch.setattr(sys.modules[__name__], "_page_content", lambda pn: f"第{pn}页内容" * 120)
-    user = _uuid()
-    settings = Settings(
-        api_key_encryption_key="aa" * 32,
-        planner_max_input_chars=1300,
-        _env_file=None,  # type: ignore[call-arg]
-    )
-    with session_factory() as session:
-        # EXTENSIVE 预算 9：最大余数法后两组子配额均非零（COMPACT 预算 3 会被
-        # 最大余数法全部分给 300 字符大组，小组零配额）
-        task_id, _, _ = _seed_planning_task(
-            session,
-            user_id=user,
-            chapter_start_page=1,
-            chapter_end_page=4,
-            coverage_mode="EXTENSIVE",
-        )
-        received: list[list[str]] = []
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            body = json.loads(request.content)
-            user = body["messages"][-1]["content"]
-            payload = json.loads(
-                user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
-            )
-            received.append([c["chunk_id"] for c in payload["source_chunks"]])
-            return _ok_response(_planning_response_from_request(request))
-
-        client = _client_with_handler(handler)
-        task = claim_planning_task(session, orphan_timeout_minutes=30, now=_CLAIM_NOW)
-        assert task is not None
-        session.commit()
-        run_planning(session, task, settings=settings, client=client)
-        session.commit()
-    with session_factory() as session:
-        task = session.get(Task, task_id)
-        assert task is not None
-        kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
-    assert calls == 2  # 4 页 × 600 字符 = 2400 > 1300 → 2 组
-    assert [len(pages) for pages in received] == [2, 2]  # 连续页分组：[1,2] + [3,4]
-    assert all(received[0][i] != received[1][0] for i in range(2))  # 组间无重叠页
-    assert len(kps) == 2
-    assert task.total_batch_count == 2
-
-
-def test_planning_hard_cap_fails_task(
+def test_planning_coarse_split_and_merge(
     session_factory: Callable[[], Session],
 ) -> None:
-    """组数 > max_planner_groups_per_task → 任务 FAILED + PLANNING（不发调用，§6.3 硬上限）。"""
+    """粗规划按 planner_coarse_max_input_chars 连续页分段：2 段各一次调用、章内合并去重
+    后按章区间截断，精规划单批展开。"""
     user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
-        planner_max_input_chars=100,
-        max_planner_groups_per_task=1,
+        planner_coarse_max_input_chars=1600,
         _env_file=None,  # type: ignore[call-arg]
     )
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(
             session, user_id=user, chapter_start_page=1, chapter_end_page=4
         )
-        calls = 0
+        received: list[list[str]] = []
+        state: dict[str, int] = {"calls": 0}
 
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return _ok_response(_planning_response_from_request(request))
+        def coarse(payload: dict[str, Any]) -> list[dict[str, Any]]:
+            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+            received.append(chunk_ids)
+            # 每段 2 个主题（段区间 [2,2]），标题带页锚避免跨段合并去重误伤
+            return [
+                {
+                    "title": f"主题{chunk_ids[i][:8]}",
+                    "coverage_tier": "CORE",
+                    "source_chunk_ids": [chunk_ids[i]],
+                }
+                for i in range(min(2, len(chunk_ids)))
+            ]
 
-        client = _client_with_handler(handler)
+        handler = _two_stage_handler(state, coarse=coarse)
         task = claim_planning_task(session, orphan_timeout_minutes=30, now=_CLAIM_NOW)
         assert task is not None
         session.commit()
-        run_planning(session, task, settings=settings, client=client)
+        run_planning(session, task, settings=settings, client=_client_with_handler(handler))
         session.commit()
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
-    assert calls == 0  # 硬上限失败不发 Planner 请求
+        kps = session.scalars(select(KnowledgePoint).where(KnowledgePoint.task_id == task_id)).all()
+    assert state["calls"] == 3  # 2 粗规划段 + 1 精规划批
+    assert [len(pages) for pages in received] == [2, 2]  # 连续页分段：[1,2] + [3,4]
+    assert all(received[0][i] != received[1][0] for i in range(2))  # 段间无重叠页
+    # 章区间 [3,3]（3000 字 COMPACT）→ 合并后截断到 3 主题 → 3 单元
+    assert len(kps) == 3
+    assert task.total_batch_count == 3
+
+
+def test_planning_hard_cap_fails_task(
+    session_factory: Callable[[], Session],
+) -> None:
+    """精规划批数 > max_planner_groups_per_task → 任务 FAILED + PLANNING（批调用前拦截）。"""
+    user = _uuid()
+    settings = Settings(
+        api_key_encryption_key="aa" * 32,
+        planner_fine_topics_per_call=1,  # 2 主题 → 2 批
+        max_planner_groups_per_task=1,
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    with session_factory() as session:
+        task_id, _, _ = _seed_planning_task(session, user_id=user)
+        state: dict[str, int] = {"calls": 0}
+        handler = _two_stage_handler(state)
+        task = claim_planning_task(session, orphan_timeout_minutes=30, now=_CLAIM_NOW)
+        assert task is not None
+        session.commit()
+        run_planning(session, task, settings=settings, client=_client_with_handler(handler))
+        session.commit()
+    with session_factory() as session:
+        task = session.get(Task, task_id)
+        assert task is not None
+    assert state["calls"] == 1  # 粗规划已执行（2 主题），批数超限在精规划前失败
     assert task.status == "FAILED"
     assert task.failure_stage == "PLANNING"
     assert task.error_code == "GENERATION_FAILED"
@@ -760,19 +835,12 @@ def test_planning_no_text_chapter_is_empty_success(
             chapter_end_page=12,
             text_page_range=(1, 2),
         )
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return _ok_response(_planning_response_from_request(request))
-
-        client = _client_with_handler(handler)
-        _claim_and_plan(session, client=client)
+        state: dict[str, int] = {"calls": 0}
+        _claim_and_plan(session, client=_client_with_handler(_two_stage_handler(state)))
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
-    assert calls == 0
+    assert state["calls"] == 0
     assert task.status == "COMPLETED"
     assert task.completion_reason == "NO_GENERATION_UNITS"
 
@@ -794,16 +862,14 @@ def test_planning_heartbeat_refreshes_per_attempt(
     from infra.clock import FrozenClock
 
     base = datetime(2026, 8, 12, 1, 0, 0, tzinfo=UTC)
-    steps = iter(FrozenClock(base + timedelta(minutes=2 * i)) for i in range(1, 20))
+    steps = iter(FrozenClock(base + timedelta(minutes=2 * i)) for i in range(1, 60))
     monkeypatch.setattr(planning_mod, "SystemClock", lambda: next(steps))
 
     user = _uuid()
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
-        client = _client_with_handler(
-            lambda request: _ok_response(_planning_response_from_request(request))
-        )
-        _claim_and_plan(session, client=client)
+        state: dict[str, int] = {"calls": 0}
+        _claim_and_plan(session, client=_client_with_handler(_two_stage_handler(state)))
     with session_factory() as session:
         task = session.get(Task, task_id)
     assert task is not None
@@ -817,7 +883,7 @@ def test_planning_key_error_fail_race_preserves_failed(
     session_factory: Callable[[], Session],
 ) -> None:
     """review fix 2：401 Key 错误路径的条件更新——finish 提交后、guard 前并发 FAILED
-    → rowcount=0 → guard 的 FAILED 不覆盖并发终态（V2.5 无 cancel，以 FAILED 等价验证）。"""
+    → rowcount=0 → guard 的 FAILED 不覆盖并发终态（以 FAILED 等价验证）。"""
     user = _uuid()
     with session_factory() as session:
         task_id, _, _ = _seed_planning_task(session, user_id=user)
@@ -869,8 +935,8 @@ def test_planning_fingerprint_drift_fails_task(
     user = _uuid()
     with session_factory() as session:
         task_id, chapter_id, _ = _seed_planning_task(session, user_id=user)
-        op_key = f"planning:{chapter_id}:0"
-        # 用错误 fingerprint 预置一次 SUCCESS（模拟规划输入漂移：分组/配额/版本变化）
+        op_key = f"planning:coarse:{chapter_id}:0"
+        # 用错误 fingerprint 预置一次 SUCCESS（模拟规划输入漂移：分段/区间/版本变化）
         attempt = create_attempt(
             session,
             user_id=user,
@@ -882,8 +948,8 @@ def test_planning_fingerprint_drift_fails_task(
             input_fingerprint="stale-fingerprint",
             attempt_no=1,
             model="m",
-            prompt_name="planner",
-            prompt_version="v3",
+            prompt_name="planner-coarse",
+            prompt_version="v7",
             now=_NOW,
         )
         finish_success(
@@ -896,23 +962,16 @@ def test_planning_fingerprint_drift_fails_task(
             },
             http_status=200,
             duration_ms=1,
-            normalized_result='{"units": []}',
+            normalized_result="[]",
             now=_NOW,
         )
         session.commit()
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return _ok_response(_planning_response_from_request(request))
-
-        client = _client_with_handler(handler)
-        _claim_and_plan(session, client=client)
+        state: dict[str, int] = {"calls": 0}
+        _claim_and_plan(session, client=_client_with_handler(_two_stage_handler(state)))
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
-    assert calls == 0  # 漂移失败不发任何调用
+    assert state["calls"] == 0  # 漂移失败不发任何调用
     assert task.status == "FAILED"
     assert task.failure_stage == "PLANNING"
     assert task.error_code == "GENERATION_FAILED"
@@ -921,44 +980,26 @@ def test_planning_fingerprint_drift_fails_task(
 def test_planning_mixed_skipped_and_empty_records_skips(
     session_factory: Callable[[], Session],
 ) -> None:
-    """review fix 4（§6.4）：部分组跳过 + 其余成功但 0 单元 → COMPLETED
+    """review fix 4（§6.4）：部分粗规划段跳过 + 其余成功但 0 主题 → COMPLETED
     NO_GENERATION_UNITS 且 skipped_planning_group_count 保留观测。"""
     user = _uuid()
     settings = Settings(
         api_key_encryption_key="aa" * 32,
-        planner_max_input_chars=300,
+        planner_coarse_max_input_chars=1600,
         _env_file=None,  # type: ignore[call-arg]
     )
     with session_factory() as session:
         task_id, chapter_id, file_id = _seed_planning_task(
             session, user_id=user, chapter_start_page=1, chapter_end_page=4
         )
-        from infra.db.models import TextChunk
-
-        pages = list(
-            session.scalars(
-                select(TextChunk)
-                .where(TextChunk.file_id == file_id)
-                .order_by(TextChunk.page_number)
-            ).all()
+        pages = _load_pages(session, file_id)
+        assert len(pages) == 4
+        # 段 0（页 1-2，1500 字）预算耗尽 → SKIPPED；段 1（页 3-4）成功返回 0 主题
+        seg_interval = interval_for_chapter(
+            sum(p.char_count for p in pages[:2]), "COMPACT", _anchors(_SETTINGS)
         )
-        # 镜像难度区间（V25-D-25）：组 0（页 1-3）的区间由章区间按字符占比拆分
-        from app.config import Settings as _Settings
-
-        _s = _Settings(api_key_encryption_key="aa" * 32, _env_file=None)  # type: ignore[call-arg]
-        chapter_interval = interval_for_chapter(
-            400,
-            "COMPACT",
-            cards_per_10k={
-                "COMPACT": _s.cards_per_10k_compact,
-                "BALANCED": _s.cards_per_10k_balanced,
-                "EXTENSIVE": _s.cards_per_10k_extensive,
-            },
-        )
-        di = difficulty_interval(chapter_interval, 0.4, 0.4, 0.2)
-        sub_interval = allocate_group_interval(di, [300, 100])[0]
-        op_key0 = f"planning:{chapter_id}:0"
-        fp0 = group_fingerprint(pages[:3], sub_interval, asset_versions(), "COMPACT")
+        fp0 = coarse_fingerprint(pages[:2], seg_interval, "COMPACT", asset_versions())
+        op_key0 = f"planning:coarse:{chapter_id}:0"
         for attempt_no in (1, 2, 3):
             att = create_attempt(
                 session,
@@ -971,30 +1012,24 @@ def test_planning_mixed_skipped_and_empty_records_skips(
                 input_fingerprint=fp0,
                 attempt_no=attempt_no,
                 model="m",
-                prompt_name="planner",
-                prompt_version="v3",
+                prompt_name="planner-coarse",
+                prompt_version="v7",
                 now=_NOW,
             )
             att.status = ("STARTED", "FAILED", "UNKNOWN")[attempt_no - 1]
             att.finished_at = _NOW
         session.commit()
-        calls = 0
-
-        def handler(request: httpx.Request) -> httpx.Response:
-            nonlocal calls
-            calls += 1
-            return _ok_response('{"units": []}')
-
-        client = _client_with_handler(handler)
+        state: dict[str, int] = {"calls": 0}
+        handler = _two_stage_handler(state, coarse=lambda p: [])
         task = claim_planning_task(session, orphan_timeout_minutes=30, now=_CLAIM_NOW)
         assert task is not None
         session.commit()
-        run_planning(session, task, settings=settings, client=client)
+        run_planning(session, task, settings=settings, client=_client_with_handler(handler))
         session.commit()
     with session_factory() as session:
         task = session.get(Task, task_id)
         assert task is not None
-    assert calls == 1  # 组 0 预算耗尽跳过；仅组 1 调用（成功空结果）
+    assert state["calls"] == 1  # 段 0 预算耗尽跳过；仅段 1 调用（成功空结果）
     assert task.status == "COMPLETED"
     assert task.completion_reason == "NO_GENERATION_UNITS"
     assert task.skipped_planning_group_count == 1  # 部分跳过观测不丢

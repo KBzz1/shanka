@@ -101,6 +101,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `review_event` | 复习事件 | 评级产生的不可变记录 |
 | `AGAIN / HARD / GOOD / EASY` | 没想起来 / 勉强想起 / 正常想起 / 轻松想起 | FSRS 四档评级；内部枚举保持不变 |
 | `generation_unit`(生成单元) | 知识点 | 最小规划单元:一个锚定卡片类型与目标难度的生成任务(见 3.6);数据库表名保持 `knowledge_points`(兼容壳) |
+| `planning_topic`(规划主题) | 盘点主题 | 粗规划产物(V2.5.2):章节内一个可独立出卡的知识点(标题+覆盖层级+来源页锚定);经精规划展开为 1~3 个生成单元;清单存粗规划账本 `normalized_result`,不落新表 |
 
 ## 3. 资源模型(单一事实来源)
 
@@ -211,7 +212,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `coverage_mode` | enum | ✓ | `COMPACT`(精简) / `BALANCED`(均衡) / `EXTENSIVE`(充分覆盖);表达知识覆盖深度,不显示、不承诺卡片数量。数量采用目标密度制(V25-D-26):服务端按章节字符规模(每 1 万字 ≈ 6/12/20 张)推导难度目标区间,Planner 在区间内按内容取舍(低于下限合法、超上限确定性截断);区间上限与 `max_generation_units_per_task` 为代码护栏 |
+| `coverage_mode` | enum | ✓ | `COMPACT`(精简) / `BALANCED`(均衡) / `EXTENSIVE`(充分覆盖);表达知识覆盖深度,不显示、不承诺卡片数量。数量采用目标密度制(V25-D-26):服务端按章节字符规模(每 1 万字 ≈ 6/12/20 张)推导**主题数量目标区间**下发粗规划。规划两阶段(V2.5.2):粗规划整章一次调用产出规划主题清单并在区间内取舍;精规划按主题分批展开为生成单元,单元难度分布受难度比例推导的区间约束(低于下限合法、超上限确定性截断)。区间上限与 `max_generation_units_per_task` 为代码护栏 |
 | `difficulty_ratio` | object | ✓ | `basic / understanding / deep_question` 为 0~100 的 10% 整数档,合计 100,允许任一档为 0;比例为 0 的难度不生成单元和样卡 |
 | `custom_requirements` | string | ✗ | 仅当前任务生效 |
 
@@ -233,7 +234,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `target_difficulty` | enum | ✓ | `BASIC` / `UNDERSTANDING` / `DEEP_QUESTION`(规划锚定,旧数据为 null;历史 `APPLICATION` 经迁移映射为 `DEEP_QUESTION`) |
 | `card_type` | enum | ✓ | `QUESTION` / `TRUE_FALSE`(规划锚定,旧数据为 null) |
 | `coverage_tier` | enum | ✗ | `CORE` / `IMPORTANT` / `LOW_FREQUENCY`(Planner 覆盖层级,V25-D-26 起落库并注入 `<GENERATION_SPEC>`;历史行为 null) |
-| `priority` | int | ✓ | 全局顺序(服务端按章序、组序、组内数组顺序合并分配,Planner 不输出数值) |
+| `priority` | int | ✓ | 全局顺序(服务端按章序、主题序、批内数组顺序合并分配,Planner 不输出数值) |
 | `status` | enum | ✓ | `PENDING` / `PROCESSED` / `SKIPPED` |
 
 **双维锚定**:卡型与目标难度是两个独立维度,规划时同时锚定、生成时遵循,互不派生。Generator 输出卡型不符合锚定 → 代码校验拒绝(进入该单元重试预算);`Card.target_difficulty` 由服务端写规划锚定值(生成时落库,评分时不再补写),不要求模型回传;内容是否达到目标难度由 Rubric 观测。
@@ -601,7 +602,7 @@ FAILED ──retry──→ 新任务 DRAFT(retry_of_task_id 指向原任务;正
 - **DRAFT 创建与自动保存**:`POST /tasks` 校验章节/牌组同项目归属后写入 DRAFT(章节快照、目标牌组、配置),页面切换、App 退出或换设备后读取服务端最新状态继续,无需重新上传 PDF。配置仅在 `DRAFT` / `AWAITING_SAMPLE_CONFIRMATION` 可改,修改后清空 `sample_cards`、`sample_config_hash`、`sample_confirmed_at`(样卡失效)。
 - **样卡生成**:`POST /tasks/{task_id}/samples` 持久化生成 1~3 张样卡(只为比例>0 的难度各 1 张),写入 `sample_config_hash`(配置指纹);幂等键防重复触发。比例全 0 为非法配置(`INVALID_PREFERENCES` 语义,创建/修改时即拒绝)。
 - **start 校验**:`POST /tasks/{task_id}/start` 校验当前配置 hash 与 `sample_config_hash` 一致(不一致 → `409 SAMPLE_STALE`)且样卡存在,置 `sample_confirmed_at` 并进入 `GENERATING`。
-- **内部阶段**:`internal_stage` 依次 `PLANNING → GENERATING → SCORING → PUBLISHING`,仅为运行期观测,不直接作为用户状态。规划阶段语义沿用:worker CAS 抢占,同一短事务内按快照 `chapter_id` 重读章节最新 `name/start_page/end_page` 覆盖并冻结为规划快照;所选章节已删除或已不属于该 PDF → 任务 `FAILED`(`failure_stage=PLANNING`,内部原因区分 `CHAPTER_SNAPSHOT_STALE`)。
+- **内部阶段**:`internal_stage` 依次 `PLANNING → GENERATING → SCORING → PUBLISHING`,仅为运行期观测,不直接作为用户状态。规划阶段语义沿用:worker CAS 抢占,同一短事务内按快照 `chapter_id` 重读章节最新 `name/start_page/end_page` 覆盖并冻结为规划快照;所选章节已删除或已不属于该 PDF → 任务 `FAILED`(`failure_stage=PLANNING`,内部原因区分 `CHAPTER_SNAPSHOT_STALE`)。规划在 `PLANNING` 内两步执行(V2.5.2):**粗规划**每章一次调用产出主题清单(存 SUCCESS 账本行 `normalized_result`,崩溃恢复按指纹复用不重复付费);**精规划**按主题打包成批调用展开为生成单元,`coverage_tier` 由服务端从主题注入(模型不输出)。两步共用 `stage='PLANNING'` 的抢占/心跳/终态 guard,以 `operation_key` 前缀区分(见 4.2)。
 - **STAGED 隔离与确认发布**:正式生成写入的卡均为 `STAGED`(可见谓词 3.9 排除)。**发布时点=用户确认**:生成完毕的任务先 park 至 `AWAITING_CONFIRMATION`(同一短事务内校验至少一张合法卡;卡保持 `STAGED`、`ended_at` 不写、operation 保持 `ACTIVE`,park 不变量=待确认任务必有 ≥1 张 `STAGED` 卡),用户 `POST /tasks/{id}/confirm` 后单事务整批置 `PUBLISHED` → 任务 `COMPLETED` + `generated_card_count` + `ended_at`。未确认期间卡组不进今日计划/复习队列/统计/卡组计数(既有可见谓词天然覆盖,跨端一致)。PUBLISHING 孤儿(在途 worker 崩溃)被接管后落点=待确认(不自动发布)。任何阶段失败 → 任务 `FAILED`,`STAGED` 卡继续隔离,用户侧零部分可见。0 张有效卡在 park 时点整体失败(`TASK_ZERO_CARDS`,V25-D-23,不经过待确认)。
 - **确认前只读复审**:`GET /tasks/{task_id}/cards` 是确认前唯一 sanctioned 的 `STAGED` 读出口(仅 `AWAITING_CONFIRMATION` 可读,按 `position, card_id` 排序);确认后走 `GET /decks/{deck_id}/cards`。STAGED 卡不开放 PATCH/DELETE(逐卡编辑/删除仅在确认后经卡组卡片列表提供)。
 - **失败与重新生成**:`POST /tasks/{task_id}/retry` 允许 `FAILED`(原语义:创建关联新任务,复制已确认配置;正式生成失败可沿用已确认样卡,原失败任务保留)与 `AWAITING_CONFIRMATION`(supersede 单事务:CAS 原任务 `ABANDONED`+`completion_reason='SUPERSEDED'`+`ended_at` → 硬删其全部 `STAGED` 卡(此时不可能有学习记录) → 新建 `DRAFT` 任务(同章节同配置快照,**不携带样卡**,重走样卡流程))。确认后(`COMPLETED`)不可重新生成(保护学习记录,409)。
@@ -624,7 +625,7 @@ Batch: PENDING → PROCESSING → SUCCEEDED
 
 已完成批次不得重复执行;已入库卡片(`generation_item_id`)不得重复写入(AC-05)。
 批次 `SKIPPED` 不代表任务失败;任务仅在系统级错误(API Key 失效、上游持续不可用)时 `FAILED`(见 4.1)。
-重试预算与尝试计数以 `llm_call_attempts` 账本为权威:同一 operation_key 的全部 STARTED/SUCCESS/FAILED/UNKNOWN 尝试计入预算(孤儿 STARTED 转 UNKNOWN 仍计数),达到预算不再发请求;调用前必须先有已提交的 STARTED 占位行。
+重试预算与尝试计数以 `llm_call_attempts` 账本为权威:同一 operation_key 的全部 STARTED/SUCCESS/FAILED/UNKNOWN 尝试计入预算(孤儿 STARTED 转 UNKNOWN 仍计数),达到预算不再发请求;调用前必须先有已提交的 STARTED 占位行。规划两阶段(V2.5.2)的 operation_key:`planning:coarse:{chapter_id}`(粗规划,每章一个)、`planning:fine:{chapter_id}:{batch_index}`(精规划批)、`planning:fine-wide:{chapter_id}:{topic_index}`(空产出主题的整章恢复重试);各自独立预算与输入指纹,账本 `prompt_name`/`schema_name` 分别记 `planner-coarse`/`planner_coarse_output` 与 `planner`/`planner_output`。
 
 ### 4.3 卡片复习状态(FSRS)
 
@@ -947,7 +948,8 @@ duration histogram 桶（分位数证据的正确性前提，桶集合在指标�
 
 - Rubric 评分执行者:LLM-as-judge;评分在独立 SCORING 阶段执行(4.1),评分 Prompt 资产入口:
   `agent_evolution/manifest.json` 的 `prompts.scoring`。
-- 当前资产登记:Planner Prompt v6 / planner-output Schema v4;Generator Prompt v6 /
+- 当前资产登记:Planner-coarse Prompt v7 / planner-coarse-output Schema v7;Planner(精规划) Prompt v7 /
+  planner-output Schema v7;Generator Prompt v6 /
   generator-output Schema v3 / 投影后 card Schema v1;Rewrite Prompt v4 / generator-output
   Schema v3 / 投影后 card Schema v1;Scoring Prompt v3 / scoring-output Schema v3 / Rubric v3。
   具体 path 以 manifest 为唯一权威,禁止运行时绕过 manifest 读取相对路径。

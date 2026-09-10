@@ -54,10 +54,12 @@ def asset_versions() -> dict[str, str]:
     return {
         "generator_prompt_version": prompts["generator"]["version"],
         "planner_prompt_version": prompts["planner"]["version"],
+        "planner_coarse_prompt_version": prompts["planner_coarse"]["version"],
         "rewrite_prompt_version": prompts["rewrite"]["version"],
         "scoring_prompt_version": prompts["scoring"]["version"],
         "card_schema_version": schemas["card"]["version"],
         "planner_output_schema_version": schemas["planner_output"]["version"],
+        "planner_coarse_output_schema_version": schemas["planner_coarse_output"]["version"],
         "scoring_output_schema_version": schemas["scoring_output"]["version"],
         "rubric_version": manifest["rubrics"]["main"]["version"],
         # 兼容键（旧消费者）

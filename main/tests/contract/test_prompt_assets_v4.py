@@ -65,28 +65,32 @@ def _manifest_versions() -> set[str]:
 
 
 def test_manifest_pins_current_asset_versions_and_paths() -> None:
-    """manifest 当前版本（V25-D-33 密度制升版后）：planner/generator v6、rewrite v4、
-    scoring v3，schemas（除 card v1）v3/v4，rubrics v3，path 指向对应版本目录。"""
+    """manifest 当前版本（V2.5.2 两阶段规划升版后）：planner/planner_coarse v7、
+    generator v6、rewrite v4、scoring v3；schemas planner_output/planner_coarse_output v7、
+    card v1、其余 v3；rubrics v3，path 指向对应版本目录。"""
     manifest = load_manifest()
-    assert manifest["prompts"]["planner"]["version"] == "v6"
+    assert manifest["prompts"]["planner"]["version"] == "v7"
+    assert manifest["prompts"]["planner_coarse"]["version"] == "v7"
     assert manifest["prompts"]["generator"]["version"] == "v6"
     assert manifest["prompts"]["rewrite"]["version"] == "v4"
     assert manifest["prompts"]["scoring"]["version"] == "v3"
     assert manifest["schemas"]["card"]["version"] == "v1"  # 持久化 Card Schema 保持 v1
-    # 密度制 v5 → v6 难度锚定重设计（V25-D-33）：planner v6 / generator v6 / planner_output v4
-    assert manifest["schemas"]["planner_output"]["version"] == "v4"
+    # V2.5.2 两阶段：planner（精规划）v7 / planner_coarse（粗规划）v7 / 两 output schema v7
+    assert manifest["schemas"]["planner_output"]["version"] == "v7"
+    assert manifest["schemas"]["planner_coarse_output"]["version"] == "v7"
     assert manifest["schemas"]["generator_output"]["version"] == "v3"
     assert manifest["schemas"]["scoring_output"]["version"] == "v3"
     assert manifest["rubrics"]["main"]["version"] == "v3"
-    for name in ("planner", "generator"):
-        assert str(manifest["prompts"][name]["path"]).startswith("prompts/v6/")
+    assert str(manifest["prompts"]["planner"]["path"]).startswith("prompts/v7/")
+    assert str(manifest["prompts"]["planner_coarse"]["path"]).startswith("prompts/v7/")
+    assert str(manifest["prompts"]["generator"]["path"]).startswith("prompts/v6/")
     assert str(manifest["prompts"]["rewrite"]["path"]).startswith("prompts/v4/")
     assert str(manifest["prompts"]["scoring"]["path"]).startswith("rubrics/v3/")
     for name, entry in manifest["schemas"].items():
         if name == "card":
             expected = "schemas/v1/"
-        elif name == "planner_output":
-            expected = "schemas/v4/"
+        elif name in ("planner_output", "planner_coarse_output"):
+            expected = "schemas/v7/"
         else:
             expected = "schemas/v3/"
         assert str(entry["path"]).startswith(expected)
@@ -109,25 +113,25 @@ def test_v4_v3_schemas_are_valid_json_schema() -> None:
 
 
 def test_planner_schema_v3_difficulty_enum_and_coverage_tier_labels() -> None:
-    """planner-output v3：难度枚举只允许 BASIC/UNDERSTANDING/DEEP_QUESTION；
-    每单元必须携带 coverage_tier 标签（CORE/IMPORTANT/LOW_FREQUENCY）。"""
+    """planner-output v7（精规划）：难度枚举只允许 BASIC/UNDERSTANDING/DEEP_QUESTION；
+    units 必须携带 topic_index（分配主题锚定），coverage_tier 由服务端注入（schema 禁出）。"""
     schema = _schema("planner_output")
     unit = schema["properties"]["units"]["items"]
     assert unit["additionalProperties"] is False
     difficulty = unit["properties"]["target_difficulty"]["enum"]
     assert difficulty == list(DIFFICULTIES)
     assert "APPLICATION" not in difficulty
-    assert unit["properties"]["coverage_tier"]["enum"] == list(COVERAGE_TIERS)
-    assert "coverage_tier" in unit["required"]
+    assert "topic_index" in unit["required"]
+    assert "coverage_tier" not in unit["properties"]
     jsonschema.validate(
         {
             "units": [
                 {
+                    "topic_index": 1,
                     "source_chunk_ids": ["ch1"],
                     "learning_objective": "说出 A 的判定条件",
                     "target_difficulty": "DEEP_QUESTION",
                     "card_type": "QUESTION",
-                    "coverage_tier": "CORE",
                 }
             ]
         },
@@ -138,11 +142,11 @@ def test_planner_schema_v3_difficulty_enum_and_coverage_tier_labels() -> None:
             {
                 "units": [
                     {
+                        "topic_index": 1,
                         "source_chunk_ids": ["ch1"],
                         "learning_objective": "旧值",
                         "target_difficulty": "APPLICATION",  # V2.5 改名后禁止
                         "card_type": "QUESTION",
-                        "coverage_tier": "CORE",
                     }
                 ]
             },
@@ -154,7 +158,7 @@ def test_planner_schema_v3_difficulty_enum_and_coverage_tier_labels() -> None:
                 "units": [
                     {
                         "source_chunk_ids": ["ch1"],
-                        "learning_objective": "缺标签",
+                        "learning_objective": "缺主题锚定",
                         "target_difficulty": "BASIC",
                         "card_type": "QUESTION",
                     }
@@ -175,11 +179,11 @@ def test_planner_schema_v3_units_require_grounded_source_chunk_ids() -> None:
             {
                 "units": [
                     {
+                        "topic_index": 1,
                         "source_chunk_ids": [],
                         "learning_objective": "x",
                         "target_difficulty": "BASIC",
                         "card_type": "QUESTION",
-                        "coverage_tier": "CORE",
                     }
                 ]
             },
@@ -205,14 +209,17 @@ def test_scoring_schema_v3_keeps_four_dimension_integer_scores() -> None:
 
 
 def test_planner_v4_coverage_modes_select_semantic_scope() -> None:
-    """覆盖模式选语义范围不选数量：三种模式映射标签范围，稀疏章节允许有限重复。"""
-    text = _asset("prompts", "planner")
-    assert "coverage_mode" in text
+    """覆盖模式选语义范围不选数量（V2.5.2 起语义范围表移驻粗规划）：三种模式映射标签
+    范围、稀疏章节允许不同学习角度、禁止同义重复；精规划只展开分配主题。"""
+    coarse = _asset("prompts", "planner_coarse")
+    assert "coverage_mode" in coarse
     for mode in COVERAGE_MODES:
-        assert mode in text
-    assert "CORE" in text and "IMPORTANT" in text and "LOW_FREQUENCY" in text
-    assert "学习角度" in text  # 知识稀疏时允许不同学习角度
-    assert "同义重复" in text  # 禁止同义重复
+        assert mode in coarse
+    assert "CORE" in coarse and "IMPORTANT" in coarse and "LOW_FREQUENCY" in coarse
+    assert "不同侧面" in coarse  # 知识稀疏时允许同一知识点的不同侧面分别列主题
+    assert "同义重复" in coarse  # 禁止同义重复
+    fine = _asset("prompts", "planner")
+    assert "只展开" in fine and "topic_index" in fine  # 精规划主题契约
 
 
 def test_planner_v4_source_grounding_instructions() -> None:
@@ -240,6 +247,7 @@ def test_assets_forbid_count_cost_pause_semantics() -> None:
     """禁止 count/cost/pause 语义：prompts/rubrics 当前资产不得含数量承诺、费用与暂停词。"""
     current = [
         ("prompts", "planner"),
+        ("prompts", "planner_coarse"),
         ("prompts", "generator"),
         ("prompts", "rewrite"),
         ("prompts", "scoring"),
@@ -255,11 +263,13 @@ def test_v4_v3_assets_do_not_mention_legacy_application() -> None:
     """当前资产不含旧难度名 APPLICATION（V2.5 改名收敛；历史说明只留在 CHANGELOG）。"""
     current = [
         ("prompts", "planner"),
+        ("prompts", "planner_coarse"),
         ("prompts", "generator"),
         ("prompts", "rewrite"),
         ("prompts", "scoring"),
         ("rubrics", "main"),
         ("schemas", "planner_output"),
+        ("schemas", "planner_coarse_output"),
         ("schemas", "generator_output"),
         ("schemas", "scoring_output"),
     ]

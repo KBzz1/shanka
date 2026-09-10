@@ -34,7 +34,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库
 SAMPLE = REPO_ROOT / "res" / "AI-Agents-in-Depth-zh-CN.pdf"
 
 # executor 解密路径与 PUT /api-key 落库共用同一测试加密密钥（hex 32B）
-_SETTINGS = Settings(api_key_encryption_key="aa" * 32)
+# V2.5.2 两阶段：粗规划分段上限放宽到单章单段（样书第 2 章 68k 字），配合
+# coarse mock 每段固定 16 主题 → 2 章 32 单元（与旧单阶段断言计数一致）
+_SETTINGS = Settings(api_key_encryption_key="aa" * 32, planner_coarse_max_input_chars=200_000)
 
 
 class FakeClient:
@@ -51,30 +53,45 @@ class FakeClient:
 
 
 def _client_factory(api_key: str) -> DeepSeekClient:
-    """mock transport 全链路分派（与 test_tasks_api 同款）：<PLANNER_INPUT> → 按请求配额
-    产出锚定单元；<SCORING_INPUT> → ID 守恒的确定性分数；其余（<GENERATION_SPEC>）→
-    每批 1 张合法卡。COMPACT 2 章 = 6 单元 → 6 批 → 6 卡。"""
+    """mock transport 全链路分派（V2.5.2 两阶段，与 test_tasks_api 同款）：
+    <PLANNER_COARSE_INPUT> → 主题清单（区间上限条）；<PLANNER_INPUT> → 按分配主题
+    逐个展开单元；<SCORING_INPUT> → ID 守恒的确定性分数；其余（<GENERATION_SPEC>）→
+    每批 1 张合法卡。COMPACT 2 章 × [3,3] = 6 单元 → 6 批 → 6 卡。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         user = body["messages"][-1]["content"]
-        if "<PLANNER_INPUT>" in user:
+        if "<PLANNER_COARSE_INPUT>" in user:
+            payload = json.loads(
+                user.split("<PLANNER_COARSE_INPUT>", 1)[1].split("</PLANNER_COARSE_INPUT>", 1)[0]
+            )
+            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+            count = min(payload["topic_interval"]["max"], 16)
+            topics = [
+                {
+                    "title": f"主题{i}",
+                    "coverage_tier": "CORE",
+                    "source_chunk_ids": [chunk_ids[i % len(chunk_ids)]],
+                }
+                for i in range(count)
+            ]
+            content = json.dumps({"topics": topics}, ensure_ascii=False)
+        elif "<PLANNER_INPUT>" in user:
             payload = json.loads(
                 user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
             )
-            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
-            units: list[dict[str, object]] = []
-            for difficulty, quota_i in payload["difficulty_interval"].items():
-                for _ in range(quota_i["max"]):
-                    units.append(
-                        {
-                            "source_chunk_ids": [chunk_ids[0]],
-                            "learning_objective": f"知识点{len(units)}",
-                            "target_difficulty": difficulty,
-                            "card_type": "QUESTION",
-                            "coverage_tier": "CORE",  # V2.5 资产 v3：语义单元 tier 必填
-                        }
-                    )
+            diffs = [d for d, b in payload["difficulty_interval"].items() if b["max"] > 0]
+            chapter_name = payload["chapter"]["name"]
+            units: list[dict[str, object]] = [
+                {
+                    "topic_index": t["topic_index"],
+                    "source_chunk_ids": [t["source_chunk_ids"][0]],
+                    "learning_objective": f"知识点{chapter_name}{t['topic_index']}",
+                    "target_difficulty": diffs[i % len(diffs)],
+                    "card_type": "QUESTION",
+                }
+                for i, t in enumerate(payload["topics"])
+            ]
             content = json.dumps({"units": units}, ensure_ascii=False)
         elif "<SCORING_INPUT>" in user:
             payload = json.loads(
@@ -208,7 +225,7 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
     assert resp.status_code == 200
 
     # 5. executor 显式扫描 → park 至 AWAITING_CONFIRMATION（4.1 确认闭环）→
-    #    POST confirm 发布 → COMPLETED（COMPACT 2 章 = 6 单元 → 6 卡）
+    #    POST confirm 发布 → COMPLETED（COMPACT 引言+第 1 章 = 23 单元 → 23 卡）
     parked: dict[str, object] = {}
     for _ in range(10):
         scan_tasks(task_factory, settings=_SETTINGS, client_factory=_client_factory)
@@ -222,13 +239,15 @@ def test_task_e2e_user_domain_generation(ctx: tuple[TestClient, Path]) -> None:
     assert resp.status_code == 200
     final = resp.json()
     assert final["status"] == "COMPLETED"
-    assert final["generated_card_count"] == 32
+    # V2.5.2 两阶段：引言（区间上限 7）+ 第 1 章（上限 25、mock 截到 16）= 7+16 主题
+    # → 等量单元/卡（coarse mock 固定 min(topic_interval.max, 16)）
+    assert final["generated_card_count"] == 23
     assert final["ended_at"] is not None
 
     # 6. 归属判别：全部卡片 user_id 非空（归属切 user 域）
     engine = create_db_engine(f"sqlite:///{db_path}")
     with engine.connect() as conn:
         cards = conn.execute(text("SELECT card_id, user_id, deck_id FROM cards")).all()
-    assert len(cards) == 32
+    assert len(cards) == 23
     assert all(row[1] is not None for row in cards), "卡片 user_id 应非空（user 域归属）"
     assert {row[2] for row in cards} == {deck_id}

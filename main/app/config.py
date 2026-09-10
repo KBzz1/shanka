@@ -66,9 +66,15 @@ class Settings(BaseSettings):
     # 孤儿 RUNNING 任务恢复阈值（V5B 4.5：超过该分钟数无心跳视为孤儿，Task 2 恢复消费）
     orphan_timeout_minutes: int = 30
     # LLM 硬上限与预算（spec §10 全局硬上限、§8 scoring、§6.2/§6.3 planning；可运维调整）
-    # 规划（§4.2 选页 / §6.2 组数上限）：按页文本累计字符拆组，组数超限 → 任务 FAILED
+    # 规划两阶段（V2.5.2）：精规划按主题打包，批输入字符上限沿用 planner_max_input_chars；
+    # 粗规划整章一次调用，字符上限独立配置（超限按连续页分段粗规划）
     planner_max_input_chars: int = 20_000
-    # 60：密度制后全书任务（12 章 33 组）也放行（V25-D-25）
+    planner_coarse_max_input_chars: int = 60_000
+    # 精规划单批主题数上限（输出 token 预算护栏：8 主题 × ≤3 单元在 2048 token 内）
+    planner_fine_topics_per_call: int = 8
+    # 精规划批输入页 = 主题声明页 ∪ ±1 页上下文余量
+    planner_fine_page_margin: int = 1
+    # 60：密度制后全书任务（12 章 33 组）也放行（V25-D-25）；V2.5.2 起口径=精规划批数
     max_planner_groups_per_task: int = 60
     # 生成预算（§10 POST 校验）：任务预算超上限直接 VALIDATION_ERROR；单元页数与原文输入双限
     max_generation_units_per_task: int = 300
@@ -88,6 +94,8 @@ class Settings(BaseSettings):
     # 输出上限（§5.7 JSON 截断防线 / §10：可运维调整，不是制卡字数规则；
     # Scoring 每次仍按 item 数计算更小的实际值 min(上限, 256 + 128 × items)）
     planner_max_output_tokens: int = 2048
+    # 粗规划输出主题清单可较长（充分模式整章 40~140 主题），独立放宽
+    planner_coarse_max_output_tokens: int = 4096
     generator_max_output_tokens: int = 768
     rewrite_max_output_tokens: int = 768
     scoring_max_output_tokens: int = 4096

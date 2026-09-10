@@ -17,12 +17,14 @@ def test_manifest_asset_versions_and_paths_valid() -> None:
     manifest = load_manifest()
     assets = [
         ("prompts", "planner"),
+        ("prompts", "planner_coarse"),
         ("prompts", "generator"),
         ("prompts", "rewrite"),
         ("prompts", "scoring"),
         ("schemas", "card"),
         ("schemas", "generator_output"),
         ("schemas", "planner_output"),
+        ("schemas", "planner_coarse_output"),
         ("schemas", "scoring_output"),
         ("rubrics", "main"),
     ]

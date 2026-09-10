@@ -190,7 +190,7 @@ def _seed_context(db_path: Path, *, user_id: str) -> dict[str, object]:
         persist_text_chunks(
             session,
             file_id=pdf.file_id,
-            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2, 3)],
+            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 320} for pn in (1, 2, 3)],
             now="2026-08-11T00:00:00.000Z",
         )
         session.commit()
@@ -272,8 +272,9 @@ def _scripted_factory(
 ) -> Callable[[str], DeepSeekClient]:
     """mock transport 全链路分派（planner → generator → scorer）+ 崩溃注入。
 
-    - <PLANNER_INPUT>：按请求配额产出锚定单元（学习目标全局唯一编号——生成调用可按
-      目标定位批次）；2 章 → 2 次规划调用 → 6 单元（知识点0..5）。
+    - <PLANNER_COARSE_INPUT>：主题清单（区间上限条）。
+    - <PLANNER_INPUT>：按分配主题逐个展开单元（学习目标全局唯一编号——生成调用可按
+      目标定位批次）；2 章 → 4 次规划调用（粗+精 × 2）→ 6 单元（知识点0..5）。
     - <GENERATION_SPEC>：crash_call 次生成调用抛 SystemExit（崩溃模拟——批 2 处理
       中断）；其余按学习目标序号返回 q{i}/a{i}（记录 gen_objectives 供"批 1 未重跑"
       断言）。
@@ -288,24 +289,40 @@ def _scripted_factory(
             body = json.loads(request.content)
             user = body["messages"][-1]["content"]
             calls["n"] += 1
-            if "<PLANNER_INPUT>" in user:
+            if "<PLANNER_COARSE_INPUT>" in user:
+                payload = json.loads(
+                    user.split("<PLANNER_COARSE_INPUT>", 1)[1].split("</PLANNER_COARSE_INPUT>", 1)[
+                        0
+                    ]
+                )
+                chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+                count = payload["topic_interval"]["max"]
+                topics = [
+                    {
+                        "title": f"主题{i}",
+                        "coverage_tier": "CORE",
+                        "source_chunk_ids": [chunk_ids[i % len(chunk_ids)]],
+                    }
+                    for i in range(count)
+                ]
+                content = json.dumps({"topics": topics}, ensure_ascii=False)
+            elif "<PLANNER_INPUT>" in user:
                 payload = json.loads(
                     user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
                 )
-                chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+                diffs = [d for d, b in payload["difficulty_interval"].items() if b["max"] > 0]
                 units: list[dict[str, object]] = []
-                for difficulty, interval in payload["difficulty_interval"].items():
-                    for _ in range(interval["max"]):
-                        units.append(
-                            {
-                                "source_chunk_ids": [chunk_ids[0]],
-                                "learning_objective": f"知识点{counter[0]}",
-                                "target_difficulty": difficulty,
-                                "card_type": "QUESTION",
-                                "coverage_tier": "CORE",
-                            }
-                        )
-                        counter[0] += 1
+                for i, topic in enumerate(payload["topics"]):
+                    units.append(
+                        {
+                            "topic_index": topic["topic_index"],
+                            "source_chunk_ids": [topic["source_chunk_ids"][0]],
+                            "learning_objective": f"知识点{counter[0]}",
+                            "target_difficulty": diffs[i % len(diffs)],
+                            "card_type": "QUESTION",
+                        }
+                    )
+                    counter[0] += 1
                 content = json.dumps({"units": units}, ensure_ascii=False)
             elif "<SCORING_INPUT>" in user:
                 payload = json.loads(
@@ -383,14 +400,14 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     seed = _seed_context(db_path, user_id=_user_id(db_path))
     task_id = _create_and_start(client, db_path, user=user, seed=seed)
 
-    # 崩溃模拟（T1 模式）：扫描 = 2 次规划（2 章）+ 批 1 一次生成成功，批 2 前
-    # SystemExit（绕过 executor 的 except Exception）；崩溃点 = 第 4 次调用
+    # 崩溃模拟（T1 模式）：扫描 = 4 次规划（粗+精 × 2 章）+ 批 1 一次生成成功，批 2 前
+    # SystemExit（绕过 executor 的 except Exception）；崩溃点 = 第 6 次调用
     calls: dict[str, int] = {"n": 0}
     gen_objectives: list[str] = []
-    factory = _scripted_factory(calls, gen_objectives, crash_call=4)
+    factory = _scripted_factory(calls, gen_objectives, crash_call=6)
     with pytest.raises(SystemExit):
         scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory)
-    assert calls["n"] == 4  # 2 规划 + 批 1 + 批 2 崩溃
+    assert calls["n"] == 6  # 4 规划 + 批 1 + 批 2 崩溃
     assert gen_objectives == ["知识点0", "知识点1"]  # 崩溃前生成序（批 1、批 2）
 
     # AC-05-a：崩溃后任务停留 GENERATING + 批 1 SUCCEEDED + 卡保留（批次事务粒度已落库）；
@@ -482,9 +499,7 @@ def test_acceptance_ac05_crash_resume_cursor_and_dedup(
     for _ in range(10):
         if scan_tasks(_db_factory(db_path), settings=_SETTINGS, client_factory=factory) == 0:
             break
-    assert (
-        calls["n"] == 15
-    )  # 2 规划 + 8 生成（含崩溃批重试；密度制 V25-D-25 后单元数变化）+ 5 评分组
+    assert calls["n"] == 17  # 4 规划（粗+精 × 2 章）+ 8 生成（含崩溃批重试）+ 5 评分组
     # （评分分层：BASIC×2 章 + UNDERSTANDING×2 章 各一组、DEEP_QUESTION 逐单元 1 组）
     # AC-05-c：批 1 未重跑（重跑会再次出现 知识点0 生成调用）；批 2 崩溃+恢复共 2 次
     assert gen_objectives == [

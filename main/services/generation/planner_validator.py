@@ -1,15 +1,18 @@
-"""planner_validator.py：Planner 输出校验与配额截断（spec §5.2/§5.6/§3.5）。
+"""planner_validator.py：精规划输出校验与配额截断（spec §5.2/§5.6/§3.5；V2.5.2 主题契约）。
 
 分层校验（schema 负责结构，代码负责来源/锚定/配额）：
 
-- Schema：`load_schema_asset("planner_output")`（planner-output，版本以 manifest 为准）负责根包装、结构、
-  必填、枚举、范围和禁额外键；违反 → AppError(GENERATION_FAILED)（§6.3 输出非法）。
-- 代码层逐单元校验：`source_chunk_ids` ⊆ 本次调用页集合；单元页数 ≤ max_pages_per_unit、
-  来源字符和 ≤ max_chars_per_unit；违反 → AppError(GENERATION_FAILED)。
+- Schema：`load_schema_asset("planner_output")`（v7 精规划输出）负责根包装、结构、
+  必填（含 `topic_index`）、枚举、范围和禁额外键；违反 → AppError(GENERATION_FAILED)
+  （§6.3 输出非法）。
+- 代码层逐单元校验：`topic_index` ∈ 本批主题；`source_chunk_ids` ⊆ 本次调用页集合；
+  单元页数 ≤ max_pages_per_unit、来源字符和 ≤ max_chars_per_unit；违反 →
+  AppError(GENERATION_FAILED)。
 - 配额截断：按各难度子配额确定性截断——priority 升序保留、并列按原数组顺序（§3.5
   约束"Planner 若对某难度超配额，代码按输出数组相对顺序确定性截断，不重试"）。
 - 规范化：`source_chunk_ids` 按页序重排（`page_chars` 插入序 = 调用方按
-  `load_pages` 页序构造）、去重；priority 重排 1..N（服务端生成，模型不输出）。
+  `load_pages` 页序构造）、去重；priority 重排 1..N（服务端生成，模型不输出）；
+  `coverage_tier` 由服务端从主题注入（v7 起模型不输出层级，结构上杜绝越权）。
 
 输入容忍服务端 `priority` 提示键（模型契约不含数值 priority——§5.2；缺失时按数组
 顺序即相对重要性截断）；其余任何额外键仍被 Schema 拒绝（§5.6 禁止过滤非法字段后
@@ -33,13 +36,17 @@ def _invalid(message: str) -> AppError:
 def validate_and_truncate(
     raw: dict[str, Any],
     *,
+    topics: list[dict[str, Any]],
     allowed_page_ids: set[str],
     interval: dict[str, dict[str, int]],
     max_pages_per_unit: int,
     max_chars_per_unit: int,
     page_chars: dict[str, int],
 ) -> list[dict[str, Any]]:
-    """Planner 原始输出 → 规范化且按区间上限截断后的 units（priority 1..N）。
+    """精规划原始输出 → 规范化且按区间上限截断后的 units（priority 1..N）。
+
+    topics 契约（本批分配主题）：`[{topic_index, coverage_tier, ...}]`；单元的
+    `topic_index` 必须命中本批主题，`coverage_tier` 从对应主题注入。
 
     interval 契约（V25-D-25 密度制）：`{难度: {"min": n, "max": n}}`——max 是硬上限
     （超配确定性截断、不重试），min 是软目标（内容不足允许低于下界，不强制填充）。
@@ -49,10 +56,12 @@ def validate_and_truncate(
     （spec §5.2 按 page_number 规范化来源顺序）。
     """
     schema = load_schema_asset("planner_output")
+    tier_by_topic = {t["topic_index"]: t["coverage_tier"] for t in topics}
     units = _schema_validate(raw, schema)
     for unit in units:
         _check_unit(
             unit,
+            tier_by_topic=tier_by_topic,
             allowed_page_ids=allowed_page_ids,
             max_pages_per_unit=max_pages_per_unit,
             max_chars_per_unit=max_chars_per_unit,
@@ -60,7 +69,7 @@ def validate_and_truncate(
         )
     kept = _enforce_interval_max(units, interval)
     page_order = {chunk_id: i for i, chunk_id in enumerate(page_chars)}
-    return _normalize(kept, page_order=page_order)
+    return _normalize(kept, page_order=page_order, tier_by_topic=tier_by_topic)
 
 
 def _schema_validate(raw: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
@@ -85,12 +94,15 @@ def _schema_validate(raw: dict[str, Any], schema: dict[str, Any]) -> list[dict[s
 def _check_unit(
     unit: dict[str, Any],
     *,
+    tier_by_topic: dict[int, Any],
     allowed_page_ids: set[str],
     max_pages_per_unit: int,
     max_chars_per_unit: int,
     page_chars: dict[str, int],
 ) -> None:
-    """代码层逐单元校验：来源子集、页数上限、字符和上限（spec §5.2 生成输入上限）。"""
+    """代码层逐单元校验：主题归属、来源子集、页数上限、字符和上限（spec §5.2）。"""
+    if unit["topic_index"] not in tier_by_topic:
+        raise _invalid("精规划单元引用了本批未分配的主题")
     chunk_ids = unit["source_chunk_ids"]
     if any(cid not in allowed_page_ids for cid in chunk_ids):
         raise _invalid("Planner 来源引用超出本次调用页集合")
@@ -127,11 +139,13 @@ def _enforce_interval_max(
     return [units[i] for i in sorted(surviving)]
 
 
-def _normalize(units: list[dict[str, Any]], *, page_order: dict[str, int]) -> list[dict[str, Any]]:
-    """规范化：source_chunk_ids 按页序重排 + 去重；priority 重排 1..N；保留契约字段。
-
-    coverage_tier 自 v5 起落库并传给生成阶段（V25-D-25）；历史模型输出缺省时为 None。
-    """
+def _normalize(
+    units: list[dict[str, Any]],
+    *,
+    page_order: dict[str, int],
+    tier_by_topic: dict[int, Any],
+) -> list[dict[str, Any]]:
+    """规范化：source_chunk_ids 按页序重排 + 去重；tier 从主题注入；priority 重排 1..N。"""
     normalized: list[dict[str, Any]] = []
     for unit in units:
         chunk_ids = list(
@@ -144,11 +158,12 @@ def _normalize(units: list[dict[str, Any]], *, page_order: dict[str, int]) -> li
         )
         normalized.append(
             {
+                "topic_index": unit["topic_index"],
                 "source_chunk_ids": chunk_ids,
                 "learning_objective": unit["learning_objective"],
                 "target_difficulty": unit["target_difficulty"],
                 "card_type": unit["card_type"],
-                "coverage_tier": unit.get("coverage_tier"),
+                "coverage_tier": tier_by_topic[unit["topic_index"]],
             }
         )
     return [{**unit, "priority": i + 1} for i, unit in enumerate(normalized)]

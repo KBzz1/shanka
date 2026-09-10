@@ -70,3 +70,12 @@ def test_settings_secret_hidden_in_repr() -> None:
 def test_settings_encryption_key_hidden_in_repr() -> None:
     settings = Settings(api_key_encryption_key="aa" * 32)
     assert "aa" * 32 not in repr(settings)
+
+
+def test_two_stage_planning_defaults() -> None:
+    """V2.5.2 两阶段规划新增旋钮默认值（可运维调整，客户端不得硬编码）。"""
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.planner_coarse_max_input_chars == 60_000
+    assert s.planner_coarse_max_output_tokens == 4096
+    assert s.planner_fine_topics_per_call == 8
+    assert s.planner_fine_page_margin == 1

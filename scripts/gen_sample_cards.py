@@ -11,10 +11,10 @@
   conda run -n shanka-backend python scripts/gen_sample_cards.py \
     --count 10 --ratio 4:4:2 --chapter-prefix "第 2 章" --model deepseek-v4-pro
 
-流程：解析样书 → 取目标章（默认"第 1 章"）页文本 → 按 planner_max_input_chars 拆组 →
-每组一次真实 Planner 调用（规划学习目标）→ 每个学习目标一次真实 Generator 调用（锚定
-单卡生成）→ 终端打印卡片与汇总；Planner 第一组与 Generator 第一单元的双消息（system
-资产原文 + user 动态信封）作为代表在调用前打印，其余同构省略。
+流程：解析样书 → 取目标章（默认"第 1 章"）页文本 → 粗规划（整章一次调用盘点主题清单，
+planner-coarse v7）→ 精规划（主题打包成批调用展开为生成单元，planner v7）→ 每个学习
+目标一次真实 Generator 调用（锚定单卡生成）→ 终端打印卡片与汇总；粗规划与 Generator
+第一单元的双消息（system 资产原文 + user 动态信封）作为代表在调用前打印，其余同构省略。
 
 复用生产链路资产与逻辑（agent_evolution 版本化 Prompt/Schema、quota 三层配额、
 planner 输出校验），不建任务不写库，无账本/幂等/评分。Key 安全遵循红线 4：
@@ -34,13 +34,20 @@ _MAIN_DIR = Path(__file__).resolve().parents[1] / "main"
 sys.path.insert(0, str(_MAIN_DIR))
 
 import jsonschema
+from pypdf import PdfReader
+
 from app.config import Settings
 from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
 from infra.llm.prompts import load_asset, load_schema_asset, safe_json_dumps
-from pypdf import PdfReader
+from services.generation.coarse_validator import validate_and_normalize_topics
 from services.generation.cost import estimate_cost_by_kind
 from services.generation.planner_validator import validate_and_truncate
-from services.generation.quota import allocate_group_quota, allocate_task_quota
+from services.generation.quota import (
+    allocate_group_quota,
+    allocate_task_quota,
+    expand_page_window,
+    pack_topic_batches,
+)
 from services.pdf.parser import PageText, parse_pdf
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -48,7 +55,7 @@ _DEFAULT_PDF = _REPO_ROOT / "res" / "AI-Agents-in-Depth-zh-CN.pdf"  # 样书只�
 _DEFAULT_ENV_FILE = _REPO_ROOT / ".env"
 _DEFAULT_CHAPTER_PREFIX = "第 1 章"
 _ATTEMPTS = 3  # 单次逻辑调用最多尝试次数（含输出非法重试；对齐生产预算口径）
-_DIFFICULTY_LABEL = {"BASIC": "基础记忆", "UNDERSTANDING": "理解分析", "APPLICATION": "综合应用"}
+_DIFFICULTY_LABEL = {"BASIC": "基础记忆", "UNDERSTANDING": "理解分析", "DEEP_QUESTION": "综合应用"}
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -121,17 +128,18 @@ def split_groups(pages: list[PageText], *, max_chars: int) -> list[list[PageText
     return groups
 
 
-def planner_prompts(
-    chapter_name: str, quota: dict[str, int], pages: list[PageText], settings: Settings
+def coarse_prompts(
+    chapter_name: str, pages: list[PageText], count: int, settings: Settings
 ) -> tuple[str, str]:
-    """Planner 双消息组装（与 planning_executor._build_planner_prompts 同款）：
-    稳定 system（planner v3 + planner-output schema 原文）+ 动态 user（<PLANNER_INPUT> 信封）。
+    """粗规划双消息组装（与 planning_executor._build_coarse_prompts 同款）：
+    稳定 system（planner-coarse v7 + planner-coarse-output schema 原文）+ 动态 user。
 
     无 DB：chunk_id 用 "page:{page_number}" 自造（生产为 uuid5，planner 只作 opaque 引用）。
+    演示脚本固定数量：主题区间退化为 [count, count]。
     """
     system_prompt = (
-        f"{load_asset('prompts', 'planner')}\n\n<PLANNER_OUTPUT_SCHEMA>\n"
-        f"{load_asset('schemas', 'planner_output')}\n</PLANNER_OUTPUT_SCHEMA>"
+        f"{load_asset('prompts', 'planner_coarse')}\n\n<PLANNER_COARSE_OUTPUT_SCHEMA>\n"
+        f"{load_asset('schemas', 'planner_coarse_output')}\n</PLANNER_COARSE_OUTPUT_SCHEMA>"
     )
     payload = {
         "chapter": {
@@ -139,8 +147,51 @@ def planner_prompts(
             "start_page": pages[0]["page_number"],
             "end_page": pages[-1]["page_number"],
         },
-        # 演示脚本单组固定数量：区间退化为 [q, q]（与旧"每难度 q 个"行为一致）
-        "difficulty_interval": {d: {"min": q, "max": q} for d, q in quota.items()},
+        "coverage_mode": "EXTENSIVE",
+        "topic_interval": {"min": count, "max": count},
+        "limits": {
+            "max_source_chunks_per_topic": settings.max_source_pages_per_unit,
+            "max_source_chars_per_topic": settings.generator_max_input_chars,
+        },
+        "source_chunks": [
+            {
+                "chunk_id": f"page:{p['page_number']}",
+                "page_number": p["page_number"],
+                "content": p["content"],
+            }
+            for p in pages
+        ],
+        "custom_requirements": None,
+    }
+    return system_prompt, f"<PLANNER_COARSE_INPUT>{safe_json_dumps(payload)}</PLANNER_COARSE_INPUT>"
+
+
+def fine_prompts(
+    chapter_name: str,
+    topics: list[dict[str, Any]],
+    pages: list[PageText],
+    interval: dict[str, dict[str, int]],
+    settings: Settings,
+) -> tuple[str, str]:
+    """精规划双消息组装（与 planning_executor._build_fine_prompts 同款）：
+    稳定 system（planner v7 + planner-output schema 原文）+ 动态 user（批主题+批页）。"""
+    system_prompt = (
+        f"{load_asset('prompts', 'planner')}\n\n<PLANNER_OUTPUT_SCHEMA>\n"
+        f"{load_asset('schemas', 'planner_output')}\n</PLANNER_OUTPUT_SCHEMA>"
+    )
+    payload = {
+        "chapter": {"name": chapter_name},
+        "coverage_mode": "EXTENSIVE",
+        "topics": [
+            {
+                "topic_index": t["topic_index"],
+                "title": t["title"],
+                "coverage_tier": t["coverage_tier"],
+                "source_chunk_ids": t["source_chunk_ids"],
+            }
+            for t in topics
+        ],
+        "difficulty_interval": interval,
         "limits": {
             "max_source_chunks_per_unit": settings.max_source_pages_per_unit,
             "max_source_chars_per_unit": settings.generator_max_input_chars,
@@ -201,6 +252,15 @@ def chat_with_retry(
                 raise SystemExit(f"{what}: {exc.code.value}（重试耗尽）") from None
             time.sleep(1.0)
     raise SystemExit(f"{what}: 重试耗尽")
+
+
+def _accumulate_usage(total: dict[str, int], result: dict[str, Any]) -> None:
+    """累加单次调用的 usage 到汇总（缺键按 0）。"""
+    usage = result["usage"]
+    total["prompt"] += int(usage.get("prompt_tokens") or 0)
+    total["cache_hit"] += int(usage.get("prompt_cache_hit_tokens") or 0)
+    total["cache_miss"] += int(usage.get("prompt_cache_miss_tokens") or 0)
+    total["output"] += int(usage.get("completion_tokens") or 0)
 
 
 _PREVIEW_CHARS = 120  # 打印 user prompt 时 source 内容的预览上限（全文省略，仅标识 + 片段）
@@ -315,20 +375,18 @@ def main() -> None:
         settings = settings.model_copy(update={"deepseek_model": args.model})
     chapter_name, start_page, end_page = find_chapter(args.pdf, args.chapter_prefix)
     pages = extract_chapter_pages(args.pdf, start_page, end_page)
-    groups = split_groups(pages, max_chars=settings.planner_max_input_chars)
+    if args.difficulty == "APPLICATION":  # 旧难度名兼容（V2.5 起枚举为 DEEP_QUESTION）
+        args.difficulty = "DEEP_QUESTION"
     if args.difficulty:
         task_quota = {args.difficulty: args.count}
-        for d in ("BASIC", "UNDERSTANDING", "APPLICATION"):
+        for d in ("BASIC", "UNDERSTANDING", "DEEP_QUESTION"):
             task_quota.setdefault(d, 0)
     else:
         task_quota = allocate_task_quota(args.count, *[r / sum(ratio) for r in ratio])
-    group_quotas = allocate_group_quota(
-        task_quota, [sum(len(p["content"]) for p in g) for g in groups]
-    )
 
     print("=" * 72)
     print(f"样卡真实生成演示：目标 {args.count} 张（配额 {task_quota}）")
-    print(f"章节：{chapter_name}（页 {start_page}-{end_page}，{len(pages)} 页 → {len(groups)} 组）")
+    print(f"章节：{chapter_name}（页 {start_page}-{end_page}，{len(pages)} 页）")
     print(
         f"模型：{settings.deepseek_model}（thinking={'on' if settings.deepseek_thinking else 'off'}）"
     )
@@ -341,50 +399,104 @@ def main() -> None:
     started = time.monotonic()
     merged: list[dict[str, Any]] = []
     try:
-        # ---- Planner：每组一次调用，规划学习目标 ----
-        for gi, (group, quota) in enumerate(zip(groups, group_quotas), start=1):
-            if all(v == 0 for v in quota.values()):
-                continue
-            sys_prompt, user_prompt = planner_prompts(chapter_name, quota, group, settings)
-            if gi == 1:
+        # ---- Coarse Planner：整章一次盘点主题（超粗规划上限按连续页分段）----
+        segments = split_groups(pages, max_chars=settings.planner_coarse_max_input_chars)
+        topics: list[dict[str, Any]] = []
+        for si, seg in enumerate(segments, start=1):
+            sys_prompt, user_prompt = coarse_prompts(chapter_name, seg, args.count, settings)
+            if si == 1:
                 print_prompts(
-                    f"Planner 组{gi}/{len(groups)}（代表，后续组同构省略）",
+                    f"Coarse Planner 段{si}/{len(segments)}（代表，后续同构省略）",
                     sys_prompt,
                     user_prompt,
-                    "PLANNER_INPUT",
+                    "PLANNER_COARSE_INPUT",
                 )
             result = chat_with_retry(
                 client,
                 sys_prompt,
                 user_prompt,
-                max_tokens=settings.planner_max_output_tokens,
-                what=f"Planner 组{gi}/{len(groups)}",
+                max_tokens=settings.planner_coarse_max_output_tokens,
+                what=f"Coarse Planner 段{si}/{len(segments)}",
             )
             calls += 1
-            usage = result["usage"]
-            total_usage["prompt"] += int(usage.get("prompt_tokens") or 0)
-            total_usage["cache_hit"] += int(usage.get("prompt_cache_hit_tokens") or 0)
-            total_usage["cache_miss"] += int(usage.get("prompt_cache_miss_tokens") or 0)
-            total_usage["output"] += int(usage.get("completion_tokens") or 0)
-            raw = parse_json_result(result, f"Planner 组{gi}")
+            _accumulate_usage(total_usage, result)
+            raw = parse_json_result(result, f"Coarse Planner 段{si}")
+            if raw is None:
+                continue
+            try:
+                seg_topics = validate_and_normalize_topics(
+                    raw,
+                    coverage_mode="EXTENSIVE",
+                    topic_interval=(args.count, args.count),
+                    allowed_page_ids={f"page:{pg['page_number']}" for pg in seg},
+                    max_chunks_per_topic=settings.max_source_pages_per_unit,
+                    max_chars_per_topic=settings.generator_max_input_chars,
+                    page_chars={f"page:{pg['page_number']}": len(pg["content"]) for pg in seg},
+                )
+            except Exception as exc:  # noqa: BLE001 —— 输出非法：脚本不重试，跳过该段
+                print(f"    [Coarse 段{si}] 输出校验失败（{type(exc).__name__}），跳过该段")
+                continue
+            topics.extend(seg_topics)
+        for i, topic in enumerate(topics, start=1):
+            topic["topic_index"] = i
+        if not topics:
+            raise SystemExit("Coarse Planner 未产出任何有效主题，退出")
+        print(f"[粗规划] {len(topics)} 主题 → 精规划展开")
+
+        # ---- Fine Planner：主题打包成批展开为生成单元 ----
+        page_chars_all = {f"page:{p['page_number']}": len(p["content"]) for p in pages}
+        position_of = {f"page:{p['page_number']}": i for i, p in enumerate(pages)}
+        packed = pack_topic_batches(
+            topics,
+            page_chars_all,
+            max_chars=settings.planner_max_input_chars,
+            max_topics=settings.planner_fine_topics_per_call,
+        )
+        for bi, batch in enumerate(packed, start=1):
+            batch_topics = [topics[i] for i in batch]
+            window = expand_page_window(
+                {position_of[cid] for t in batch_topics for cid in t["source_chunk_ids"]},
+                len(pages),
+                margin=settings.planner_fine_page_margin,
+            )
+            batch_pages = [pages[pos] for pos in sorted(window)]
+            batch_chars = sum(len(p["content"]) for p in batch_pages)
+            batch_quota = allocate_group_quota(task_quota, [batch_chars])[0]
+            interval = {d: {"min": 0, "max": q} for d, q in batch_quota.items()}
+            sys_prompt, user_prompt = fine_prompts(
+                chapter_name, batch_topics, batch_pages, interval, settings
+            )
+            result = chat_with_retry(
+                client,
+                sys_prompt,
+                user_prompt,
+                max_tokens=settings.planner_max_output_tokens,
+                what=f"Fine Planner 批{bi}/{len(packed)}",
+            )
+            calls += 1
+            _accumulate_usage(total_usage, result)
+            raw = parse_json_result(result, f"Fine Planner 批{bi}")
             if raw is None:
                 continue
             try:
                 units = validate_and_truncate(
                     raw,
-                    allowed_page_ids={f"page:{pg['page_number']}" for pg in group},
-                    quota=quota,
+                    topics=batch_topics,
+                    allowed_page_ids={f"page:{pg['page_number']}" for pg in batch_pages},
+                    interval=interval,
                     max_pages_per_unit=settings.max_source_pages_per_unit,
                     max_chars_per_unit=settings.generator_max_input_chars,
-                    page_chars={f"page:{pg['page_number']}": len(pg["content"]) for pg in group},
+                    page_chars={
+                        f"page:{pg['page_number']}": len(pg["content"]) for pg in batch_pages
+                    },
                 )
-            except Exception as exc:  # noqa: BLE001 —— 输出非法：脚本不重试，跳过该组
-                print(f"    [Planner 组{gi}] 输出校验失败（{type(exc).__name__}），跳过该组")
+            except Exception as exc:  # noqa: BLE001 —— 输出非法：脚本不重试，跳过该批
+                print(f"    [Fine 批{bi}] 输出校验失败（{type(exc).__name__}），跳过该批")
                 continue
-            pages_span = f"{group[0]['page_number']}-{group[-1]['page_number']}"
+            pages_span = f"{batch_pages[0]['page_number']}-{batch_pages[-1]['page_number']}"
             print(
-                f"[规划] 组 {gi}/{len(groups)}（页 {pages_span}，{sum(len(p['content']) for p in group)} 字符，"
-                f"配额 {quota}）→ {len(units)} 单元"
+                f"[精规划] 批 {bi}/{len(packed)}（页 {pages_span}，{batch_chars} 字符，"
+                f"{len(batch_topics)} 主题）→ {len(units)} 单元"
             )
             merged.extend(units)
         # 跨组去重（生产 _merge_units 同款指纹：目标+难度+卡型+来源页集合）

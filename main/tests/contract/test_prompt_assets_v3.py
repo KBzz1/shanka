@@ -12,6 +12,8 @@ import pytest
 from infra.llm.prompts import asset_versions, load_schema_asset
 from tests.contract.support import MANIFEST_PATH, load_manifest
 
+COVERAGE_TIERS = ("CORE", "IMPORTANT", "LOW_FREQUENCY")
+
 ASSET_ROOT = MANIFEST_PATH.parent
 
 
@@ -31,6 +33,7 @@ def _schema(name: str) -> dict[str, Any]:
 def test_prompt_assets_use_structured_runtime_envelopes() -> None:
     expected = {
         "planner": "<PLANNER_INPUT>",
+        "planner_coarse": "<PLANNER_COARSE_INPUT>",
         "generator": "<GENERATION_SPEC>",
         "rewrite": "<REWRITE_INPUT>",
         "scoring": "<SCORING_INPUT>",
@@ -95,17 +98,32 @@ def test_planner_output_schema_contract() -> None:
     assert schema["additionalProperties"] is False
     unit = schema["properties"]["units"]["items"]
     assert unit["additionalProperties"] is False
+    # V2.5.2 两阶段：units 增 topic_index（锚定分配主题），coverage_tier 由服务端注入
     assert set(unit["required"]) == {
+        "topic_index",
         "source_chunk_ids",
         "learning_objective",
         "target_difficulty",
         "card_type",
-        "coverage_tier",
     }
     assert "priority" not in unit["properties"]
+    assert "coverage_tier" not in unit["properties"]
+    assert unit["properties"]["topic_index"]["minimum"] == 1
     jsonschema.validate({"units": []}, schema)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"units": [], "unexpected": True}, schema)
+
+
+def test_planner_coarse_output_schema_contract() -> None:
+    schema = _schema("planner_coarse_output")
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["topics"]
+    topic = schema["properties"]["topics"]["items"]
+    assert topic["additionalProperties"] is False
+    assert set(topic["required"]) == {"title", "coverage_tier", "source_chunk_ids"}
+    assert topic["properties"]["coverage_tier"]["enum"] == list(COVERAGE_TIERS)
+    assert "topic_index" not in topic["properties"]  # 服务端分配，模型不输出
+    jsonschema.validate({"topics": []}, schema)
 
 
 def test_scoring_output_v2_schema_contract() -> None:
@@ -144,11 +162,13 @@ def test_manifest_has_new_entries() -> None:
 def test_versions_extended() -> None:
     v = asset_versions()
     assert v["generator_prompt_version"] == "v6"
-    assert v["planner_prompt_version"] == "v6"
+    assert v["planner_prompt_version"] == "v7"
+    assert v["planner_coarse_prompt_version"] == "v7"
     assert v["rewrite_prompt_version"] == "v4"
     assert v["scoring_prompt_version"] == "v3"
     assert v["card_schema_version"] == "v1"
-    assert v["planner_output_schema_version"] == "v4"
+    assert v["planner_output_schema_version"] == "v7"
+    assert v["planner_coarse_output_schema_version"] == "v7"
     assert v["scoring_output_schema_version"] == "v3"
     assert v["rubric_version"] == "v3"
 

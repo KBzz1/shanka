@@ -1,4 +1,4 @@
-"""planning_executor.py：规划执行（spec §6.1/§6.2/§6.3/§6.4；Task 9；V2.5 七态适配）。
+"""planning_executor.py：两阶段规划执行（spec §6.1/§6.2/§6.3/§6.4；V2.5.2 粗+精）。
 
 - `claim_planning_task`：CAS1 首次接管（GENERATING+PLANNING 且未接管 → 心跳/
   started_at 落库）+ 提交前按 §4.2 重读章节最新 name/start/end_page 覆盖
@@ -8,18 +8,22 @@
   遗留 STARTED 转 UNKNOWN）。V2.5：用户状态 GENERATING 覆盖规划/生成/评分全程，
   接管只动 internal_stage/心跳，不再写 RUNNING。不 commit——由调用方提交保证
   "接管与快照冻结原子性"。
-- `run_planning`：快照选页 → 按 planner_max_input_chars 连续页拆组（组数超上限 →
-  FAILED）→ 三层配额（任务→章→组子配额）→ 每组：输入漂移守卫 / 账本恢复复用 /
-  预算 / STARTED 心跳 commit → 事务外 chat → 校验截断 → 终态+心跳 commit → 合并去重
+- `run_planning`（V2.5.2 两阶段）：快照选页 → 粗规划（每章按 planner_coarse_max_input_chars
+  连续页分段，每段一次调用产出主题清单，账本恢复复用/预算/心跳）→ 确定性校验
+  （tier∈模式允许集过滤/上限截断/标题去重/topic_index 分配）→ 精规划（主题按
+  pack_topic_batches 打包成批，批页=主题声明页∪±margin，批难度区间=章区间按批字符
+  占比）→ 空产出主题 fine-wide 恢复（整章页重试一次，独立 operation_key）→ 合并去重
   → 条件落库（KnowledgePoint + plan_batches + stage=GENERATING + 难度分布 cursor）。
-  空单元三分支（§6.4）：全组失败 → FAILED+PLANNING；全组成功但 0 单元（或部分失败
-  +0 成功单元）→ COMPLETED + NO_GENERATION_UNITS（skipped 计数保留观测）；部分成功
-  → GENERATING + skipped_planning_group_count。
-- 红线 4：normalized_result 只保存通过校验的规范化 units JSON（含服务端 priority），
-  不保存完整 Prompt、原文或原始模型响应；账本不落 usage 以外的敏感内容。
+  空单元三分支（§6.4）：全部操作失败 → FAILED+PLANNING；全部成功但 0 单元 →
+  COMPLETED + NO_GENERATION_UNITS；部分成功 → GENERATING + skipped 计数。
+- operation_key（database-design）：`planning:coarse:{chapter_id}:{seg}`、
+  `planning:fine:{chapter_id}:{batch}`、`planning:fine-wide:{chapter_id}:{topic}`；
+  粗/精共用账本 stage='PLANNING'（DB CHECK 域），prompt_name/schema_name 区分。
+- 红线 4：normalized_result 只保存通过校验的规范化 topics/units JSON（含服务端
+  priority/topic_index/注入 tier），不保存完整 Prompt、原文或原始模型响应。
 - 时钟：`now` 显式参数定式（claim 由调用方注入）；run_planning 每次尝试/心跳/终态
   各自读取新时钟（SystemClock，ledger.py 同款 _now 兜底约定）——心跳必须真实推进，
-  避免长运行任务被 CAS2 误判孤儿接管；CAS1 的 started_at 用 claim 注入时刻。
+  避免长运行任务被 CAS2 误判孤儿接管。
 - 终态一律条件更新（WHERE GENERATING+PLANNING）：并发放弃/转移不覆盖；Key 错误、输入
   漂移与快照非法等即时失败同款 guard（review fix 2/5）。
 """
@@ -28,7 +32,7 @@ import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -43,6 +47,7 @@ from infra.db.session import format_utc
 from infra.llm.deepseek import LlmChatClient, RetryableUpstreamError
 from infra.llm.prompts import asset_versions, load_asset, safe_json_dumps
 from services.generation.batches import plan_batches
+from services.generation.coarse_validator import normalize_title, validate_and_normalize_topics
 from services.generation.ledger import (
     attempt_count,
     create_attempt,
@@ -53,8 +58,10 @@ from services.generation.ledger import (
 )
 from services.generation.planner_validator import validate_and_truncate
 from services.generation.quota import (
-    allocate_chapter_intervals,
-    allocate_group_interval,
+    difficulty_interval,
+    expand_page_window,
+    interval_for_chapter,
+    pack_topic_batches,
 )
 from services.pdf.text_chunks import load_pages
 from services.tasks.lease import TaskLease, renew_task, require_lease
@@ -86,15 +93,42 @@ def _format_cutoff(now: str, minutes: int) -> str:
     return format_utc(_parse_utc(now) - timedelta(minutes=minutes))
 
 
-def group_fingerprint(
+def _page_digest(pages: Sequence[TextChunk]) -> list[dict[str, str]]:
+    return [{"chunk_id": p.chunk_id, "content_sha256": p.content_sha256} for p in pages]
+
+
+def coarse_fingerprint(
+    pages: Sequence[TextChunk],
+    interval: tuple[int, int],
+    coverage_mode: str,
+    versions: dict[str, str],
+) -> str:
+    """粗规划段输入指纹（spec §6.2）：页 ID + content_sha256 + 覆盖模式 + 主题区间 + 粗规划资产版本。"""
+    payload = {
+        "pages": _page_digest(pages),
+        "coverage_mode": coverage_mode,
+        "topic_interval": {"min": interval[0], "max": interval[1]},
+        "planner_coarse_prompt_version": versions["planner_coarse_prompt_version"],
+        "planner_coarse_output_schema_version": versions["planner_coarse_output_schema_version"],
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def fine_fingerprint(
+    topics: Sequence[dict[str, Any]],
     pages: Sequence[TextChunk],
     interval: dict[str, dict[str, int]],
-    versions: dict[str, str],
     coverage_mode: str,
+    versions: dict[str, str],
 ) -> str:
-    """规划组输入指纹（spec §6.2）：页 ID + content_sha256 + 覆盖模式 + 难度区间 + prompt/schema 版本。"""
+    """精规划批输入指纹：批主题声明 + 批页 + 覆盖模式 + 难度区间 + 精规划资产版本。"""
     payload = {
-        "pages": [{"chunk_id": p.chunk_id, "content_sha256": p.content_sha256} for p in pages],
+        "topics": [
+            {"topic_index": t["topic_index"], "source_chunk_ids": t["source_chunk_ids"]}
+            for t in topics
+        ],
+        "pages": _page_digest(pages),
         "coverage_mode": coverage_mode,
         "difficulty_interval": {
             d: {
@@ -242,14 +276,14 @@ def _stale_fail(session: Session, *, task: Task, now: str) -> bool:
     return False
 
 
-# ---------- 规划执行 ----------
+# ---------- 规划执行（两阶段） ----------
 
 
 def run_planning(
     session: Session, task: Task, *, settings: Settings, client: LlmChatClient
 ) -> None:
-    """执行规划（spec §6.2）：选页拆组 → 组调用（账本恢复/预算/STARTED→chat→终态）→
-    合并去重 → 三分支条件落库。LLM 调用始终在事务外（§3/§6.2 硬规则）。
+    """执行两阶段规划（spec §6.2；V2.5.2）：粗规划分段盘点 → 主题校验 → 精规划分批展开
+    → 空产出主题恢复 → 合并去重 → 三分支条件落库。LLM 调用始终在事务外（§3/§6.2 硬规则）。
 
     时钟：不捕获 run 级冻结 now——每次尝试/心跳/终态各自读取新时钟（review fix 1：
     心跳必须真实推进，否则长运行任务会被 CAS2 误判孤儿接管）。
@@ -302,30 +336,6 @@ def run_planning(
             internal_reason="PLANNING_TASK_INCOMPLETE",
         )
         return
-    # 1. 快照选页 + 连续页拆组（§4.2）；组数超上限 → FAILED（§6.3 硬上限）
-    chapter_groups: list[list[list[TextChunk]]] = []
-    for entry in chapters:
-        start = entry.get("start_page")
-        end = entry.get("end_page")
-        pages = load_pages(
-            session,
-            material_id=str(entry["material_id"]),
-            start_page=int(start) if start is not None else None,
-            end_page=int(end) if end is not None else None,
-        )
-        chapter_groups.append(_split_groups(pages, max_chars=settings.planner_max_input_chars))
-    total_groups = sum(len(g) for g in chapter_groups)
-    if total_groups > settings.max_planner_groups_per_task:
-        logger.warning(
-            "task planning group cap exceeded",
-            extra={"task_id": task.task_id, "groups": total_groups},
-        )
-        _finish_planning_failed(
-            session, task, error_code=ErrorCode.GENERATION_FAILED.value, skipped=0
-        )
-        return
-    # 2. 密度制区间（V25-D-25）：章字符数 → 目标区间 → 按难度占比拆分；组间按字符占比再拆。
-    #    区间 = [max(3,⌊0.6t⌋)∧⌈1.2t⌉, ⌈1.2t⌉]：下界软目标（内容不足允许低于），上界硬截断。
     config = json.loads(task.generation_config)
     ratio = config["difficulty_ratio"]
     # V2.5 兼容读取：新配置键 coverage_mode / deep_question（0~100 整数档），
@@ -338,86 +348,338 @@ def run_planning(
     def _fraction(value: float) -> float:
         return value / 100 if value > 1 else value
 
-    chapter_char_counts = [
-        sum(page.char_count for group in groups for page in group) for groups in chapter_groups
-    ]
-    chapter_intervals = allocate_chapter_intervals(
-        chapter_char_counts,
-        str(mode),
-        _fraction(ratio_basic),
-        _fraction(ratio_understanding),
-        _fraction(ratio_deep),
-        cards_per_10k={
-            "COMPACT": settings.cards_per_10k_compact,
-            "BALANCED": settings.cards_per_10k_balanced,
-            "EXTENSIVE": settings.cards_per_10k_extensive,
-        },
-    )
-    # 3. 组调用（账本恢复/预算；STARTED 心跳 commit → 事务外 chat → 终态+心跳 commit）
-    skipped_groups = 0
-    merged: list[tuple[dict[str, Any], str]] = []
-    for ci, (entry, groups) in enumerate(zip(chapters, chapter_groups)):
-        char_counts = [sum(p.char_count for p in group) for group in groups]
-        sub_intervals = allocate_group_interval(chapter_intervals[ci], char_counts)
-        for gi, group in enumerate(groups):
+    anchors = {
+        "COMPACT": settings.cards_per_10k_compact,
+        "BALANCED": settings.cards_per_10k_balanced,
+        "EXTENSIVE": settings.cards_per_10k_extensive,
+    }
+
+    # 1. 快照选页 + 粗规划分段（planner_coarse_max_input_chars 连续页；单页超限独立成段）
+    chapter_pages: list[list[TextChunk]] = []
+    chapter_segments: list[list[list[TextChunk]]] = []
+    for entry in chapters:
+        start = entry.get("start_page")
+        end = entry.get("end_page")
+        pages = load_pages(
+            session,
+            material_id=str(entry["material_id"]),
+            start_page=int(start) if start is not None else None,
+            end_page=int(end) if end is not None else None,
+        )
+        chapter_pages.append(pages)
+        chapter_segments.append(
+            _split_groups(pages, max_chars=settings.planner_coarse_max_input_chars)
+        )
+
+    def _alive() -> bool:
+        session.refresh(task)
+        if task.status != _GENERATING_STATUS or task.stage != _PLANNING_STAGE:
+            return False  # 已取消/转移 → 停止（不再付费调用）
+        if lease is not None:
+            require_lease(
+                session,
+                task_id=task.task_id,
+                worker_id=lease.worker_id,
+                token=lease.token,
+                version=lease.version,
+                now=_now_utc(),
+            )
+        return True
+
+    def _heartbeat() -> bool:
+        if (
+            lease is not None
+            and task.status == _GENERATING_STATUS
+            and task.stage == _PLANNING_STAGE
+        ):
+            if not renew_task(session, lease, now=_now_utc()):
+                session.expire(task)
+                return False
+            session.commit()
             session.refresh(task)
-            if task.status != _GENERATING_STATUS or task.stage != _PLANNING_STAGE:
-                return  # 已取消/转移 → 停止（不再付费调用）
-            if lease is not None:
-                require_lease(
-                    session,
-                    task_id=task.task_id,
-                    worker_id=lease.worker_id,
-                    token=lease.token,
-                    version=lease.version,
-                    now=_now_utc(),
-                )
-            operation_key = f"planning:{entry['chapter_id']}:{gi}"
-            interval = sub_intervals[gi]
-            fingerprint = group_fingerprint(group, interval, versions, str(mode))
-            units = _run_group(
+        return task.status == _GENERATING_STATUS and task.stage == _PLANNING_STAGE
+
+    # 2. 粗规划：每章每段一次调用 → 校验规范化 → 章内合并去重
+    skipped_ops = 0
+    total_ops = 0
+    chapter_topics: list[list[dict[str, Any]]] = []
+    for entry, segments in zip(chapters, chapter_segments):
+        seg_chars = [sum(p.char_count for p in seg) for seg in segments]
+        raw_topic_lists: list[list[dict[str, Any]]] = []
+        for si, seg in enumerate(segments):
+            if not _alive():
+                return
+            seg_interval = interval_for_chapter(seg_chars[si], str(mode), anchors)
+            fingerprint = coarse_fingerprint(seg, seg_interval, str(mode), versions)
+            system_prompt, user_prompt = _build_coarse_prompts(
+                chapter=entry,
+                pages=seg,
+                coverage_mode=str(mode),
+                topic_interval=seg_interval,
+                settings=settings,
+                custom_requirements=config.get("custom_requirements"),
+            )
+            total_ops += 1
+            topics = _run_planning_operation(
                 session,
                 task,
                 settings=settings,
                 client=client,
-                operation_key=operation_key,
+                operation_key=f"planning:coarse:{entry['chapter_id']}:{si}",
                 fingerprint=fingerprint,
-                interval=interval,
-                coverage_mode=str(mode),
-                pages=group,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                validate=_coarse_validator_for(seg, seg_interval, str(mode), settings),
+                prompt_name="planner-coarse",
+                prompt_version=versions["planner_coarse_prompt_version"],
+                schema_name="planner_coarse_output",
+                schema_version=versions["planner_coarse_output_schema_version"],
+                max_output_tokens=settings.planner_coarse_max_output_tokens,
+            )
+            if topics is None:
+                skipped_ops += 1
+                continue
+            raw_topic_lists.append(cast(list[dict[str, Any]], topics))
+            if not _heartbeat():
+                return
+        chapter_interval = interval_for_chapter(sum(seg_chars), str(mode), anchors)
+        chapter_topics.append(_merge_topics(raw_topic_lists, chapter_interval))
+
+    if task.status != _GENERATING_STATUS or task.stage != _PLANNING_STAGE:
+        return
+
+    # 3. 精规划：主题打包成批（先算总批数做硬上限守卫，再逐批调用）
+    chapter_batches: list[list[list[dict[str, Any]]]] = []
+    chapter_sub_intervals: list[list[dict[str, dict[str, int]]]] = []
+    chapter_batch_pages: list[list[list[TextChunk]]] = []
+    for entry, pages, topics, segments in zip(
+        chapters, chapter_pages, chapter_topics, chapter_segments
+    ):
+        if not topics:
+            chapter_batches.append([])
+            chapter_sub_intervals.append([])
+            chapter_batch_pages.append([])
+            continue
+        page_chars = {p.chunk_id: p.char_count for p in pages}
+        position_of = {p.chunk_id: i for i, p in enumerate(pages)}
+        packed = pack_topic_batches(
+            topics,
+            page_chars,
+            max_chars=settings.planner_max_input_chars,
+            max_topics=settings.planner_fine_topics_per_call,
+        )
+        chapter_interval = interval_for_chapter(sum(page_chars.values()), str(mode), anchors)
+        batches: list[list[dict[str, Any]]] = []
+        sub_intervals: list[dict[str, dict[str, int]]] = []
+        batch_pages_list: list[list[TextChunk]] = []
+        for batch_idx in packed:
+            batch_topics = [topics[i] for i in batch_idx]
+            window = expand_page_window(
+                {position_of[cid] for t in batch_topics for cid in t["source_chunk_ids"]},
+                len(pages),
+                margin=settings.planner_fine_page_margin,
+            )
+            batch_pages = [pages[pos] for pos in sorted(window)]
+            batch_chars = sum(p.char_count for p in batch_pages)
+            batches.append(batch_topics)
+            batch_pages_list.append(batch_pages)
+            sub_intervals.append(
+                difficulty_interval(
+                    interval_for_chapter(batch_chars, str(mode), anchors),
+                    _fraction(ratio_basic),
+                    _fraction(ratio_understanding),
+                    _fraction(ratio_deep),
+                )
+            )
+        chapter_batches.append(batches)
+        chapter_sub_intervals.append(sub_intervals)
+        chapter_batch_pages.append(batch_pages_list)
+
+    total_fine_batches = sum(len(b) for b in chapter_batches)
+    if total_fine_batches > settings.max_planner_groups_per_task:
+        logger.warning(
+            "task planning fine batch cap exceeded",
+            extra={"task_id": task.task_id, "batches": total_fine_batches},
+        )
+        _finish_planning_failed(
+            session, task, error_code=ErrorCode.GENERATION_FAILED.value, skipped=0
+        )
+        return
+
+    # 4. 精规划批调用 + 空产出主题 fine-wide 恢复
+    merged: list[tuple[dict[str, Any], str]] = []
+    produced_topics: dict[str, set[int]] = {}
+    succeeded_batches: dict[str, set[int]] = {}
+    for entry, pages, topics, batches, sub_intervals, batch_pages_list in zip(
+        chapters,
+        chapter_pages,
+        chapter_topics,
+        chapter_batches,
+        chapter_sub_intervals,
+        chapter_batch_pages,
+    ):
+        chapter_id = str(entry["chapter_id"])
+        for bi, (batch_topics, batch_page_list, interval) in enumerate(
+            zip(batches, batch_pages_list, sub_intervals)
+        ):
+            if not _alive():
+                return
+            fingerprint = fine_fingerprint(
+                batch_topics, batch_page_list, interval, str(mode), versions
+            )
+            system_prompt, user_prompt = _build_fine_prompts(
                 chapter=entry,
+                topics=batch_topics,
+                pages=batch_page_list,
+                coverage_mode=str(mode),
+                interval=interval,
+                settings=settings,
                 custom_requirements=config.get("custom_requirements"),
-                versions=versions,
+            )
+            total_ops += 1
+            units = _run_planning_operation(
+                session,
+                task,
+                settings=settings,
+                client=client,
+                operation_key=f"planning:fine:{chapter_id}:{bi}",
+                fingerprint=fingerprint,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                validate=_fine_validator_for(batch_topics, batch_page_list, interval, settings),
+                prompt_name="planner",
+                prompt_version=versions["planner_prompt_version"],
+                schema_name="planner_output",
+                schema_version=versions["planner_output_schema_version"],
+                max_output_tokens=settings.planner_max_output_tokens,
             )
             if units is None:
-                skipped_groups += 1
-            else:
-                merged.extend((u, entry["chapter_id"]) for u in units)
-            if (
-                lease is not None
-                and task.status == _GENERATING_STATUS
-                and task.stage == _PLANNING_STAGE
-            ):
-                heartbeat_now = _now_utc()
-                if not renew_task(session, lease, now=heartbeat_now):
-                    session.expire(task)
+                skipped_ops += 1
+                continue
+            succeeded_batches.setdefault(chapter_id, set()).add(bi)
+            produced = produced_topics.setdefault(chapter_id, set())
+            unit_list = cast(list[dict[str, Any]], units)
+            for unit in unit_list:
+                produced.add(unit["topic_index"])
+            merged.extend((unit, chapter_id) for unit in unit_list)
+            if not _heartbeat():
+                return
+
+    # 4b. fine-wide 恢复：批成功但该主题 0 单元 → 整章页重试一次（独立 key 避开漂移守卫；
+    #     每难度上限 1，轻微超出章区间上限有界且罕见——为漏挖主题兜底）
+    for entry, pages, topics, batches in zip(
+        chapters, chapter_pages, chapter_topics, chapter_batches
+    ):
+        chapter_id = str(entry["chapter_id"])
+        for bi, batch_topics in enumerate(batches):
+            if bi not in succeeded_batches.get(chapter_id, set()):
+                continue  # 批已失败/跳过——损失计入 skipped，不重复兜底
+            for topic in batch_topics:
+                if topic["topic_index"] in produced_topics.get(chapter_id, set()):
+                    continue
+                if not _alive():
                     return
-                session.commit()
-                session.refresh(task)
+                recovery_interval = {
+                    d: {"min": 0, "max": 1} for d in ("BASIC", "UNDERSTANDING", "DEEP_QUESTION")
+                }
+                fingerprint = fine_fingerprint(
+                    [topic], pages, recovery_interval, str(mode), versions
+                )
+                system_prompt, user_prompt = _build_fine_prompts(
+                    chapter=entry,
+                    topics=[topic],
+                    pages=pages,
+                    coverage_mode=str(mode),
+                    interval=recovery_interval,
+                    settings=settings,
+                    custom_requirements=config.get("custom_requirements"),
+                )
+                total_ops += 1
+                units = _run_planning_operation(
+                    session,
+                    task,
+                    settings=settings,
+                    client=client,
+                    operation_key=f"planning:fine-wide:{chapter_id}:{topic['topic_index']}",
+                    fingerprint=fingerprint,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    validate=_fine_validator_for([topic], list(pages), recovery_interval, settings),
+                    prompt_name="planner",
+                    prompt_version=versions["planner_prompt_version"],
+                    schema_name="planner_output",
+                    schema_version=versions["planner_output_schema_version"],
+                    max_output_tokens=settings.planner_max_output_tokens,
+                )
+                if units is None:
+                    skipped_ops += 1
+                    continue
+                unit_list = cast(list[dict[str, Any]], units)
+                produced_topics.setdefault(chapter_id, set()).update(
+                    unit["topic_index"] for unit in unit_list
+                )
+                merged.extend((unit, chapter_id) for unit in unit_list)
+                if not _heartbeat():
+                    return
+
     if task.status != _GENERATING_STATUS:
         return  # Key 错误/输入漂移等内部失败已置 FAILED（或外部转移）→ 不再落最终事务
-    # 4. 合并：跨组指纹去重 + 全局 priority（§6.2）
+    # 5. 合并：跨批指纹去重 + 全局 priority（§6.2；主题序=批序+组内序由打包顺序保证）
     final_units = _merge_units(merged)
-    # 5. 空单元三分支（§6.4）
-    if total_groups > 0 and skipped_groups == total_groups:
+    # 6. 空单元三分支（§6.4）
+    if total_ops > 0 and skipped_ops == total_ops:
         _finish_planning_failed(
-            session, task, error_code=ErrorCode.GENERATION_FAILED.value, skipped=skipped_groups
+            session, task, error_code=ErrorCode.GENERATION_FAILED.value, skipped=skipped_ops
         )
         return
     if not final_units:
-        _finish_planning_empty(session, task, skipped=skipped_groups)
+        _finish_planning_empty(session, task, skipped=skipped_ops)
         return
-    _finish_planning_generating(session, task, units=final_units, skipped=skipped_groups)
+    _finish_planning_generating(session, task, units=final_units, skipped=skipped_ops)
+
+
+def _coarse_validator_for(
+    seg: Sequence[TextChunk],
+    seg_interval: tuple[int, int],
+    mode: str,
+    settings: Settings,
+) -> Callable[[dict[str, Any]], Any]:
+    """粗规划段校验闭包（显式绑定段上下文，避免循环变量晚绑定）。"""
+
+    def validate(raw: dict[str, Any]) -> Any:
+        return validate_and_normalize_topics(
+            raw,
+            coverage_mode=mode,
+            topic_interval=seg_interval,
+            allowed_page_ids={p.chunk_id for p in seg},
+            max_chunks_per_topic=settings.max_source_pages_per_unit,
+            max_chars_per_topic=settings.generator_max_input_chars,
+            page_chars={p.chunk_id: p.char_count for p in seg},
+        )
+
+    return validate
+
+
+def _fine_validator_for(
+    batch_topics: list[dict[str, Any]],
+    batch_page_list: list[TextChunk],
+    interval: dict[str, dict[str, int]],
+    settings: Settings,
+) -> Callable[[dict[str, Any]], Any]:
+    """精规划批校验闭包（显式绑定批上下文）。"""
+
+    def validate(raw: dict[str, Any]) -> Any:
+        return validate_and_truncate(
+            raw,
+            topics=batch_topics,
+            allowed_page_ids={p.chunk_id for p in batch_page_list},
+            interval=interval,
+            max_pages_per_unit=settings.max_source_pages_per_unit,
+            max_chars_per_unit=settings.generator_max_input_chars,
+            page_chars={p.chunk_id: p.char_count for p in batch_page_list},
+        )
+
+    return validate
 
 
 def _split_groups(pages: list[TextChunk], *, max_chars: int) -> list[list[TextChunk]]:
@@ -444,7 +706,28 @@ def _split_groups(pages: list[TextChunk], *, max_chars: int) -> list[list[TextCh
     return groups
 
 
-def _run_group(
+def _merge_topics(
+    raw_lists: list[list[dict[str, Any]]], chapter_interval: tuple[int, int]
+) -> list[dict[str, Any]]:
+    """章内主题合并：跨段标题规范化去重（保留首现）→ 截断到章区间上限 → topic_index 1..N。"""
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for topics in raw_lists:
+        for topic in topics:
+            norm = normalize_title(str(topic["title"]))
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            merged.append(topic)
+    upper = chapter_interval[1]
+    if len(merged) > upper:
+        merged = merged[:upper]
+    for index, topic in enumerate(merged, start=1):
+        topic["topic_index"] = index
+    return merged
+
+
+def _run_planning_operation(
     session: Session,
     task: Task,
     *,
@@ -452,16 +735,20 @@ def _run_group(
     client: LlmChatClient,
     operation_key: str,
     fingerprint: str,
-    interval: dict[str, dict[str, int]],
-    coverage_mode: str,
-    pages: list[TextChunk],
-    chapter: dict[str, Any],
-    custom_requirements: Any,
-    versions: dict[str, str],
-) -> list[dict[str, Any]] | None:
-    """单组规划：输入漂移守卫 → 恢复复用 → 预算 → 尝试循环。返回规范化 units；
-    None = 组 SKIPPED、停止或任务已 FAILED（Key 错误/输入漂移）。"""
-    lease = _task_lease(session, task.task_id)
+    system_prompt: str,
+    user_prompt: str,
+    validate: Callable[[dict[str, Any]], Any],
+    prompt_name: str,
+    prompt_version: str,
+    schema_name: str,
+    schema_version: str,
+    max_output_tokens: int,
+) -> Any | None:
+    """单次规划调用（粗/精共用）：输入漂移守卫 → 恢复复用 → 预算 → 尝试循环。
+
+    返回 validate 通过的规范化结果；None = 操作 SKIPPED、停止或任务已 FAILED
+    （Key 错误/输入漂移）。validate 抛 AppError 按输出非法走预算内重试（§6.3）。
+    """
     # §6.2 输入漂移守卫：该 operation_key 已有账本尝试但 fingerprint 与重推导不一致
     # → 不得错误复用/续跑旧结果，任务以规划输入漂移失败（fail fast，不发调用）
     drifted = session.scalar(
@@ -491,12 +778,12 @@ def _run_group(
     )
     if saved is not None:
         try:
-            units = json.loads(saved)
-            assert isinstance(units, list)
-            return units  # 恢复复用（§6.2：同 key+fingerprint 的 SUCCESS 不重复调用）
+            result = json.loads(saved)
+            assert isinstance(result, list)
+            return result  # 恢复复用（§6.2：同 key+fingerprint 的 SUCCESS 不重复调用）
         except (ValueError, TypeError, AssertionError):
             logger.warning(
-                "task planning ledger result unreadable, re-planning group",
+                "task planning ledger result unreadable, re-planning operation",
                 extra={"task_id": task.task_id, "operation_key": operation_key},
             )
     budget = 1 + settings.planning_retry_limit
@@ -506,17 +793,7 @@ def _run_group(
         )
         >= budget
     ):
-        return None  # 预算耗尽（含 UNKNOWN）→ 组 SKIPPED（§6.3 预算不重置）
-    allowed_page_ids = {p.chunk_id for p in pages}
-    page_chars = {p.chunk_id: p.char_count for p in pages}
-    system_prompt, user_prompt = _build_planner_prompts(
-        chapter=chapter,
-        interval=interval,
-        coverage_mode=coverage_mode,
-        pages=pages,
-        settings=settings,
-        custom_requirements=custom_requirements,
-    )
+        return None  # 预算耗尽（含 UNKNOWN）→ 操作 SKIPPED（§6.3 预算不重置）
     while True:
         session.refresh(task)
         if task.status != _GENERATING_STATUS or task.stage != _PLANNING_STAGE:
@@ -550,10 +827,10 @@ def _run_group(
             input_fingerprint=fingerprint,
             attempt_no=attempt_no,
             model=settings.deepseek_model,
-            prompt_name="planner",
-            prompt_version=versions["planner_prompt_version"],
-            schema_name="planner_output",
-            schema_version=versions["planner_output_schema_version"],
+            prompt_name=prompt_name,
+            prompt_version=prompt_version,
+            schema_name=schema_name,
+            schema_version=schema_version,
             now=attempt_now,
         )
         task.updated_at = attempt_now  # 心跳与 STARTED 占位同事务（§9 调用前先有已提交 STARTED 行）
@@ -562,7 +839,7 @@ def _run_group(
             result = client.chat(
                 user_prompt,
                 system_prompt=system_prompt,
-                max_tokens=settings.planner_max_output_tokens,
+                max_tokens=max_output_tokens,
             )
         except RetryableUpstreamError as exc:
             finish_now = _now_utc()
@@ -612,14 +889,7 @@ def _run_group(
         # 事务外校验（§6.3 输出非法 → 预算内重试；红线 4：原始响应不落库）
         try:
             raw = json.loads(result["content"])
-            units = validate_and_truncate(
-                raw,
-                allowed_page_ids=allowed_page_ids,
-                interval=interval,
-                max_pages_per_unit=settings.max_source_pages_per_unit,
-                max_chars_per_unit=settings.generator_max_input_chars,
-                page_chars=page_chars,
-            )
+            normalized = validate(raw)
         except (ValueError, TypeError, AppError):
             finish_now = _now_utc()
             if not _planning_guard_update(session, task, values={"updated_at": finish_now}):
@@ -640,33 +910,33 @@ def _run_group(
             usage=result["usage"],
             http_status=result["http_status"],
             duration_ms=result["duration_ms"],
-            normalized_result=json.dumps(units, ensure_ascii=False),
+            normalized_result=json.dumps(normalized, ensure_ascii=False),
             now=finish_now,
         )
         session.commit()
-        return units
+        return normalized
 
 
 def _attempt_total(session: Session, task: Task, operation_key: str) -> int:
-    """本组尝试数（含全部状态；§9 预算口径）。"""
+    """本操作尝试数（含全部状态；§9 预算口径）。"""
     return attempt_count(
         session, task_id=task.task_id, stage=_PLANNING_STAGE, operation_key=operation_key
     )
 
 
-def _build_planner_prompts(
+def _build_coarse_prompts(
     *,
     chapter: dict[str, Any],
-    interval: dict[str, dict[str, int]],
+    pages: Sequence[TextChunk],
     coverage_mode: str,
-    pages: list[TextChunk],
+    topic_interval: tuple[int, int],
     settings: Settings,
     custom_requirements: Any,
 ) -> tuple[str, str]:
-    """Planner 双消息组装（spec §5.7）：稳定 system（prompt + schema 原文）+ 动态 user。"""
+    """粗规划双消息组装（spec §5.7）：稳定 system（prompt + schema 原文）+ 动态 user。"""
     system_prompt = (
-        f"{load_asset('prompts', 'planner')}\n\n<PLANNER_OUTPUT_SCHEMA>\n"
-        f"{load_asset('schemas', 'planner_output')}\n</PLANNER_OUTPUT_SCHEMA>"
+        f"{load_asset('prompts', 'planner_coarse')}\n\n<PLANNER_COARSE_OUTPUT_SCHEMA>\n"
+        f"{load_asset('schemas', 'planner_coarse_output')}\n</PLANNER_COARSE_OUTPUT_SCHEMA>"
     )
     payload = {
         "chapter": {
@@ -676,6 +946,48 @@ def _build_planner_prompts(
             "end_page": chapter["end_page"],
         },
         "coverage_mode": coverage_mode,
+        "topic_interval": {"min": topic_interval[0], "max": topic_interval[1]},
+        "limits": {
+            "max_source_chunks_per_topic": settings.max_source_pages_per_unit,
+            "max_source_chars_per_topic": settings.generator_max_input_chars,
+        },
+        "source_chunks": [
+            {"chunk_id": p.chunk_id, "page_number": p.page_number, "content": p.content}
+            for p in pages
+        ],
+        "custom_requirements": custom_requirements,
+    }
+    user_prompt = f"<PLANNER_COARSE_INPUT>{safe_json_dumps(payload)}</PLANNER_COARSE_INPUT>"
+    return system_prompt, user_prompt
+
+
+def _build_fine_prompts(
+    *,
+    chapter: dict[str, Any],
+    topics: Sequence[dict[str, Any]],
+    pages: Sequence[TextChunk],
+    coverage_mode: str,
+    interval: dict[str, dict[str, int]],
+    settings: Settings,
+    custom_requirements: Any,
+) -> tuple[str, str]:
+    """精规划双消息组装：稳定 system（prompt + schema 原文）+ 动态 user（批主题+批页）。"""
+    system_prompt = (
+        f"{load_asset('prompts', 'planner')}\n\n<PLANNER_OUTPUT_SCHEMA>\n"
+        f"{load_asset('schemas', 'planner_output')}\n</PLANNER_OUTPUT_SCHEMA>"
+    )
+    payload = {
+        "chapter": {"name": chapter["name"]},
+        "coverage_mode": coverage_mode,
+        "topics": [
+            {
+                "topic_index": t["topic_index"],
+                "title": t["title"],
+                "coverage_tier": t["coverage_tier"],
+                "source_chunk_ids": t["source_chunk_ids"],
+            }
+            for t in topics
+        ],
         "difficulty_interval": interval,
         "limits": {
             "max_source_chunks_per_unit": settings.max_source_pages_per_unit,
@@ -692,8 +1004,8 @@ def _build_planner_prompts(
 
 
 def _merge_units(merged: list[tuple[dict[str, Any], str]]) -> list[dict[str, Any]]:
-    """跨组去重（§6.2）：指纹 = (learning_objective, target_difficulty, card_type,
-    page 序 source_chunk_ids)；按章序/组序/数组顺序保留首次出现，全局 priority 1..N。"""
+    """跨批去重（§6.2）：指纹 = (learning_objective, target_difficulty, card_type,
+    page 序 source_chunk_ids)；按章序/批序/数组顺序保留首次出现，全局 priority 1..N。"""
     seen: set[tuple[Any, ...]] = set()
     result: list[dict[str, Any]] = []
     for unit, chapter_id in merged:
@@ -791,7 +1103,7 @@ def _planning_guard_update(session: Session, task: Task, *, values: dict[str, An
 
 
 def _finish_planning_failed(session: Session, task: Task, *, error_code: str, skipped: int) -> None:
-    """全部规划组失败（§6.4 分支 2）→ FAILED + failure_stage=PLANNING（条件更新）。"""
+    """全部规划操作失败（§6.4 分支 2）→ FAILED + failure_stage=PLANNING（条件更新）。"""
     now = _now_utc()
     if not _planning_guard_update(
         session,
@@ -894,7 +1206,7 @@ def _finish_planning_generating(
                 status="PENDING",
                 target_difficulty=unit["target_difficulty"],
                 card_type=unit["card_type"],
-                coverage_tier=unit.get("coverage_tier"),
+                coverage_tier=unit["coverage_tier"],
                 source_chunk_ids=json.dumps(chunk_ids, ensure_ascii=False),
             )
         )

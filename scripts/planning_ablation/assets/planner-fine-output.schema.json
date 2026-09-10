@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "planner-fine-output draft",
+  "type": "object",
+  "required": ["units"],
+  "additionalProperties": false,
+  "properties": {
+    "units": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "topic_index",
+          "source_chunk_ids",
+          "learning_objective",
+          "target_difficulty",
+          "card_type"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "topic_index": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "source_chunk_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": { "type": "string" }
+          },
+          "learning_objective": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 160
+          },
+          "target_difficulty": {
+            "enum": ["BASIC", "UNDERSTANDING", "DEEP_QUESTION"]
+          },
+          "card_type": {
+            "enum": ["QUESTION", "TRUE_FALSE"]
+          }
+        }
+      }
+    }
+  }
+}

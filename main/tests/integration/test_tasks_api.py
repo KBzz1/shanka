@@ -37,36 +37,47 @@ _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
 
 def _client_factory(api_key: str) -> DeepSeekClient:
-    """mock transport 全链路分派（LLM 升级管线）：<PLANNER_INPUT> → 按请求配额产出
-    锚定单元（引用请求内组页）；<SCORING_INPUT> → ID 守恒的确定性分数；其余
-    （<GENERATION_SPEC>）→ 每批 1 张合法卡（1 单元 1 批）。COMPACT 2 章 = 6 单元
-    → 6 批 → 6 卡。"""
+    """mock transport 全链路分派（V2.5.2 两阶段）：<PLANNER_COARSE_INPUT> → 主题清单
+    （区间上限条，引用请求内页）；<PLANNER_INPUT> → 按分配主题逐个展开单元；
+    <SCORING_INPUT> → ID 守恒的确定性分数；其余（<GENERATION_SPEC>）→ 每批 1 张
+    合法卡（1 单元 1 批）。COMPACT 2 章 × [3,3] = 6 主题 → 6 单元 → 6 批 → 6 卡。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         import json
 
         body = json.loads(request.content)
         user = body["messages"][-1]["content"]
-        if "<PLANNER_INPUT>" in user:
+        if "<PLANNER_COARSE_INPUT>" in user:
+            payload = json.loads(
+                user.split("<PLANNER_COARSE_INPUT>", 1)[1].split("</PLANNER_COARSE_INPUT>", 1)[0]
+            )
+            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+            count = payload["topic_interval"]["max"]
+            topics = [
+                {
+                    "title": f"主题{i}",
+                    "coverage_tier": "CORE",
+                    "source_chunk_ids": [chunk_ids[i % len(chunk_ids)]],
+                }
+                for i in range(count)
+            ]
+            content = json.dumps({"topics": topics}, ensure_ascii=False)
+        elif "<PLANNER_INPUT>" in user:
             payload = json.loads(
                 user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0]
             )
-            chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
-            units: list[dict[str, object]] = []
-            # 难度键原样回显（与 test_observability 同款）：planner 输出 schema v3
-            # 枚举为 BASIC/UNDERSTANDING/DEEP_QUESTION 且单元必填 coverage_tier
-            # （Task 7 资产 v4/v3 起服务端配额键与模型输出口径一致）
-            for difficulty, quota_i in payload["difficulty_interval"].items():
-                for _ in range(quota_i["max"]):
-                    units.append(
-                        {
-                            "source_chunk_ids": [chunk_ids[0]],
-                            "learning_objective": f"知识点{len(units)}",
-                            "target_difficulty": difficulty,
-                            "card_type": "QUESTION",
-                            "coverage_tier": "CORE",
-                        }
-                    )
+            diffs = [d for d, b in payload["difficulty_interval"].items() if b["max"] > 0]
+            chapter_name = payload["chapter"]["name"]
+            units: list[dict[str, object]] = [
+                {
+                    "topic_index": t["topic_index"],
+                    "source_chunk_ids": [t["source_chunk_ids"][0]],
+                    "learning_objective": f"知识点{chapter_name}{t['topic_index']}",
+                    "target_difficulty": diffs[i % len(diffs)],
+                    "card_type": "QUESTION",
+                }
+                for i, t in enumerate(payload["topics"])
+            ]
             content = json.dumps({"units": units}, ensure_ascii=False)
         elif "<SCORING_INPUT>" in user:
             payload = json.loads(
@@ -233,7 +244,9 @@ def _seed_context(db_path: Path, *, user_id: str, with_key: bool = True) -> dict
         persist_text_chunks(
             session,
             file_id=pdf.file_id,
-            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2)],
+            # V2.5.2 两阶段：加厚到 1600 字/页（每章 3200 字 → COMPACT 主题区间 [3,3]，
+            # 与旧单阶段"每章 3 单元"的下游计数保持一致）
+            pages=[{"page_number": pn, "content": f"第{pn}页内容" * 320} for pn in (1, 2, 3)],
             now="2026-08-11T00:00:00.000Z",
         )
         session.commit()

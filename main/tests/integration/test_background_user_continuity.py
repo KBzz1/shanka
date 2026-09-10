@@ -29,7 +29,8 @@ from tests.integration.test_task_e2e_user_domain import FakeClient, _client_fact
 REPO_ROOT = Path(__file__).resolve().parents[3]  # tests/integration/ → 仓库根
 SAMPLE = REPO_ROOT / "res" / "AI-Agents-in-Depth-zh-CN.pdf"
 
-_SETTINGS = Settings(api_key_encryption_key="aa" * 32)
+# V2.5.2 两阶段：粗规划分段上限放宽（与 test_task_e2e_user_domain 同款）
+_SETTINGS = Settings(api_key_encryption_key="aa" * 32, planner_coarse_max_input_chars=200_000)
 
 
 @pytest.fixture
@@ -160,7 +161,8 @@ def test_task_continues_after_logout_and_new_session_reads(ctx: tuple[TestClient
     )
     task = client.get(f"/tasks/{task_id}", headers=new_headers)
     assert task.json()["status"] == "COMPLETED"
-    assert task.json()["generated_card_count"] == 32
+    # V2.5.2 两阶段：与 test_task_e2e_user_domain 同款 mock（引言 7 + 第 1 章 16 主题）
+    assert task.json()["generated_card_count"] == 23
 
 
 def test_task_continues_after_session_expiry(ctx: tuple[TestClient, Path]) -> None:

@@ -147,7 +147,7 @@ def _seed_task(
     persist_text_chunks(
         session,
         file_id=pdf.file_id,
-        pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2)],
+        pages=[{"page_number": pn, "content": f"第{pn}页内容" * 320} for pn in (1, 2)],
         now="2026-08-10T00:00:00.000Z",
     )
     task = create_task(
@@ -353,33 +353,39 @@ def test_concurrency_batch_commit_survives_crash(
 
 
 def _planning_content(request: httpx.Request) -> str:
-    """<PLANNER_INPUT> 提取组页 → 2 个合法单元（引用请求内首页；2 单元 = 2 批，
-    供"批 2 失败注入"与替代结果断言使用）。"""
+    """两阶段规划 mock（V2.5.2）：<PLANNER_COARSE_INPUT> → 2 个主题（引用请求内
+    首页）；<PLANNER_INPUT> → 按分配主题逐个展开单元（2 单元 = 2 批，供"批 2
+    失败注入"与替代结果断言使用）。"""
     body = json.loads(request.content)
     user = body["messages"][-1]["content"]
+    if "<PLANNER_COARSE_INPUT>" in user:
+        payload = json.loads(
+            user.split("<PLANNER_COARSE_INPUT>", 1)[1].split("</PLANNER_COARSE_INPUT>", 1)[0]
+        )
+        chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
+        count = min(payload["topic_interval"]["max"], 2)
+        topics = [
+            {
+                "title": f"主题{label}",
+                "coverage_tier": "CORE",
+                "source_chunk_ids": [chunk_ids[0]],
+            }
+            for label in ("一", "二")[:count]
+        ]
+        return json.dumps({"topics": topics}, ensure_ascii=False)
     payload = json.loads(user.split("<PLANNER_INPUT>", 1)[1].split("</PLANNER_INPUT>", 1)[0])
-    chunk_ids = [c["chunk_id"] for c in payload["source_chunks"]]
-    return json.dumps(
+    diffs = [d for d, b in payload["difficulty_interval"].items() if b["max"] > 0]
+    units = [
         {
-            "units": [
-                {
-                    "source_chunk_ids": [chunk_ids[0]],
-                    "learning_objective": "规划目标一",
-                    "target_difficulty": "BASIC",
-                    "card_type": "QUESTION",
-                    "coverage_tier": "CORE",
-                },
-                {
-                    "source_chunk_ids": [chunk_ids[0]],
-                    "learning_objective": "规划目标二",
-                    "target_difficulty": "UNDERSTANDING",
-                    "card_type": "QUESTION",
-                    "coverage_tier": "CORE",
-                },
-            ]
-        },
-        ensure_ascii=False,
-    )
+            "topic_index": t["topic_index"],
+            "source_chunk_ids": [t["source_chunk_ids"][0]],
+            "learning_objective": f"规划目标{label}",
+            "target_difficulty": diffs[i % len(diffs)],
+            "card_type": "QUESTION",
+        }
+        for i, (t, label) in enumerate(zip(payload["topics"], ("一", "二")))
+    ]
+    return json.dumps({"units": units}, ensure_ascii=False)
 
 
 def _seed_planning_task(session: Session, *, user_id: str) -> str:
@@ -462,7 +468,7 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
     persist_text_chunks(
         session,
         file_id=pdf.file_id,
-        pages=[{"page_number": pn, "content": f"第{pn}页内容" * 20} for pn in (1, 2)],
+        pages=[{"page_number": pn, "content": f"第{pn}页内容" * 320} for pn in (1, 2)],
         now="2026-08-10T00:00:00.000Z",
     )
     task = create_task(
@@ -687,7 +693,7 @@ def test_concurrency_retry_after_failure_publishes_replacement(
         user_msg = body["messages"][-1]["content"]
         if "<SCORING_INPUT>" in user_msg:
             content = _scoring_content(request)
-        elif "<PLANNER_INPUT>" in user_msg:
+        elif "<PLANNER_INPUT>" in user_msg or "<PLANNER_COARSE_INPUT>" in user_msg:
             content = _planning_content(request)
         else:  # GENERATION_SPEC
             run_phase["gen_calls"] += 1
