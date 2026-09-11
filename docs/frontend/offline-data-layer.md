@@ -21,13 +21,13 @@
 - 列表刷新在事务内替换所属范围（delete+insert 同 scope）；网络失败不触碰写路径，最后成功缓存保全。
 - 类型化缓存元数据：资源键、服务器版本/updated_at（存在时）、抓取时间、schema 版本；不把未建模的完整 HTTP JSON 当长期列。
 - stale-while-revalidate：Room Flow 立即给已有数据，后台按 TTL 刷新——项目/牌组/卡片 5 分钟，今日计划/进度/统计 60 秒；显式用户刷新 FORCE 覆盖。处理中的资源不受 TTL 约束：观察引擎（§6）对在途解析/任务的轮询读一律强制远端读，终态由服务端版本跃迁（契约 4.5，V25-D-34）保证可被项目/牌组列表感知；强制读失败时回退缓存快照，保证离线重进仍可渲染。
-- 跨日语义：`today_plan` 按 `user_id + study_date` 保存；无网且只有旧日缓存时返回可判定的 stale/empty 状态，不把旧今日计划伪装成当天权威队列。
+- 跨日语义：`today_plan` 按 `user_id + study_date` 保存；无网且只有旧日缓存时返回可判定的 stale/empty 状态，不把旧今日计划伪装成当天权威队列。当日计划日内只会收缩（已评卡离开队列），同日期重写先清后写，不保留旧队尾残行。
 - 登出：取消该用户同步与内存订阅；默认保留账号隔离的非敏感缓存。凭据仍由 Keystore SessionStore 负责，不写 Room。
 
 ## 4. 评分 outbox
 
 - `review_outbox` 行：userId、cardId、rating、`client_event_id`（主键，首次入队生成后**永不变更**）、`idempotency_key`（唯一索引，同样固定）、createdAt、status、attemptCount、nextAttemptAt、lastErrorCode。
-- 划卡原子性：单个 Room 事务内先写 outbox、后从本地队列隐藏卡片；事务失败卡片不离队并返回错误。不等待网络。
+- 划卡原子性：单个 Room 事务内先写 outbox、后从本地队列隐藏卡片（**AGAIN 例外**：没想起来的卡保留在本地队列投影中，与服务器 FSRS relearning 步长约 10 分钟后重见的调度语义对齐，会话层负责它的复练排程——学习中按 10 分钟到期作为下一张插入；整轮学完仍有未到期复练时立即复现，不再等待）；事务失败卡片不离队并返回错误。不等待网络。
 - 补传：进程内同步器在线即发 + WorkManager 兜底（每用户 unique work `review-sync/<uid>`、CONNECTED 约束、指数退避）。同卡事件严格按 createdAt 顺序（全局串行实现）。
 - 结果分类：2xx/幂等重放 → COMPLETED 并写服务器 ReviewState；网络/429/5xx → 保留退避重试；401 → 暂停等待重新认证；永久 4xx/冲突 → FAILED（可诊断）并触发恰好一次服务器权威刷新。不静默成功、不无限热循环。
 - 服务器侧幂等由 `POST /review-events` 双幂等承担（`Idempotency-Key` 键层 + `UNIQUE(user_id, client_event_id)` 兜底），补传重复不重复计数。
