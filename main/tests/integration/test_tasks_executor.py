@@ -415,6 +415,45 @@ def test_executor_same_chapter_second_task_still_generates(
             assert task.generated_card_count > 0  # 若无 task 维度，第二个任务会被全局去重清 0
 
 
+def test_sample_only_scan_advances_samples_and_spares_generation(
+    session_factory: Callable[[], Session],
+) -> None:
+    """sample_only 扫描（独立样卡线程入口）：只把 SAMPLE_GENERATING 推进到
+    AWAITING_SAMPLE_CONFIRMATION，不碰 GENERATING 任务的批次与状态——并行制卡时
+    新任务的样卡不被其他任务的生成 worker 阻塞。"""
+    user = _uuid()
+    with session_factory() as session:
+        generating_id = _seed_task(session, user_id=user)
+        sample_id = _seed_task(session, user_id=user)
+        sample_task = session.get(Task, sample_id)
+        assert sample_task is not None
+        # 请求样卡后的真实状态：SAMPLE_GENERATING + stage 置空
+        sample_task.status = "SAMPLE_GENERATING"
+        sample_task.stage = None
+        sample_task.updated_at = _NOW
+        session.commit()
+    with session_factory() as session:
+        n = process_active_tasks(
+            session,
+            settings=_SETTINGS,
+            client_factory=_client_factory,
+            sample_only=True,
+        )
+        session.commit()
+        sample_row = session.get(Task, sample_id)
+        generating_row = session.get(Task, generating_id)
+        assert sample_row is not None and generating_row is not None
+        assert sample_row.status == "AWAITING_SAMPLE_CONFIRMATION"
+        # 生成 worker 未被触发：状态/阶段原样，deck 尚无卡片入库
+        assert generating_row.status == "GENERATING"
+        assert generating_row.stage == "GENERATING"
+        assert generating_row.deck_id is not None
+        assert (
+            session.scalars(select(Card).where(Card.deck_id == generating_row.deck_id)).all() == []
+        )
+    assert n == 1
+
+
 def _metric_value(name: str, fragments: list[str]) -> float:
     """Prometheus 文本中指定 name+label 片段的数值（label 顺序不敏感）；不存在返回 0。"""
     for line in generate_latest(REGISTRY).decode().splitlines():

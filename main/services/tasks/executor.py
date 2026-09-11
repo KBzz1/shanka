@@ -519,10 +519,15 @@ def process_active_tasks(
     settings: Settings | None = None,
     client_factory: ClientFactory | None = None,
     work_quantum: int | None = None,
+    sample_only: bool = False,
 ) -> int:
     """扫描一轮：先样卡 worker（SAMPLE_GENERATING 完成），再规划 worker（CAS 抢占一个
     PLANNING 任务 → run_planning），再生成 worker（GENERATING + stage=GENERATING 任务
     分批生成入库），最后评分 worker（GENERATING + stage=SCORING 孤儿接管）。返回处理任务数。
+
+    sample_only=True 仅运行样卡 worker 后返回：独立样卡线程入口（main.py lifespan
+    装配），让新任务的样卡不被其他任务的生成批次阻塞；两循环凭任务租约互斥，
+    重复扫描无副作用。
 
     storage 预留：V5A 真实 adapter 读取批次内容时使用（当前批次 prompt 仅用知识点 topic）；
     事务：规划 CAS/快照冻结、每组心跳、最终条件更新由 claim/run_planning 内部短事务
@@ -536,6 +541,8 @@ def process_active_tasks(
     _recover_expired_task_leases(session, now=now, settings=settings)
     # 样卡 worker 入口（V2.5）：完成 SAMPLE_GENERATING → AWAITING_SAMPLE_CONFIRMATION
     sample_count = _sample_worker(session, settings, client_factory=client_factory)
+    if sample_only:
+        return sample_count
     # 规划 worker 入口（spec §6.1）：每次扫描至多接管一个 PLANNING 任务
     claimed = claim_planning_task(
         session, orphan_timeout_minutes=settings.orphan_timeout_minutes, now=now
@@ -937,8 +944,10 @@ def scan_once(
     storage: Any = None,
     settings: Settings | None = None,
     client_factory: ClientFactory | None = None,
+    sample_only: bool = False,
 ) -> int:
-    """扫描一轮：处理全部活跃任务（V3A 同款 session_factory 循环）。返回处理任务数。"""
+    """扫描一轮：处理全部活跃任务（V3A 同款 session_factory 循环）；sample_only=True
+    仅推进样卡（独立样卡线程入口）。返回处理任务数。"""
     with session_factory() as session:
         n = process_active_tasks(
             session,
@@ -948,6 +957,7 @@ def scan_once(
             work_quantum=(
                 settings.generation_work_quantum_batches if settings is not None else None
             ),
+            sample_only=sample_only,
         )
         session.commit()
     return n

@@ -83,6 +83,27 @@ def _task_executor_loop(
             logger.warning("task executor loop iteration failed", exc_info=True)
 
 
+def _sample_executor_loop(
+    session_factory: sessionmaker[Session],
+    stop_event: threading.Event,
+    interval: float,
+    settings: Settings,
+) -> None:
+    """样卡专用执行循环：仅推进 SAMPLE_GENERATING 任务（scan_once sample_only）。
+
+    与主执行循环并存——样卡是单次轻量 LLM 调用，独立成线程后不被其他任务的
+    规划/生成批次阻塞（并行制卡时新任务的样卡秒级就绪）；两循环凭任务租约互斥，
+    重复扫描无副作用。"""
+    while not stop_event.is_set():
+        stop_event.wait(interval)
+        if stop_event.is_set():
+            return
+        try:
+            scan_tasks(session_factory, settings=settings, sample_only=True)
+        except Exception:
+            logger.warning("sample executor loop iteration failed", exc_info=True)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     setup_logging(settings.log_level, settings.log_dir)
@@ -117,13 +138,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             daemon=True,
         )
         task_thread.start()
+        sample_stop_event = threading.Event()
+        sample_thread = threading.Thread(
+            target=_sample_executor_loop,
+            args=(
+                app.state.session_factory,
+                sample_stop_event,
+                settings.task_scan_interval_seconds,
+                settings,
+            ),
+            daemon=True,
+        )
+        sample_thread.start()
         try:
             yield
         finally:
             stop_event.set()
             task_stop_event.set()
+            sample_stop_event.set()
             thread.join(timeout=5)
             task_thread.join(timeout=5)
+            sample_thread.join(timeout=5)
             engine.dispose()
 
     app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
