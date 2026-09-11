@@ -67,9 +67,12 @@ class Settings(BaseSettings):
     orphan_timeout_minutes: int = 30
     # LLM 硬上限与预算（spec §10 全局硬上限、§8 scoring、§6.2/§6.3 planning；可运维调整）
     # 规划两阶段（V2.5.2）：精规划按主题打包，批输入字符上限沿用 planner_max_input_chars；
-    # 粗规划整章一次调用，字符上限独立配置（超限按连续页分段粗规划）
+    # 粗规划分段上限与输出 token 预算耦合：每段主题数 ≈ 字符×密度锚点×1.2 悬顶，
+    # 每主题输出 ≈ 64 token（标题+tier+UUID 引用），24k 字符/段保证 EXTENSIVE 即使
+    # 超发 40% 也在 planner_coarse_max_output_tokens 内（2026-09-10 生产 EXTENSIVE
+    # 33.5k 字整章单段 5k+ token 被 4096 截断 → JSON 解析失败 ×3 → 任务 FAILED）
     planner_max_input_chars: int = 20_000
-    planner_coarse_max_input_chars: int = 60_000
+    planner_coarse_max_input_chars: int = 24_000
     # 精规划单批主题数上限（输出 token 预算护栏：8 主题 × ≤3 单元在 2048 token 内）
     planner_fine_topics_per_call: int = 8
     # 精规划批输入页 = 主题声明页 ∪ ±1 页上下文余量
@@ -94,8 +97,9 @@ class Settings(BaseSettings):
     # 输出上限（§5.7 JSON 截断防线 / §10：可运维调整，不是制卡字数规则；
     # Scoring 每次仍按 item 数计算更小的实际值 min(上限, 256 + 128 × items)）
     planner_max_output_tokens: int = 2048
-    # 粗规划输出主题清单可较长（充分模式整章 40~140 主题），独立放宽
-    planner_coarse_max_output_tokens: int = 4096
+    # 粗规划输出主题清单可较长（充分模式整段 40~60 主题，每主题 ≈64 token）；
+    # 8192 为 deepseek-v4-flash 实测接受值（2026-09-10 探针验证）
+    planner_coarse_max_output_tokens: int = 8192
     generator_max_output_tokens: int = 768
     rewrite_max_output_tokens: int = 768
     scoring_max_output_tokens: int = 4096
