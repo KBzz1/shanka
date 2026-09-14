@@ -23,7 +23,14 @@ V2.5 的“正式版本”仅指 Android Release APK，不包含 iOS、桌面端
 
 - 每次生成新的正式 APK 固定覆盖该路径；
 - APK 不提交 Git；
-- `versionName` 为 `2.5.0`；
+- 版本管理（2026-09-14 起，V2.5.2 交付引入）：
+  - `versionName` 以 `frontend/Front/app/build.gradle.kts` 的 `appVersionName` 为唯一事实源，
+    语义化版本 `major.minor.patch`，每次正式发布至少递增 patch；
+  - `versionCode` 由 `appVersionName` 派生：`major*10000 + minor*100 + patch`（如 2.5.2 → 20502），
+    保证覆盖安装升级时单调递增，不得手工维护裸数字；
+  - `frontend/scripts/build-release.sh` 门禁校验产物版本与声明一致，并打 annotated git tag
+    `v<version>`（tag 唯一防重复发版；工作区有未提交改动时跳过并告警）；
+  - 每次发布同时归档带版本号副本 `releases/shanka-v<version>-release.apk`（+ `.sha256`）；
 - `versionCode` 必须高于此前可安装版本；
 - APK 必须使用正式签名，可在目标 Android 设备完成安装和升级；
 - Release 固定连接正式后端，普通用户不能修改服务器地址；
@@ -179,7 +186,8 @@ V2.5 正式交付。
 
 ### V25-REL-AC-01 构建与安装
 
-- 生成签名的 `releases/app-release.apk`，版本为 2.5.0 且版本号可升级；
+- 生成签名的 `releases/app-release.apk`，`versionName`/`versionCode` 与 `appVersionName`
+  声明及派生规则一致且版本号可升级；
 - APK 可在目标设备冷安装并启动；普通用户不能修改正式服务器地址；
 - APK 不依赖开发机、Mock 服务或在线头像服务。
 
