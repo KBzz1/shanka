@@ -50,6 +50,7 @@ import com.qiuzhao.flashcards.domain.v25.V25MaterialStatus
 import com.qiuzhao.flashcards.domain.v25.V25MaterialType
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
+import com.qiuzhao.flashcards.ui.auth.ErrorMessages
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
 import com.qiuzhao.flashcards.ui.motion.AppMotion
 
@@ -293,7 +294,7 @@ internal fun SmartCardChapterScreen(project: ProjectSummary, nav: ScreenNavigato
             requestError?.let { error ->
                 item {
                     CardHint(
-                        "无法生成样卡：$error",
+                        "无法生成样卡：${ErrorMessages.forCode(error)}",
                         designScale = scale,
                         error = true,
                     )
@@ -493,7 +494,7 @@ internal fun SmartCardPreviewScreen(project: ProjectSummary, nav: ScreenNavigato
             startError?.let { error ->
                 item {
                     CardHint(
-                        "无法开始生成：$error",
+                        "无法开始生成：${ErrorMessages.forCode(error)}",
                         designScale = scale,
                         error = true,
                     )
