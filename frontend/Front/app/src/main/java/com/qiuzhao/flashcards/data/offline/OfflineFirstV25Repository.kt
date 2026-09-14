@@ -474,6 +474,16 @@ class OfflineFirstV25Repository(
             userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_PROJECTS) }
         }
 
+    override suspend fun addProjectMaterialZip(
+        projectId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String?,
+    ): V25Result<com.qiuzhao.flashcards.domain.v25.V25Material> =
+        remote.addProjectMaterialZip(projectId, fileName, content, idempotencyKey).alsoOnSuccess {
+            userId()?.let { user -> cache.invalidate(user, V25CacheStore.KEY_PROJECTS) }
+        }
+
     override suspend fun listProjectMaterials(projectId: String): V25Result<List<com.qiuzhao.flashcards.domain.v25.V25Material>> =
         remote.listProjectMaterials(projectId)
 

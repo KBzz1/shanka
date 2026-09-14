@@ -10,12 +10,17 @@
 import hashlib
 import re
 import uuid
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from infra.db.models import TextChunk
 from services.pdf.parser import PageText
+
+if TYPE_CHECKING:  # 运行时不导入，保持 services.pdf ← services.projects 单向
+    from services.projects.zip_archive import ZipChapter
 
 
 def chunk_id_for(file_id: str, page_number: int, content: str) -> str:
@@ -110,6 +115,43 @@ def persist_text_material_chunks(
             )
         )
     return len(pieces)
+
+
+def persist_zip_material_chunks(
+    session: Session,
+    *,
+    material_id: str,
+    chapters: Sequence["ZipChapter"],
+    target_chars: int,
+    now: str,
+) -> list[tuple[str, int, int]]:
+    """ZIP 笔记包入库（V25-D-35）：逐 md 文件段落切段（跨文件不合并），chunk_seq
+    全材料连续 1..N（伪页码，同 TEXT）；返回各章 (章节名, start_seq, end_seq) 区间，
+    空章节不落行。区间即章节 start_page/end_page，复用 PDF 的 load_pages 映射。
+    """
+    ranges: list[tuple[str, int, int]] = []
+    seq = 0
+    for chapter in chapters:
+        start = seq + 1
+        for _relpath, content in chapter.files:
+            for piece in split_text_into_chunks(content, target_chars=target_chars):
+                seq += 1
+                session.add(
+                    TextChunk(
+                        chunk_id=chunk_id_for(material_id, seq, piece),
+                        file_id=None,
+                        material_id=material_id,
+                        chunk_seq=seq,
+                        page_number=seq,
+                        char_count=len(piece),
+                        content_sha256=hashlib.sha256(piece.encode("utf-8")).hexdigest(),
+                        content=piece,
+                        created_at=now,
+                    )
+                )
+        if seq >= start:
+            ranges.append((chapter.name, start, seq))
+    return ranges
 
 
 def load_pages(

@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # 100MB 与 Cloudflare 免费版上传上限对齐（2026-08-11 决策：教材扫描件常超 50MB）
     pdf_max_size_bytes: int = 100 * 1024 * 1024
     pdf_max_pages: int = 1000
+    # ZIP 笔记包上传限制（V25-D-35；可运维调整）：总字符帽兼作 zip 炸弹防线
+    zip_max_size_bytes: int = 20 * 1024 * 1024
+    zip_max_files: int = 500
+    zip_max_total_chars: int = 300_000
     # PDF 扫描器后台循环间隔（lifespan daemon 线程轮询；测试不依赖，显式 scan_once）
     pdf_scan_interval_seconds: float = 1.0
     # 任务执行器后台循环间隔（lifespan daemon 线程轮询；测试不依赖，显式 scan_once）

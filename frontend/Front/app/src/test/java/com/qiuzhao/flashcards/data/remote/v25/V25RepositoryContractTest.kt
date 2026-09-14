@@ -470,6 +470,25 @@ class V25RepositoryContractTest {
     }
 
     @Test
+    fun `addProjectMaterialZip uploads the file part to the zip materials endpoint`() = runBlocking {
+        enqueue(zipMaterialBody(), 201)
+
+        val result = repo.addProjectMaterialZip("p-1", "01-LangGraph.zip", ByteArrayInputStream(byteArrayOf(1, 2)))
+
+        assertTrue(result is V25Result.Success)
+        val material = (result as V25Result.Success).value
+        assertEquals(V25MaterialType.ZIP, material.type)
+        assertEquals(V25MaterialStatus.READY, material.status)
+        assertEquals(96780, material.charCount)
+        val request = take()
+        assertEquals("/projects/p-1/materials/zip", request.path)
+        assertTrue(request.getHeader("Content-Type")!!.startsWith("multipart/form-data"))
+        val body = request.body.readUtf8()
+        assertTrue(body.contains("01-LangGraph.zip"))
+        assertTrue(request.getHeader("Idempotency-Key")!!.isNotBlank())
+    }
+
+    @Test
     fun `addProjectMaterialText posts the JSON name and content body`() = runBlocking {
         enqueue(textMaterialBody(), 201)
 
@@ -716,6 +735,13 @@ class V25RepositoryContractTest {
          "chapter": {"chapter_id": "ch-text", "material_id": "m-text", "name": "课堂笔记",
                      "start_page": null, "end_page": null},
          "created_at": "2026-08-14T09:00:00+00:00"}
+    """.trimIndent()
+
+    /** One READY ZIP note-pack material (V25-D-35; chapters surface via the project payload). */
+    private fun zipMaterialBody(): String = """
+        {"material_id": "m-zip", "project_id": "p-1", "type": "ZIP", "name": "01-LangGraph.zip",
+         "status": "READY", "error_code": null, "size_bytes": 89986, "char_count": 96780,
+         "chapter": null, "created_at": "2026-09-14T09:00:00+00:00"}
     """.trimIndent()
 
     private fun importResponseBody(): String = """

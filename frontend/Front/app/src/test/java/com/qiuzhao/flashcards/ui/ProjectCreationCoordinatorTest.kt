@@ -93,6 +93,16 @@ private fun textMaterial(name: String, projectId: String) = V25Material(
     createdAt = NOW,
 )
 
+private fun zipMaterial(name: String, projectId: String) = V25Material(
+    materialId = "material-zip",
+    projectId = projectId,
+    type = V25MaterialType.ZIP,
+    name = name,
+    status = V25MaterialStatus.READY,
+    charCount = 96780,
+    createdAt = NOW,
+)
+
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ProjectCreationCoordinatorTest {
 
@@ -248,6 +258,7 @@ class ProjectCreationCoordinatorTest {
         val createProjectCalls = mutableListOf<Pair<String, String>>() // name to key
         val addPdfCalls = mutableListOf<Pair<String, ByteArray?>>() // key to body bytes
         val addTextCalls = mutableListOf<Triple<String, String, String?>>() // key, name, content
+        val addZipCalls = mutableListOf<Pair<String, ByteArray?>>() // key to body bytes
         val createProjectResultsQueue = ArrayDeque<V25Result<V25LearningProject>>()
         val projectCounter = AtomicInteger(0)
 
@@ -271,6 +282,16 @@ class ProjectCreationCoordinatorTest {
             addPdfCalls += (idempotencyKey ?: "") to content.use { it.readBytes() }
             return pdfGate?.await()
                 ?: V25Result.Success(pdfMaterial(fileName, projectId))
+        }
+
+        override suspend fun addProjectMaterialZip(
+            projectId: String,
+            fileName: String,
+            content: InputStream,
+            idempotencyKey: String?,
+        ): V25Result<V25Material> {
+            addZipCalls += (idempotencyKey ?: "") to content.use { it.readBytes() }
+            return V25Result.Success(zipMaterial(fileName, projectId))
         }
 
         override suspend fun addProjectMaterialText(

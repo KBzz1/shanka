@@ -45,9 +45,9 @@ enum class V25CardType { QUESTION, TRUE_FALSE }
 enum class V25ProjectStatus { EMPTY, PARSING, PARSE_FAILED, AWAITING_CHAPTER_CONFIRMATION, READY }
 
 /** Learning material kind (structure-contract 3.2a); LINK is reserved and not implemented. */
-enum class V25MaterialType { PDF, TEXT }
+enum class V25MaterialType { PDF, TEXT, ZIP }
 
-/** Material lifecycle: PDF uses PENDING/PARSING/PARSED/FAILED; TEXT is always READY. */
+/** Material lifecycle: PDF uses PENDING/PARSING/PARSED/FAILED; TEXT/ZIP is always READY. */
 enum class V25MaterialStatus { PENDING, PARSING, PARSED, FAILED, READY }
 
 /**

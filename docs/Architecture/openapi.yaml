@@ -552,6 +552,48 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /projects/{project_id}/materials/zip:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    post:
+      tags: [projects]
+      summary: 添加 ZIP 笔记包资料(≤20MB、≤500 个 md、正文≤30 万字;同步解析、即时就绪;重置章节确认)
+      operationId: addProjectMaterialZip
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: ZIP 笔记包(魔数+扩展名+MIME 校验);顶层须恰好一个主文件夹,一级子文件夹=章节,md=正文,结构不符 400 ZIP_STRUCTURE_INVALID
+      responses:
+        '201':
+          description: 资料已添加并就绪(子文件夹章节经项目 chapters 聚合返回)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: ZIP_EXTRACT_FAILED(zip 损坏或 md 非 UTF-8)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /projects/{project_id}/materials/{material_id}:
     parameters:
       - $ref: '#/components/parameters/ProjectId'
@@ -2151,13 +2193,13 @@ components:
 
     MaterialType:
       type: string
-      enum: [PDF, TEXT]
-      description: LINK 为预留类型,本期不实现
+      enum: [PDF, TEXT, ZIP]
+      description: LINK 为预留类型,本期不实现;ZIP=md 笔记包(V25-D-35)
 
     MaterialStatus:
       type: string
       enum: [PENDING, PARSING, PARSED, FAILED, READY]
-      description: PDF 使用 PENDING/PARSING/PARSED/FAILED;TEXT 恒为 READY
+      description: PDF 使用 PENDING/PARSING/PARSED/FAILED;TEXT/ZIP 恒为 READY
 
     Material:
       type: object
@@ -2173,7 +2215,7 @@ components:
           $ref: '#/components/schemas/MaterialType'
         name:
           type: string
-          description: PDF=文件名;TEXT=用户可改标题(1~60 字符)
+          description: PDF/ZIP=文件名;TEXT=用户可改标题(1~60 字符)
         status:
           $ref: '#/components/schemas/MaterialStatus'
         error_code:
@@ -2181,13 +2223,13 @@ components:
           description: 仅 PDF 解析失败码
         size_bytes:
           type: [integer, 'null']
-          description: 仅 PDF
+          description: PDF/ZIP 上传字节数
         char_count:
           type: [integer, 'null']
-          description: 仅 TEXT;1~30000
+          description: TEXT 1~30000;ZIP 为 md 正文总字符
         chapter:
           type: [object, 'null']
-          description: 仅 TEXT:资料自带的单一章节
+          description: 仅 TEXT:资料自带的单一章节(ZIP 多章节经项目 chapters 聚合)
           $ref: '#/components/schemas/Chapter'
         created_at:
           type: string

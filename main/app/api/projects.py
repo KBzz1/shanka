@@ -42,6 +42,7 @@ from services.progress.service import project_progress, project_weekly_stats
 from services.projects.service import (
     add_pdf_material,
     add_text_material,
+    add_zip_material,
     confirm_chapters,
     create_project,
     delete_material,
@@ -58,6 +59,7 @@ from services.projects.service import (
     update_project_chapter,
     update_study_settings,
 )
+from services.projects.zip_archive import parse_zip_archive, validate_zip_upload
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -275,6 +277,59 @@ def add_text_material_endpoint(
         path=path,
         idempotency_key=key,
         request_body_hash=request_body_hash(payload.model_dump_json().encode()),
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router.post("/{project_id}/materials/zip", status_code=201)
+async def add_zip_material_endpoint(
+    request: Request,
+    project_id: str,
+    file: Annotated[UploadFile, File()],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """添加 ZIP 笔记包资料（V25-D-35）：同步解析、即时就绪。
+
+    主文件夹一级子文件夹 = 章节、根级 md 收「总览」章节；结构不符 400
+    ZIP_STRUCTURE_INVALID。校验与解析在幂等外（同 PDF 定式），biz 只做 DB 写入。
+    """
+    settings: Settings = request.app.state.settings
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/materials/zip"
+    data = await file.read()
+    validate_zip_upload(
+        filename=file.filename or "",
+        content_type=file.content_type or "",
+        magic=data[:4],
+        size_bytes=len(data),
+        settings=settings,
+    )
+    archive = parse_zip_archive(data, settings=settings)
+    body_hash = request_body_hash(data)
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        body = add_zip_material(
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            filename=file.filename or "upload.zip",
+            size_bytes=len(data),
+            archive=archive,
+            now=_now(),
+            settings=settings,
+        )
+        session.flush()
+        return 201, body
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
         fn=biz,
     )
     session.commit()

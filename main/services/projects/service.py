@@ -49,7 +49,8 @@ from services.deletion.service import (
     resource_tasks,
 )
 from services.pdf.service import chapter_view, delete_chapter, update_chapter, upload_pdf
-from services.pdf.text_chunks import persist_text_material_chunks
+from services.pdf.text_chunks import persist_text_material_chunks, persist_zip_material_chunks
+from services.projects.zip_archive import ZipArchive
 
 
 def _uuid4() -> str:
@@ -118,11 +119,14 @@ def _derive_status(
         return "EMPTY"
     if any(status in ("PENDING", "PARSING") for status in pdf_statuses):
         return "PARSING"
-    # 可用章节来源：任一 PARSED PDF 或任一 TEXT 资料
+    # 可用章节来源：任一 PARSED PDF 或任一 TEXT/ZIP 资料（ZIP 同步解析即时出章节，V25-D-35）
     has_source = (
         "PARSED" in pdf_statuses
         or _count(
-            session, Material, Material.project_id == project.project_id, Material.type == "TEXT"
+            session,
+            Material,
+            Material.project_id == project.project_id,
+            Material.type.in_(("TEXT", "ZIP")),
         )
         > 0
     )
@@ -160,7 +164,8 @@ def material_view(session: Session, material: Material) -> dict[str, Any]:
         ).first()
         if row is not None:
             chapter = chapter_view(row)
-    status = "READY" if material_type == "TEXT" else pdf_status
+    # TEXT/ZIP 同步就绪（状态列恒 READY）；PDF 行状态取自 pdf_files（单一权威）
+    status = material.status if material_type in ("TEXT", "ZIP") else pdf_status
     return {
         "material_id": material.material_id,
         "project_id": material.project_id,
@@ -331,6 +336,59 @@ def add_text_material(
         target_chars=settings.text_chunk_target_chars,
         now=now,
     )
+    _reset_chapter_confirmation(project, now=now)
+    session.flush()
+    return material_view(session, material)
+
+
+def add_zip_material(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    filename: str,
+    size_bytes: int,
+    archive: ZipArchive,
+    now: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    """添加 ZIP 笔记包资料（POST /materials/zip，V25-D-35）。
+
+    解析已在上传段完成（zip_archive.parse_zip_archive）；本用例只落库：
+    Material(type=ZIP, READY) + 每子文件夹一 Chapter（chunk_seq 区间为页码，
+    复用 PDF 的章节→load_pages 映射）+ 连续 chunk。即时就绪、不存档文件本体。
+    """
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    material = Material(
+        material_id=_uuid4(),
+        project_id=project.project_id,
+        type="ZIP",
+        name=filename,
+        status="READY",
+        size_bytes=size_bytes,
+        char_count=archive.total_chars,
+        created_at=now,
+    )
+    session.add(material)
+    session.flush()
+    ranges = persist_zip_material_chunks(
+        session,
+        material_id=material.material_id,
+        chapters=archive.chapters,
+        target_chars=settings.text_chunk_target_chars,
+        now=now,
+    )
+    for name, start_seq, end_seq in ranges:
+        session.add(
+            Chapter(
+                chapter_id=_uuid4(),
+                file_id=None,
+                material_id=material.material_id,
+                name=name,
+                start_page=start_seq,
+                end_page=end_seq,
+            )
+        )
     _reset_chapter_confirmation(project, now=now)
     session.flush()
     return material_view(session, material)

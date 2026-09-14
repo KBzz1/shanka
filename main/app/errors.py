@@ -29,6 +29,10 @@ class ErrorCode(StrEnum):
     PDF_UPLOAD_INVALID = "PDF_UPLOAD_INVALID"
     PDF_PARSE_FAILED = "PDF_PARSE_FAILED"
     PDF_TOC_MISSING = "PDF_TOC_MISSING"
+    # ZIP 笔记包（V25-D-35）
+    ZIP_UPLOAD_INVALID = "ZIP_UPLOAD_INVALID"  # 扩展名/MIME/魔数/大小/文件数/总字符超限
+    ZIP_STRUCTURE_INVALID = "ZIP_STRUCTURE_INVALID"  # 结构不符（无或多个主文件夹、无有效正文）
+    ZIP_EXTRACT_FAILED = "ZIP_EXTRACT_FAILED"  # zip 损坏或 md 严格 UTF-8 解码失败
     PDF_NOT_FOUND = "PDF_NOT_FOUND"
     CHAPTER_NOT_FOUND = "CHAPTER_NOT_FOUND"
     PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"  # V2.5 项目不存在或跨用户（统一 404）
@@ -73,6 +77,9 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.PDF_UPLOAD_INVALID: 400,
     ErrorCode.PDF_PARSE_FAILED: 422,
     ErrorCode.PDF_TOC_MISSING: 422,
+    ErrorCode.ZIP_UPLOAD_INVALID: 400,
+    ErrorCode.ZIP_STRUCTURE_INVALID: 400,
+    ErrorCode.ZIP_EXTRACT_FAILED: 422,
     ErrorCode.PDF_NOT_FOUND: 404,
     ErrorCode.CHAPTER_NOT_FOUND: 404,
     ErrorCode.PROJECT_NOT_FOUND: 404,
@@ -115,6 +122,9 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.pdf_upload_invalid",
         "error.pdf_parse_failed",
         "error.pdf_toc_missing",
+        "error.zip_upload_invalid",
+        "error.zip_structure_invalid",
+        "error.zip_extract_failed",
         "error.pdf_not_found",
         "error.chapter_not_found",
         "error.project_not_found",

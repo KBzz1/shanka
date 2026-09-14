@@ -61,7 +61,7 @@ internal fun MaterialManagementScreen(project: ProjectSummary?, viewModel: AppVi
     var materialDeletionInFlight by remember { mutableStateOf(false) }
     val filtered = list.filter { material -> query.isBlank() || material.title.contains(query, true) || material.content.contains(query, true) }
     val textItems = filtered.filter { it.type == ProjectDraftMaterialType.TEXT }
-    val fileItems = filtered.filter { it.type == ProjectDraftMaterialType.FILE }
+    val fileItems = filtered.filter { it.type != ProjectDraftMaterialType.TEXT }
     val hasMaterials = list.isNotEmpty()
 
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
@@ -237,7 +237,7 @@ private fun MaterialManagementGroup(
             }
         }
         materials.forEach { material ->
-            if (material.type == ProjectDraftMaterialType.FILE) {
+            if (material.type != ProjectDraftMaterialType.TEXT) {
                 ProjectDraftFileCard(material, theme, scale, onEdit = { onEditFile(material) }) { onDelete(material) }
             } else {
                 ProjectDraftTextCard(material, theme, scale, onEdit = { onEditText(material) }, onDelete = { onDelete(material) })

@@ -114,7 +114,7 @@ internal fun MaterialImportScreen(
             item {
                 ImportAddPanel(
                     theme = theme, scale = scale,
-                    onChooseFile = { filePicker.launch(arrayOf("application/pdf")) },
+                    onChooseFile = { filePicker.launch(arrayOf("application/pdf", "application/zip")) },
                     onEnterText = {
                         val draftId = viewModel.stageMaterialImportText()
                         navigator.navigate(
@@ -133,7 +133,7 @@ internal fun MaterialImportScreen(
                 ImportPreviewGroup(
                     theme = theme, scale = scale, title = "文件资料", icon = "files",
                     hint = "右滑卡片可编辑、删除文件",
-                    materials = filtered.filter { it.type == ProjectDraftMaterialType.FILE },
+                    materials = filtered.filter { it.type != ProjectDraftMaterialType.TEXT },
                     onEditFile = { editingFile = it },
                     onEditText = {},
                     onRetry = { material ->
@@ -301,7 +301,7 @@ private fun ImportPreviewGroup(
                         // Figma 1100:5644 状态=已选择: success shows check_circle.
                         doneIcon = "check_circle",
                         onEdit = {
-                            if (material.type == ProjectDraftMaterialType.FILE) onEditFile(material) else onEditText(material)
+                            if (material.type != ProjectDraftMaterialType.TEXT) onEditFile(material) else onEditText(material)
                         },
                         onDelete = { onDelete(material.id) },
                         onRetry = { onRetry(material) }

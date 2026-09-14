@@ -147,7 +147,7 @@ data class AccountBootstrap(val loaded: Boolean = false, val account: LocalAccou
  * then every staged material uploads through the materials endpoints). Server-backed materials
  * carry their real ids and statuses so the management screens render the contract states.
  */
-internal enum class ProjectDraftMaterialType { FILE, TEXT }
+internal enum class ProjectDraftMaterialType { FILE, TEXT, ZIP }
 
 internal data class ProjectDraftMaterial(
     val id: String,
@@ -771,14 +771,18 @@ class AppViewModel(
      */
     fun addProjectDraftFile(uri: Uri, displayName: String = contentResolver.displayName(uri)) {
         val extension = displayName.substringAfterLast('.', "").lowercase()
-        if (extension != "pdf") {
-            _uiMessage.value = "仅支持 PDF 文件"
-            return
+        val draftType = when (extension) {
+            "pdf" -> ProjectDraftMaterialType.FILE
+            "zip" -> ProjectDraftMaterialType.ZIP
+            else -> {
+                _uiMessage.value = "仅支持 PDF / ZIP 文件"
+                return
+            }
         }
         if (_projectCreationMaterials.value.any { it.uri == uri }) return
         _projectCreationMaterials.value = _projectCreationMaterials.value + ProjectDraftMaterial(
-            id = "project-pdf-${System.nanoTime()}",
-            type = ProjectDraftMaterialType.FILE,
+            id = "project-file-${System.nanoTime()}",
+            type = draftType,
             title = displayName,
             extension = extension,
             uri = uri,
@@ -787,7 +791,7 @@ class AppViewModel(
 
     /** Kept for an old visual callback; it intentionally refuses name-only fake files. */
     fun addProjectDraftFile(@Suppress("UNUSED_PARAMETER") displayName: String) {
-        _uiMessage.value = "请通过文件选择器选择 PDF，不能只保存文件名"
+        _uiMessage.value = "请通过文件选择器选择 PDF / ZIP，不能只保存文件名"
     }
 
     fun deleteProjectDraftMaterial(materialId: String) {
@@ -796,7 +800,7 @@ class AppViewModel(
 
     internal fun renameProjectDraftFile(materialId: String, title: String) {
         _projectCreationMaterials.value = _projectCreationMaterials.value.map { material ->
-            if (material.type == ProjectDraftMaterialType.FILE && material.id == materialId) {
+            if (material.type != ProjectDraftMaterialType.TEXT && material.id == materialId) {
                 material.renamedFile(title)
             } else if (material.id == materialId) {
                 material.copy(title = title.trim().ifBlank { material.title })
@@ -919,14 +923,18 @@ class AppViewModel(
         for (uri in uris) {
             val displayName = contentResolver.displayName(uri)
             val extension = displayName.substringAfterLast('.', "").lowercase()
-            if (extension != "pdf") {
-                _uiMessage.value = "仅支持 PDF 文件"
-                continue
+            val draftType = when (extension) {
+                "pdf" -> ProjectDraftMaterialType.FILE
+                "zip" -> ProjectDraftMaterialType.ZIP
+                else -> {
+                    _uiMessage.value = "仅支持 PDF / ZIP 文件"
+                    continue
+                }
             }
             if (_materialImportDrafts.value.any { it.uri == uri }) continue
             _materialImportDrafts.value = _materialImportDrafts.value + ProjectDraftMaterial(
-                id = "staged-pdf-${System.nanoTime()}",
-                type = ProjectDraftMaterialType.FILE,
+                id = "staged-file-${System.nanoTime()}",
+                type = draftType,
                 title = displayName,
                 extension = extension,
                 uri = uri,
@@ -973,7 +981,7 @@ class AppViewModel(
 
     internal fun renameMaterialImportFile(materialId: String, title: String) {
         _materialImportDrafts.value = _materialImportDrafts.value.map { material ->
-            if (material.type == ProjectDraftMaterialType.FILE && material.id == materialId) {
+            if (material.type != ProjectDraftMaterialType.TEXT && material.id == materialId) {
                 material.renamedFile(title)
             } else if (material.id == materialId) {
                 material.copy(title = title.trim().ifBlank { material.title })
@@ -1007,6 +1015,7 @@ class AppViewModel(
                 val outcome = when (material.type) {
                     ProjectDraftMaterialType.FILE -> commitStagedPdf(projectId, material)
                     ProjectDraftMaterialType.TEXT -> commitStagedImportText(projectId, material)
+                    ProjectDraftMaterialType.ZIP -> commitStagedZip(projectId, material)
                 }
                 if (outcome is V25Result.Failure) {
                     if (outcome.code != ImportCoordinator.IN_FLIGHT_CODE) {
@@ -1068,6 +1077,7 @@ class AppViewModel(
                 val outcome = when (material.type) {
                     ProjectDraftMaterialType.FILE -> commitStagedPdf(projectId, material)
                     ProjectDraftMaterialType.TEXT -> commitStagedImportText(projectId, material)
+                    ProjectDraftMaterialType.ZIP -> commitStagedZip(projectId, material)
                 }
                 if (outcome is V25Result.Failure) {
                     if (outcome.code != ImportCoordinator.IN_FLIGHT_CODE) handleFailure("commit_material", outcome, surface = false)
@@ -1127,6 +1137,36 @@ class AppViewModel(
     }
 
     /**
+     * One staged ZIP note pack → POST materials/zip (V25-D-35). Synchronous server-side
+     * parsing: a structural rejection lands here as a 4xx failure on the draft card —
+     * retry means picking the file again, never a server replace.
+     */
+    private suspend fun commitStagedZip(projectId: String, material: ProjectDraftMaterial): V25Result<*> {
+        val uri = material.uri
+            ?: return V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, "无法读取所选 ZIP")
+        val fileName = contentResolver.displayName(uri)
+        val attempt = pdfUploadCoordinator.begin(PdfUploadOperation.AddZipMaterial(projectId), uri.toString(), fileName)
+            ?: return V25Result.Failure(ImportCoordinator.IN_FLIGHT_CODE, null, null)
+        val input = contentResolver.openInputStream(uri)
+        if (input == null) {
+            pdfUploadCoordinator.fail()
+            return V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, "无法读取所选 ZIP")
+        }
+        return try {
+            input.use { content ->
+                v25Repository.addProjectMaterialZip(projectId, fileName, content, attempt.idempotencyKey)
+            }.also { result ->
+                if (result is V25Result.Success) pdfUploadCoordinator.commit() else pdfUploadCoordinator.fail()
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            pdfUploadCoordinator.fail()
+            V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, failure.message)
+        }
+    }
+
+    /**
      * Two-step creation (contract V25-D-29): POST /projects with the JSON name, then every
      * staged material through POST materials/pdf|text. Zero staged materials is valid — the
      * project is created EMPTY and the guide screen offers the add-material entries.
@@ -1151,6 +1191,13 @@ class AppViewModel(
                         openStream = { contentResolver.openInputStream(uri) },
                     )
                 }
+                ProjectDraftMaterialType.ZIP -> material.uri?.let { uri ->
+                    MaterialUpload.Zip(
+                        draftId = material.id,
+                        materialName = material.title,
+                        openStream = { contentResolver.openInputStream(uri) },
+                    )
+                }
                 ProjectDraftMaterialType.TEXT -> MaterialUpload.Text(
                     draftId = material.id,
                     materialName = material.title,
@@ -1158,8 +1205,8 @@ class AppViewModel(
                 )
             }
         }
-        if (materials.any { it.type == ProjectDraftMaterialType.FILE && it.uri == null }) {
-            onResult(null, "无法读取所选 PDF")
+        if (materials.any { it.type != ProjectDraftMaterialType.TEXT && it.uri == null }) {
+            onResult(null, "无法读取所选文件")
             return
         }
         viewModelScope.launch {
@@ -2150,8 +2197,7 @@ class AppViewModel(
         if (BuildConfig.DEBUG) Log.w("ShankaNetwork", "op=$operation code=${result.code}")
     }
 
-    private fun userMessage(result: V25Result.Failure): String =
-        if (result.code == "NETWORK_UNAVAILABLE") "网络错误，请稍后重试" else ErrorMessages.forCode(result.code)
+    private fun userMessage(result: V25Result.Failure): String = ErrorMessages.forCode(result.code)
 
     private fun toProjectSummary(project: V25LearningProject) = com.qiuzhao.flashcards.data.remote.ProjectSummary(
         id = project.projectId,
@@ -2164,12 +2210,15 @@ class AppViewModel(
 
     private fun com.qiuzhao.flashcards.domain.v25.V25Material.toProjectMaterial() = ProjectDraftMaterial(
         id = "project-material-$projectId-$materialId",
-        type = if (type == V25MaterialType.PDF) ProjectDraftMaterialType.FILE else ProjectDraftMaterialType.TEXT,
+        type = when (type) {
+            V25MaterialType.PDF, V25MaterialType.ZIP -> ProjectDraftMaterialType.FILE
+            V25MaterialType.TEXT -> ProjectDraftMaterialType.TEXT
+        },
         title = name,
-        extension = if (type == V25MaterialType.PDF) {
-            name.substringAfterLast('.', "").lowercase().ifBlank { "pdf" }
-        } else {
-            null
+        extension = when (type) {
+            V25MaterialType.PDF -> name.substringAfterLast('.', "").lowercase().ifBlank { "pdf" }
+            V25MaterialType.ZIP -> name.substringAfterLast('.', "").lowercase().ifBlank { "zip" }
+            V25MaterialType.TEXT -> null
         },
         importedAt = createdAt,
         projectId = projectId,

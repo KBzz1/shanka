@@ -45,8 +45,8 @@ class V25ContractTest {
     @Test
     fun `material enums carry the exact V2-5 values`() {
         // structure-contract 3.2a: LINK is reserved and not modelled; PDF uses the parse
-        // lifecycle while TEXT is always READY.
-        assertEquals(listOf("PDF", "TEXT"), V25MaterialType.entries.map { it.name })
+        // lifecycle while TEXT/ZIP are always READY (ZIP note pack, V25-D-35).
+        assertEquals(listOf("PDF", "TEXT", "ZIP"), V25MaterialType.entries.map { it.name })
         assertEquals(
             listOf("PENDING", "PARSING", "PARSED", "FAILED", "READY"),
             V25MaterialStatus.entries.map { it.name },
@@ -547,6 +547,23 @@ private class StubV25Repository : V25Repository {
             type = V25MaterialType.PDF,
             name = fileName,
             status = V25MaterialStatus.PENDING,
+            createdAt = now,
+        ),
+    )
+
+    override suspend fun addProjectMaterialZip(
+        projectId: String,
+        fileName: String,
+        content: java.io.InputStream,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = V25Result.Success(
+        V25Material(
+            materialId = "material-zip",
+            projectId = projectId,
+            type = V25MaterialType.ZIP,
+            name = fileName,
+            status = V25MaterialStatus.READY,
+            charCount = null,
             createdAt = now,
         ),
     )

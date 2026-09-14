@@ -137,6 +137,15 @@ class RemoteV25Repository internal constructor(
         uploadApi.addProjectMaterialPdf(projectId, idempotencyKey ?: newKey(), pdfPart(fileName, content)).toDomain()
     }
 
+    override suspend fun addProjectMaterialZip(
+        projectId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = wire {
+        uploadApi.addProjectMaterialZip(projectId, idempotencyKey ?: newKey(), zipPart(fileName, content)).toDomain()
+    }
+
     override suspend fun addProjectMaterialText(
         projectId: String,
         name: String,
@@ -486,5 +495,15 @@ internal fun pdfPart(fileName: String, content: InputStream): MultipartBody.Part
         "file",
         fileName,
         bytes.toRequestBody("application/pdf".toMediaType()),
+    )
+}
+
+/** Frames the ZIP note-pack part (V25-D-35); same Content-Disposition safety as [pdfPart]. */
+internal fun zipPart(fileName: String, content: InputStream): MultipartBody.Part {
+    val bytes = content.use { it.readBytes() }
+    return MultipartBody.Part.createFormData(
+        "file",
+        fileName,
+        bytes.toRequestBody("application/zip".toMediaType()),
     )
 }

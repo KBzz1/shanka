@@ -296,6 +296,140 @@ def test_projects_text_material_too_long_400(client: TestClient) -> None:
     assert _error_code(resp) == "VALIDATION_ERROR"
 
 
+def _zip_bytes(files: dict[str, str]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+def _add_zip_material(
+    client: TestClient,
+    user: dict[str, str],
+    project_id: str,
+    files: dict[str, str],
+    *,
+    filename: str = "notes.zip",
+    content_type: str = "application/zip",
+    raw: bytes | None = None,
+    idem: dict[str, str] | None = None,
+):
+    data = raw if raw is not None else _zip_bytes(files)
+    return client.post(
+        f"/projects/{project_id}/materials/zip",
+        files={"file": (filename, data, content_type)},
+        headers={**user, **(idem or _idem())},
+    )
+
+
+def _long_notes(paragraphs: int = 120) -> str:
+    return "\n\n".join(f"第 {i} 段：{'内容' * 24}" for i in range(paragraphs))
+
+
+def test_projects_add_zip_material_ready_chapters(client: TestClient, tmp_path: Path) -> None:
+    """V25-D-35：ZIP 笔记包即时就绪；子文件夹=章节、根级 md 收「总览」；页码区间映射复用 PDF 链路。"""
+    user = _user(client)
+    body = _create_project(client, user)
+    files = {
+        "Notes/0.总览.md": "# 总览\n\n" + _long_notes(60),
+        "Notes/1.图/1.1.md": _long_notes(120),
+        "Notes/1.图/1.2.md": _long_notes(60),
+        "Notes/2.记忆/2.1.md": _long_notes(90),
+        "Notes/杂项/cover.png": "not text",
+    }
+    resp = _add_zip_material(client, user, body["project_id"], files)
+    assert resp.status_code == 201, resp.text
+    material = resp.json()
+    assert material["type"] == "ZIP"
+    assert material["status"] == "READY"
+    assert material["name"] == "notes.zip"
+    assert material["chapter"] is None  # 多章节经项目 chapters 聚合，不嵌单章
+    expected_chars = sum(len(c) for n, c in files.items() if n.endswith(".md"))
+    assert material["char_count"] == expected_chars
+    detail = client.get(f"/projects/{body['project_id']}", headers=user).json()
+    assert detail["status"] == "AWAITING_CHAPTER_CONFIRMATION"
+    assert detail["chapter_count"] == 3  # 总览 + 1.图 + 2.记忆（杂项无 md 不成章）
+    chapters = sorted(detail["chapters"], key=lambda c: c["start_page"] or 0)
+    assert [c["name"] for c in chapters] == ["总览", "1.图", "2.记忆"]
+    # 章节区间为 chunk_seq 闭区间且连续覆盖 1..N（复用 PDF 的 load_pages 映射）
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from infra.db.session import create_db_engine
+    from services.pdf.text_chunks import load_pages
+
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'projects_api.db'}")
+    factory = sessionmaker(bind=engine, class_=Session)
+    mid = material["material_id"]
+    with factory() as session:
+        total = len(load_pages(session, material_id=mid))
+        assert total >= 4  # 多章多块
+        prev_end = 0
+        for chapter in chapters:
+            start, end = chapter["start_page"], chapter["end_page"]
+            assert start == prev_end + 1  # 区间无缝衔接
+            pages = load_pages(session, material_id=mid, start_page=start, end_page=end)
+            assert len(pages) == end - start + 1
+            prev_end = end
+        assert prev_end == total
+    engine.dispose()
+
+
+def test_projects_zip_structure_invalid_400(client: TestClient) -> None:
+    """V25-D-35：散落根级文件/多个顶层条目 → 400 ZIP_STRUCTURE_INVALID，不落资料行。"""
+    user = _user(client)
+    body = _create_project(client, user)
+    for files in ({"readme.md": "无主文件夹。"}, {"A/a.md": "A。", "B/b.md": "B。"}):
+        resp = _add_zip_material(client, user, body["project_id"], files)
+        assert resp.status_code == 400, resp.text
+        assert _error_code(resp) == "ZIP_STRUCTURE_INVALID"
+    detail = client.get(f"/projects/{body['project_id']}", headers=user).json()
+    assert detail["materials"] == []
+
+
+def test_projects_zip_upload_invalid_400(client: TestClient) -> None:
+    """V25-D-35：容器校验（扩展名/MIME）失败 → 400 ZIP_UPLOAD_INVALID。"""
+    user = _user(client)
+    body = _create_project(client, user)
+    data = _zip_bytes({"V/1.章/a.md": "内容。"})
+    resp = _add_zip_material(client, user, body["project_id"], {}, filename="notes.pdf", raw=data)
+    assert resp.status_code == 400
+    assert _error_code(resp) == "ZIP_UPLOAD_INVALID"
+    resp = _add_zip_material(
+        client, user, body["project_id"], {}, content_type="text/plain", raw=data
+    )
+    assert resp.status_code == 400
+    assert _error_code(resp) == "ZIP_UPLOAD_INVALID"
+
+
+def test_projects_zip_corrupt_422(client: TestClient) -> None:
+    """V25-D-35：zip 损坏（魔数过、内容坏）→ 422 ZIP_EXTRACT_FAILED。"""
+    user = _user(client)
+    body = _create_project(client, user)
+    resp = _add_zip_material(
+        client, user, body["project_id"], {}, raw=b"PK\x03\x04 broken archive bytes"
+    )
+    assert resp.status_code == 422
+    assert _error_code(resp) == "ZIP_EXTRACT_FAILED"
+
+
+def test_projects_zip_upload_idempotent_replay(client: TestClient) -> None:
+    """V25-D-35：同 Idempotency-Key + 同文件字节重放 201，不产生第二份资料。"""
+    user = _user(client)
+    body = _create_project(client, user)
+    files = {"V/1.章/a.md": "幂等内容。"}
+    key = {"Idempotency-Key": str(uuid.uuid4())}
+    first = _add_zip_material(client, user, body["project_id"], files, idem=key)
+    second = _add_zip_material(client, user, body["project_id"], files, idem=key)
+    assert first.status_code == 201 and second.status_code == 201
+    assert second.json()["material_id"] == first.json()["material_id"]
+    detail = client.get(f"/projects/{body['project_id']}", headers=user).json()
+    assert len(detail["materials"]) == 1
+
+
 def test_projects_material_add_resets_confirmation(client: TestClient, tmp_path: Path) -> None:
     """V25-D-31：新增资料重置章节确认（READY → AWAITING；TEXT 资料即时就绪可观测）。"""
     user = _user(client)

@@ -85,9 +85,9 @@ class Material(Base):
     project_id: Mapped[str] = mapped_column(
         String, ForeignKey("learning_projects.project_id", ondelete="CASCADE"), nullable=False
     )
-    type: Mapped[str] = mapped_column(String, nullable=False)  # PDF/TEXT（LINK 预留）
+    type: Mapped[str] = mapped_column(String, nullable=False)  # PDF/TEXT/ZIP（LINK 预留）
     name: Mapped[str] = mapped_column(String, nullable=False)
-    status: Mapped[str | None] = mapped_column(String, nullable=True)  # TEXT='READY'; PDF=NULL
+    status: Mapped[str | None] = mapped_column(String, nullable=True)  # TEXT/ZIP='READY'; PDF=NULL
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     char_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -97,7 +97,8 @@ class Material(Base):
 class Chapter(Base):
     """2.4 chapters：章节（用户可改 name/start_page/end_page）。
 
-    V2.5 多资料：章节改挂 material_id；TEXT 资料的单章节页码为 NULL。
+    V2.5 多资料：章节改挂 material_id；TEXT 资料的单章节页码为 NULL；
+    ZIP 资料每子文件夹一章节，页码为 chunk_seq 闭区间（V25-D-35）。
     """
 
     __tablename__ = "chapters"
@@ -509,8 +510,8 @@ class TextChunk(Base):
     """text_chunks：页文本一页一行、与章节解耦（spec §4.1）。
 
     V2.5 多资料：chunk 挂 material_id；PDF 行 file_id/material_id 同值、
-    chunk_seq=page_number；TEXT 行 file_id=NULL、chunk_seq=1..N 伪页码
-    （(material_id, chunk_seq) 唯一）。
+    chunk_seq=page_number；TEXT/ZIP 行 file_id=NULL、chunk_seq=1..N 伪页码
+    （(material_id, chunk_seq) 唯一）；ZIP 章节经 start/end_page 区间映射（V25-D-35）。
     """
 
     __tablename__ = "text_chunks"

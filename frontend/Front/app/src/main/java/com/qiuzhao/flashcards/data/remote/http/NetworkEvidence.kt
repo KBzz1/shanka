@@ -107,6 +107,7 @@ object ShankaOps {
     const val LIST_MATERIALS = "list_project_materials"
     const val ADD_MATERIAL_PDF = "add_project_material_pdf"
     const val ADD_MATERIAL_TEXT = "add_project_material_text"
+    const val ADD_MATERIAL_ZIP = "add_project_material_zip"
     const val DELETE_MATERIAL = "delete_project_material"
     const val REPLACE_MATERIAL_PDF = "replace_project_material_pdf"
     const val UPDATE_CHAPTER = "update_chapter"

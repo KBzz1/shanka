@@ -354,6 +354,7 @@ class DeletionSyncCoordinatorTest {
         override suspend fun setCurrentProject(projectId: String?): V25Result<V25UserPreferences> = throw NotImplementedError()
         override suspend fun createProject(name: String, idempotencyKey: String?): V25Result<V25LearningProject> = throw NotImplementedError()
         override suspend fun addProjectMaterialPdf(projectId: String, fileName: String, content: InputStream, idempotencyKey: String?): V25Result<V25Material> = throw NotImplementedError()
+        override suspend fun addProjectMaterialZip(projectId: String, fileName: String, content: InputStream, idempotencyKey: String?): V25Result<V25Material> = throw NotImplementedError()
         override suspend fun addProjectMaterialText(projectId: String, name: String, content: String, idempotencyKey: String?): V25Result<V25Material> = throw NotImplementedError()
         override suspend fun listProjectMaterials(projectId: String): V25Result<List<V25Material>> = throw NotImplementedError()
         override suspend fun replaceProjectMaterialPdf(projectId: String, materialId: String, fileName: String, content: InputStream, idempotencyKey: String?): V25Result<V25Material> = throw NotImplementedError()

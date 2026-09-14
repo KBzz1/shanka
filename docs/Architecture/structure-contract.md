@@ -80,7 +80,7 @@
 | 登录(邮箱分桶) | 按规范化邮箱(默认阈值运维可调) | `POST /auth/login`(防单账号分布式猜测) |
 | `PUT /api-key` | 10 次/时/user | Key 校验(校验 oracle) |
 | `POST /tasks/{task_id}/samples` | 20 次/时/user | 样卡生成(消耗模型配额) |
-| PDF 上传 | 10 次/时/user | `POST /projects/{project_id}/materials/pdf` |
+| PDF 上传 | 10 次/时/user | `POST /projects/{project_id}/materials/pdf`、`POST /projects/{project_id}/materials/zip`(共享文件材料桶,V25-D-35) |
 
 超限返回 `429 RATE_LIMITED` + `Retry-After` 响应头;阈值可运维调整,客户端不得硬编码。
 
@@ -138,17 +138,22 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | --- | --- | --- | --- |
 | `material_id` | uuid | ✓ | |
 | `project_id` | uuid | ✓ | 归属学习项目 |
-| `type` | enum | ✓ | `PDF` / `TEXT`;`LINK` 预留,本期不实现 |
-| `name` | string | ✓ | PDF=文件名(去扩展名前的原始名);TEXT=用户可改标题,1~60 字符 |
-| `status` | enum | ✓ | PDF:`PENDING` / `PARSING` / `PARSED` / `FAILED`;TEXT:恒 `READY` |
-| `error_code` | string | ✗ | 仅 PDF 解析失败码 |
-| `size_bytes` | int | ✗ | 仅 PDF |
-| `char_count` | int | ✗ | 仅 TEXT;≤ 30000 |
-| `chapter` | Chapter | ✗ | 仅 TEXT:资料自带的单一章节 |
+| `type` | enum | ✓ | `PDF` / `TEXT` / `ZIP`;`LINK` 预留,本期不实现 |
+| `name` | string | ✓ | PDF/ZIP=文件名(去扩展名前的原始名);TEXT=用户可改标题,1~60 字符 |
+| `status` | enum | ✓ | PDF:`PENDING` / `PARSING` / `PARSED` / `FAILED`;TEXT/ZIP:恒 `READY`(同步解析) |
+| `error_code` | string | ✗ | 仅 PDF 解析失败码(ZIP 结构/解压失败在上传响应即时返回,不落资料行) |
+| `size_bytes` | int | ✗ | PDF/ZIP 上传字节数 |
+| `char_count` | int | ✗ | TEXT:≤ 30000;ZIP:md 正文总字符(≤ 300000) |
+| `chapter` | Chapter | ✗ | 仅 TEXT:资料自带的单一章节(ZIP 多章节经项目 chapters 聚合) |
 | `created_at` | datetime | ✓ | |
 
 规则:一个项目包含 0~N 份资料;PDF 资料经解析产出章节,TEXT 资料本身即一个章节且按段落切分为
-多个 chunk(`(material_id, chunk_seq)` 唯一,每块数千字,禁止整块单块)。新增或删除任一资料都会
+多个 chunk(`(material_id, chunk_seq)` 唯一,每块数千字,禁止整块单块)。ZIP 笔记包(V25-D-35)同步
+解析:顶层须恰好一个主文件夹(忽略 `__MACOSX`/`.DS_Store`/`Thumbs.db`/`.obsidian`/`._*` 垃圾条目),
+主文件夹的一级子文件夹 = 章节(文件夹内 md 递归收集,相对路径自然排序),主文件夹下直接放置的 md
+收进固定「总览」章节且排最前,非 md 文件静默忽略;chunk 与 TEXT 同款切段(逐 md 文件、跨文件不合并),
+`chunk_seq` 全材料连续 1..N(伪页码),章节 `start_page`/`end_page` 记 chunk 区间,复用 PDF 的
+章节→页文本映射;不存档文件本体。新增或删除任一资料都会
 重置项目 `chapters_confirmed_at`(V25-D-31)。删除资料为三档语义(6.2):确认后服务端静默取消引用
 该资料的活跃任务(fencing 失效迟到写入),用户选择保留或一并删除该资料产出的卡片;删除最后一份资料
 后项目保留为空项目。
@@ -160,8 +165,8 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `chapter_id` | uuid | ✓ | |
 | `material_id` | uuid | ✓ | 归属学习资料(3.2a) |
 | `name` | string | ✓ | 可修改 |
-| `start_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null |
-| `end_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null |
+| `start_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null;ZIP 章节 = chunk_seq 区间起点(可修改) |
+| `end_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null;ZIP 章节 = chunk_seq 区间终点(可修改) |
 
 ### 3.4 GenerationTask(制卡任务,V2.5 重写)
 
@@ -734,6 +739,7 @@ Scheduler(
 | DELETE | `/v1/projects/{project_id}?retain_decks=true\|false` | 二次确认后自动取消全部关联活跃任务(含 GENERATING)并删除;仅保留或删除卡组两种选择 | ✓ |
 | POST | `/v1/projects/{project_id}/materials/pdf` | multipart PDF;建立 PDF 资料并异步解析(重置章节确认) | ✓ |
 | POST | `/v1/projects/{project_id}/materials/text` | JSON `{name, content}`;≤30000 字,单章节+段落多 chunk,即时就绪(重置章节确认) | ✓ |
+| POST | `/v1/projects/{project_id}/materials/zip` | multipart ZIP 笔记包;≤20MB、≤500 个 md、正文≤30 万字,同步解析、即时就绪:一级子文件夹=章节、根级 md 收「总览」章节(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials` | 资料列表(各自状态;TEXT 附单章节) | - |
 | DELETE | `/v1/projects/{project_id}/materials/{material_id}?retain_cards=true\|false` | 资料级删除:静默取消引用该资料的活跃任务并 fencing;按参数保留或删除该资料产出卡片;删最后一份资料后项目转 `EMPTY`(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials/{material_id}/deletion-preflight` | 删除确认页预检(V25-GEN-FR-02):返回将影响的卡片数量与静默取消任务数;只读、无 blocker 语义(引用任务删除时静默取消) | - |
@@ -748,6 +754,11 @@ Scheduler(
 
 上传限制继续适用:≤ 100MB、≤ 1000 页;文件魔数 + 扩展名 + MIME 三重检查,不合规 → `400 PDF_UPLOAD_INVALID`。
 文本限制:1~30000 字(去首尾空白后),超限 → `400 VALIDATION_ERROR`(全局校验失败统一 400,F1 约定)。
+ZIP 笔记包限制(V25-D-35):≤ 20MB、≤ 500 个 md 文件、md 正文合计 ≤ 300000 字符;魔数(`PK\u0003\u0004`)
++ 扩展名 + MIME(zip 族,含 `application/octet-stream` 兜底)校验,不合规 → `400 ZIP_UPLOAD_INVALID`;
+顶层结构不符(散落根级文件、多个顶层条目、无有效 md 正文) → `400 ZIP_STRUCTURE_INVALID`;
+zip 损坏或 md 非 UTF-8 → `422 ZIP_EXTRACT_FAILED`。条目名按 UTF-8 flag 解码,无 flag 时以 cp437→GBK
+恢复中文文件名。
 兼容路径:旧 `/v1/pdfs*` 已移除,不得再创建第二套项目/任务状态。
 
 ### 6.3 API Key(FR-17,继承)
@@ -872,6 +883,9 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | PDF/项目 | `PDF_UPLOAD_INVALID` | 400 | 非 PDF / 损坏 / 超限(100MB / 1000 页) |
 | | `PDF_PARSE_FAILED` | 422 | 文本层解析失败 |
 | | `PDF_TOC_MISSING` | 422 | 无可用目录结构(终止流程) |
+| | `ZIP_UPLOAD_INVALID` | 400 | V25-D-35 ZIP 笔记包非 zip / 超限(20MB / 500 文件 / 30 万字) |
+| | `ZIP_STRUCTURE_INVALID` | 400 | V25-D-35 结构不符:散落根级文件、多个顶层条目或无有效 md 正文 |
+| | `ZIP_EXTRACT_FAILED` | 422 | V25-D-35 zip 损坏或 md 非 UTF-8 编码 |
 | | `PDF_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性) |
 | | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本用户(统一 404) |
 | | `PROJECT_NOT_FOUND` | 404 | V2.5 项目不存在或跨用户 |
