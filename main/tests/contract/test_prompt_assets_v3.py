@@ -161,9 +161,9 @@ def test_manifest_has_new_entries() -> None:
 
 def test_versions_extended() -> None:
     v = asset_versions()
-    assert v["generator_prompt_version"] == "v6"
-    assert v["planner_prompt_version"] == "v7"
-    assert v["planner_coarse_prompt_version"] == "v7"
+    assert v["generator_prompt_version"] == "v7"
+    assert v["planner_prompt_version"] == "v8"
+    assert v["planner_coarse_prompt_version"] == "v8"
     assert v["rewrite_prompt_version"] == "v4"
     assert v["scoring_prompt_version"] == "v3"
     assert v["card_schema_version"] == "v1"

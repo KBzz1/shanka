@@ -183,7 +183,7 @@ def _seed_batch(
                 generation_unit_id=unit_id,
                 coverage_rate=coverage_rate,
                 duplicate_rate=duplicate_rate,
-                model="deepseek-v4-flash",
+                model="deepseek-flash",
                 rubric_version=rubric_version,
                 created_at=_SEED_AT,
             )

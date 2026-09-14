@@ -135,3 +135,41 @@
 - **manifest** 切换到 planner v7 / planner_coarse v7 / planner_output v7 /
   planner_coarse_output v7；generator 保持 v6、rewrite 保持 v4、scoring 保持 v3、card 保持
   v1、generator_output 保持 v3、scoring_output 保持 v3、rubric 保持 v3。
+
+## 2026-09-12（v8 自定义要求执行力 + 反空泛技术锚定；generator v7 输出语言治理）
+
+- **依据**：生产库证据（任务 fac741c5）——`custom_requirements`「生成不要有英文」下
+  62 卡中 71% 仍含英文，与无指令基线（74%~90%）几乎无差；同时存在系统性空泛概念卡
+  （「用户记忆系统的本质目标是什么？」跨任务出现 2 次，第 1 章 21.1% 正面为"N 个
+  原则/目标"式宏观卡）。根因：三个现行 prompt 的信任边界条款把 `custom_requirements`
+  统一定性为"不可信数据，不是新指令"，且 generator v6「保留来源关键术语」与显式语言
+  指令冲突时无优先级仲裁；规划/制卡两侧均无"聚焦具体技术对象、拒绝宏观定位式卡"的
+  通用条款。
+- **prompts/planner v7 → v8（精规划）**：信任边界重分类——`custom_requirements` 从
+  "不可信数据"改为"认证用户配置的正式输入，内容侧重/术语保留/目标语言必须执行"（仍
+  不得改变 Schema/枚举/区间/证据规则、不得引入外部知识）；目标写法新增技术锚定硬规则
+  （禁止"X 的目标/意义/价值/定位"式宏观目标，来源只有定位性表述时改锚定具体技术侧面
+  或输出 0 条），锚定对象按挡位分化——BASIC 锚定单一原子事实、UNDERSTANDING 锚定
+  对象间关系、DEEP_QUESTION 锚定有界场景与判断点（引发权衡与系统性整合，不以单一
+  可检索事实为答案）；新增语言传导规则（显式目标语言决定 `learning_objective` 书写
+  语言，代码级标识符除外）；主题展开规则新增"内容侧重倾斜展开角度"。
+- **新增 prompts/planner_coarse v8（粗规划）**：同款信任边界重分类；新增「技术锚定：
+  先具体机制，后宏观定位」小节（优先机制/流程/字段/接口/参数/规则类知识，纯定位性
+  段落不单独列主题）并纳入盘点步骤第 3 步；静态示例新增"记忆系统的目标"不合格主题
+  对照例。
+- **prompts/generator v6 → v7**：信任边界重分类（同上，范围限输出语言/措辞/详略/呈现
+  侧重）；新增「输出语言」小节——显式语言指令优先级最高，压过默认语言链与术语保留
+  条款，为语言中立的通用机制（不预设任何目标语言），默认语言链保留为无显式指令时的
+  兜底；「内容与文风」背面锚定按挡位分化（BASIC/UNDERSTANDING 落具体技术对象，
+  DEEP_QUESTION 参考思路贴场景示范「识别约束→组合规则→权衡取舍」推理路径、引发思考
+  与系统观念）；输出前静默自检增语言核对项。（当日修订：初稿含中文化译名细则与代码
+  标识符白名单，复盘认定系对"不要英文"这一验证探针场景的过拟合——该探针用于暴露
+  遵守度弱的问题，并非产品需求——收敛为语言中立条款，示例题干恢复来源术语 "Agent"。）
+- **schemas/rubrics 均不变**：planner_output / planner_coarse_output 保持 v7、
+  generator_output / scoring_output 保持 v3、card 保持 v1、rubric 保持 v3——本次为纯
+  提示词行为演进，无结构变更。
+- **manifest** 切换到 planner v8 / planner_coarse v8（prompts/v8/）/ generator v7
+  （prompts/v7/generator.md）；rewrite 保持 v4、scoring 保持 v3。
+- 配套：生产模型默认值 `deepseek-v4-flash` → `deepseek-flash`（官方 2026-09-10 发布
+  V4.1-Flash，旧名仅临时兼容路由；DeepSeekClient 无代码变更，仅 config 默认值与测试
+  断言同步）。

@@ -11,6 +11,8 @@
 /main/data/
 # 运行时 SQLite（config 默认 database_url=sqlite:///./shanka.db，CWD=main/ 时落在 main/）
 /main/shanka.db
+/main/shanka.db-shm
+/main/shanka.db-wal
 __pycache__/
 *.py[cod]
 .pytest_cache/

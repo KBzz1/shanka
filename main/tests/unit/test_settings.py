@@ -25,7 +25,7 @@ def test_settings_defaults() -> None:
     assert settings.pdf_max_pages == 1000
     assert settings.deepseek_api_key is None
     assert settings.api_key_encryption_key is None
-    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert settings.deepseek_model == "deepseek-flash"
     assert settings.deepseek_thinking is False
     assert settings.deepseek_timeout_seconds == 60.0
     assert settings.generation_work_quantum_batches == 4

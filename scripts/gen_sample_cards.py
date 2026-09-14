@@ -1,7 +1,7 @@
 """gen_sample_cards.py：样卡真实生成演示脚本（零 DB、不落盘，结果打印到终端）。
 
 用法示例（仓库根目录）：
-  # 默认：第 1 章 10 张（基础 4 / 理解 4 / 应用 2），deepseek-v4-flash
+  # 默认：第 1 章 10 张（基础 4 / 理解 4 / 应用 2），deepseek-flash
   conda run -n shanka-backend python scripts/gen_sample_cards.py
 
   # 只生成综合应用卡
@@ -11,10 +11,15 @@
   conda run -n shanka-backend python scripts/gen_sample_cards.py \
     --count 10 --ratio 4:4:2 --chapter-prefix "第 2 章" --model deepseek-v4-pro
 
+  # 带自定义提示词（验证语言/侧重类偏好的端到端遵守情况）
+  conda run -n shanka-backend python scripts/gen_sample_cards.py \
+    --chapter-prefix "第 3 章" --custom-requirements "生成不要有英文"
+
 流程：解析样书 → 取目标章（默认"第 1 章"）页文本 → 粗规划（整章一次调用盘点主题清单，
-planner-coarse v7）→ 精规划（主题打包成批调用展开为生成单元，planner v7）→ 每个学习
-目标一次真实 Generator 调用（锚定单卡生成）→ 终端打印卡片与汇总；粗规划与 Generator
-第一单元的双消息（system 资产原文 + user 动态信封）作为代表在调用前打印，其余同构省略。
+planner-coarse v8）→ 精规划（主题打包成批调用展开为生成单元，planner v8）→ 每个学习
+目标一次真实 Generator 调用（锚定单卡生成，generator v7）→ 终端打印卡片与汇总；粗规划
+与 Generator 第一单元的双消息（system 资产原文 + user 动态信封）作为代表在调用前打印，
+其余同构省略。
 
 复用生产链路资产与逻辑（agent_evolution 版本化 Prompt/Schema、quota 三层配额、
 planner 输出校验），不建任务不写库，无账本/幂等/评分。Key 安全遵循红线 4：
@@ -129,7 +134,11 @@ def split_groups(pages: list[PageText], *, max_chars: int) -> list[list[PageText
 
 
 def coarse_prompts(
-    chapter_name: str, pages: list[PageText], count: int, settings: Settings
+    chapter_name: str,
+    pages: list[PageText],
+    count: int,
+    settings: Settings,
+    custom_requirements: str | None,
 ) -> tuple[str, str]:
     """粗规划双消息组装（与 planning_executor._build_coarse_prompts 同款）：
     稳定 system（planner-coarse v7 + planner-coarse-output schema 原文）+ 动态 user。
@@ -161,7 +170,7 @@ def coarse_prompts(
             }
             for p in pages
         ],
-        "custom_requirements": None,
+        "custom_requirements": custom_requirements,
     }
     return system_prompt, f"<PLANNER_COARSE_INPUT>{safe_json_dumps(payload)}</PLANNER_COARSE_INPUT>"
 
@@ -172,9 +181,10 @@ def fine_prompts(
     pages: list[PageText],
     interval: dict[str, dict[str, int]],
     settings: Settings,
+    custom_requirements: str | None,
 ) -> tuple[str, str]:
     """精规划双消息组装（与 planning_executor._build_fine_prompts 同款）：
-    稳定 system（planner v7 + planner-output schema 原文）+ 动态 user（批主题+批页）。"""
+    稳定 system（planner v8 + planner-output schema 原文）+ 动态 user（批主题+批页）。"""
     system_prompt = (
         f"{load_asset('prompts', 'planner')}\n\n<PLANNER_OUTPUT_SCHEMA>\n"
         f"{load_asset('schemas', 'planner_output')}\n</PLANNER_OUTPUT_SCHEMA>"
@@ -204,12 +214,14 @@ def fine_prompts(
             }
             for p in pages
         ],
-        "custom_requirements": None,
+        "custom_requirements": custom_requirements,
     }
     return system_prompt, f"<PLANNER_INPUT>{safe_json_dumps(payload)}</PLANNER_INPUT>"
 
 
-def generator_prompts(unit: dict[str, Any], page_by_id: dict[str, PageText]) -> tuple[str, str]:
+def generator_prompts(
+    unit: dict[str, Any], page_by_id: dict[str, PageText], custom_requirements: str | None
+) -> tuple[str, str]:
     """Generator 双消息组装（与 batches._build_generator_prompts 同款三区块，V25-D-27）：
     稳定 system（generator prompt + generator-output schema 原文）+ 动态 user
     （<GENERATION_SPEC> + <SOURCE_MATERIAL> + <USER_REQUIREMENTS>）。
@@ -231,7 +243,7 @@ def generator_prompts(unit: dict[str, Any], page_by_id: dict[str, PageText]) -> 
     user_prompt = (
         f"<GENERATION_SPEC>{safe_json_dumps(spec)}</GENERATION_SPEC>\n"
         f"<SOURCE_MATERIAL>{safe_json_dumps(source_material)}</SOURCE_MATERIAL>\n"
-        f"<USER_REQUIREMENTS>{safe_json_dumps({'custom_requirements': None})}</USER_REQUIREMENTS>"
+        f"<USER_REQUIREMENTS>{safe_json_dumps({'custom_requirements': custom_requirements})}</USER_REQUIREMENTS>"
     )
     return system_prompt, user_prompt
 
@@ -348,13 +360,25 @@ def main() -> None:
         "--model",
         type=str,
         default=None,
-        help="覆盖模型名（默认 Settings 值 deepseek-v4-flash；可试 deepseek-v4-pro）",
+        help="覆盖模型名（默认 Settings 值 deepseek-flash；可试 deepseek-v4-pro）",
     )
     parser.add_argument(
         "--difficulty",
         choices=("BASIC", "UNDERSTANDING", "APPLICATION"),
         default=None,
         help="只生成指定难度（配额全给该难度；与显式 --ratio 互斥）",
+    )
+    parser.add_argument(
+        "--custom-requirements",
+        type=str,
+        default=None,
+        help="自定义提示词（透传三个阶段的 custom_requirements，验证遵守情况）",
+    )
+    parser.add_argument(
+        "--dump",
+        type=Path,
+        default=None,
+        help="导出 JSON（items 含卡与锚定 + 全章页原文），供离线评分/复核使用",
     )
     args = parser.parse_args()
     if args.count < 1:
@@ -390,6 +414,8 @@ def main() -> None:
     print(
         f"模型：{settings.deepseek_model}（thinking={'on' if settings.deepseek_thinking else 'off'}）"
     )
+    if args.custom_requirements:
+        print(f"自定义提示词：{args.custom_requirements}")
     print("=" * 72)
 
     page_by_id = {f"page:{p['page_number']}": p for p in pages}
@@ -403,7 +429,9 @@ def main() -> None:
         segments = split_groups(pages, max_chars=settings.planner_coarse_max_input_chars)
         topics: list[dict[str, Any]] = []
         for si, seg in enumerate(segments, start=1):
-            sys_prompt, user_prompt = coarse_prompts(chapter_name, seg, args.count, settings)
+            sys_prompt, user_prompt = coarse_prompts(
+                chapter_name, seg, args.count, settings, args.custom_requirements
+            )
             if si == 1:
                 print_prompts(
                     f"Coarse Planner 段{si}/{len(segments)}（代表，后续同构省略）",
@@ -464,7 +492,12 @@ def main() -> None:
             batch_quota = allocate_group_quota(task_quota, [batch_chars])[0]
             interval = {d: {"min": 0, "max": q} for d, q in batch_quota.items()}
             sys_prompt, user_prompt = fine_prompts(
-                chapter_name, batch_topics, batch_pages, interval, settings
+                chapter_name,
+                batch_topics,
+                batch_pages,
+                interval,
+                settings,
+                args.custom_requirements,
             )
             result = chat_with_retry(
                 client,
@@ -520,7 +553,7 @@ def main() -> None:
         generated: list[tuple[dict[str, Any], dict[str, Any]]] = []  # (unit, card)
         generator_schema = load_schema_asset("generator_output")
         for i, unit in enumerate(units, start=1):
-            sys_prompt, user_prompt = generator_prompts(unit, page_by_id)
+            sys_prompt, user_prompt = generator_prompts(unit, page_by_id, args.custom_requirements)
             if i == 1:
                 print_prompts(
                     f"Generator {i}/{len(units)}（代表，后续单元同构省略）",
@@ -559,6 +592,42 @@ def main() -> None:
         client.close()
     wall = time.monotonic() - started
 
+    if args.dump and generated:
+        dump = {
+            "chapter": chapter_name,
+            "custom_requirements": args.custom_requirements,
+            "pages": [
+                {
+                    "chunk_id": f"page:{p['page_number']}",
+                    "page_number": p["page_number"],
+                    "content": p["content"],
+                }
+                for p in pages
+            ],
+            "items": [
+                {
+                    "generation_item_id": f"item-{i:03d}",
+                    "learning_objective": unit["learning_objective"],
+                    "target_difficulty": unit["target_difficulty"],
+                    "card_type": unit["card_type"],
+                    "card": {
+                        "card_type": card["type"],
+                        "question": card.get("question"),
+                        "answer": card.get("answer"),
+                        "statement": card.get("statement"),
+                        "explanation": card.get("explanation"),
+                        "answer_boolean": card.get("answer_boolean"),
+                    },
+                    "source_chunk_ids": list(unit["source_chunk_ids"]),
+                }
+                for i, (unit, card) in enumerate(generated, start=1)
+            ],
+        }
+        args.dump.write_text(
+            json.dumps(dump, ensure_ascii=False, separators=(",", ":")), encoding="utf-8"
+        )
+        print(f"已导出 {len(generated)} 卡 → {args.dump}")
+
     # ---- 终端打印 ----
     print("=" * 72)
     for i, (unit, card) in enumerate(generated, start=1):
@@ -585,8 +654,8 @@ def main() -> None:
         f"tokens: prompt={total_usage['prompt']} cache_hit={total_usage['cache_hit']} "
         f"cache_miss={total_usage['cache_miss']} output={total_usage['output']}"
     )
-    if args.model and args.model != "deepseek-v4-flash":
-        print(f"注意: 价格表为 deepseek-v4-flash 价目，{args.model} 实际计费以官方账单为准")
+    if args.model and args.model != "deepseek-flash":
+        print(f"注意: 价格表为 deepseek-flash 价目，{args.model} 实际计费以官方账单为准")
     print(f"估算成本（{effective_date} 价目）: ¥{cost['total']}")
 
 

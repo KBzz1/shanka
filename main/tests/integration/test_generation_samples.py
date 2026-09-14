@@ -112,7 +112,7 @@ class StubClient:
             return {
                 "content": "这不是 JSON",
                 "usage": {},
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "http_status": 200,
                 "duration_ms": 1,
             }
@@ -129,7 +129,7 @@ class StubClient:
                 }
             ),
             "usage": {"prompt_cache_miss_tokens": 5, "completion_tokens": 3},
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "http_status": 200,
             "duration_ms": 1,
         }

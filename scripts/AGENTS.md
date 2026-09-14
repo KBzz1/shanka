@@ -9,7 +9,8 @@
 
 - 真实调用 DeepSeek：样书目标章（默认第 1 章）→ 粗规划主题盘点 → 精规划学习单元 → Generator 锚定单卡，复用 `agent_evolution` 版本化 Prompt/Schema 与 quota/校验逻辑；零 DB、不落盘。
 - 红线 4：`DEEPSEEK_API_KEY` 仅从仓库根 `.env` 运行时读取（`--env-file` 可覆盖），进程内使用，任何输出不出现明文。
-- 用法：`conda run -n shanka-backend python scripts/gen_sample_cards.py [--count 10] [--ratio 4:4:2] [--difficulty APPLICATION] [--model deepseek-v4-pro]`。
+- 用法：`conda run -n shanka-backend python scripts/gen_sample_cards.py [--count 10] [--ratio 4:4:2] [--difficulty APPLICATION] [--model deepseek-v4-pro] [--custom-requirements "生成不要有英文"]`。
+- `--custom-requirements` 透传用户自定义提示词到粗规划/精规划/制卡三阶段（同生产 `generation_config.custom_requirements`），用于验证语言/侧重类偏好的遵守情况。
 - 旧名兼容：`--difficulty APPLICATION` 显式映射到 `DEEP_QUESTION`（V2.5 域枚举改名后的兼容入口，非欠同步）。
 - 终端只打印代表 prompt（粗规划首段 + 精规划首批 + Generator 第一单元），其余同构省略。
 

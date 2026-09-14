@@ -83,7 +83,7 @@ def _ok(content: str) -> httpx.Response:
                 "prompt_cache_hit_tokens": 2,
                 "prompt_cache_miss_tokens": 8,
             },
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
         },
     )
 

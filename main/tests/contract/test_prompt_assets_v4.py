@@ -65,25 +65,25 @@ def _manifest_versions() -> set[str]:
 
 
 def test_manifest_pins_current_asset_versions_and_paths() -> None:
-    """manifest 当前版本（V2.5.2 两阶段规划升版后）：planner/planner_coarse v7、
-    generator v6、rewrite v4、scoring v3；schemas planner_output/planner_coarse_output v7、
+    """manifest 当前版本（2026-09-12 自定义要求执行力升版后）：planner/planner_coarse v8、
+    generator v7、rewrite v4、scoring v3；schemas planner_output/planner_coarse_output v7、
     card v1、其余 v3；rubrics v3，path 指向对应版本目录。"""
     manifest = load_manifest()
-    assert manifest["prompts"]["planner"]["version"] == "v7"
-    assert manifest["prompts"]["planner_coarse"]["version"] == "v7"
-    assert manifest["prompts"]["generator"]["version"] == "v6"
+    assert manifest["prompts"]["planner"]["version"] == "v8"
+    assert manifest["prompts"]["planner_coarse"]["version"] == "v8"
+    assert manifest["prompts"]["generator"]["version"] == "v7"
     assert manifest["prompts"]["rewrite"]["version"] == "v4"
     assert manifest["prompts"]["scoring"]["version"] == "v3"
     assert manifest["schemas"]["card"]["version"] == "v1"  # 持久化 Card Schema 保持 v1
-    # V2.5.2 两阶段：planner（精规划）v7 / planner_coarse（粗规划）v7 / 两 output schema v7
+    # V2.5.2 两阶段：planner（精规划）v8 / planner_coarse（粗规划）v8 / 两 output schema v7
     assert manifest["schemas"]["planner_output"]["version"] == "v7"
     assert manifest["schemas"]["planner_coarse_output"]["version"] == "v7"
     assert manifest["schemas"]["generator_output"]["version"] == "v3"
     assert manifest["schemas"]["scoring_output"]["version"] == "v3"
     assert manifest["rubrics"]["main"]["version"] == "v3"
-    assert str(manifest["prompts"]["planner"]["path"]).startswith("prompts/v7/")
-    assert str(manifest["prompts"]["planner_coarse"]["path"]).startswith("prompts/v7/")
-    assert str(manifest["prompts"]["generator"]["path"]).startswith("prompts/v6/")
+    assert str(manifest["prompts"]["planner"]["path"]).startswith("prompts/v8/")
+    assert str(manifest["prompts"]["planner_coarse"]["path"]).startswith("prompts/v8/")
+    assert str(manifest["prompts"]["generator"]["path"]).startswith("prompts/v7/")
     assert str(manifest["prompts"]["rewrite"]["path"]).startswith("prompts/v4/")
     assert str(manifest["prompts"]["scoring"]["path"]).startswith("rubrics/v3/")
     for name, entry in manifest["schemas"].items():

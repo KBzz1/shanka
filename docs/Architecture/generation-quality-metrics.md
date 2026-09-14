@@ -188,3 +188,19 @@ D. **evidence/correctness 微降的来源**：v6-07/v6-09 双裁判一致 eviden
    7e4ff591 同一知识缺口（planner 多 chunk/图示锚定，B3 覆盖率观测的延续），是 prompt 之外的
    数据面问题。
 E. 校准纪律：本结论只对 rubric v3 + deepseek-v4-flash + v6 资产有效；v7 演进后需重跑。
+
+## 模型与资产切换备注（2026-09-12）
+
+- 生产模型默认值 `deepseek-v4-flash` → `deepseek-flash`（官方 2026-09-10 发布 V4.1-Flash，
+  旧名已下线仅临时兼容路由；thinking disabled 沿用，planner-coarse 8192 输出上限经两轮
+  整章粗规划实测无截断）。上文校准结论（自评绝对分不可信等）绑定旧模型与 v6 资产，**需
+  在新模型 + v8/v7 资产下重跑校准后方可引用**。
+- 提示词资产切换：planner/planner_coarse v7 → v8、generator v6 → v7（`custom_requirements`
+  重分类为必须执行的用户配置——语言中立通用机制；技术锚定反空泛按挡位分化：BASIC/
+  UNDERSTANDING 落具体对象与关系、DEEP_QUESTION 走参考思路/系统观念），依据见
+  `agent_evolution/CHANGELOG.md` 2026-09-12 小节（含当日回退过拟合译名细则的修订记录）。
+  样卡验证（scripts/gen_sample_cards.py，deepseek-flash）：默认（无指令）保留来源术语
+  （第 3 章 30 卡 70% 含英文术语 Notes/Agent/JSON/MRR 等，语言治理仅显式指令时生效）；
+  显式「生成不要有英文」下行文转向中文、可译词大幅减少（改前同类任务 62 卡 71% 可译词
+  全面漏出）；「目标/本质/意义」式空泛卡 0/25（第 1 章）与 0/30、0/35（第 3 章两轮，
+  第 1 章基线 21.1%）。正式 B5 全链路复评待后续任务排期。

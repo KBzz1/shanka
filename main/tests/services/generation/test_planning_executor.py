@@ -92,6 +92,7 @@ def _seed_planning_task(
     chapter_end_page: int = 2,
     text_page_range: tuple[int, int] | None = None,
     coverage_mode: str = "COMPACT",
+    custom_requirements: str | None = None,
 ) -> tuple[str, str, str]:
     """GENERATING+PLANNING 任务（start 后状态）+ 章节 + 页文本（text_chunks）；
     返回 (task_id, chapter_id, file_id)。
@@ -188,6 +189,7 @@ def _seed_planning_task(
         config=GenerationConfig(
             coverage_mode=coverage_mode,
             difficulty_ratio=DifficultyRatio(basic=40, understanding=40, deep_question=20),
+            custom_requirements=custom_requirements,
         ),
         now=_NOW,
     )
@@ -287,7 +289,7 @@ def _ok_response(content: str) -> httpx.Response:
                 "prompt_cache_hit_tokens": 0,
                 "prompt_cache_miss_tokens": 1,
             },
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
         },
     )
 
@@ -367,7 +369,7 @@ def test_claim_cas2_orphan_takeover_marks_started_unknown(
             attempt_no=1,
             model="m",
             prompt_name="planner-coarse",
-            prompt_version="v7",
+            prompt_version="v8",
             now="2026-08-12T00:00:00.000Z",
         )
         session.commit()
@@ -445,6 +447,32 @@ def test_planning_success_units_and_batches(
         "UNDERSTANDING": 1,
         "DEEP_QUESTION": 0,
     }
+
+
+def test_planning_custom_requirements_reaches_both_stages(
+    session_factory: Callable[[], Session],
+) -> None:
+    """custom_requirements 从任务配置贯通粗/精规划两阶段 user prompt（v8 语言/侧重传导前置：
+    制卡链路早有注入断言，规划链路此前缺失）。"""
+    user = _uuid()
+    state: dict[str, int] = {"calls": 0}
+    seen: dict[str, dict[str, Any]] = {}
+
+    def coarse_capture(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        seen["coarse"] = payload
+        return _default_coarse_topics(payload)
+
+    def fine_capture(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        seen["fine"] = payload
+        return _default_fine_units(payload)
+
+    with session_factory() as session:
+        _seed_planning_task(session, user_id=user, custom_requirements="生成不要有英文")
+        handler = _two_stage_handler(state, coarse=coarse_capture, fine=fine_capture)
+        _claim_and_plan(session, client=_client_with_handler(handler))
+    assert state["calls"] == 2
+    assert seen["coarse"]["custom_requirements"] == "生成不要有英文"
+    assert seen["fine"]["custom_requirements"] == "生成不要有英文"
 
 
 def test_planning_compact_filters_disallowed_tiers(
@@ -570,7 +598,7 @@ def test_planning_success_reuses_normalized(
                 attempt_no=1,
                 model="m",
                 prompt_name="planner",
-                prompt_version="v7",
+                prompt_version="v8",
                 now=_NOW,
             )
             finish_success(
@@ -625,7 +653,7 @@ def test_planning_budget_reset_prevented(
                 attempt_no=attempt_no,
                 model="m",
                 prompt_name="planner-coarse",
-                prompt_version="v7",
+                prompt_version="v8",
                 now=_NOW,
             )
             # STARTED/FAILED/UNKNOWN 任意组合均计入预算（spec §9）
@@ -949,7 +977,7 @@ def test_planning_fingerprint_drift_fails_task(
             attempt_no=1,
             model="m",
             prompt_name="planner-coarse",
-            prompt_version="v7",
+            prompt_version="v8",
             now=_NOW,
         )
         finish_success(
@@ -1013,7 +1041,7 @@ def test_planning_mixed_skipped_and_empty_records_skips(
                 attempt_no=attempt_no,
                 model="m",
                 prompt_name="planner-coarse",
-                prompt_version="v7",
+                prompt_version="v8",
                 now=_NOW,
             )
             att.status = ("STARTED", "FAILED", "UNKNOWN")[attempt_no - 1]

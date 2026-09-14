@@ -179,7 +179,7 @@ def test_acceptance_ac08_prompt_content_not_logged(
             json={
                 "choices": [{"message": {"content": '{"cards": []}'}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             },
         )
 

@@ -948,10 +948,13 @@ duration histogram 桶（分位数证据的正确性前提，桶集合在指标�
 
 - Rubric 评分执行者:LLM-as-judge;评分在独立 SCORING 阶段执行(4.1),评分 Prompt 资产入口:
   `agent_evolution/manifest.json` 的 `prompts.scoring`。
-- 当前资产登记:Planner-coarse Prompt v7 / planner-coarse-output Schema v7;Planner(精规划) Prompt v7 /
-  planner-output Schema v7;Generator Prompt v6 /
+- 当前资产登记:Planner-coarse Prompt v8 / planner-coarse-output Schema v7;Planner(精规划) Prompt v8 /
+  planner-output Schema v7;Generator Prompt v7 /
   generator-output Schema v3 / 投影后 card Schema v1;Rewrite Prompt v4 / generator-output
   Schema v3 / 投影后 card Schema v1;Scoring Prompt v3 / scoring-output Schema v3 / Rubric v3。
+  (2026-09-12:planner/planner_coarse v7→v8、generator v6→v7,`custom_requirements` 由
+  "不可信数据"重分类为"必须执行的用户配置",新增技术锚定与输出语言治理;变更依据见
+  `agent_evolution/CHANGELOG.md` 同日小节。)
   具体 path 以 manifest 为唯一权威,禁止运行时绕过 manifest 读取相对路径。
 - `rubric_version` / `prompt_version` / `schema_version` 按每次调用实际使用的入口记录,不能用
   单个全局 schema_version 混写 card v1 与 generator/planner/scoring 的 output schema

@@ -173,7 +173,7 @@ def _client_ok(session_factory: Callable[[], Session]) -> DeepSeekClient:
                     "prompt_cache_hit_tokens": 2,
                     "prompt_cache_miss_tokens": 8,
                 },
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             },
         )
 
@@ -312,6 +312,6 @@ def test_batches_usage_and_versions_recorded(session_factory: Callable[[], Sessi
     assert batch.cache_hit_tokens == 2
     assert batch.cache_miss_tokens == 8
     assert batch.output_tokens == 5
-    assert batch.model == "deepseek-v4-flash"
-    assert batch.prompt_version == "v6" and batch.schema_version == "v3"
+    assert batch.model == "deepseek-flash"
+    assert batch.prompt_version == "v7" and batch.schema_version == "v3"
     assert batch.http_status == 200

@@ -152,7 +152,7 @@ def _pipeline_factory(
                 content = json.dumps({"cards": [cards[index % len(cards)]]}, ensure_ascii=False)
             resp_body: dict[str, object] = {
                 "choices": [{"message": {"content": content}}],
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             }
             if with_usage:
                 resp_body["usage"] = {
@@ -489,8 +489,8 @@ def test_acceptance_ac07_quality_and_cache_recorded(ctx: tuple[TestClient, Path]
         assert item["output_tokens"] == 5
         # AC-07-a：整批质量统计（仅观测，随 rubrics 落库）
         assert item["rubric_version"] == "v3"
-        assert item["prompt_version"] == "v6" and item["schema_version"] == "v3"
-        assert item["model"] == "deepseek-v4-flash"
+        assert item["prompt_version"] == "v7" and item["schema_version"] == "v3"
+        assert item["model"] == "deepseek-flash"
         assert item["http_status"] == 200
         assert item["coverage_rate"] == 1.0
         assert item["duplicate_rate"] == 0.0

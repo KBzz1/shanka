@@ -337,7 +337,7 @@ def _client_factory(api_key: str) -> DeepSeekClient:
                     "prompt_cache_hit_tokens": 2,
                     "prompt_cache_miss_tokens": 8,
                 },
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             },
         )
 
@@ -489,7 +489,7 @@ def test_executor_system_failure_fails_task_and_keeps_cards(
                 json={
                     "choices": [{"message": {"content": _valid_cards_json()}}],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-                    "model": "deepseek-v4-flash",
+                    "model": "deepseek-flash",
                 },
             )
         return httpx.Response(401, json={"error": {"message": "invalid api key"}})
@@ -608,7 +608,7 @@ def test_executor_full_flow_plan_then_generate(
                     "prompt_cache_hit_tokens": 2,
                     "prompt_cache_miss_tokens": 8,
                 },
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             },
         )
 

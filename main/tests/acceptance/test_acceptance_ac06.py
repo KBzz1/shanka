@@ -292,7 +292,7 @@ def _scripted_factory(calls: dict[str, int], *, content: str) -> Callable[[str],
                 200,
                 json={
                     "choices": [{"message": {"content": content}}],
-                    "model": "deepseek-v4-flash",
+                    "model": "deepseek-flash",
                 },
             )
 

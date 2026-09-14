@@ -135,7 +135,7 @@ def _make_dry_run_handler(batch_size: int) -> Callable[[httpx.Request], httpx.Re
                     "prompt_cache_hit_tokens": 2,
                     "prompt_cache_miss_tokens": 8,
                 },
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "system_fingerprint": _DRY_RUN_FINGERPRINT,
             },
         )

@@ -216,7 +216,7 @@ def _client_returning(content: str) -> DeepSeekClient:
             json={
                 "choices": [{"message": {"content": content}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             },
         )
 

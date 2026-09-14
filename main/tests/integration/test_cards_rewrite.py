@@ -223,7 +223,7 @@ def _client_returning(content: str) -> tuple[DeepSeekClient, list[dict[str, Any]
                     "prompt_cache_hit_tokens": 2,
                     "prompt_cache_miss_tokens": 8,
                 },
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             },
         )
 
@@ -774,7 +774,7 @@ def test_rewrite_next_version_rule() -> None:
 
 def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> None:
     """final review Important 1：预览创建的 chat 调用上报 8.3 llm 指标——成功一次 →
-    llm_requests_total{model="deepseek-v4-flash", http_status="200"} +1、
+    llm_requests_total{model="deepseek-flash", http_status="200"} +1、
     llm_tokens_total 按 usage（cache_hit=2 + cache_miss=8 + output=5）。
     断言用 before/after 差值（REGISTRY 全局共享，批次路径可能已 inc 同 label）。"""
     with session_factory() as session:
@@ -782,7 +782,7 @@ def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> 
         card_id = seeded.card_id
     client, _ = _client_returning(_rewrite_cards_json())
     before_requests = _metric_value(
-        "llm_requests_total", ['model="deepseek-v4-flash"', 'http_status="200"']
+        "llm_requests_total", ['model="deepseek-flash"', 'http_status="200"']
     )
     before_tokens = {
         kind: _metric_value("llm_tokens_total", [f'kind="{kind}"'])
@@ -791,7 +791,7 @@ def test_rewrite_reports_llm_metrics(session_factory: Callable[[], Session]) -> 
     with session_factory() as session:
         _create_preview(session, card_id=card_id, custom_requirements=None, client=client)
     after_requests = _metric_value(
-        "llm_requests_total", ['model="deepseek-v4-flash"', 'http_status="200"']
+        "llm_requests_total", ['model="deepseek-flash"', 'http_status="200"']
     )
     after_tokens = {
         kind: _metric_value("llm_tokens_total", [f'kind="{kind}"'])

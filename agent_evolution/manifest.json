@@ -1,12 +1,12 @@
 {
   "prompts": {
     "planner": {
-      "version": "v7",
-      "path": "prompts/v7/planner-fine.md"
+      "version": "v8",
+      "path": "prompts/v8/planner-fine.md"
     },
     "generator": {
-      "version": "v6",
-      "path": "prompts/v6/generator.md"
+      "version": "v7",
+      "path": "prompts/v7/generator.md"
     },
     "rewrite": {
       "version": "v4",
@@ -17,8 +17,8 @@
       "path": "rubrics/v3/scoring-prompt.md"
     },
     "planner_coarse": {
-      "version": "v7",
-      "path": "prompts/v7/planner-coarse.md"
+      "version": "v8",
+      "path": "prompts/v8/planner-coarse.md"
     }
   },
   "schemas": {

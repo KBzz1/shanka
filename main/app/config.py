@@ -98,7 +98,8 @@ class Settings(BaseSettings):
     # Scoring 每次仍按 item 数计算更小的实际值 min(上限, 256 + 128 × items)）
     planner_max_output_tokens: int = 2048
     # 粗规划输出主题清单可较长（充分模式整段 40~60 主题，每主题 ≈64 token）；
-    # 8192 为 deepseek-v4-flash 实测接受值（2026-09-10 探针验证）
+    # 8192 为实测接受值（2026-09-10 于 deepseek-v4-flash 探针验证；2026-09-12 于
+    # deepseek-flash 复核通过：两轮整章粗规划无截断）
     planner_coarse_max_output_tokens: int = 8192
     generator_max_output_tokens: int = 768
     rewrite_max_output_tokens: int = 768
@@ -107,7 +108,9 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = Field(default=None, repr=False)
     # API Key 加密密钥（database-design 2.2：环境变量，32 字节 hex；缺失时 PUT /api-key 不可用）
     api_key_encryption_key: str | None = Field(default=None, repr=False)
-    # DeepSeek 模型与 thinking 单一配置入口（R-09：默认冻结 deepseek-v4-flash + thinking disabled，可替换）
-    deepseek_model: str = "deepseek-v4-flash"
+    # DeepSeek 模型与 thinking 单一配置入口（2026-09-12：默认 deepseek-flash = 官方
+    # 2026-09-10 发布的 V4.1-Flash；旧名 deepseek-v4-flash 已下线、仅临时兼容路由；
+    # R-09 thinking disabled 沿用，可替换）
+    deepseek_model: str = "deepseek-flash"
     deepseek_thinking: bool = False
     deepseek_timeout_seconds: float = 60.0

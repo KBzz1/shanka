@@ -5,12 +5,13 @@ mock transport 全链路驱动（LLM 升级管线：规划 → 生成 → 评分
 COMPACT 2 章 → 6 生成单元（配额 BASIC 3/UNDERSTANDING 2/DEEP_QUESTION 1）→ 6 批
 （1 单元 1 批）→ 每批 1 张合法卡 → 6 卡；评分 mock 返回确定性分数
 （evidence=1/correctness=1/difficulty=1/learning=2，总分代码计算 5）；
-usage 统一 hit=2/miss=8/output=5，model deepseek-v4-flash，rubric_version v3。
+usage 统一 hit=2/miss=8/output=5，model deepseek-flash，rubric_version v3。
 """
 
 import json
 import uuid
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,14 @@ _TEST_ENCRYPTION_KEY = key_from_settings(_SETTINGS)
 assert _TEST_ENCRYPTION_KEY is not None
 _ENCRYPTED_TEST_KEY = encrypt_key("sk-test-abc", _TEST_ENCRYPTION_KEY)
 
-_PER_BATCH_COST = pytest.approx(2 * 0.5e-6 + 8 * 2e-6 + 5 * 8e-6)  # 0.000057 元/批
+# 成本按"今天"取价档（8.4 生效日期选档）：2026-09-12 起 deepseek-flash（V4.1-Flash）
+# 高峰档 hit 0.04 元/百万，此前档 hit 0.5；miss/output 两档相同（2 / 8）。
+# 测试 token 用量 hit=2/miss=8/output=5。新增价格档时同步此表。
+_TODAY = datetime.now(UTC).date().isoformat()
+_HIT_PER_TOKEN = 0.04e-6 if _TODAY >= "2026-09-12" else 0.5e-6
+# 服务端估算 round 9 位（8.4；9 位保住新价档下 hit 分项不被抹零）
+_PER_BATCH_COST_VALUE = round(2 * _HIT_PER_TOKEN + 8 * 2e-6 + 5 * 8e-6, 9)
+_PER_BATCH_COST = pytest.approx(_PER_BATCH_COST_VALUE)
 
 
 def _dispatch(request: httpx.Request) -> httpx.Response:
@@ -112,7 +120,7 @@ def _dispatch(request: httpx.Request) -> httpx.Response:
                 "prompt_cache_hit_tokens": 2,
                 "prompt_cache_miss_tokens": 8,
             },
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
         },
     )
 
@@ -342,8 +350,8 @@ def test_batches_endpoint_lists_usage_versions_quality_and_cost(
     assert first["cache_miss_tokens"] == 8
     assert first["output_tokens"] == 5
     # 版本/model/http_status/duration
-    assert first["model"] == "deepseek-v4-flash"
-    assert first["prompt_version"] == "v6"
+    assert first["model"] == "deepseek-flash"
+    assert first["prompt_version"] == "v7"
     assert first["schema_version"] == "v3"
     assert first["rubric_version"] == "v3"
     assert first["http_status"] == 200
@@ -376,7 +384,7 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     assert body["days"] == 30
     assert len(body["groups"]) == 1
     g = body["groups"][0]
-    assert g["key"] == "deepseek-v4-flash"
+    assert g["key"] == "deepseek-flash"
     assert g["rubric_version"] == "v3"  # 卡经批次归属 → 批次 rubric_version
     assert g["card_count"] == 6
     assert g["eligible_card_count"] == 6
@@ -389,7 +397,9 @@ def test_quality_summary_aggregates_by_model_pdf_difficulty(
     assert g["coverage_avg"] == 1.0
     assert g["duplicate_avg"] == 0.0
     assert g["task_completion_rate"] == 1.0  # 1 个 COMPLETED / 1 个任务
-    assert g["cost_estimate"]["total"] == pytest.approx(0.000342)  # 6 批 × 0.000057
+    assert g["cost_estimate"]["total"] == pytest.approx(
+        6 * _PER_BATCH_COST_VALUE
+    )  # 6 批 × 单批成本（按当日价档）
     assert g["cost_estimate"]["cache_hit"] > 0
     assert g["cost_estimate"]["scope"] == "generation-stage-only"  # 不引入账本双计
 
@@ -443,7 +453,7 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
 
     # llm（样卡 3 次 + 生成 6 批 + 评分 6 次 = 15 次 chat；规划调用不在 llm 指标口径；
     # 密度制 V25-D-25 后每章难度兜底产出 6 生成单元）
-    ok_labels = ['model="deepseek-v4-flash"', 'http_status="200"']
+    ok_labels = ['model="deepseek-flash"', 'http_status="200"']
     assert (
         _labeled_value(after, "llm_requests_total", ok_labels)
         - _labeled_value(before, "llm_requests_total", ok_labels)
@@ -461,10 +471,8 @@ def test_metrics_text_includes_llm_generation_batch_metrics(
         - _labeled_value(before, "llm_tokens_total", ['kind="output"'])
     ) == 75.0  # 15 次 × 5
     assert (
-        _labeled_value(after, "llm_request_duration_seconds_count", ['model="deepseek-v4-flash"'])
-        - _labeled_value(
-            before, "llm_request_duration_seconds_count", ['model="deepseek-v4-flash"']
-        )
+        _labeled_value(after, "llm_request_duration_seconds_count", ['model="deepseek-flash"'])
+        - _labeled_value(before, "llm_request_duration_seconds_count", ['model="deepseek-flash"'])
     ) == 15.0
     # generation（1 个任务 COMPLETED）
     assert (
@@ -581,7 +589,7 @@ def test_quality_summary_excludes_staged_and_failed_task_cards(
     resp = client.get("/observability/quality-summary", headers=user)
     assert resp.status_code == 200
     by_key = {g["key"]: g for g in resp.json()["groups"]}
-    g = by_key["deepseek-v4-flash"]
+    g = by_key["deepseek-flash"]
     assert g["card_count"] == 6  # 只计已发布卡（RED：改造前 STAGED 卡计入 → 8）
     assert g["scored_card_count"] == 6
     assert g["sampling_rate"] == 1.0

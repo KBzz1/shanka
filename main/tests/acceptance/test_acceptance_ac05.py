@@ -257,7 +257,7 @@ def _sample_factory(api_key: str) -> DeepSeekClient:
                     "prompt_cache_hit_tokens": 2,
                     "prompt_cache_miss_tokens": 8,
                 },
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
             },
         )
 
@@ -370,7 +370,7 @@ def _scripted_factory(
                         "prompt_cache_hit_tokens": 2,
                         "prompt_cache_miss_tokens": 8,
                     },
-                    "model": "deepseek-v4-flash",
+                    "model": "deepseek-flash",
                 },
             )
 

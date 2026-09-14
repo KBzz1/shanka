@@ -29,7 +29,7 @@ from infra.llm.deepseek import DeepSeekClient, RetryableUpstreamError
 def _settings(**kw: Any) -> Settings:
     defaults: dict[str, Any] = {
         "api_key_encryption_key": "aa" * 32,
-        "deepseek_model": "deepseek-v4-flash",
+        "deepseek_model": "deepseek-flash",
         "deepseek_thinking": False,
     }
     defaults.update(kw)
@@ -135,7 +135,7 @@ def test_adapter_chat_request_shape_thinking_off_json() -> None:
     result = client.chat("请生成卡片", "sk-test")
     assert captured["url"] == "/chat/completions"
     body = captured["json"]
-    assert body["model"] == "deepseek-v4-flash"
+    assert body["model"] == "deepseek-flash"
     assert body["response_format"] == {"type": "json_object"}
     # T17 canary 修复：上游默认启用 thinking，不携带参数时 reasoning 可能烧满 max_tokens
     # 挤掉 content（finish=length + 空 content）——disabled 必须显式携带
@@ -204,7 +204,7 @@ def test_adapter_chat_passthrough_system_fingerprint() -> None:
             json={
                 "choices": [{"message": {"content": "answer"}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "system_fingerprint": "fp_r1_live_0001",
             },
         )
