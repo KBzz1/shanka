@@ -152,6 +152,16 @@ private const val RELEARN_DELAY_MS = 10 * 60 * 1000L
 /** One slot in the review session queue. [relearn] entries are AGAIN cards returning for their same-day second pass. */
 internal data class StudyQueueEntry(val cardId: String, val relearn: Boolean = false)
 
+/**
+ * V25-D-37 reset round (full-deck review-all): the server queue already IS the deck's entire
+ * visible set (new cards first by position, then forgetting-risk order; no due filter), so the
+ * rebuilt round keeps every entry in server order. Deliberately does not take the pre-reset
+ * session cards — those are a due-queue subset, and intersecting against them truncated the
+ * full-deck round back to the due queue.
+ */
+internal fun resetRoundQueue(reviewAll: List<FlashcardEntity>): List<StudyQueueEntry> =
+    reviewAll.map { StudyQueueEntry(it.id) }
+
 /** A card scheduled to come back after the FSRS relearning step, as (cardId, dueAtEpochMs). */
 private data class ScheduledRequeue(val cardId: String, val dueAtMs: Long)
 
@@ -275,19 +285,20 @@ internal fun StudyScreen(
         viewModel.reportStudySession(sessionLocalSeconds, ended)
     }
 
-    // V25-D-37：重置成功后用服务端全卡组复盘队列重建本轮（卡片本体已在本地投影中，
-    // 仅取还存在的卡；无卡可学时按完成页处理）。
+    // V25-D-37：重置成功后用服务端全卡组复盘队列重建本轮——队列即卡组全部可见卡（服务端
+    // 无到期过滤，新卡按 position 最前、其余按遗忘风险降序），卡片实体已随重置灌满
+    // studyCards，按服务端顺序整队即可；不得与重置前屏内的到期子集求交集（会把全量复盘
+    // 截断回到期队列）。无卡可学时按完成页处理。
     val resetQueue by viewModel.resetQueue.collectAsState()
     LaunchedEffect(resetQueue) {
         val reviewAll = resetQueue ?: return@LaunchedEffect
         viewModel.consumeResetQueue()
-        val ids = reviewAll.mapNotNull { planCard -> cards.firstOrNull { it.id == planCard.card.cardId }?.id }
-        if (ids.isEmpty()) {
+        if (reviewAll.isEmpty()) {
             sessionQueue = emptyList()
         } else {
             baseCompleted = 0
             sessionFinished = false
-            sessionQueue = ids.map { StudyQueueEntry(it) }
+            sessionQueue = resetRoundQueue(reviewAll)
             currentIndex = 0
             timingDeckId()?.let { studyTimer.resume(it, System.currentTimeMillis()) }
         }

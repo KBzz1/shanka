@@ -393,10 +393,12 @@ class AppViewModel(
 
     /**
      * The review-all queue of the latest reset, consumed by the study screen to rebuild its
-     * sessionQueue; null when no reset happened (or it failed).
+     * sessionQueue; null when no reset happened (or it failed). The entities double as the new
+     * [studyCards] source: the server queue is the deck's full visible set (no due filter), so it
+     * must NOT be intersected with the previously loaded session cards (a due-queue subset).
      */
-    private val _resetQueue = MutableStateFlow<List<V25PlanCard>?>(null)
-    val resetQueue: StateFlow<List<V25PlanCard>?> = _resetQueue.asStateFlow()
+    private val _resetQueue = MutableStateFlow<List<FlashcardEntity>?>(null)
+    val resetQueue: StateFlow<List<FlashcardEntity>?> = _resetQueue.asStateFlow()
 
     /** The study screen consumes the reset queue exactly once after rendering it. */
     fun consumeResetQueue() {
@@ -410,7 +412,13 @@ class AppViewModel(
             when (val result = v25Repository.beginStudySession(origin, deckId, reset)) {
                 is V25Result.Success -> {
                     activeSession = result.value.session
-                    _resetQueue.value = if (reset) result.value.reviewAllCards else null
+                    if (reset) {
+                        val entities = result.value.reviewAllCards.map { toFlashcard(it.card) }
+                        _studyCards.value = entities
+                        _resetQueue.value = entities
+                    } else {
+                        _resetQueue.value = null
+                    }
                 }
                 is V25Result.Failure -> {
                     activeSession = null // 尽力而为：无服务端时长也不阻塞学习
