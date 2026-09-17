@@ -57,8 +57,8 @@ def _seed_chapter(db_path: Path, file_id: str) -> str:
     with engine.begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO chapters (chapter_id, file_id, material_id, name, start_page, end_page)"
-                " VALUES (:c, :f, :f, '第1章', 1, 1)"
+                "INSERT INTO chapters (chapter_id, file_id, material_id, name, source, start_page, end_page)"
+                " VALUES (:c, :f, :f, '第1章', 'MANUAL', 1, 1)"
             ),
             {"c": chapter_id, "f": file_id},
         )

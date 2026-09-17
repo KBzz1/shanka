@@ -136,6 +136,7 @@ def _seed_card(session: Session) -> Card:
         file_id=pdf.file_id,
         material_id=pdf.file_id,
         name="第一章",
+        source="MANUAL",
         start_page=1,
         end_page=2,
     )

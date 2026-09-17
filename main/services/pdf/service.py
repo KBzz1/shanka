@@ -40,6 +40,7 @@ def chapter_view(chapter: Chapter) -> dict[str, Any]:
         "chapter_id": chapter.chapter_id,
         "material_id": chapter.material_id,
         "name": chapter.name,
+        "source": chapter.source,
         "start_page": chapter.start_page,
         "end_page": chapter.end_page,
     }

@@ -13,11 +13,14 @@ from app.schemas.samples import GenerationConfig, SampleCard
 
 
 class Chapter(BaseModel):
-    """openapi Chapter（V2.5 多资料快照）：material_id 归属资料；TEXT 章节页码 null。"""
+    """openapi Chapter（V2.5 多资料快照）：material_id 归属资料；TEXT 章节页码 null。
+
+    V25-D-36：source = 章节初始来源（TOC/AI/FALLBACK/TEXT/ZIP/MANUAL）入快照。"""
 
     chapter_id: str
     material_id: str
     name: str
+    source: str  # TOC/AI/FALLBACK/TEXT/ZIP/MANUAL（V25-D-36）
     start_page: int | None
     end_page: int | None
 

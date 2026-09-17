@@ -65,19 +65,23 @@ def _manifest_versions() -> set[str]:
 
 
 def test_manifest_pins_current_asset_versions_and_paths() -> None:
-    """manifest 当前版本（2026-09-12 自定义要求执行力升版后）：planner/planner_coarse v8、
-    generator v7、rewrite v4、scoring v3；schemas planner_output/planner_coarse_output v7、
-    card v1、其余 v3；rubrics v3，path 指向对应版本目录。"""
+    """manifest 当前版本（2026-09-17 chapter_planner 升 v10 后）：planner/planner_coarse v8、
+    generator v7、rewrite v4、scoring v3、chapter_planner v9；schemas planner_output/
+    planner_coarse_output v7、chapter_planner_output v9、card v1、其余 v3；rubrics v3，
+    path 指向对应版本目录。"""
     manifest = load_manifest()
     assert manifest["prompts"]["planner"]["version"] == "v8"
     assert manifest["prompts"]["planner_coarse"]["version"] == "v8"
     assert manifest["prompts"]["generator"]["version"] == "v7"
     assert manifest["prompts"]["rewrite"]["version"] == "v4"
     assert manifest["prompts"]["scoring"]["version"] == "v3"
+    assert manifest["prompts"]["chapter_planner"]["version"] == "v10"
     assert manifest["schemas"]["card"]["version"] == "v1"  # 持久化 Card Schema 保持 v1
     # V2.5.2 两阶段：planner（精规划）v8 / planner_coarse（粗规划）v8 / 两 output schema v7
     assert manifest["schemas"]["planner_output"]["version"] == "v7"
     assert manifest["schemas"]["planner_coarse_output"]["version"] == "v7"
+    # V25-D-36 无目录 PDF 章节边界规划
+    assert manifest["schemas"]["chapter_planner_output"]["version"] == "v9"
     assert manifest["schemas"]["generator_output"]["version"] == "v3"
     assert manifest["schemas"]["scoring_output"]["version"] == "v3"
     assert manifest["rubrics"]["main"]["version"] == "v3"
@@ -86,11 +90,14 @@ def test_manifest_pins_current_asset_versions_and_paths() -> None:
     assert str(manifest["prompts"]["generator"]["path"]).startswith("prompts/v7/")
     assert str(manifest["prompts"]["rewrite"]["path"]).startswith("prompts/v4/")
     assert str(manifest["prompts"]["scoring"]["path"]).startswith("rubrics/v3/")
+    assert str(manifest["prompts"]["chapter_planner"]["path"]).startswith("prompts/v10/")
     for name, entry in manifest["schemas"].items():
         if name == "card":
             expected = "schemas/v1/"
         elif name in ("planner_output", "planner_coarse_output"):
             expected = "schemas/v7/"
+        elif name == "chapter_planner_output":
+            expected = "schemas/v9/"
         else:
             expected = "schemas/v3/"
         assert str(entry["path"]).startswith(expected)
@@ -248,6 +255,7 @@ def test_assets_forbid_count_cost_pause_semantics() -> None:
     current = [
         ("prompts", "planner"),
         ("prompts", "planner_coarse"),
+        ("prompts", "chapter_planner"),
         ("prompts", "generator"),
         ("prompts", "rewrite"),
         ("prompts", "scoring"),
@@ -264,12 +272,14 @@ def test_v4_v3_assets_do_not_mention_legacy_application() -> None:
     current = [
         ("prompts", "planner"),
         ("prompts", "planner_coarse"),
+        ("prompts", "chapter_planner"),
         ("prompts", "generator"),
         ("prompts", "rewrite"),
         ("prompts", "scoring"),
         ("rubrics", "main"),
         ("schemas", "planner_output"),
         ("schemas", "planner_coarse_output"),
+        ("schemas", "chapter_planner_output"),
         ("schemas", "generator_output"),
         ("schemas", "scoring_output"),
     ]

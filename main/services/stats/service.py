@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from domain.card import VISIBLE_PREDICATE_SQL
-from infra.db.models import Card, ReviewEvent, ReviewState
+from infra.db.models import Card, ReviewEvent, ReviewState, StudySession
 from infra.db.session import format_utc
 from services.preferences.service import get_preferences, learning_date
 
@@ -168,6 +168,22 @@ def dashboard(session: Session, *, user_id: str, now: datetime) -> dict[str, obj
         or 0
     )
 
+    # 学习时长（V25-D-37）：study_sessions 按学习日聚合，与周窗口同一周界（学习日字符串
+    # 字典序 = 日期序）；时长是尽力送达的观测数据，与上面的事件事实口径分离。
+    monday_local = start.date()  # start 为账号学习时区下的周一 00:00（_week_bounds）
+    session_rows = session.execute(
+        select(StudySession.study_date, StudySession.origin, StudySession.study_seconds).where(
+            StudySession.user_id == user_id,
+            StudySession.study_date >= monday_local.isoformat(),
+            StudySession.study_date < (monday_local + timedelta(days=7)).isoformat(),
+        )
+    ).all()
+    daily_study_seconds = [0] * _WEEKDAYS
+    origin_totals = {"PLAN": 0, "BACKLOG": 0, "ADHOC": 0}
+    for row in session_rows:
+        daily_study_seconds[date.fromisoformat(row.study_date).weekday()] += int(row.study_seconds)
+        origin_totals[row.origin] = origin_totals.get(row.origin, 0) + int(row.study_seconds)
+
     return {
         "period": {"start": start_str, "end": end_str, "week_ordinal": start.isocalendar()[1]},
         "timezone": timezone,
@@ -182,6 +198,11 @@ def dashboard(session: Session, *, user_id: str, now: datetime) -> dict[str, obj
         "retention_rate": retention,
         "streak_days": streak,
         "mastered_card_count": mastered,
+        "weekly_study_seconds": sum(daily_study_seconds),
+        "daily_study_seconds": daily_study_seconds,
+        "plan_study_seconds": origin_totals["PLAN"],
+        "backlog_study_seconds": origin_totals["BACKLOG"],
+        "adhoc_study_seconds": origin_totals["ADHOC"],
         "updated_at": format_utc(now),
         "has_data": weekly_total > 0 or mastered > 0,
     }

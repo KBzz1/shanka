@@ -99,6 +99,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `due` | 下次复习时间 | FSRS 字段,到期判断用 |
 | `review_state` | 复习状态 | FSRS 排程状态快照 |
 | `review_event` | 复习事件 | 评级产生的不可变记录 |
+| `study_session` | 学习会话 | 当日学习容器:记录来源与时长,不保存卡片状态或队列(V25-D-37) |
 | `AGAIN / HARD / GOOD / EASY` | 没想起来 / 勉强想起 / 正常想起 / 轻松想起 | FSRS 四档评级；内部枚举保持不变 |
 | `generation_unit`(生成单元) | 知识点 | 最小规划单元:一个锚定卡片类型与目标难度的生成任务(见 3.6);数据库表名保持 `knowledge_points`(兼容壳) |
 | `planning_topic`(规划主题) | 盘点主题 | 粗规划产物(V2.5.2):章节内一个可独立出卡的知识点(标题+覆盖层级+来源页锚定);经精规划展开为 1~3 个生成单元;清单存粗规划账本 `normalized_result`,不落新表 |
@@ -123,11 +124,17 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `filename` | string | ✓ | |
 | `size_bytes` | int | ✓ | |
 | `status` | enum | ✓ | `PENDING` / `PARSING` / `PARSED` / `FAILED` |
-| `error_code` | string | ✗ | 解析失败码(`PDF_PARSE_FAILED` / `PDF_TOC_MISSING`) |
+| `error_code` | string | ✗ | 解析失败码(`PDF_PARSE_FAILED` / `PDF_TOC_MISSING` 历史 / `PDF_AI_CHAPTERS_FAILED` / `API_KEY_NOT_SET`) |
 | `chapters` | Chapter[] | ✗ | 解析成功后返回 |
 | `created_at` | datetime | ✓ | |
 
-规则:目录解析失败 → `FAILED` + `error_code`,前端终止流程,不提供 AI 猜测兜底(PRD 5.2)。
+规则(V25-D-36/38):文本层不可提取 → `FAILED + PDF_PARSE_FAILED`(不变);自带目录(outline)→ 按目录划分章节
+(`source=TOC`,不变);无可识别目录结构 → 确定性分诊(V25-D-38,程序优先):页文本总字符数 ≤
+`single_chapter_max_chars`(默认 24000)→ 直接整本单章(`source=AUTO`,零模型、不要求已存 Key);超阈值 →
+自动以用户已保存的 API Key 调 AI 规划章节边界(分段识别起始点 + 确定性校验 + 页级区间合并,`source=AI`),
+AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规划失败(未存 Key → `API_KEY_NOT_SET`,
+调用/校验失败 → `PDF_AI_CHAPTERS_FAILED`)→ `FAILED`,支持不重传文件的 `reparse` 重试与
+`chapters/whole-book` 整本单章降级(6.2)。历史 `PDF_TOC_MISSING` 不再产出(行保留兼容)。
 删除规则(V2.5):PDF 是项目资料集合的成员,按资料级删除(3.2a/6.2)或随项目删除(3.16/6.2);
 仅 `FAILED` 资料支持原位替换(`replace-pdf` 语义,替换后重新解析)。旧 `/pdfs` 兼容路径已随
 多资料模型移除,不得再创建第二套项目/任务状态。
@@ -138,9 +145,9 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | --- | --- | --- | --- |
 | `material_id` | uuid | ✓ | |
 | `project_id` | uuid | ✓ | 归属学习项目 |
-| `type` | enum | ✓ | `PDF` / `TEXT` / `ZIP`;`LINK` 预留,本期不实现 |
+| `type` | enum | ✓ | `PDF` / `TEXT` / `ZIP` / `HTML`(V25-D-38);`LINK` 预留,本期不实现 |
 | `name` | string | ✓ | PDF/ZIP=文件名(去扩展名前的原始名);TEXT=用户可改标题,1~60 字符 |
-| `status` | enum | ✓ | PDF:`PENDING` / `PARSING` / `PARSED` / `FAILED`;TEXT/ZIP:恒 `READY`(同步解析) |
+| `status` | enum | ✓ | PDF:`PENDING` / `PARSING` / `PARSED` / `FAILED`;TEXT/ZIP/HTML:恒 `READY`(同步解析) |
 | `error_code` | string | ✗ | 仅 PDF 解析失败码(ZIP 结构/解压失败在上传响应即时返回,不落资料行) |
 | `size_bytes` | int | ✗ | PDF/ZIP 上传字节数 |
 | `char_count` | int | ✗ | TEXT:≤ 30000;ZIP:md 正文总字符(≤ 300000) |
@@ -165,6 +172,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `chapter_id` | uuid | ✓ | |
 | `material_id` | uuid | ✓ | 归属学习资料(3.2a) |
 | `name` | string | ✓ | 可修改 |
+| `source` | enum | ✓ | 章节初始来源(V25-D-36/38):`TOC`(PDF 目录)/ `HEADING`(HTML 标题,V25-D-38)/ `AI`(AI 规划,含零边界静默降级的整本单章)/ `AUTO`(程序阈值单章,V25-D-38——总字数 ≤ `single_chapter_max_chars` 或同步类型无标题结构)/ `FALLBACK`(用户显式选择整本单章继续)/ `TEXT` / `ZIP` / `MANUAL`(预留);用户修改名称/页码不改变 source |
 | `start_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null;ZIP 章节 = chunk_seq 区间起点(可修改) |
 | `end_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null;ZIP 章节 = chunk_seq 区间终点(可修改) |
 
@@ -355,6 +363,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `client_event_id` | uuid | ✓ | 客户端生成,用户内唯一,幂等标识 |
 | `card_id` | uuid | ✓ | |
 | `rating` | enum | ✓ | `AGAIN` / `HARD` / `GOOD` / `EASY` |
+| `origin` | enum | ✗ | 评分来源:`PLAN`(今日计划) / `BACKLOG`(积压巩固) / `ADHOC`(卡组临时学习);V25-D-37 新增,可缺省,缺失存 NULL=未分类(旧客户端过渡期不失败),与会话 origin(3.25)同枚举 |
 | `reviewed_at` | datetime | ✓ | 服务端时间 |
 | `device_timezone` | string | ✗ | V2.5 降级为可空审计字段,不参与权威统计(1.2) |
 | `created_at` | datetime | ✓ | |
@@ -379,9 +388,12 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `retention_rate` | float \| null | ✓ | 非首次事件中 GOOD 数 / 非首次事件数 |
 | `streak_days` | int | ✓ | 截至账号学习时区当天连续有复习事件的自然日数(按学习时区分桶) |
 | `mastered_card_count` | int | ✓ | 掌握卡片数(见 5.3) |
+| `weekly_study_seconds` | int | ✓ | 本周学习会话累计秒数(按学习日对齐周窗口,V25-D-37) |
+| `daily_study_seconds` | int[7] | ✓ | 周一~周日每日学习秒数(与会话学习日同口径) |
+| `plan_study_seconds` / `backlog_study_seconds` / `adhoc_study_seconds` | int | ✓ | 本周按来源拆分的学习秒数 |
 | `has_data` | bool | ✓ | false 时客户端展示空态,不得用固定示例值 |
 
-**分母为 0 的比率一律返回 `null`**,不得以 0% 冒充;无历史数据时不得伪造固定日期数组或伪 0%。时区改变后用 UTC `reviewed_at` 重新分桶,不改写事件。
+**分母为 0 的比率一律返回 `null`**,不得以 0% 冒充;无历史数据时不得伪造固定日期数组或伪 0%。时区改变后用 UTC `reviewed_at` 重新分桶,不改写事件。学习时长为尽力送达的观测数据(会话绝对值合并,3.25),无会话数据时各时长字段为 0,不与评级事实口径混同。
 
 ### 3.13 SampleCard(V2.5 增量)
 
@@ -587,6 +599,21 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 规则:register(201)与 login(200)共用本形状;logout 撤销当前会话返回 204;`GET /auth/me` 只返回 `user`。
 客户端不得自动重试 register/login(防网络重放静默创建多条会话,FR-19)。
 
+### 3.25 StudySession(学习会话,V25-D-37)
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `session_id` | uuid | ✓ | 服务端生成 |
+| `origin` | enum | ✓ | `PLAN`(今日计划,跨卡组) / `BACKLOG`(积压巩固,跨卡组) / `ADHOC`(卡组临时学习,单卡组) |
+| `deck_id` | uuid \| null | ✓ | ADHOC 必填且须归属当前用户;PLAN/BACKLOG 恒为 null |
+| `study_date` | string | ✓ | 账号学习时区下的学习日期(ISO `yyyy-MM-dd`,1.2),自然键成员 |
+| `study_seconds` | int | ✓ | 本会话累计学习秒数;客户端按绝对值上报,服务端 `max` 合并,取值 0~86400 |
+| `started_at` | datetime | ✓ | 首次开启时间(服务端) |
+| `last_reported_at` | datetime \| null | ✓ | 最近一次时长上报时间 |
+| `ended_at` | datetime \| null | ✓ | 客户端申报的结束时间;缺失不阻断同日续用 |
+
+自然键 = `(user_id, study_date, origin, deck 范围)`:同一天同来源同范围再次 begin 即返回同一行(中断续学仅限当天),跨学习日自动开新行,不存在跨天续用与僵尸会话清理。deck 范围在库内物化为非空哨兵列 `deck_key`(ADHOC=deck_id,跨卡组=`*`),规避 SQLite UNIQUE 对 NULL 不去重的语义。会话是薄容器:**状态在卡上、事实在流水里、会话只是当天的门**——不保存卡片状态、剩余队列或完成数,恢复会话后的学习队列按当前 ReviewState 现算(到期队列扣除当日已评分卡片);时长为尽力送达的观测数据,重复/乱序上报按绝对值取最大不叠加,极端丢失不影响评分事实。评分请求的 `origin`(3.11,可缺省)与本枚举同源;自由刷题不产生会话。
+
 ## 4. 状态机
 
 ### 4.1 GenerationTask(V2.5 八态)
@@ -740,10 +767,13 @@ Scheduler(
 | POST | `/v1/projects/{project_id}/materials/pdf` | multipart PDF;建立 PDF 资料并异步解析(重置章节确认) | ✓ |
 | POST | `/v1/projects/{project_id}/materials/text` | JSON `{name, content}`;≤30000 字,单章节+段落多 chunk,即时就绪(重置章节确认) | ✓ |
 | POST | `/v1/projects/{project_id}/materials/zip` | multipart ZIP 笔记包;≤20MB、≤500 个 md、正文≤30 万字,同步解析、即时就绪:一级子文件夹=章节、根级 md 收「总览」章节(重置章节确认) | ✓ |
+| POST | `/v1/projects/{project_id}/materials/html` | multipart HTML 页面(V25-D-38);≤20MB、正文≤30 万字,同步解析、即时就绪:最浅出现的标题级=章节(source=HEADING,标题间正文按章切段),无标题结构或总字数≤`single_chapter_max_chars` → 恒单章(source=AUTO);script/style 忽略,不存档原件(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials` | 资料列表(各自状态;TEXT 附单章节) | - |
 | DELETE | `/v1/projects/{project_id}/materials/{material_id}?retain_cards=true\|false` | 资料级删除:静默取消引用该资料的活跃任务并 fencing;按参数保留或删除该资料产出卡片;删最后一份资料后项目转 `EMPTY`(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials/{material_id}/deletion-preflight` | 删除确认页预检(V25-GEN-FR-02):返回将影响的卡片数量与静默取消任务数;只读、无 blocker 语义(引用任务删除时静默取消) | - |
 | POST | `/v1/projects/{project_id}/materials/{material_id}/replace` | 仅 `FAILED` PDF 资料可原位替换并重新解析(不重置其他资料;旧 `/replace-pdf` 为同 handler 兼容别名) | ✓ |
+| POST | `/v1/projects/{project_id}/materials/{material_id}/reparse` | V25-D-36 仅 `FAILED` 且 error_code ∈ {`PDF_AI_CHAPTERS_FAILED`,`API_KEY_NOT_SET`} 的 PDF 资料可重置为 `PENDING` 重新解析(不重传文件) | ✓ |
+| POST | `/v1/projects/{project_id}/materials/{material_id}/chapters/whole-book` | V25-D-36 整本单章降级:仅同上失败态 PDF,以既有文本块建 1..N 单章(`source=FALLBACK`,名称=资料名)并置 `PARSED` | ✓ |
 | PATCH | `/v1/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页(TEXT 章节仅名称) | ✓ |
 | DELETE | `/v1/projects/{project_id}/chapters/{chapter_id}?delete_cards=false` | 活跃任务保护;保留卡时 `chapter_id` 置空 | ✓ |
 | POST | `/v1/projects/{project_id}/confirm-chapters` | 确认目录,使项目进入 READY | ✓ |
@@ -821,8 +851,12 @@ zip 损坏或 md 非 UTF-8 → `422 ZIP_EXTRACT_FAILED`。条目名按 UTF-8 fla
 | GET | `/v1/study/plan` | 读取当前项目、计划卡组与新学/巩固双目标 | - |
 | PUT | `/v1/study/plan` | 原子保存计划配置;目标为 0~200 的 10 倍数且不可同时为 0 | ✓ |
 | GET | `/v1/study/today/backlog?offset=&limit=` | 读取超过巩固软目标的到期卡 | - |
+| POST | `/v1/study/sessions` | 开启/续用当日学习会话 `{ origin, deck_id? }`;同日同来源同范围返回同一行并继承累计时长(3.25,V25-D-37) | ✓ |
+| PATCH | `/v1/study/sessions/{session_id}` | 上报会话时长 `{ study_seconds, ended? }`;绝对值 max 合并,天然幂等 | ✓ |
+| GET | `/v1/study/sessions?study_date=` | 查询指定学习日(缺省=账号学习时区今天)的会话列表 | - |
+| GET | `/v1/study/sessions/summary` | 全历史时长汇总:ADHOC 按卡组 + 三来源合计(3.25);项目/卡组详情既有「学习时长」卡的服务端数据源 | - |
 | GET | `/v1/decks/{deck_id}/review` | 独立牌组或指定牌组到期复习队列(due <= now,按 due、position 排序) | - |
-| POST | `/v1/review-events` | 提交评级 `{ card_id, rating, client_event_id }`(不再要求 device_timezone),返回更新后的 ReviewState 与本次学习日期 | ✓(client_event_id) |
+| POST | `/v1/review-events` | 提交评级 `{ card_id, rating, client_event_id, origin? }`(不再要求 device_timezone),返回更新后的 ReviewState 与本次学习日期 | ✓(client_event_id) |
 
 ### 6.7 数据看板(V2.5 目标 4.5)
 
@@ -882,10 +916,13 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `INVALID_LEARNING_TIMEZONE` | 400 | V2.5 非法 IANA 时区 |
 | PDF/项目 | `PDF_UPLOAD_INVALID` | 400 | 非 PDF / 损坏 / 超限(100MB / 1000 页) |
 | | `PDF_PARSE_FAILED` | 422 | 文本层解析失败 |
-| | `PDF_TOC_MISSING` | 422 | 无可用目录结构(终止流程) |
+| | `PDF_TOC_MISSING` | 422 | 无可用目录结构;V25-D-36 起不再产出(历史行兼容),无目录走 AI 章节规划 |
+| | `PDF_AI_CHAPTERS_FAILED` | 422 | V25-D-36 无目录 PDF 的 AI 章节规划失败(调用/校验失败或超段数上限);可 `reparse` 重试或 `whole-book` 降级 |
 | | `ZIP_UPLOAD_INVALID` | 400 | V25-D-35 ZIP 笔记包非 zip / 超限(20MB / 500 文件 / 30 万字) |
 | | `ZIP_STRUCTURE_INVALID` | 400 | V25-D-35 结构不符:散落根级文件、多个顶层条目或无有效 md 正文 |
 | | `ZIP_EXTRACT_FAILED` | 422 | V25-D-35 zip 损坏或 md 非 UTF-8 编码 |
+| | `HTML_UPLOAD_INVALID` | 400 | V25-D-38 HTML 非 .html/.htm / 超限(20MB / 30 万字) / 非文本 html |
+| | `HTML_EXTRACT_FAILED` | 422 | V25-D-38 HTML 正文抽取失败(非 UTF-8 编码或解析异常) |
 | | `PDF_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性) |
 | | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本用户(统一 404) |
 | | `PROJECT_NOT_FOUND` | 404 | V2.5 项目不存在或跨用户 |
@@ -893,7 +930,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `PROJECT_STATE_CONFLICT` | 409 | V2.5 当前项目状态不允许操作 |
 | | `PROJECT_HAS_ACTIVE_TASK` | 409 | 保护性冲突:放弃路径遇不可中断的正式 `GENERATING` 任务、或章节/资源被活跃任务引用(项目/牌组确认删除主路径在同一事务自动取消关联活跃任务,V25-D-17,不再以本码阻止) |
 | API Key | `API_KEY_UNAVAILABLE` | 502 | Key 缺失/解密失败、chat 上游 401/429/5xx 或校验链路(validate_key)上游不可用(含网络);生成链路中 401(Key 错误)不可重试 → 任务 `FAILED`,429/5xx 可重试(账本预算内);生成链路网络/超时与响应解析失败内部记 `GENERATION_FAILED`(重试预算同) |
-| | `API_KEY_NOT_SET` | 422 | 样卡 / 任务启动时未保存 Key |
+| | `API_KEY_NOT_SET` | 422 | 样卡 / 任务启动 / 无目录 PDF 的 AI 章节规划(V25-D-36)时未保存 Key |
 | 任务 | `TASK_NOT_FOUND` | 404 | |
 | | `TASK_STATE_CONFLICT` | 409 | V2.5 非法状态转移(如 abandon/start/retry 前置状态不符) |
 | | `TASK_ZERO_CARDS` | 422 | V2.5 正式生成无有效卡(整体失败,不显示"完成 0 张") |
@@ -910,6 +947,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `REWRITE_SCHEMA_INVALID` | 422 | 重写预览的新版本未通过 Schema 校验(原卡保留) |
 | 复习 | `REVIEW_EVENT_INVALID` | 400 | 评级非法 |
 | | `REVIEW_EVENT_CONFLICT` | 409 | 同 `client_event_id` 但 `card_id` / `rating` 与首次不一致 |
+| | `SESSION_NOT_FOUND` | 404 | V25-D-37 学习会话不存在或非本用户(统一 404,不暴露存在性) |
 
 注:API Key 校验结果(`INVALID` / `INSUFFICIENT_BALANCE`)经 `200 + ApiKey.status` 返回,不产生错误响应(见 6.2)。跨用户资源访问一律返回 404,不暴露资源存在性(1.1)。
 注:生成链路重试分类(适配层 `retryable` 元数据,1.4)——chat 401(Key 错误)非重试(任务 `FAILED`);chat 429/5xx 记 `API_KEY_UNAVAILABLE` 重试,网络/超时与响应解析失败记 `GENERATION_FAILED` 重试;Schema/锚定非法属业务重试,预算同为每操作 2 次重试 = 3 次尝试,由 `llm_call_attempts` 账本计数。
@@ -1015,3 +1053,4 @@ duration histogram 桶（分位数证据的正确性前提，桶集合在指标�
 | 1.2 学习时区 / 3.15 偏好 / 3.16 项目 / 3.17 项目设置 / 3.18 删除批次 / 3.19 重写预览 / 3.20 今日计划 / 3.4~3.9 增量 / 4.1 七态 / 6.1~6.7 接口 / 7 新错误码 | V2.5 总 PRD 及模块 PRD(V25-D-01~D-25) | 一致(非视觉计划 NV-01 原子转正) |
 | 1.6 IP 维度令牌桶语义（持续 5 req/s + 突发 10） | offline-foundation-v1（IP 限流突发容忍 + 离线补传幂等） | 修改(离线优先地基工作包契约同步；HTTP schema 无变化，openapi 不动) |
 | 8.3 指标桶边界与 path 归一化 / 8.6 服务端延迟基线 | V25-REL-FR-05/06（数据基线与性能门槛，方案由 Architecture 定义） | 新增(测试地基工作包契约同步；G4 证据出口) |
+| 3.25 StudySession / 3.11 ReviewEvent.origin / 3.12 时长字段 / 6.6 会话接口 | V25-D-37、V25-STUDY-FR-11/AC-05、V25-STATS-FR-07/AC-04 | 新增(学习会话与评分来源工作包契约同步) |

@@ -24,11 +24,14 @@ object ErrorMessages {
         "PDF_UPLOAD_INVALID" to "文件不符合要求，请上传有效 PDF",
         "PDF_PARSE_FAILED" to "PDF 解析失败，请换一份文件重试",
         "PDF_TOC_MISSING" to "PDF 缺少目录结构，无法生成",
+        "PDF_AI_CHAPTERS_FAILED" to "AI 章节规划失败，可重试解析或按整本继续",
         "PDF_NOT_READY" to "PDF 尚未解析完成，请稍候再试",
         "PDF_NOT_FOUND" to "文件不存在或已删除",
         "ZIP_UPLOAD_INVALID" to "ZIP 文件不符合要求（≤20MB、≤500 个 md、正文≤30 万字）",
         "ZIP_STRUCTURE_INVALID" to "ZIP 结构不符：需恰有一个主文件夹，子文件夹放 md 笔记",
         "ZIP_EXTRACT_FAILED" to "ZIP 损坏或包含非 UTF-8 的 md 文件",
+        "HTML_UPLOAD_INVALID" to "HTML 文件不符合要求（≤20MB、正文≤30 万字）",
+        "HTML_EXTRACT_FAILED" to "HTML 解析失败，请确认文件为 UTF-8 编码",
         "CHAPTER_NOT_FOUND" to "章节不存在或已删除",
         "PROJECT_NOT_FOUND" to "项目不存在或已删除",
         "MATERIAL_NOT_FOUND" to "资料不存在或已删除",
@@ -56,6 +59,7 @@ object ErrorMessages {
         "REWRITE_SCHEMA_INVALID" to "改写结果不符合要求，请重试",
         "REVIEW_EVENT_INVALID" to "学习记录无效",
         "REVIEW_EVENT_CONFLICT" to "学习记录冲突，请刷新重试",
+        "SESSION_NOT_FOUND" to "学习会话不存在或已过期，请重新进入学习",
     )
 
     /**

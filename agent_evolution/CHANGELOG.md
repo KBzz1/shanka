@@ -173,3 +173,57 @@
 - 配套：生产模型默认值 `deepseek-v4-flash` → `deepseek-flash`（官方 2026-09-10 发布
   V4.1-Flash，旧名仅临时兼容路由；DeepSeekClient 无代码变更，仅 config 默认值与测试
   断言同步）。
+
+## 2026-09-16（v9 新增 chapter_planner：无目录 PDF 的 AI 章节边界规划，V25-D-36）
+
+- **依据**：PRD V25-D-36（显式推翻历史「目录解析失败不提供 AI 猜测兜底」规则）——无目录
+  PDF 此前直接 FAILED（PDF_TOC_MISSING）且只能换文件；页文本已在解析期全量落
+  text_chunks，具备分段喂给模型识别章节起始点的数据基础。
+- **新增 prompts/chapter_planner v9**：全新资产（planner/generator/rewrite/scoring 均
+  不变）。文档结构分析师角色：输入一段连续内容页（资料按约 2.4 万字符切段，各段调用
+  system 部分逐字节一致以吃自动前缀缓存），只输出**在本段内开始**的章节边界
+  `{title, start_page}`；边界判定按可信度排序（显式章节标题 > 无标题的主要部分级主题
+  切换 > 前置内容后的正文起点），小节级切换与不确定项宁缺毋滥；段边界规则处理跨段延续
+  （本段开头是上一章收尾时不报告）；页码只能引用本段实际出现的页，运行时字符串一律
+  不可信。措辞资料类型中立（「内容页/资料」，不出现 PDF），为后续推广到 TEXT/ZIP 预留。
+- **新增 schemas/chapter_planner_output v9**：`{"chapters": [{"title"(1~80 字),
+  "start_page"(≥1 整数)}]}`；服务端另有确定性校验（start_page 必须落在段内区间、标题
+  规范化去重、每段边界数上限），schema 只管结构层。
+- **manifest** 新增 prompts.chapter_planner → v9、schemas.chapter_planner_output →
+  v9；既有资产版本全部不变（planner/planner_coarse v8、generator v7、rewrite v4、
+  scoring v3、card v1、planner_output/planner_coarse_output v7、generator_output/
+  scoring_output v3、rubric v3）。
+- 配套服务端：`llm_call_attempts.stage` 域新增 `CHAPTER_PLANNING`（scope_type=
+  MATERIAL、operation_key=`chapters:{material_id}:{segment_index}`）；章节规划失败 →
+  `PDF_AI_CHAPTERS_FAILED`，支持 reparse 重试与整本单章降级（详见 structure-contract
+  3.2/6.2）。
+
+## 2026-09-17（v10 章节体系分层原理 + 0 边界引导重试；两书量化评测驱动）
+
+- **依据**：chapter_planning_eval 两书量化证据（deepseek-flash）——样书（"第 N 章"显式
+  标题）recall 0.917 / precision 0.355（偏多切）；面试问答笔记（中文序号「一→十一」节头
+  + 高频「卡片 NN」条目行）输出 0 边界、静默降级整本单章（recall 0.000）。根因：v9 的
+  边界判定为形态枚举（"第 N 章/Chapter N/Part N"），中文序号不在枚举内，且未提供多编号
+  体系的分层方法，模型把节头与条目行同级看待后在"宁缺毋滥"约束下整体弃权。
+- **prompts/chapter_planner v9 → v10**：边界判定从形态枚举改为**分层原理**——通读后列出
+  文档内全部编号标题体系，按编号跨度与重复频次分层，「跨度最大、频次最低」者为章节体系，
+  其每个成员标题行必报；高频重复编号行（题号/卡片号/练习号）为条目，明确排除；中文序号
+  与阿拉伯/拉丁编号同权。宁缺毋滥改为分级适用（显式编号节头必报；仅无编号主题切换适用）。
+  静态示例新增问答/题库类正反例（中文序号节头 vs 题号行），示例措辞保持通用形态以避免
+  向评测样本过拟合。schemas/chapter_planner_output 保持 v9（结构不变）。
+- **服务端流程（services/chapters/planner.py）**：段返回 0 边界时追加**引导重试**一次——
+  同 system、user 附加「章节体系判定原理」引导指令（重新检查编号体系，存在则必须输出），
+  独立 operation_key `chapters:{material_id}:{seg}:guided`（不挤占首次预算，账本独立留痕）；
+  引导轮仍为空才视为"该段确实无章节结构"，维持 V25-D-36 静默降级语义。
+- **manifest**：prompts.chapter_planner → v10；其余资产版本全部不变（planner/planner_coarse
+  v8、generator v7、rewrite v4、scoring v3、card v1、planner_output/planner_coarse_output v7、
+  chapter_planner_output v9、generator_output/scoring_output v3、rubric v3）。
+- **验证结果（chapter_planning_eval 两书回归，deepseek-flash 实测）**：闪卡书 F1 0.000 →
+  **0.952**（precision 1.000 / recall 0.909；唯一漏检为同页双节头被确定性页去重合并，属
+  页级模型固有限制），多轮重跑稳定；样书 recall 持平（0.917 附近），precision 由 0.355
+  降至约 0.24~0.28（多切以 N.N 小节为主），F1 0.512 → 0.377~0.431——**未达"样书 F1 不降"
+  门槛**。定性结论：v10 分层原理对 flash 规模模型可执行性有限，样书多切为模型固有倾向，
+  提示词层修不动（同措辞两次运行 F1 波动 0.431/0.377，与措辞微调效应同量级）；两书综合
+  （0.377+0.952 vs 0.512+0）与产品价值（全弃不可用 → 可用、用户可在确认环节删除多切章节）
+  支持采纳 v10。样书 precision 的根治方向是架构层确定性分层（正则抽标题行候选 + 代码按
+  跨度/频次分层，模型仅确认），已列为后续工作包候选，不在本提示词版本内。

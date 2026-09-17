@@ -39,7 +39,9 @@ from services.pdf.parser import page_count_hint
 from services.pdf.scanner import validate_upload
 from services.pdf.service import chapter_view
 from services.progress.service import project_progress, project_weekly_stats
+from services.projects.html_archive import parse_html_archive, validate_html_upload
 from services.projects.service import (
+    add_html_material,
     add_pdf_material,
     add_text_material,
     add_zip_material,
@@ -48,6 +50,7 @@ from services.projects.service import (
     delete_material,
     delete_project,
     delete_project_chapter,
+    fallback_whole_book_chapters,
     get_project,
     get_study_settings,
     list_materials,
@@ -55,6 +58,7 @@ from services.projects.service import (
     material_deletion_preflight,
     project_deletion_preflight,
     rename_project,
+    reparse_material,
     replace_pdf,
     update_project_chapter,
     update_study_settings,
@@ -336,6 +340,59 @@ async def add_zip_material_endpoint(
     return JSONResponse(status_code=status, content=body)
 
 
+@router.post("/{project_id}/materials/html", status_code=201)
+async def add_html_material_endpoint(
+    request: Request,
+    project_id: str,
+    file: Annotated[UploadFile, File()],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """添加 HTML 页面资料（V25-D-38）：同步解析、即时就绪，程序优先零模型。
+
+    最浅标题级 = 章节（source=HEADING）；无标题结构或总字数 ≤ 阈值 → 恒单章
+    （source=AUTO）。校验与解析在幂等外（同 ZIP 定式），biz 只做 DB 写入。
+    """
+    settings: Settings = request.app.state.settings
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/materials/html"
+    data = await file.read()
+    validate_html_upload(
+        filename=file.filename or "",
+        content_type=file.content_type or "",
+        data=data,
+        settings=settings,
+    )
+    chapters, total_chars = parse_html_archive(data, settings=settings)
+    body_hash = request_body_hash(data)
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        body = add_html_material(
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            filename=file.filename or "upload.html",
+            size_bytes=len(data),
+            chapters=chapters,
+            total_chars=total_chars,
+            now=_now(),
+            settings=settings,
+        )
+        session.flush()
+        return 201, body
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
 @router.get(
     "/{project_id}/materials/{material_id}/deletion-preflight", response_model=DeletionPreflight
 )
@@ -516,6 +573,78 @@ async def replace_pdf_endpoint(
             storage_key=storage_key,
             now=_now(),
             storage=request.app.state.storage,
+        )
+        return 200, body
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router.post("/{project_id}/materials/{material_id}/reparse", status_code=200)
+def reparse_material_endpoint(
+    request: Request,
+    project_id: str,
+    material_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """V25-D-36 重试解析（不重传文件）：仅 FAILED 且 error_code ∈
+    {PDF_AI_CHAPTERS_FAILED, API_KEY_NOT_SET} 的 PDF 资料可重置 PENDING 重新解析。"""
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/materials/{material_id}/reparse"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        body = reparse_material(
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            material_id=material_id,
+            now=_now(),
+        )
+        return 200, body
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router.post("/{project_id}/materials/{material_id}/chapters/whole-book", status_code=200)
+def fallback_whole_book_chapters_endpoint(
+    request: Request,
+    project_id: str,
+    material_id: str,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """V25-D-36 整本单章降级：仅 AI 章节规划失败的 PDF，以既有文本块建 1..N 单章
+    （source=FALLBACK，名称=资料名）并置 PARSED。"""
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/materials/{material_id}/chapters/whole-book"
+    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        body = fallback_whole_book_chapters(
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            material_id=material_id,
+            now=_now(),
         )
         return 200, body
 

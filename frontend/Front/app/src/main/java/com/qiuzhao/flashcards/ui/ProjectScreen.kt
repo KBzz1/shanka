@@ -190,6 +190,7 @@ internal fun ProjectCreateScreen(
     }
     // 编辑页失败 PDF 的「点击重试」= 换文件 replace 重传（V25-D-30）。
     var replaceTarget by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
+    var aiRetryTarget by remember { mutableStateOf<ProjectDraftMaterial?>(null) }
     val replacePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val target = replaceTarget
         if (uri != null && target?.materialId != null && projectId != null) {
@@ -296,7 +297,13 @@ internal fun ProjectCreateScreen(
                         theme = theme, scale = scale,
                         materials = materials.filter { it.type != ProjectDraftMaterialType.TEXT },
                         onEditFile = { editingFile = it }, onEditText = {},
-                        onRetry = { material -> replaceTarget = material },
+                        onRetry = { material ->
+                            when {
+                                material.materialId != null && editingProject != null &&
+                                    isAiChapterRetryable(material.errorCode) -> aiRetryTarget = material
+                                else -> replaceTarget = material
+                            }
+                        },
                         onDelete = { material ->
                             if (editingProject == null || material.materialId == null) viewModel.deleteProjectDraftMaterial(material.id)
                             else pendingMaterialDeletion = material
@@ -401,6 +408,31 @@ internal fun ProjectCreateScreen(
                 editingFile = null
             },
             onDismiss = { editingFile = null }
+        )
+    }
+    aiRetryTarget?.let { material ->
+        val retryProjectId = material.projectId ?: projectId
+        val retryMaterialId = material.materialId
+        AiChapterFailureDialog(
+            theme = theme,
+            onReparse = {
+                aiRetryTarget = null
+                if (retryProjectId != null && retryMaterialId != null) {
+                    viewModel.reparseProjectMaterial(retryProjectId, retryMaterialId) { _, _ -> }
+                    viewModel.markMaterialImportParsing(material.id)
+                }
+            },
+            onWholeBook = {
+                aiRetryTarget = null
+                if (retryProjectId != null && retryMaterialId != null) {
+                    viewModel.fallbackWholeBookChapters(retryProjectId, retryMaterialId) { _, _ -> }
+                }
+            },
+            onReplaceFile = {
+                aiRetryTarget = null
+                replaceTarget = material
+            },
+            onDismiss = { aiRetryTarget = null },
         )
     }
     pendingMaterialDeletion?.let { material ->
@@ -1229,7 +1261,9 @@ internal fun ProjectTextEditorScreen(route: AppRoute.ProjectTextEditor, viewMode
         // Figma 1107:6361: the save action hugs its content, centred over the fade.
         Surface(
             onClick = {
-                if (title.isBlank()) {
+                // 与标题同款拦截：空标题/空内容都留在编辑器，避免“看似保存、
+                // 实则退出丢弃输入”。
+                if (title.isBlank() || content.isBlank()) {
                     return@Surface
                 }
                 if (route.stageForMaterialImport) {

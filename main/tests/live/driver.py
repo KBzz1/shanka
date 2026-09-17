@@ -375,7 +375,7 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
         if resp.status_code != 201:
             raise SystemExit(f"POST /pdfs 失败: {resp.status_code} {resp.text}")
         file_id = resp.json()["file_id"]
-        scan_pdfs(app.state.session_factory, storage=app.state.storage)
+        scan_pdfs(app.state.session_factory, storage=app.state.storage, settings=app.state.settings)
         pdf_view = client.get(f"/pdfs/{file_id}", headers=headers).json()
         if pdf_view["status"] != "PARSED":
             raise SystemExit(
@@ -393,6 +393,7 @@ def run_driver(args: argparse.Namespace) -> dict[str, Any]:
                     chapter_id=str(uuid.uuid4()),
                     file_id=file_id,
                     name=f"{block['chapter_name']}-块{block['index']:02d}",
+                    source="MANUAL",
                     start_page=int(block["start_page"]),
                     end_page=int(block["end_page"]),
                 )

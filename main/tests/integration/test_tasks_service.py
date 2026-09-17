@@ -115,6 +115,7 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
             file_id=pdf.file_id,
             material_id=pdf.file_id,
             name=f"第{i + 1}章",
+            source="MANUAL",
             start_page=i + 1,
             end_page=i + 2,
         )
@@ -143,6 +144,7 @@ def _seed_context(session: Session, *, user_id: str, with_key: bool = True) -> d
                 "chapter_id": ch.chapter_id,
                 "material_id": ch.material_id,
                 "name": ch.name,
+                "source": "MANUAL",
                 "start_page": ch.start_page,
                 "end_page": ch.end_page,
             }
@@ -285,6 +287,7 @@ def test_tasks_create_foreign_chapter_404(session_factory: Callable[[], Session]
             file_id=other_pdf.file_id,
             material_id=other_pdf.file_id,
             name="他章",
+            source="MANUAL",
             start_page=1,
             end_page=2,
         )

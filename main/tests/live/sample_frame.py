@@ -104,6 +104,7 @@ def build_frame(*, pdf_path: Path, seed: int) -> dict[str, Any]:
     if not pdf_path.exists():
         raise FileNotFoundError(f"样书不存在: {pdf_path}")
     _text_sample, chapters = parse_pdf(pdf_path)
+    assert chapters is not None  # 样书有 outline（None = 无目录走 AI，V25-D-36）
     if not _text_sample.strip():
         raise ValueError("样书无可提取文本层（抽样框依赖文本层）")
     selected = _select_chapters(chapters)

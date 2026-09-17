@@ -121,6 +121,18 @@ class Rating(StrEnum):
     EASY = "EASY"
 
 
+class ReviewOrigin(StrEnum):
+    """评分/会话来源（structure-contract 3.11/3.25；V25-D-37）。
+
+    PLAN=今日计划（跨卡组）；BACKLOG=积压巩固（跨卡组）；ADHOC=卡组临时学习（单卡组）。
+    评分请求可缺省，缺失落库 NULL=未分类（旧客户端过渡期不失败）。
+    """
+
+    PLAN = "PLAN"
+    BACKLOG = "BACKLOG"
+    ADHOC = "ADHOC"
+
+
 class ApiKeyStatus(StrEnum):
     """API Key 状态（structure-contract 3.1/6.2）。"""
 

@@ -31,5 +31,10 @@ class StatsDashboard(BaseModel):
     retention_rate: float | None
     streak_days: int
     mastered_card_count: int
+    weekly_study_seconds: int  # V25-D-37 本周学习会话累计秒数（按学习日对齐周窗口）
+    daily_study_seconds: list[int]  # 周一~周日每日学习秒数（与会话学习日同口径）
+    plan_study_seconds: int  # 本周按来源拆分：今日计划
+    backlog_study_seconds: int  # 本周按来源拆分：积压巩固
+    adhoc_study_seconds: int  # 本周按来源拆分：卡组临时学习
     updated_at: str
     has_data: bool

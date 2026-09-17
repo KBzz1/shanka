@@ -62,9 +62,47 @@ def test_alembic_upgrade_creates_all_tables(alembic_env: tuple[Config, Path]) ->
         "project_study_settings",
         "card_deletion_batches",
         "card_rewrite_previews",
+        # V25-D-37 学习会话（database-design 2.23）
+        "study_sessions",
         "alembic_version",
     }
     assert expected <= tables
+
+
+def test_v25_d37_study_sessions_and_review_origin(alembic_env: tuple[Config, Path]) -> None:
+    """V25-D-37（revision e6a9c3f02b7d）：study_sessions 表 + review_events.origin 列。"""
+    config, db_path = alembic_env
+    command.upgrade(config, "head")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    with engine.connect() as conn:
+        sessions_cols = {r[1] for r in conn.execute(text("PRAGMA table_info('study_sessions')"))}
+        assert {
+            "session_id",
+            "user_id",
+            "origin",
+            "deck_id",
+            "deck_key",
+            "study_date",
+            "study_seconds",
+            "started_at",
+            "last_reported_at",
+            "ended_at",
+        } <= sessions_cols
+        # 自然键唯一索引（当日续用；SQLite 将命名 UNIQUE 物化为 sqlite_autoindex_*，
+        # 按列集合识别）+ 看板聚合索引
+        unique_columns: set[frozenset[str]] = set()
+        for idx in conn.execute(text("PRAGMA index_list('study_sessions')")):
+            if idx[2]:  # unique 标志位
+                cols = frozenset(r[2] for r in conn.execute(text(f"PRAGMA index_info('{idx[1]}')")))
+                unique_columns.add(cols)
+        assert frozenset({"user_id", "study_date", "origin", "deck_key"}) in unique_columns
+        indexes = {r[1] for r in conn.execute(text("PRAGMA index_list('study_sessions')"))}
+        assert "ix_study_sessions_user_date" in indexes
+        review_cols = {r[1] for r in conn.execute(text("PRAGMA table_info('review_events')"))}
+        assert "origin" in review_cols  # NULL=未分类（历史行不回填）
+    # downgrade fail-closed（不可逆）
+    with pytest.raises(NotImplementedError):
+        command.downgrade(config, "d4f8a2c6b1e9")
 
 
 def test_alembic_downgrade_empties_db(alembic_env: tuple[Config, Path]) -> None:

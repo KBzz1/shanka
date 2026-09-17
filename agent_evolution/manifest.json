@@ -19,6 +19,10 @@
     "planner_coarse": {
       "version": "v8",
       "path": "prompts/v8/planner-coarse.md"
+    },
+    "chapter_planner": {
+      "version": "v10",
+      "path": "prompts/v10/chapter-planner.md"
     }
   },
   "schemas": {
@@ -41,6 +45,10 @@
     "planner_coarse_output": {
       "version": "v7",
       "path": "schemas/v7/planner-coarse-output.schema.json"
+    },
+    "chapter_planner_output": {
+      "version": "v9",
+      "path": "schemas/v9/chapter-plan-output.schema.json"
     }
   },
   "rubrics": {

@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.errors import AppError, ErrorCode
 from domain.card import VISIBLE_PREDICATE_SQL
+from domain.enums import ReviewOrigin
 from infra.db.models import Card, ReviewEvent, ReviewState
 from infra.db.session import format_utc
 from services.cards.service import card_view
@@ -178,15 +179,23 @@ def _submit_review_inner(
     rating_value: str,
     client_event_id: str,
     device_timezone: str | None,
+    origin: str | None,
     now: str,
 ) -> tuple[bool, dict[str, object], str]:
     """执行评级（幂等原语 fn 内）：返回 (是否因 client_event_id 兜底重放, 响应视图, study_date)。
 
     study_date = 账号学习时区（1.2）下的本次学习日期：首评取事务时钟 now；
     兜底重放取既有事件的 reviewed_at（同口径折算，不改写）。
+    origin（V25-D-37）：非法值 → VALIDATION_ERROR；缺省落库 None=未分类（旧客户端过渡期）。
     """
     if device_timezone is not None:
         _validate_timezone(device_timezone)  # M-3：非法 IANA → 400 VALIDATION_ERROR
+    origin_value: str | None = None
+    if origin is not None:
+        try:
+            origin_value = ReviewOrigin(origin).value
+        except ValueError as exc:
+            raise AppError(ErrorCode.VALIDATION_ERROR, "origin 须为 PLAN/BACKLOG/ADHOC") from exc
     card = session.scalar(
         select(Card).where(
             Card.card_id == card_id,
@@ -240,6 +249,7 @@ def _submit_review_inner(
             card_id=card_id,
             client_event_id=client_event_id,
             rating=rating_value,
+            origin=origin_value,
             reviewed_at=now,
             device_timezone=device_timezone,
             created_at=now,
@@ -256,11 +266,13 @@ def submit_review(
     rating: str,
     client_event_id: str,
     device_timezone: str | None,
+    origin: str | None = None,
     now: str,
 ) -> dict[str, object]:
     """评级事务入口（handler 层再包 execute_idempotent，Task 3）。
 
     V2.5（6.6）：返回 {review_state: 更新后视图, study_date: 账号学习时区下的本次学习日期}。
+    origin（V25-D-37）：可选评分来源，缺省存 NULL=未分类。
     """
     _, view, study_date = _submit_review_inner(
         session,
@@ -269,6 +281,7 @@ def submit_review(
         rating_value=rating,
         client_event_id=client_event_id,
         device_timezone=device_timezone,
+        origin=origin,
         now=now,
     )
     return {"review_state": view, "study_date": study_date}

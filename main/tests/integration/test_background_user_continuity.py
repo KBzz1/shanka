@@ -62,7 +62,7 @@ def _idem() -> dict[str, str]:
 
 def _scan_pdfs(client: TestClient) -> None:
     app = cast(FastAPI, client.app)
-    scan_pdfs(app.state.session_factory, storage=app.state.storage)
+    scan_pdfs(app.state.session_factory, storage=app.state.storage, settings=app.state.settings)
 
 
 def _create_task_before_executor(

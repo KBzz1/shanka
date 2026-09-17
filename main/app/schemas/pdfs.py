@@ -4,11 +4,15 @@ from pydantic import BaseModel, Field
 
 
 class Chapter(BaseModel):
-    """openapi Chapter（V2.5 多资料）：章节归属 material_id；TEXT 章节页码为 null。"""
+    """openapi Chapter（V2.5 多资料）：章节归属 material_id；TEXT 章节页码为 null。
+
+    V25-D-36：source = 章节初始来源（TOC/AI/FALLBACK/TEXT/ZIP/MANUAL）。
+    """
 
     chapter_id: str
     material_id: str
     name: str
+    source: str  # TOC/AI/FALLBACK/TEXT/ZIP/MANUAL（V25-D-36）
     start_page: int | None
     end_page: int | None
 

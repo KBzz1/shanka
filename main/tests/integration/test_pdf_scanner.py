@@ -1,11 +1,13 @@
-"""services.pdf.scanner 集成测试：状态机/章节落库/失败分支/恢复。
+"""services.pdf.scanner 集成测试：状态机/章节落库/失败分支/恢复 + V25-D-36 AI 章节规划分支。
 
 V1 教训 carry-forward：user_id FK 强制（PRAGMA foreign_keys=ON），scanner 测试
 需显式建立 users 行（见 test_pdf_service.py 同款 _ensure_user）。
 """
 
+import json
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pypdf import PdfWriter
@@ -15,12 +17,37 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.errors import AppError, ErrorCode
-from infra.db.models import Base, Chapter, LearningProject, Material, PdfFile, User
+from infra.db.models import (
+    ApiKey,
+    Base,
+    Chapter,
+    LearningProject,
+    LlmCallAttempt,
+    Material,
+    PdfFile,
+    User,
+)
 from infra.db.session import create_db_engine, create_session_factory
+from infra.llm.crypto import encrypt_key
+from infra.llm.deepseek import RetryableUpstreamError
 from infra.storage.local import LocalStorage
 from services.pdf.scanner import process_pending, scan_once, validate_upload
 
 SAMPLE = Path("/home/kbzz1/shanka_backend/res/AI-Agents-in-Depth-zh-CN.pdf")
+
+_ENC_KEY = "00" * 32  # 64 位 hex = 32 字节 AES-256 密钥（测试用）
+
+
+@pytest.fixture
+def settings() -> Settings:
+    return Settings(_env_file=None, api_key_encryption_key=_ENC_KEY)  # type: ignore[call-arg]
+
+
+def _ai_forced_settings() -> Settings:
+    """强制走 AI 分支：阈值压 0（V25-D-38 分诊不再拦截小资料）。"""
+    return Settings(  # type: ignore[call-arg]
+        _env_file=None, api_key_encryption_key=_ENC_KEY, single_chapter_max_chars=0
+    )
 
 
 @pytest.fixture
@@ -48,6 +75,19 @@ def _ensure_user(session: Session, user_id: str) -> None:
             email=f"u-{user_id[:8]}@example.com",
             password_hash="x",
             created_at="2026-08-11T00:00:00.000Z",
+            updated_at="2026-08-11T00:00:00.000Z",
+        )
+    )
+    session.flush()
+
+
+def _save_key(session: Session, *, user_id: str) -> None:
+    session.add(
+        ApiKey(
+            user_id=user_id,
+            encrypted_key=encrypt_key("sk-test", bytes.fromhex(_ENC_KEY)),
+            status="AVAILABLE",
+            masked_key="sk-****test",
             updated_at="2026-08-11T00:00:00.000Z",
         )
     )
@@ -94,7 +134,7 @@ def _seed_pending(session: Session, *, user_id: str, storage_key: str) -> str:
 
 
 def test_scanner_process_pending_parses_sample(
-    session_factory: sessionmaker[Session], storage: LocalStorage
+    session_factory: sessionmaker[Session], storage: LocalStorage, settings: Settings
 ) -> None:
     if not SAMPLE.exists():
         pytest.skip("样书缺失")
@@ -107,7 +147,7 @@ def test_scanner_process_pending_parses_sample(
         )
         session.commit()
     with session_factory() as session:
-        n = process_pending(session, storage=storage)
+        n = process_pending(session, storage=storage, settings=settings)
         session.commit()
         row = session.get(PdfFile, file_id)
         chapters = session.scalars(select(Chapter).where(Chapter.file_id == file_id)).all()
@@ -122,10 +162,19 @@ def test_scanner_process_pending_parses_sample(
     assert row.status == "PARSED"
     assert len(chapters) >= 3
     assert chapters[0].start_page is not None and chapters[0].start_page >= 1
+    # 有目录 → source=TOC（V25-D-36），零 LLM 调用
+    assert all(c.source == "TOC" for c in chapters)
+    with session_factory() as session:
+        assert (
+            session.scalar(
+                select(LlmCallAttempt.call_id).where(LlmCallAttempt.stage == "CHAPTER_PLANNING")
+            )
+            is None
+        )
 
 
 def test_scanner_process_pending_failed_keeps_file(
-    session_factory: sessionmaker[Session], storage: LocalStorage
+    session_factory: sessionmaker[Session], storage: LocalStorage, settings: Settings
 ) -> None:
     """损坏 PDF → FAILED + error_code，原始文件保留；失败同样是终态跃迁，bump 项目版本。"""
     user = _uuid()
@@ -137,7 +186,7 @@ def test_scanner_process_pending_failed_keeps_file(
         )
         session.commit()
     with session_factory() as session:
-        n = process_pending(session, storage=storage)
+        n = process_pending(session, storage=storage, settings=settings)
         session.commit()
         row = session.get(PdfFile, file_id)
         assert project_id is not None
@@ -152,7 +201,7 @@ def test_scanner_process_pending_failed_keeps_file(
 
 
 def test_scanner_scan_once_resumes_after_restart(
-    session_factory: sessionmaker[Session], storage: LocalStorage
+    session_factory: sessionmaker[Session], storage: LocalStorage, settings: Settings
 ) -> None:
     """重启恢复：PENDING/PARSING 残留重新入队处理。"""
     if not SAMPLE.exists():
@@ -200,7 +249,7 @@ def test_scanner_scan_once_resumes_after_restart(
         session.commit()
     # 新 session/新 app（重启模拟）
     with session_factory() as session:
-        n = scan_once(session_factory, storage=storage)
+        n = scan_once(session_factory, storage=storage, settings=settings)
         assert n >= 2
     with session_factory() as session:
         row1 = session.get(PdfFile, f1)
@@ -237,29 +286,255 @@ def _write_text_page(path: Path, text: str = "hello world") -> None:
         w.write(f)
 
 
-def test_scanner_process_pending_no_toc_fails(
-    tmp_path: Path, session_factory: sessionmaker[Session], storage: LocalStorage
-) -> None:
-    """有文本层但无目录（TOC_MISSING 分支）→ FAILED + PDF_TOC_MISSING。
+class _StubClient:
+    """章节规划 stub：按脚本逐次返回；记录调用以断言信封与页码锚定。"""
 
-    T3 审查补覆盖：T1 解析器测试只到 parse_pdf 抛错；此处走完整扫描路径验证
-    FAILED 终态与 error_code 落库（流程停止）。
-    """
+    def __init__(self, replies: list[str | Exception]) -> None:
+        self._replies = list(replies)
+        self.calls: list[dict[str, str]] = []
+
+    def chat(
+        self,
+        prompt: str,
+        api_key: str = "",
+        *,
+        system_prompt: str | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append({"user": prompt, "system": system_prompt or ""})
+        reply = self._replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return {
+            "content": reply,
+            "usage": {
+                "prompt_cache_hit_tokens": 10,
+                "prompt_cache_miss_tokens": 20,
+                "completion_tokens": 5,
+            },
+            "model": "stub",
+            "http_status": 200,
+            "duration_ms": 1,
+        }
+
+    def close(self) -> None:
+        return None
+
+
+def test_scanner_no_toc_small_pdf_auto_single_chapter(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    storage: LocalStorage,
+    settings: Settings,
+) -> None:
+    """V25-D-38 分诊：小资料（≤阈值）无目录 → 直接单章（source=AUTO），零模型、
+    不要求已存 Key（此前行为：FAILED + API_KEY_NOT_SET）。"""
+    from infra.db.models import TextChunk
+
     user = _uuid()
     pdf_path = tmp_path / "notoc.pdf"
     _write_text_page(pdf_path)
     with session_factory() as session:
         storage_key = storage.save(pdf_path.read_bytes())
         file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
+        session.commit()  # 无 ApiKey 行
+    with session_factory() as session:
+        n = process_pending(session, storage=storage, settings=settings)
+        session.commit()
+        row = session.get(PdfFile, file_id)
+        chapters = session.scalars(select(Chapter).where(Chapter.file_id == file_id)).all()
+        chunks = session.scalars(select(TextChunk).where(TextChunk.material_id == file_id)).all()
+        llm_rows = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.stage == "CHAPTER_PLANNING")
+        ).all()
+    assert n == 1
+    assert row is not None and row.status == "PARSED"  # 无 Key 也成功
+    assert len(chapters) == 1 and chapters[0].source == "AUTO"
+    assert chapters[0].name == "book.pdf"  # 资料名
+    assert chapters[0].start_page == 1 and chapters[0].end_page == 1
+    assert len(chunks) == 1
+    assert llm_rows == []  # 零模型调用
+
+
+def test_scanner_no_toc_large_without_key_fails_not_set(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    storage: LocalStorage,
+    settings: Settings,
+) -> None:
+    """V25-D-36 保留路径：超阈值无目录且未存 Key → FAILED + API_KEY_NOT_SET。"""
+    from infra.db.models import TextChunk
+
+    user = _uuid()
+    pdf_path = tmp_path / "notoc-big.pdf"
+    _write_text_page(pdf_path, text="x" * 2000)  # 1 页 2000 字符（PDF 文本流 ascii）
+    forced = Settings(  # type: ignore[call-arg]
+        _env_file=None,
+        api_key_encryption_key=_ENC_KEY,
+        single_chapter_max_chars=1000,  # 阈值 < 2000 → 强制超阈值
+    )
+    with session_factory() as session:
+        storage_key = storage.save(pdf_path.read_bytes())
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
-        n = process_pending(session, storage=storage)
+        n = process_pending(session, storage=storage, settings=forced)
+        session.commit()
+        row = session.get(PdfFile, file_id)
+        chunks = session.scalars(select(TextChunk).where(TextChunk.material_id == file_id)).all()
+    assert n == 1
+    assert row is not None
+    assert row.status == "FAILED"
+    assert row.error_code == "API_KEY_NOT_SET"
+    assert len(chunks) == 1  # 页文本先行落库
+
+
+def test_scanner_no_toc_ai_plans_chapters(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    storage: LocalStorage,
+    settings: Settings,
+) -> None:
+    """V25-D-36：无目录 + 已存 Key → AI 章节规划 → PARSED，章节 source=AI，
+    账本 stage=CHAPTER_PLANNING 落库。"""
+    user = _uuid()
+    pdf_path = tmp_path / "notoc.pdf"
+    _write_text_page(pdf_path)
+    with session_factory() as session:
+        storage_key = storage.save(pdf_path.read_bytes())
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
+        _save_key(session, user_id=user)
+        session.commit()
+    stub = _StubClient([json.dumps({"chapters": [{"title": "第 1 章 绪论", "start_page": 1}]})])
+    with session_factory() as session:
+        n = process_pending(
+            session, storage=storage, settings=_ai_forced_settings(), client_factory=lambda _k: stub
+        )
+        session.commit()
+        row = session.get(PdfFile, file_id)
+        chapters = session.scalars(select(Chapter).where(Chapter.file_id == file_id)).all()
+        attempts = session.scalars(
+            select(LlmCallAttempt).where(LlmCallAttempt.stage == "CHAPTER_PLANNING")
+        ).all()
+    assert n == 1
+    assert row is not None and row.status == "PARSED"
+    assert len(chapters) == 1
+    assert chapters[0].source == "AI"
+    assert chapters[0].name == "第 1 章 绪论"
+    assert chapters[0].start_page == 1 and chapters[0].end_page == 1
+    assert len(attempts) == 1
+    assert attempts[0].status == "SUCCESS"
+    assert attempts[0].scope_type == "MATERIAL" and attempts[0].scope_id == file_id
+    assert attempts[0].task_id is None
+    assert attempts[0].operation_key == f"chapters:{file_id}:0"
+
+
+def test_scanner_no_toc_ai_failure_fails_with_new_code(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    storage: LocalStorage,
+    settings: Settings,
+) -> None:
+    """V25-D-36：AI 调用持续失败（预算耗尽）→ FAILED + PDF_AI_CHAPTERS_FAILED。"""
+    user = _uuid()
+    pdf_path = tmp_path / "notoc.pdf"
+    _write_text_page(pdf_path)
+    with session_factory() as session:
+        storage_key = storage.save(pdf_path.read_bytes())
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
+        _save_key(session, user_id=user)
+        session.commit()
+    errors: list[str | Exception] = [
+        RetryableUpstreamError(ErrorCode.GENERATION_FAILED, "上游 5xx", retryable=True)
+        for _ in range(3 + settings.ai_chapter_retry_limit)
+    ]
+    stub = _StubClient(errors)
+    with session_factory() as session:
+        n = process_pending(
+            session, storage=storage, settings=_ai_forced_settings(), client_factory=lambda _k: stub
+        )
         session.commit()
         row = session.get(PdfFile, file_id)
     assert n == 1
     assert row is not None
     assert row.status == "FAILED"
-    assert row.error_code == "PDF_TOC_MISSING"
+    assert row.error_code == "PDF_AI_CHAPTERS_FAILED"
+
+
+def test_scanner_no_toc_zero_boundaries_degrades_to_whole_book(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    storage: LocalStorage,
+    settings: Settings,
+) -> None:
+    """V25-D-36：AI 全程（含 0 边界引导重试）成功仍 0 有效边界 → 静默降级整本单章
+    （source=AI），不 FAILED；账本记录 :guided 独立轮次。"""
+    user = _uuid()
+    pdf_path = tmp_path / "notoc.pdf"
+    _write_text_page(pdf_path)
+    with session_factory() as session:
+        storage_key = storage.save(pdf_path.read_bytes())
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
+        _save_key(session, user_id=user)
+        session.commit()
+    stub = _StubClient([json.dumps({"chapters": []}), json.dumps({"chapters": []})])
+    with session_factory() as session:
+        n = process_pending(
+            session, storage=storage, settings=_ai_forced_settings(), client_factory=lambda _k: stub
+        )
+        session.commit()
+        row = session.get(PdfFile, file_id)
+        chapters = session.scalars(select(Chapter).where(Chapter.file_id == file_id)).all()
+        keys = session.scalars(
+            select(LlmCallAttempt.operation_key).where(LlmCallAttempt.stage == "CHAPTER_PLANNING")
+        ).all()
+    assert n == 1
+    assert row is not None and row.status == "PARSED"
+    assert len(chapters) == 1
+    assert chapters[0].source == "AI"
+    assert chapters[0].name == "book.pdf"  # 资料名
+    assert chapters[0].start_page == 1 and chapters[0].end_page == 1
+    assert sorted(keys) == [f"chapters:{file_id}:0", f"chapters:{file_id}:0:guided"]
+    assert len(stub.calls) == 2
+    assert ":guided" not in stub.calls[0]["user"]  # 首次无引导指令
+    assert "章节体系判定原理" in stub.calls[1]["user"]  # 引导重试附加指令
+
+
+def test_scanner_no_toc_guided_retry_recovers_boundaries(
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    storage: LocalStorage,
+    settings: Settings,
+) -> None:
+    """V25-D-36 引导重试恢复：首报 0 边界 → 引导轮识别出边界 → 采用并 PARSED，
+    不再整本降级。"""
+    user = _uuid()
+    pdf_path = tmp_path / "notoc.pdf"
+    _write_text_page(pdf_path)
+    with session_factory() as session:
+        storage_key = storage.save(pdf_path.read_bytes())
+        file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
+        _save_key(session, user_id=user)
+        session.commit()
+    stub = _StubClient(
+        [
+            json.dumps({"chapters": []}),
+            json.dumps({"chapters": [{"title": "一 开场题", "start_page": 1}]}),
+        ]
+    )
+    with session_factory() as session:
+        n = process_pending(
+            session, storage=storage, settings=_ai_forced_settings(), client_factory=lambda _k: stub
+        )
+        session.commit()
+        row = session.get(PdfFile, file_id)
+        chapters = session.scalars(select(Chapter).where(Chapter.file_id == file_id)).all()
+    assert n == 1
+    assert row is not None and row.status == "PARSED"
+    assert len(chapters) == 1
+    assert chapters[0].source == "AI"
+    assert chapters[0].name == "一 开场题"
+    assert chapters[0].start_page == 1 and chapters[0].end_page == 1
 
 
 def test_scanner_validate_upload_page_count_boundary() -> None:

@@ -28,11 +28,14 @@ class ErrorCode(StrEnum):
     # PDF/项目
     PDF_UPLOAD_INVALID = "PDF_UPLOAD_INVALID"
     PDF_PARSE_FAILED = "PDF_PARSE_FAILED"
-    PDF_TOC_MISSING = "PDF_TOC_MISSING"
+    PDF_TOC_MISSING = "PDF_TOC_MISSING"  # V25-D-36 起不再产出（历史行兼容）
+    PDF_AI_CHAPTERS_FAILED = "PDF_AI_CHAPTERS_FAILED"  # V25-D-36 无目录 PDF 的 AI 章节规划失败
     # ZIP 笔记包（V25-D-35）
     ZIP_UPLOAD_INVALID = "ZIP_UPLOAD_INVALID"  # 扩展名/MIME/魔数/大小/文件数/总字符超限
     ZIP_STRUCTURE_INVALID = "ZIP_STRUCTURE_INVALID"  # 结构不符（无或多个主文件夹、无有效正文）
     ZIP_EXTRACT_FAILED = "ZIP_EXTRACT_FAILED"  # zip 损坏或 md 严格 UTF-8 解码失败
+    HTML_UPLOAD_INVALID = "HTML_UPLOAD_INVALID"  # V25-D-38 非 html / 超限 / 无正文
+    HTML_EXTRACT_FAILED = "HTML_EXTRACT_FAILED"  # V25-D-38 非 UTF-8 或解析异常
     PDF_NOT_FOUND = "PDF_NOT_FOUND"
     CHAPTER_NOT_FOUND = "CHAPTER_NOT_FOUND"
     PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"  # V2.5 项目不存在或跨用户（统一 404）
@@ -61,6 +64,7 @@ class ErrorCode(StrEnum):
     # 复习
     REVIEW_EVENT_INVALID = "REVIEW_EVENT_INVALID"
     REVIEW_EVENT_CONFLICT = "REVIEW_EVENT_CONFLICT"
+    SESSION_NOT_FOUND = "SESSION_NOT_FOUND"  # V25-D-37 学习会话不存在或非本用户（统一 404）
 
 
 ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
@@ -77,9 +81,12 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.PDF_UPLOAD_INVALID: 400,
     ErrorCode.PDF_PARSE_FAILED: 422,
     ErrorCode.PDF_TOC_MISSING: 422,
+    ErrorCode.PDF_AI_CHAPTERS_FAILED: 422,
     ErrorCode.ZIP_UPLOAD_INVALID: 400,
     ErrorCode.ZIP_STRUCTURE_INVALID: 400,
     ErrorCode.ZIP_EXTRACT_FAILED: 422,
+    ErrorCode.HTML_UPLOAD_INVALID: 400,
+    ErrorCode.HTML_EXTRACT_FAILED: 422,
     ErrorCode.PDF_NOT_FOUND: 404,
     ErrorCode.CHAPTER_NOT_FOUND: 404,
     ErrorCode.PROJECT_NOT_FOUND: 404,
@@ -104,6 +111,7 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.REWRITE_SCHEMA_INVALID: 422,
     ErrorCode.REVIEW_EVENT_INVALID: 400,
     ErrorCode.REVIEW_EVENT_CONFLICT: 409,
+    ErrorCode.SESSION_NOT_FOUND: 404,
 }
 
 # 文案清单（唯一位置，R-01）：派生集合的显式快照，守卫校验与派生集合全等
@@ -122,9 +130,12 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.pdf_upload_invalid",
         "error.pdf_parse_failed",
         "error.pdf_toc_missing",
+        "error.pdf_ai_chapters_failed",
         "error.zip_upload_invalid",
         "error.zip_structure_invalid",
         "error.zip_extract_failed",
+        "error.html_upload_invalid",
+        "error.html_extract_failed",
         "error.pdf_not_found",
         "error.chapter_not_found",
         "error.project_not_found",
@@ -149,6 +160,7 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.rewrite_schema_invalid",
         "error.review_event_invalid",
         "error.review_event_conflict",
+        "error.session_not_found",
     }
 )
 

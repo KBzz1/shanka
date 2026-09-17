@@ -594,6 +594,42 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /projects/{project_id}/materials/html:
+    post:
+      tags: [projects]
+      summary: "V25-D-38 添加 HTML 页面资料(同步解析、即时就绪):最浅标题级=章节(source=HEADING),无标题或总字数≤阈值恒单章(source=AUTO);≤20MB、正文≤30 万字"
+      operationId: addProjectMaterialHtml
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: .html/.htm 文档(UTF-8)
+      responses:
+        '201':
+          description: 资料已就绪(READY)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /projects/{project_id}/materials/{material_id}:
     parameters:
       - $ref: '#/components/parameters/ProjectId'
@@ -690,6 +726,72 @@ paths:
       responses:
         '200':
           description: 已替换并进入解析;返回更新后的项目(聚合状态)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningProject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /projects/{project_id}/materials/{material_id}/reparse:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: material_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [projects]
+      summary: V25-D-36 重试解析(不重传文件);仅 FAILED 且 error_code ∈ {PDF_AI_CHAPTERS_FAILED, API_KEY_NOT_SET} 的 PDF 资料,重置为 PENDING 重新解析
+      operationId: reparseProjectMaterial
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已重置为解析中;返回更新后的项目(聚合状态)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LearningProject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /projects/{project_id}/materials/{material_id}/chapters/whole-book:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: material_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags: [projects]
+      summary: V25-D-36 整本单章降级;仅 FAILED 且 error_code ∈ {PDF_AI_CHAPTERS_FAILED, API_KEY_NOT_SET} 的 PDF 资料,以既有文本块建 1..N 单章(source=FALLBACK,名称=资料名)并置 PARSED
+      operationId: fallbackWholeBookChapters
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 已按整本单章就绪;返回更新后的项目(聚合状态)
           content:
             application/json:
               schema:
@@ -1878,6 +1980,119 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /study/sessions:
+    post:
+      tags: [study]
+      summary: 开启/续用当日学习会话(同日同来源同范围返回同一行并继承累计时长,V25-D-37);reset=true 重置:封存活跃会话、新行从 0 计时,响应携带全卡组复盘队列
+      operationId: beginStudySession
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StudySessionBeginRequest'
+      responses:
+        '200':
+          description: 已存在(当日续用)或新开启的会话;reset=true 时另含 cards 复盘队列
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudySessionBeginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: VALIDATION_ERROR(origin 非法或 PLAN/BACKLOG 携带 deck_id)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+          description: DECK_NOT_FOUND(ADHOC 卡组不存在/非本用户)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    get:
+      tags: [study]
+      summary: 查询指定学习日(缺省=账号学习时区今天)的会话列表
+      operationId: listStudySessions
+      parameters:
+        - name: study_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+          description: ISO yyyy-MM-dd;缺省为账号学习时区下的今天
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [study_date, items]
+                properties:
+                  study_date:
+                    type: string
+                    format: date
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/StudySession'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /study/sessions/{session_id}:
+    patch:
+      tags: [study]
+      summary: 上报会话时长(客户端累计绝对值,服务端 max 合并,重复/乱序天然幂等)
+      operationId: reportStudySession
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StudySessionReportRequest'
+      responses:
+        '200':
+          description: 合并后的会话
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudySession'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+          description: VALIDATION_ERROR(study_seconds 越界 0~86400)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /study/sessions/summary:
+    get:
+      tags: [study]
+      summary: 全历史时长汇总(V25-D-37):ADHOC 按卡组 + 三来源合计;项目/卡组详情「学习时长」卡的服务端数据源
+      operationId: getStudySessionsSummary
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudySessionSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
   /review-events:
     post:
       tags: [review]
@@ -2027,6 +2242,13 @@ components:
       schema:
         type: string
         format: uuid
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
 
   schemas:
     # ---- 枚举 ----
@@ -2074,6 +2296,10 @@ components:
     Rating:
       type: string
       enum: [AGAIN, HARD, GOOD, EASY]
+    ReviewOrigin:
+      type: string
+      enum: [PLAN, BACKLOG, ADHOC]
+      description: 评分/会话来源(V25-D-37):PLAN=今日计划(跨卡组)、BACKLOG=积压巩固(跨卡组)、ADHOC=卡组临时学习(单卡组);缺失存 NULL=未分类(旧客户端过渡期)
     ApiKeyStatus:
       type: string
       enum: [AVAILABLE, INVALID, INSUFFICIENT_BALANCE, UNKNOWN]
@@ -2131,7 +2357,7 @@ components:
 
     Chapter:
       type: object
-      required: [chapter_id, material_id, name]
+      required: [chapter_id, material_id, name, source]
       properties:
         chapter_id:
           type: string
@@ -2142,6 +2368,8 @@ components:
           description: 归属学习资料(structure-contract 3.2a)
         name:
           type: string
+        source:
+          $ref: '#/components/schemas/ChapterSource'
         start_page:
           type: [integer, 'null']
           minimum: 1
@@ -2150,6 +2378,11 @@ components:
           type: [integer, 'null']
           minimum: 1
           description: PDF 章节可修改;TEXT 章节为 null
+
+    ChapterSource:
+      type: string
+      enum: [TOC, HEADING, AI, AUTO, FALLBACK, TEXT, ZIP, MANUAL]
+      description: 章节初始来源(V25-D-36/38);HEADING=HTML 标题,AUTO=程序阈值单章;用户修改名称/页码不改变 source
 
     ChapterUpdateRequest:
       type: object
@@ -2182,7 +2415,7 @@ components:
           $ref: '#/components/schemas/PdfStatus'
         error_code:
           type: [string, 'null']
-          description: PDF_PARSE_FAILED / PDF_TOC_MISSING
+          description: PDF_PARSE_FAILED / PDF_TOC_MISSING(历史,不再产出) / PDF_AI_CHAPTERS_FAILED / API_KEY_NOT_SET
         chapters:
           type: [array, 'null']
           items:
@@ -2193,8 +2426,8 @@ components:
 
     MaterialType:
       type: string
-      enum: [PDF, TEXT, ZIP]
-      description: LINK 为预留类型,本期不实现;ZIP=md 笔记包(V25-D-35)
+      enum: [PDF, TEXT, ZIP, HTML]
+      description: LINK 为预留类型,本期不实现;ZIP=md 笔记包(V25-D-35);HTML=网页文档(V25-D-38)
 
     MaterialStatus:
       type: string
@@ -2853,6 +3086,10 @@ components:
           format: uuid
         rating:
           $ref: '#/components/schemas/Rating'
+        origin:
+          type: [string, 'null']
+          enum: [PLAN, BACKLOG, ADHOC, null]
+          description: 评分来源;缺失存 NULL=未分类(旧客户端过渡期;契约 3.11)
         reviewed_at:
           type: string
           format: date-time
@@ -2878,6 +3115,9 @@ components:
           type: string
           format: uuid
           description: 客户端生成,设备内唯一,离线重试幂等
+        origin:
+          $ref: '#/components/schemas/ReviewOrigin'
+          description: 可选评分来源;缺省按未分类(NULL)落库,保证旧客户端过渡期评分不失败
 
     ReviewQueueItem:
       allOf:
@@ -2915,6 +3155,11 @@ components:
         - retention_rate
         - streak_days
         - mastered_card_count
+        - weekly_study_seconds
+        - daily_study_seconds
+        - plan_study_seconds
+        - backlog_study_seconds
+        - adhoc_study_seconds
         - updated_at
         - has_data
       properties:
@@ -2973,6 +3218,25 @@ components:
         mastered_card_count:
           type: integer
           description: 掌握卡片数(state=REVIEW 且 stability>=21 天)
+        weekly_study_seconds:
+          type: integer
+          description: 本周学习会话累计秒数(按学习日对齐周窗口,V25-D-37)
+        daily_study_seconds:
+          type: array
+          minItems: 7
+          maxItems: 7
+          items:
+            type: integer
+          description: 周一~周日每日学习秒数(与会话学习日同口径)
+        plan_study_seconds:
+          type: integer
+          description: 本周今日计划来源学习秒数
+        backlog_study_seconds:
+          type: integer
+          description: 本周积压巩固来源学习秒数
+        adhoc_study_seconds:
+          type: integer
+          description: 本周卡组临时学习来源学习秒数
         has_data:
           type: boolean
           description: false 时客户端展示空态
@@ -3641,6 +3905,150 @@ components:
           items:
             type: string
             format: uuid
+
+    StudySession:
+      type: object
+      required:
+        - session_id
+        - origin
+        - deck_id
+        - study_date
+        - study_seconds
+        - started_at
+        - last_reported_at
+        - ended_at
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        origin:
+          $ref: '#/components/schemas/ReviewOrigin'
+        deck_id:
+          type: [string, 'null']
+          format: uuid
+          description: ADHOC 必填且归属当前用户;PLAN/BACKLOG 恒为 null
+        study_date:
+          type: string
+          format: date
+          description: 账号学习时区下的学习日期(自然键成员)
+        study_seconds:
+          type: integer
+          minimum: 0
+          maximum: 86400
+          description: 本会话累计学习秒数;绝对值上报,服务端 max 合并
+        started_at:
+          type: string
+          format: date-time
+        last_reported_at:
+          type: [string, 'null']
+          format: date-time
+        ended_at:
+          type: [string, 'null']
+          format: date-time
+          description: 客户端申报结束;缺失不阻断同日续用
+      description: 学习会话薄容器(契约 3.25,V25-D-38);不保存卡片状态/队列/完成数
+
+    StudySessionBeginRequest:
+      type: object
+      required: [origin]
+      properties:
+        origin:
+          $ref: '#/components/schemas/ReviewOrigin'
+        deck_id:
+          type: string
+          format: uuid
+          description: 仅 ADHOC 必填;PLAN/BACKLOG 携带则 400
+        reset:
+          type: boolean
+          description: 会话重置(V25-D-37):封存当日活跃会话(时长保留)、新行从 0 计时;仅 ADHOC+deck_id 合法,响应携带全卡组复盘队列(新卡按 position 最前,其余按遗忘风险降序;不改写评分事实);默认 false
+
+    StudySessionBeginResponse:
+      type: object
+      required:
+        - session_id
+        - origin
+        - deck_id
+        - study_date
+        - study_seconds
+        - started_at
+        - last_reported_at
+        - ended_at
+        - cards
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        origin:
+          $ref: '#/components/schemas/ReviewOrigin'
+        deck_id:
+          type: [string, 'null']
+          format: uuid
+        study_date:
+          type: string
+          format: date
+        study_seconds:
+          type: integer
+          minimum: 0
+          maximum: 86400
+        started_at:
+          type: string
+          format: date-time
+        last_reported_at:
+          type: [string, 'null']
+          format: date-time
+        ended_at:
+          type: [string, 'null']
+          format: date-time
+        cards:
+          type: array
+          items:
+            $ref: '#/components/schemas/TodayPlanCard'
+          description: 仅 reset=true 携带;非重置 begin 为空列表
+      description: begin 响应 = StudySession 本体 + (reset=true 时)全卡组复盘队列
+
+    StudySessionReportRequest:
+      type: object
+      required: [study_seconds]
+      properties:
+        study_seconds:
+          type: integer
+          minimum: 0
+          maximum: 86400
+          description: 本次会话累计绝对秒数(非增量);服务端按 max 合并
+        ended:
+          type: boolean
+          description: 申报会话结束;默认 false
+
+    StudySessionSummary:
+      type: object
+      required:
+        - deck_study_seconds
+        - plan_study_seconds
+        - backlog_study_seconds
+        - adhoc_study_seconds
+      properties:
+        deck_study_seconds:
+          type: array
+          items:
+            type: object
+            required: [deck_id, study_seconds]
+            properties:
+              deck_id:
+                type: string
+                format: uuid
+              study_seconds:
+                type: integer
+          description: ADHOC 会话按卡组聚合的全历史累计秒数(卡组删除随级联消失,仅含现存卡组)
+        plan_study_seconds:
+          type: integer
+          description: PLAN(今日计划)全历史累计秒数
+        backlog_study_seconds:
+          type: integer
+          description: BACKLOG(积压巩固)全历史累计秒数
+        adhoc_study_seconds:
+          type: integer
+          description: ADHOC(卡组临时学习)全历史累计秒数 = deck_study_seconds 之和
+      description: 学习时长全历史汇总(V25-D-37);项目/卡组详情「学习时长」卡的服务端数据源
 
   responses:
     BadRequest:

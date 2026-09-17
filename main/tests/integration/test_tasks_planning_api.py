@@ -147,6 +147,7 @@ def _seed_context(db_path: Path, *, user_id: str, chapter_count: int = 2) -> dic
                 file_id=pdf.file_id,
                 material_id=pdf.file_id,
                 name=f"第{i + 1}章",
+                source="MANUAL",
                 start_page=i + 1,
                 end_page=i + 2,
             )
@@ -204,7 +205,14 @@ def test_tasks_create_201_draft_view(ctx: tuple[TestClient, Path]) -> None:
     assert body["skipped_planning_group_count"] == 0
     chapters = body["selected_chapters"]
     assert len(chapters) == 2
-    assert set(chapters[0]) == {"chapter_id", "material_id", "name", "start_page", "end_page"}
+    assert set(chapters[0]) == {
+        "chapter_id",
+        "material_id",
+        "name",
+        "source",
+        "start_page",
+        "end_page",
+    }
     assert chapters[0]["name"] == "第1章"
     assert body["generation_config"]["coverage_mode"] == "COMPACT"
     assert body["resumable"] is False

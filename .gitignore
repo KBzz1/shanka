@@ -41,3 +41,4 @@ __pycache__/
 /data/
 # 两阶段规划消融实验原始输出（子代理产物，含样书正文切块；harness 可重建，结论见 report.md）
 /scripts/planning_ablation/run/
+/scripts/chapter_planning_eval/run/

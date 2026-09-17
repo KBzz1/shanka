@@ -14,6 +14,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config import Settings
 from infra.db.models import LearningProject, Material, PdfFile, TextChunk, User
 from infra.storage.local import LocalStorage
 from services.pdf.scanner import process_pending
@@ -21,6 +22,11 @@ from services.pdf.text_chunks import chunk_id_for
 
 SAMPLE = Path("/home/kbzz1/shanka_backend/res/AI-Agents-in-Depth-zh-CN.pdf")
 SAMPLE_TOTAL_PAGES = 318
+
+
+@pytest.fixture
+def settings() -> Settings:
+    return Settings(_env_file=None)  # type: ignore[call-arg]
 
 
 def _uuid() -> str:
@@ -86,7 +92,7 @@ def _chunk_rows(session: Session, file_id: str) -> list[TextChunk]:
 
 
 def test_scanner_parsed_persists_text_chunks(
-    session_factory: sessionmaker[Session], storage: LocalStorage
+    session_factory: sessionmaker[Session], storage: LocalStorage, settings: Settings
 ) -> None:
     """PARSED 后完整页文本落库：一页一行、1-based 页码、确定性 chunk_id。"""
     if not SAMPLE.exists():
@@ -97,7 +103,7 @@ def test_scanner_parsed_persists_text_chunks(
         file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
-        n = process_pending(session, storage=storage)
+        n = process_pending(session, storage=storage, settings=settings)
         session.commit()
         rows = _chunk_rows(session, file_id)
     assert n == 1
@@ -111,7 +117,7 @@ def test_scanner_parsed_persists_text_chunks(
 
 
 def test_scanner_reparse_rebuilds_text_chunks(
-    session_factory: sessionmaker[Session], storage: LocalStorage
+    session_factory: sessionmaker[Session], storage: LocalStorage, settings: Settings
 ) -> None:
     """重解析幂等：清理重建后仍一页一行，且同内容页标识稳定（spec §4.1）。"""
     if not SAMPLE.exists():
@@ -122,7 +128,7 @@ def test_scanner_reparse_rebuilds_text_chunks(
         file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
-        assert process_pending(session, storage=storage) == 1
+        assert process_pending(session, storage=storage, settings=settings) == 1
         session.commit()
     # 模拟重解析：置回 PENDING 再走一遍
     with session_factory() as session:
@@ -131,7 +137,7 @@ def test_scanner_reparse_rebuilds_text_chunks(
         row.status = "PENDING"
         session.commit()
     with session_factory() as session:
-        assert process_pending(session, storage=storage) == 1
+        assert process_pending(session, storage=storage, settings=settings) == 1
         session.commit()
         rows = _chunk_rows(session, file_id)
     assert len(rows) == SAMPLE_TOTAL_PAGES
@@ -140,7 +146,7 @@ def test_scanner_reparse_rebuilds_text_chunks(
 
 
 def test_scanner_delete_pdf_cascades_text_chunks(
-    session_factory: sessionmaker[Session], storage: LocalStorage
+    session_factory: sessionmaker[Session], storage: LocalStorage, settings: Settings
 ) -> None:
     """删除 PDF 按 file_id 级联清理页文本（spec §4.1，FK ON DELETE CASCADE）。"""
     if not SAMPLE.exists():
@@ -151,7 +157,7 @@ def test_scanner_delete_pdf_cascades_text_chunks(
         file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
-        assert process_pending(session, storage=storage) == 1
+        assert process_pending(session, storage=storage, settings=settings) == 1
         session.commit()
     with session_factory() as session:
         pdf = session.get(PdfFile, file_id)
@@ -163,9 +169,13 @@ def test_scanner_delete_pdf_cascades_text_chunks(
 
 
 def test_scanner_no_toc_fails_without_text_chunks(
-    tmp_path: Path, session_factory: sessionmaker[Session], storage: LocalStorage
+    tmp_path: Path,
+    session_factory: sessionmaker[Session],
+    storage: LocalStorage,
+    settings: Settings,
 ) -> None:
-    """解析失败（PDF_TOC_MISSING）不写页文本：页文本只在 PARSED 全链路成功时落库。"""
+    """V25-D-36：无目录 + 未存 Key → FAILED + API_KEY_NOT_SET；页文本先行落库
+    （reparse / whole-book 降级不需重解析文件）。"""
     pdf_path = tmp_path / "notoc.pdf"
     w = PdfWriter()
     page = w.add_blank_page(width=200, height=200)
@@ -192,12 +202,11 @@ def test_scanner_no_toc_fails_without_text_chunks(
         file_id = _seed_pending(session, user_id=user, storage_key=storage_key)
         session.commit()
     with session_factory() as session:
-        n = process_pending(session, storage=storage)
+        n = process_pending(session, storage=storage, settings=settings)
         session.commit()
         row = session.get(PdfFile, file_id)
         chunks = _chunk_rows(session, file_id)
     assert n == 1
     assert row is not None
-    assert row.status == "FAILED"
-    assert row.error_code == "PDF_TOC_MISSING"
-    assert chunks == []
+    assert row.status == "PARSED"  # V25-D-38：小资料直接 AUTO 单章，未存 Key 也成功
+    assert len(chunks) == 1  # 页文本落库

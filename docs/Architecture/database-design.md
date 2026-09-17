@@ -32,6 +32,7 @@ users 1──N generation_operations ──0..1 tasks
                                  └──N llm_call_attempts
 users 1──N decks 1──N cards 1──1 review_states
 users 1──N review_events ──N cards
+users 1──N study_sessions ──0..1 decks（ADHOC 单卡组范围;V25-D-37）
 users 1──N llm_call_attempts
 users 1──N card_deletion_batches ──N cards(delete_batch_id)
 users 1──N card_rewrite_previews ──1 cards
@@ -82,6 +83,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | material_id | TEXT | NOT NULL, FK → materials ON DELETE CASCADE | V25-D-29 归属资料;章节随资料删除级联清理 |
 | file_id | TEXT | NULL, FK → pdf_files ON DELETE CASCADE | PDF 资料章节 = material_id;TEXT 资料章节为 NULL |
 | name | TEXT | NOT NULL | 用户可修改 |
+| source | TEXT | NOT NULL, CHECK IN ('TOC','HEADING','AI','AUTO','FALLBACK','TEXT','ZIP','MANUAL') | V25-D-36/38 章节初始来源(HEADING=HTML 标题、AUTO=程序阈值单章,V25-D-38 域扩展);用户修改名称/页码不改变。存量行迁移按资料类型回填(PDF→TOC、TEXT→TEXT、ZIP→ZIP) |
 | start_page | INTEGER | NULL | 用户可修改;TEXT 章节为 NULL(V25-D-32) |
 | end_page | INTEGER | NULL | 用户可修改;TEXT 章节为 NULL(V25-D-32) |
 
@@ -100,7 +102,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | retry_of_task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | V2.5 只指向同用户失败任务 |
 | status | TEXT | NOT NULL | V2.5 `DRAFT / SAMPLE_GENERATING / AWAITING_SAMPLE_CONFIRMATION / GENERATING / AWAITING_CONFIRMATION / COMPLETED / FAILED / ABANDONED`(八态) |
 | stage | TEXT | NULL | V2.5 改名 `internal_stage` 语义:`PLANNING / GENERATING / SCORING / PUBLISHING`,仅运行期内部观测 |
-| selected_chapters | TEXT | NOT NULL | 章节快照(JSON,契约 3.4 Chapter[];每项含 `chapter_id/material_id/name/start_page/end_page`,TEXT 章节页码为 null),与源 chapter 解耦;开始正式生成前冻结快照 |
+| selected_chapters | TEXT | NOT NULL | 章节快照(JSON,契约 3.4 Chapter[];每项含 `chapter_id/material_id/name/source/start_page/end_page`,TEXT 章节页码为 null,V25-D-36 起 source 入快照),与源 chapter 解耦;开始正式生成前冻结快照 |
 | generation_config | TEXT | NOT NULL | coverage_mode/难度整数比例/deep_question/自定义要求(JSON,契约 3.5) |
 | sample_cards | TEXT | NULL | V2.5 持久化 1~3 张样卡(JSON);配置变化时清空 |
 | sample_config_hash | TEXT | NULL | V2.5 样卡配置指纹,防止确认过期样卡 |
@@ -277,6 +279,7 @@ worker 的 CAS 失效。任务状态检查约束在 Alembic 迁移后只接受 V
 | card_id | TEXT | NOT NULL, FK → cards ON DELETE CASCADE | |
 | client_event_id | TEXT | NOT NULL | 客户端生成 |
 | rating | TEXT | NOT NULL | `AGAIN / HARD / GOOD / EASY` |
+| origin | TEXT | NULL | 评分来源 `PLAN / BACKLOG / ADHOC`(V25-D-37);缺失存 NULL=未分类(旧客户端过渡期),不虚构归因 |
 | reviewed_at | TEXT | NOT NULL | 服务端时间 |
 | device_timezone | TEXT | NULL | V2.5 降级为可空审计字段,不参与权威统计 |
 | created_at | TEXT | NOT NULL | |
@@ -336,11 +339,11 @@ LLM 调用账本(LLM 链路升级工作包新增):**重试预算、调用上限�
 | --- | --- | --- | --- |
 | call_id | TEXT | PK | |
 | user_id | TEXT | NULL, FK → users | 数据归属(V2.2,决策 D-05);新写入保证必填 |
-| scope_type / scope_id | TEXT | NOT NULL | `TASK` / `CARD`;任务链路 scope_id=task_id,单卡重写 scope_id=card_id |
+| scope_type / scope_id | TEXT | NOT NULL | `TASK` / `CARD` / `MATERIAL`;任务链路 scope_id=task_id,单卡重写 scope_id=card_id,章节规划(V25-D-36)scope_id=material_id(file_id)且 task_id 为 NULL |
 | task_id | TEXT | NULL, FK → tasks ON DELETE SET NULL | 可空;删除任务时先解除引用以保留账本(实际库存在 CASCADE 已知偏差,见下) |
 | operation_id | TEXT | NULL, FK → generation_operations ON DELETE SET NULL | 跨阶段操作归属 |
-| stage | TEXT | NOT NULL | `SAMPLE / PLANNING / GENERATING / SCORING / REWRITE` |
-| operation_key | TEXT | NOT NULL | 规划两阶段(V2.5.2)含 `planning:coarse:{chapter_id}` / `planning:fine:{chapter_id}:{batch_index}` / `planning:fine-wide:{chapter_id}:{topic_index}`(空产出主题恢复重试);生成含 batch_id;评分含确定性 group key;重写含 card_id/card_version/Idempotency-Key hash |
+| stage | TEXT | NOT NULL | `SAMPLE / PLANNING / GENERATING / SCORING / REWRITE / CHAPTER_PLANNING`(V25-D-36,CHECK 域随迁移扩展) |
+| operation_key | TEXT | NOT NULL | 规划两阶段(V2.5.2)含 `planning:coarse:{chapter_id}` / `planning:fine:{chapter_id}:{batch_index}` / `planning:fine-wide:{chapter_id}:{topic_index}`(空产出主题恢复重试);生成含 batch_id;评分含确定性 group key;重写含 card_id/card_version/Idempotency-Key hash;章节规划(V25-D-36)含 `chapters:{material_id}:{segment_index}` |
 | attempt_no | INTEGER | NOT NULL | 同一操作的第几次实际尝试 |
 | input_fingerprint | TEXT | NOT NULL | 输入身份(不保存完整 Prompt/原文) |
 | model | TEXT | NOT NULL | 实际模型值 |
@@ -512,14 +515,39 @@ V25-D-29 起不再持有 `file_id` 唯一外键:资料归属权威 = `materials.
 索引:`(project_id, created_at)`(资料列表与状态聚合)。
 删除语义(V25-D-30):资料级删除走本表行,chapters/text_chunks 经 FK 级联;PDF 资料连带删除 `pdf_files` 行与存储对象;`retain_cards` 决定该资料产出卡片去留。删最后一份资料后项目存活(`EMPTY`),增删均重置 `chapters_confirmed_at`(V25-D-31)。
 
+### 2.23 study_sessions（V25-D-37 学习会话新增）
+
+学习会话薄容器(契约 3.25):只记来源、范围、学习日与累计秒数,不保存卡片状态/队列/完成数。自然键 =
+`(user_id, study_date, origin, deck_key)`:同日同来源同范围再次 begin 命中同一行(中断续学仅限当天),跨学习日自动新行。
+
+| 列 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| session_id | TEXT | PK | 服务端生成 |
+| user_id | TEXT | NOT NULL, FK → users ON DELETE CASCADE | 数据主体隔离键 |
+| origin | TEXT | NOT NULL | `PLAN / BACKLOG / ADHOC`;`CHECK (origin IN ('PLAN','BACKLOG','ADHOC'))` |
+| deck_id | TEXT | NULL, FK → decks ON DELETE CASCADE | ADHOC 必填且归属当前用户;PLAN/BACKLOG 恒 NULL |
+| deck_key | TEXT | NOT NULL | 自然键物化:`deck_id`(ADHOC)或 `*`(跨卡组);规避 SQLite UNIQUE 对 NULL 不去重 |
+| study_date | TEXT | NOT NULL | 账号学习时区下学习日期 `yyyy-MM-dd` |
+| study_seconds | INTEGER | NOT NULL;应用层默认 0 | 累计秒数,绝对值 max 合并;`CHECK (study_seconds >= 0 AND study_seconds <= 86400)` |
+| started_at | TEXT | NOT NULL | 首次开启(服务端时间) |
+| last_reported_at | TEXT | NULL | 最近时长上报 |
+| ended_at | TEXT | NULL | 客户端申报结束;缺失不阻断同日续用 |
+
+约束与索引:
+
+- 唯一约束:`UNIQUE (user_id, study_date, origin, deck_key)`(自然键,当日续用)。
+- 索引:`(user_id, study_date)`(看板按学习日聚合)。
+
+语义:时长为尽力送达的观测数据(客户端累计绝对值上报,重复/乱序取最大不叠加),非评分事实;`deck_id` 级联删除仅发生在卡组硬删时(软删路径不触发),删行只丢该卡组后续时长聚合,不改写任何评分事实。
+
 ## 3. 级联与并发
 
 | 删除对象 | 级联效果 |
 | --- | --- |
-| users | auth_sessions CASCADE(本期无用户删除接口,预留) |
+| users | auth_sessions CASCADE(本期无用户删除接口,预留);study_sessions CASCADE |
 | learning_projects | materials CASCADE(chapters/text_chunks 随资料级联);project_study_settings/project_study_decks CASCADE;user_preferences.current_project_id SET NULL;decks.project_id SET NULL;tasks.project_id SET NULL;PDF 资料连带删 pdf_files 行与存储对象,删除确认时服务端先自动 CAS 取消全部活跃任务 |
 | materials | chapters/text_chunks CASCADE;PDF 资料级联删 pdf_files 行;cards.chapter_id 随章节删除 SET NULL 或按用户选择删除;引用该资料的活跃任务静默取消(V25-D-30) |
-| decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL;删除确认时服务端先自动 CAS 取消全部活跃任务 |
+| decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL;study_sessions.deck_id CASCADE(仅硬删触发,时长聚合丢失不改写评分事实);删除确认时服务端先自动 CAS 取消全部活跃任务 |
 | pdf_files | chapters CASCADE;tasks.file_id SET NULL;项目删除确认时服务端先自动 CAS 取消全部活跃任务 |
 | tasks | knowledge_points、batches CASCADE;cards.source_task_id SET NULL(保留卡)或按用户选择删除其已发布卡(5.3) |
 | cards | review_states、review_events、card_rewrite_previews CASCADE |
@@ -549,6 +577,8 @@ V25-D-29 起不再持有 `file_id` 唯一外键:资料归属权威 = `materials.
 
 MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已覆盖),不建物化聚合表。统计口径见 PRD 5.16 与结构契约 3.12。单用户数据量(千级卡片、万级事件)下 SQLite 聚合毫秒级完成,若后续数据量增长再引入异步聚合(PRD 6.6 允许)。
 
+学习时长聚合(V25-D-37)同样直接基于 `study_sessions`(索引 `(user_id, study_date)` 覆盖周窗口查询),按学习日对齐 3.12 的 7 桶与来源拆分;时长是会话表聚合的观测数据,与 `review_events` 的事实口径分离。
+
 ## 5. 迁移路径(未来,不在本期实现)
 
 若上线后需要多实例部署或跨设备同步,迁移 PostgreSQL:
@@ -572,6 +602,7 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 | cards | 3.9 Card |
 | review_states | 3.10 ReviewState |
 | review_events | 3.11 ReviewEvent |
+| study_sessions | 3.25 StudySession(V25-D-37 新增) |
 | (聚合计算) | 3.12 StatsDashboard / 3.20 TodayStudyPlan |
 | idempotency_keys | 总则 1.3 幂等约定 |
 | text_chunks | 3.6 KnowledgePoint 来源页底座(来源分片标识) |
@@ -660,3 +691,13 @@ V2.5 使用一个**新的不可逆 Alembic revision**;迁移从运行时真实 h
 - **learning_projects**:删除 `file_id` 列(唯一外键权威移交 `materials.project_id`);允许空项目。
 - **应用层语义**:项目 `status` 聚合派生含 `EMPTY`;新增/删除任一资料重置 `chapters_confirmed_at`;`tasks.selected_chapters` 快照每项含 `material_id`(新写入保证,历史快照只读保留)。
 - §0/§1/§2/§3/§6 与 ORM 同批更新(见 structure-contract v2.5 多资料增量)。
+
+### 7.6 学习会话落地（V25-D-37;revision `e6a9c3f02b7d`,不可逆）
+
+学习会话与评分来源(V25-D-37,契约 3.25/3.11/6.6):迁移 `downgrade` 抛
+`NotImplementedError`(评分流水 origin 与会话时长不可无损剥离,回退仅限部署备份恢复)。
+
+- **新表**:`study_sessions`(定义见 2.23;自然键 `UNIQUE (user_id, study_date, origin, deck_key)` + `(user_id, study_date)` 索引)。
+- **现有表调整**:`review_events` 加 `origin TEXT NULL`(历史行保持 NULL=未分类,不回填不虚构归因)。
+- **应用层语义**:会话 begin 按自然键 upsert(同日同来源同范围续用同一行);时长 PATCH 按绝对值 `max` 合并;恢复会话后的学习队列按当前 ReviewState 现算,不依赖会话内容。
+- §1/§2/§3/§4/§6 与 ORM 同批更新(见 structure-contract v2.5 学习会话增量)。

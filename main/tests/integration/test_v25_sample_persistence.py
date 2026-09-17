@@ -132,6 +132,7 @@ def _seed(session: Session, *, user_id: str) -> dict[str, object]:
             file_id=pdf.file_id,
             material_id=pdf.file_id,
             name=f"第{i + 1}章",
+            source="MANUAL",
             start_page=i + 1,
             end_page=i + 2,
         )

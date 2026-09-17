@@ -47,6 +47,13 @@ sealed interface MaterialUpload {
         val openStream: () -> InputStream?,
     ) : MaterialUpload
 
+    /** POST /projects/{project_id}/materials/html (multipart; V25-D-38 HTML document). */
+    class Html(
+        override val draftId: String,
+        override val materialName: String,
+        val openStream: () -> InputStream?,
+    ) : MaterialUpload
+
     /** POST /projects/{project_id}/materials/text (JSON body, ≤30000 characters). */
     class Text(
         override val draftId: String,
@@ -202,6 +209,12 @@ class ProjectCreationCoordinator(
                                     upload.openStream()?.let { input ->
                                         input.use { content ->
                                             repository.addProjectMaterialZip(projectId, upload.materialName, content, key)
+                                        }
+                                    } ?: V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, "无法读取所选文件")
+                                is MaterialUpload.Html ->
+                                    upload.openStream()?.let { input ->
+                                        input.use { content ->
+                                            repository.addProjectMaterialHtml(projectId, upload.materialName, content, key)
                                         }
                                     } ?: V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, "无法读取所选文件")
                                 is MaterialUpload.Text ->

@@ -39,6 +39,7 @@ from infra.db.models import (
     ProjectStudyDeck,
     ProjectStudySettings,
     Task,
+    TextChunk,
 )
 from infra.db.session import format_utc
 from services.deletion.service import (
@@ -49,12 +50,22 @@ from services.deletion.service import (
     resource_tasks,
 )
 from services.pdf.service import chapter_view, delete_chapter, update_chapter, upload_pdf
-from services.pdf.text_chunks import persist_text_material_chunks, persist_zip_material_chunks
+from services.pdf.text_chunks import (
+    persist_html_material_chunks,
+    persist_text_material_chunks,
+    persist_zip_material_chunks,
+)
+from services.projects.html_archive import HtmlChapter
+from services.projects.versioning import bump_project_version
 from services.projects.zip_archive import ZipArchive
 
 
 def _uuid4() -> str:
     return str(uuid.uuid4())
+
+
+# V25-D-36：支持不重传文件重试/降级的解析失败码（AI 章节规划失败 / 未保存 Key）
+_REPARSE_ALLOWED_ERRORS = ("PDF_AI_CHAPTERS_FAILED", "API_KEY_NOT_SET")
 
 
 def _validate_name(name: str) -> str:
@@ -119,14 +130,15 @@ def _derive_status(
         return "EMPTY"
     if any(status in ("PENDING", "PARSING") for status in pdf_statuses):
         return "PARSING"
-    # 可用章节来源：任一 PARSED PDF 或任一 TEXT/ZIP 资料（ZIP 同步解析即时出章节，V25-D-35）
+    # 可用章节来源：任一 PARSED PDF 或任一 TEXT/ZIP/HTML 资料（同步解析即时出章节，
+    # V25-D-35/38）
     has_source = (
         "PARSED" in pdf_statuses
         or _count(
             session,
             Material,
             Material.project_id == project.project_id,
-            Material.type.in_(("TEXT", "ZIP")),
+            Material.type.in_(("TEXT", "ZIP", "HTML")),
         )
         > 0
     )
@@ -164,8 +176,8 @@ def material_view(session: Session, material: Material) -> dict[str, Any]:
         ).first()
         if row is not None:
             chapter = chapter_view(row)
-    # TEXT/ZIP 同步就绪（状态列恒 READY）；PDF 行状态取自 pdf_files（单一权威）
-    status = material.status if material_type in ("TEXT", "ZIP") else pdf_status
+    # TEXT/ZIP/HTML 同步就绪（状态列恒 READY）；PDF 行状态取自 pdf_files（单一权威）
+    status = material.status if material_type in ("TEXT", "ZIP", "HTML") else pdf_status
     return {
         "material_id": material.material_id,
         "project_id": material.project_id,
@@ -324,6 +336,7 @@ def add_text_material(
             file_id=None,
             material_id=material.material_id,
             name=title,
+            source="TEXT",
             start_page=None,
             end_page=None,
         )
@@ -385,6 +398,63 @@ def add_zip_material(
                 file_id=None,
                 material_id=material.material_id,
                 name=name,
+                source="ZIP",
+                start_page=start_seq,
+                end_page=end_seq,
+            )
+        )
+    _reset_chapter_confirmation(project, now=now)
+    session.flush()
+    return material_view(session, material)
+
+
+def add_html_material(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    filename: str,
+    size_bytes: int,
+    chapters: list[HtmlChapter],
+    total_chars: int,
+    now: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    """添加 HTML 页面资料（POST /materials/html，V25-D-38）。
+
+    解析已在上传段完成（html_archive.parse_html_archive，含确定性分诊）；本用例只落库：
+    Material(type=HTML, READY) + 章节（HEADING 标题章 / AUTO 单章，chunk_seq 区间为
+    伪页码，复用章节→load_pages 映射）。即时就绪、不存档文件本体。
+    """
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    source = "HEADING" if len(chapters) > 1 else "AUTO"
+    material = Material(
+        material_id=_uuid4(),
+        project_id=project.project_id,
+        type="HTML",
+        name=filename,
+        status="READY",
+        size_bytes=size_bytes,
+        char_count=total_chars,
+        created_at=now,
+    )
+    session.add(material)
+    session.flush()
+    ranges = persist_html_material_chunks(
+        session,
+        material_id=material.material_id,
+        chapters=[(ch.name, ch.paragraphs) for ch in chapters],
+        target_chars=settings.text_chunk_target_chars,
+        now=now,
+    )
+    for name, start_seq, end_seq in ranges:
+        session.add(
+            Chapter(
+                chapter_id=_uuid4(),
+                file_id=None,
+                material_id=material.material_id,
+                name=name,
+                source=source,
                 start_page=start_seq,
                 end_page=end_seq,
             )
@@ -397,6 +467,101 @@ def add_zip_material(
 def list_materials(session: Session, *, user_id: str, project_id: str) -> list[dict[str, Any]]:
     _owned_project(session, user_id=user_id, project_id=project_id)
     return [material_view(session, m) for m in _project_materials(session, project_id)]
+
+
+def _reparseable_failed_pdf(
+    session: Session, *, project: LearningProject, material_id: str
+) -> tuple[Material, PdfFile]:
+    """V25-D-36 门禁：仅 FAILED 且 error_code ∈ {PDF_AI_CHAPTERS_FAILED, API_KEY_NOT_SET}
+    的本项目 PDF 资料可重试解析或整本降级；其余失败态走 replace 语义。"""
+    material = session.get(Material, material_id)
+    if material is None or material.project_id != project.project_id or material.type != "PDF":
+        raise AppError(ErrorCode.MATERIAL_NOT_FOUND, "PDF 资料不存在")
+    pdf = session.get(PdfFile, material.material_id)
+    if (
+        pdf is None
+        or pdf.status != "FAILED"
+        or (pdf.error_code or "") not in _REPARSE_ALLOWED_ERRORS
+    ):
+        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "仅 AI 章节规划失败的 PDF 资料支持该操作")
+    return material, pdf
+
+
+def reparse_material(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    material_id: str,
+    now: str,
+) -> dict[str, Any]:
+    """重试解析（POST /materials/{mid}/reparse，V25-D-36）：重置 PENDING，不重传文件。
+
+    扫描器重走解析：页文本幂等重建；同内容段的 AI 规划账本 SUCCESS 恢复复用
+    （指纹一致不重复付费），失败段在预算内续跑。parse_version +1 栅栏失效任何
+    在途迟到写入（V25-D-34：状态跃迁刷新项目版本）。
+    """
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    _material, pdf = _reparseable_failed_pdf(session, project=project, material_id=material_id)
+    pdf.status = "PENDING"
+    pdf.error_code = None
+    pdf.parse_lease_token = None
+    pdf.parse_lease_until = None
+    pdf.parse_version = int(pdf.parse_version) + 1
+    session.flush()
+    bump_project_version(session, project_id=project.project_id, now=now)
+    session.flush()
+    return project_view(session, project)
+
+
+def fallback_whole_book_chapters(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    material_id: str,
+    now: str,
+) -> dict[str, Any]:
+    """整本单章降级（POST /materials/{mid}/chapters/whole-book，V25-D-36）。
+
+    以先行落库的 text_chunks 建块区间单章（source=FALLBACK，名称=资料名）并置
+    PARSED；生成侧粗规划本就按 24k 字符自动分段，整本单章不影响制卡质量。
+    """
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    material, pdf = _reparseable_failed_pdf(session, project=project, material_id=material_id)
+    first = session.scalar(
+        select(func.min(TextChunk.chunk_seq)).where(TextChunk.material_id == material.material_id)
+    )
+    last = session.scalar(
+        select(func.max(TextChunk.chunk_seq)).where(TextChunk.material_id == material.material_id)
+    )
+    if first is None or last is None:
+        raise AppError(ErrorCode.PROJECT_STATE_CONFLICT, "资料无文本块，请先重试解析或重新上传")
+    for old in session.scalars(
+        select(Chapter).where(Chapter.material_id == material.material_id)
+    ).all():
+        session.delete(old)
+    session.flush()
+    session.add(
+        Chapter(
+            chapter_id=_uuid4(),
+            file_id=material.material_id,
+            material_id=material.material_id,
+            name=material.name,
+            source="FALLBACK",
+            start_page=int(first),
+            end_page=int(last),
+        )
+    )
+    pdf.status = "PARSED"
+    pdf.error_code = None
+    pdf.parse_lease_token = None
+    pdf.parse_lease_until = None
+    pdf.parse_version = int(pdf.parse_version) + 1
+    session.flush()
+    bump_project_version(session, project_id=project.project_id, now=now)
+    session.flush()
+    return project_view(session, project)
 
 
 def delete_material(

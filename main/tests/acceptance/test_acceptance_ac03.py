@@ -184,6 +184,7 @@ def _seed_pdf_context(client: TestClient, user: dict[str, str]) -> dict[str, obj
                 file_id=pdf.file_id,
                 material_id=pdf.file_id,
                 name=f"第{i + 1}章",
+                source="MANUAL",
                 start_page=i + 1,
                 end_page=i + 2,
             )

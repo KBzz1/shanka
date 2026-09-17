@@ -1,8 +1,9 @@
 """services.pdf.parser：PDF 文本层检测 + 书签目录解析（pypdf）。
 
-规则（structure-contract 5.1/5.2/AC-01，Task 1 报告 §章节规则）：仅文本层 + 目录；
-文本层不可提取 → PDF_PARSE_FAILED；无可用目录 → PDF_TOC_MISSING；
-不 OCR、不猜测、不兜底（无 OCR 兜底）。
+规则（structure-contract 3.2；Task 1 报告 §章节规则）：仅文本层 + 目录；不 OCR、不猜测。
+文本层不可提取 → PDF_PARSE_FAILED；无可用目录 → parse_pdf 返回 chapters=None，
+由扫描器决定章节来源（V25-D-36：无目录走 services/chapters AI 章节规划）；
+历史 PDF_TOC_MISSING 错误码不再产出（枚举与前端文案保留兼容存量行）。
 
 章节规则（按样书实测校准，见 Task 1 报告）：
 - 章节 = outline 顶层条目（根列表的直接子条目，depth 1）；
@@ -92,11 +93,13 @@ def _outline_items(reader: PdfReader) -> list[tuple[str, int, int]]:
     return items
 
 
-def parse_pdf(path: Path) -> tuple[str, list[ChapterInfo]]:
-    """解析 PDF：返回 (文本层样例, 章节列表)。
+def parse_pdf(path: Path) -> tuple[str, list[ChapterInfo] | None]:
+    """解析 PDF：返回 (文本层样例, 章节列表或 None)。
 
     文本层：抽样前 5 页拼接（超 500 字符截断）作为样例（AC-08：不落日志/不落库全文）。
     章节：outline 顶层条目（含页码的最浅深度层）；区间归一化与 clamp 见模块 docstring。
+    无可用 outline 条目 → chapters=None（V25-D-36：不再抛 PDF_TOC_MISSING，
+    由扫描器转 AI 章节规划）。
     """
     if not path.exists():
         raise AppError(ErrorCode.PDF_PARSE_FAILED, "PDF 文件不存在")
@@ -117,10 +120,10 @@ def parse_pdf(path: Path) -> tuple[str, list[ChapterInfo]]:
     if not text_sample.strip():
         raise AppError(ErrorCode.PDF_PARSE_FAILED, "PDF 无可提取文本层")
 
-    # 目录解析：outline 展平 → 取含页码的最浅深度层作为章节
+    # 目录解析：outline 展平 → 取含页码的最浅深度层作为章节；无条目 → None（AI 规划分支）
     items = _outline_items(reader)
     if not items:
-        raise AppError(ErrorCode.PDF_TOC_MISSING, "PDF 无可识别目录结构")
+        return text_sample[: _TEXT_SAMPLE_LIMIT + 1], None
     chapter_items = [it for it in items if it[2] == min(item[2] for item in items)]
 
     total_pages = len(reader.pages)

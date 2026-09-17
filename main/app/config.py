@@ -98,6 +98,20 @@ class Settings(BaseSettings):
     scoring_max_input_chars: int = 15_000
     # 规划重试（§6.3 账本为权威）：每组预算 2 次重试（共 3 次尝试），超限组 SKIPPED
     planning_retry_limit: int = 2
+    # AI 章节规划（V25-D-36 无目录 PDF）：输入分段/输出 token 对齐粗规划；段数上限 =
+    # 千页书护栏（1000 页 ÷ 约 20 页/段），超限 FAILED 提示整本降级；重试预算同规划
+    ai_chapter_max_input_chars: int = 24_000
+    ai_chapter_max_output_tokens: int = 4096
+    ai_chapter_max_segments: int = 48
+    ai_chapter_retry_limit: int = 2
+    ai_chapter_max_boundaries_per_segment: int = 12
+    # 确定性分诊阈值（V25-D-38）：资料总字符 ≤ 该值 → 直接单章（source=AUTO，零模型）。
+    # 锚点：对齐 ai_chapter_max_input_chars——更小资料的章节对生成零影响（粗规划本就单段
+    # 拿全文），只影响用户选范围；闪卡问答类笔记（~9k 字）自动落此分支。
+    single_chapter_max_chars: int = 24_000
+    # HTML 资料限制（V25-D-38；可运维调整）：与 ZIP 同款量级
+    html_max_size_bytes: int = 20 * 1024 * 1024
+    html_max_total_chars: int = 300_000
     # 输出上限（§5.7 JSON 截断防线 / §10：可运维调整，不是制卡字数规则；
     # Scoring 每次仍按 item 数计算更小的实际值 min(上限, 256 + 128 × items)）
     planner_max_output_tokens: int = 2048

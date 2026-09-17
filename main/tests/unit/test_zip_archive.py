@@ -5,6 +5,7 @@
 
 import io
 import zipfile
+from typing import Any
 
 import pytest
 
@@ -175,7 +176,7 @@ def test_parse_single_member_bomb_capped_by_byte_limit() -> None:
 
 def test_validate_zip_upload_container_checks() -> None:
     settings = _settings(zip_max_size_bytes=100)
-    ok: dict[str, object] = {
+    ok: dict[str, Any] = {
         "filename": "notes.zip",
         "content_type": "application/zip",
         "magic": b"PK\x03\x04",

@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -317,12 +318,15 @@ def _add_zip_material(
     content_type: str = "application/zip",
     raw: bytes | None = None,
     idem: dict[str, str] | None = None,
-):
+) -> httpx.Response:
     data = raw if raw is not None else _zip_bytes(files)
-    return client.post(
-        f"/projects/{project_id}/materials/zip",
-        files={"file": (filename, data, content_type)},
-        headers={**user, **(idem or _idem())},
+    return cast(
+        httpx.Response,
+        client.post(
+            f"/projects/{project_id}/materials/zip",
+            files={"file": (filename, data, content_type)},
+            headers={**user, **(idem or _idem())},
+        ),
     )
 
 
@@ -850,7 +854,7 @@ def test_projects_replace_pdf_only_parse_failed(client: TestClient, tmp_path: Pa
     material = _add_pdf_material(client, user, project_id, "bad.pdf")
     old_material_id = material["material_id"]
     app = cast(Any, client.app)
-    scan_once(app.state.session_factory, storage=app.state.storage)
+    scan_once(app.state.session_factory, storage=app.state.storage, settings=app.state.settings)
     body = client.get(f"/projects/{project_id}", headers=user).json()
     assert body["status"] == "PARSE_FAILED"
     resp = client.post(

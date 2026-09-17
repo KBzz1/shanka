@@ -291,6 +291,7 @@ def _seed_generated_card(
             file_id=pdf.file_id,
             material_id=pdf.file_id,
             name="第一章",
+            source="MANUAL",
             start_page=1,
             end_page=2,
         )

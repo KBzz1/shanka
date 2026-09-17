@@ -36,6 +36,7 @@ class ReviewEvent(BaseModel):
     client_event_id: str
     card_id: str
     rating: str  # AGAIN/HARD/GOOD/EASY
+    origin: str | None = None  # V25-D-37 评分来源 PLAN/BACKLOG/ADHOC；NULL=未分类
     reviewed_at: str
     device_timezone: str | None = None  # V2.5 降级为可空审计字段，不参与权威统计
     created_at: str
@@ -46,6 +47,7 @@ class ReviewEventRequest(BaseModel):
     rating: str  # AGAIN/HARD/GOOD/EASY（str + service 内 rating_from_str 校验 → 400 REVIEW_EVENT_INVALID）
     client_event_id: str
     # V2.5：不再要求 device_timezone（客户端不上报；服务端按账号学习时区统计）
+    origin: str | None = None  # V25-D-37 可选评分来源；缺失落库 NULL=未分类（旧客户端过渡期不失败）
 
 
 class ReviewQueueItem(Card):

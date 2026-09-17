@@ -123,7 +123,7 @@ def _idem() -> dict[str, str]:
 def _scan(client: TestClient) -> None:
     """显式触发扫描（测试环境无后台循环）：从 app state 取 session_factory/storage。"""
     app = cast(FastAPI, client.app)
-    scan_once(app.state.session_factory, storage=app.state.storage)
+    scan_once(app.state.session_factory, storage=app.state.storage, settings=app.state.settings)
 
 
 def test_acceptance_ac08_pdf_upload_content_not_logged(

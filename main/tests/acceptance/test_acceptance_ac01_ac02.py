@@ -2,7 +2,9 @@
 
 映射：
 - AC-01-1 可提取文本层 + 可识别目录的 PDF 进入章节确认流程（PARSED + 章节列表）
-- AC-01-2 无可用目录 → FAILED + 错误码（流程停止）
+- AC-01-2 解析失败 → FAILED + 错误码（流程停止；项目转 PARSE_FAILED）
+- AC-01 V25-D-36 增量：有文本层无目录 + 未存 Key → FAILED + API_KEY_NOT_SET（可
+  reparse 重试不重传文件）；AI 失败态可整本单章降级（source=FALLBACK）
 - AC-02-1 修改章节名称（PARSED 后；部分更新语义——未提供字段保持不变）
 - AC-08 后端存储边界（完整 PDF 内容不落日志/不落库）：由日志中间件不记录 body 保证，
   本文件只在上传/解析全流程中声明，不做内容级断言（Task 5 报告说明）。
@@ -29,7 +31,7 @@ SAMPLE = Path("/home/kbzz1/shanka_backend/res/AI-Agents-in-Depth-zh-CN.pdf")
 def _scan(client: TestClient) -> None:
     """显式触发扫描（测试环境无后台循环）：从 app state 取 session_factory/storage。"""
     app = cast(FastAPI, client.app)
-    scan_once(app.state.session_factory, storage=app.state.storage)
+    scan_once(app.state.session_factory, storage=app.state.storage, settings=app.state.settings)
 
 
 @pytest.fixture
@@ -100,7 +102,10 @@ def test_acceptance_ac01_sample_book_parses_to_chapters(client: TestClient, tmp_
 
 
 def test_acceptance_ac01_no_toc_stops_flow(client: TestClient) -> None:
-    """AC-01-2：无可用目录 → FAILED + PDF_TOC_MISSING（流程停止；项目转 PARSE_FAILED）。"""
+    """AC-01-2：解析失败 → FAILED + 错误码（流程停止；项目转 PARSE_FAILED）。
+
+    损坏 PDF（无可提取文本层）→ PDF_PARSE_FAILED；V25-D-36 起无目录不再是终局
+    （转 AI 章节规划，见 test_acceptance_ac01_no_toc_without_key_awaits_key）。"""
     device = _user(client)
     project_id = _create_project_with_pdf(
         client, device, filename="notoc.pdf", data=b"%PDF-1.4 broken"
@@ -112,6 +117,85 @@ def test_acceptance_ac01_no_toc_stops_flow(client: TestClient) -> None:
     assert item["status"] == "FAILED"
     assert item["error_code"] in ("PDF_PARSE_FAILED", "PDF_TOC_MISSING")
     assert client.get(f"/projects/{project_id}", headers=device).json()["status"] == "PARSE_FAILED"
+
+
+def _write_text_pdf(chars: int = 11) -> bytes:
+    """构造 1 页有文本层、无 outline 的 PDF（V25-D-36 AI 分支样本；V25-D-38 起
+    chars 超过 single_chapter_max_chars 才进 AI 分支，小样本走 AUTO 单章）。"""
+    import io
+
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+    content = DecodedStreamObject()
+    content.set_data(f"BT /F1 12 Tf 72 160 Td ({'x' * chars}) Tj ET".encode("ascii"))
+    page[NameObject("/Contents")] = writer._add_object(content)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+    )
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def test_acceptance_ac01_no_toc_without_key_awaits_key(client: TestClient) -> None:
+    """V25-D-36：大资料（>阈值）无目录 + 未存 Key → FAILED + API_KEY_NOT_SET，
+    项目转 PARSE_FAILED；可经 reparse 重试（不重传文件）。"""
+    device = _user(client)
+    project_id = _create_project_with_pdf(
+        client, device, filename="ai.pdf", data=_write_text_pdf(chars=25_000)
+    )
+    _scan(client)
+    resp = client.get(f"/projects/{project_id}/materials", headers=device)
+    item = resp.json()["items"][0]
+    assert item["status"] == "FAILED"
+    assert item["error_code"] == "API_KEY_NOT_SET"
+    assert client.get(f"/projects/{project_id}", headers=device).json()["status"] == "PARSE_FAILED"
+    # reparse：不重传文件重置 PENDING（幂等头）
+    resp = client.post(
+        f"/projects/{project_id}/materials/{item['material_id']}/reparse",
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 200, resp.text
+    _scan(client)  # 仍未存 Key → 再次 FAILED，但流程可循环重试
+    item2 = client.get(f"/projects/{project_id}/materials", headers=device).json()["items"][0]
+    assert item2["status"] == "FAILED"
+    assert item2["error_code"] == "API_KEY_NOT_SET"
+
+
+def test_acceptance_ac01_whole_book_fallback(client: TestClient) -> None:
+    """V25-D-36：AI 失败态的整本单章降级 → PARSED + source=FALLBACK 单章，项目进入
+    章节确认（AWAITING_CHAPTER_CONFIRMATION）。大样本（>阈值）确保走 AI 失败分支。"""
+    device = _user(client)
+    project_id = _create_project_with_pdf(
+        client, device, filename="ai.pdf", data=_write_text_pdf(chars=25_000)
+    )
+    _scan(client)
+    material_id = client.get(f"/projects/{project_id}/materials", headers=device).json()["items"][
+        0
+    ]["material_id"]
+    resp = client.post(
+        f"/projects/{project_id}/materials/{material_id}/chapters/whole-book",
+        headers={**device, **_idem()},
+    )
+    assert resp.status_code == 200, resp.text
+    body = client.get(f"/projects/{project_id}", headers=device).json()
+    assert body["materials"][0]["status"] == "PARSED"
+    assert body["status"] == "AWAITING_CHAPTER_CONFIRMATION"
+    chapters = body["chapters"]
+    assert len(chapters) == 1
+    assert chapters[0]["source"] == "FALLBACK"
+    assert chapters[0]["start_page"] == 1 and chapters[0]["end_page"] >= 1
 
 
 def test_acceptance_ac02_chapter_patch(client: TestClient, tmp_path: Path) -> None:

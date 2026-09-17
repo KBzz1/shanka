@@ -185,18 +185,14 @@ def test_free_browse_random_order_session_stable(client: TestClient, tmp_path: P
     """order=random：会话稳定（同用户同牌组重复请求同序），且确实打乱位置序。"""
     user = _user(client)
     deck_id = _make_deck(client, user)
-    ids = [
-        _make_card(client, user, deck_id, "a"),
-        _make_card(client, user, deck_id, "b"),
-        _make_card(client, user, deck_id, "c"),
-        _make_card(client, user, deck_id, "d"),
-        _make_card(client, user, deck_id, "e"),
-    ]
+    ids = [_make_card(client, user, deck_id, chr(ord("a") + i)) for i in range(10)]
     r1 = _card_ids(client.get(f"/decks/{deck_id}/cards?order=random", headers=user))
     r2 = _card_ids(client.get(f"/decks/{deck_id}/cards?order=random", headers=user))
     assert r1 == r2  # 服务端不每翻一张重新洗牌（会话内稳定）
     assert sorted(r1) == sorted(ids)
-    assert r1 != ids  # 确定性伪随机 ≠ 位置序
+    assert (
+        r1 != ids
+    )  # 确定性伪随机 ≠ 位置序（10 张：恒等排列概率 1/10! ≈ 2.8e-7，压平随机 UUID 引入的抖动）
 
 
 # ---------- 内容难度筛选 ----------

@@ -46,6 +46,7 @@ def _pdf_scanner_loop(
     storage: LocalStorage,
     stop_event: threading.Event,
     interval: float,
+    settings: Settings,
 ) -> None:
     """扫描器后台循环（Task 4）：逐间隔 scan_once；单轮失败不中断循环。
 
@@ -57,7 +58,7 @@ def _pdf_scanner_loop(
         if stop_event.is_set():
             return
         try:
-            scan_pdfs(session_factory, storage=storage)
+            scan_pdfs(session_factory, storage=storage, settings=settings)
         except Exception:  # 扫描失败不中断循环（scan_once 内部已记录解析失败）
             logger.warning("pdf scanner loop iteration failed", exc_info=True)
 
@@ -122,6 +123,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 storage,
                 stop_event,
                 settings.pdf_scan_interval_seconds,
+                settings,
             ),
             daemon=True,
         )

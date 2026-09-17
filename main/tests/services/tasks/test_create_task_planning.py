@@ -117,6 +117,7 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
             file_id=pdf.file_id,
             material_id=pdf.file_id,
             name=f"第{i + 1}章",
+            source="MANUAL",
             start_page=i + 1,
             end_page=i + 2,
         )
@@ -128,6 +129,7 @@ def _seed(session: Session, *, user_id: str, chapter_count: int = 2) -> dict[str
                 "chapter_id": ch.chapter_id,
                 "material_id": pdf.file_id,
                 "name": ch.name,
+                "source": "MANUAL",
                 "start_page": ch.start_page,
                 "end_page": ch.end_page,
             }

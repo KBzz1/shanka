@@ -121,6 +121,7 @@ def _seed_task(session: Session, *, user_id: str, coverage_mode: str = "COMPACT"
         file_id=pdf.file_id,
         material_id=pdf.file_id,
         name="第一章",
+        source="MANUAL",
         start_page=1,
         end_page=2,
     )
@@ -278,6 +279,7 @@ def _seed_planning_task(session: Session, *, user_id: str) -> str:
         file_id=pdf.file_id,
         material_id=pdf.file_id,
         name="第一章",
+        source="MANUAL",
         start_page=1,
         end_page=2,
     )

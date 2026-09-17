@@ -62,6 +62,7 @@ def test_pdf_parser_sample_book_parses_chapters() -> None:
         pytest.skip("样书缺失")
     text, chapters = parse_pdf(SAMPLE)
     assert text  # 文本层非空
+    assert chapters is not None  # 样书有 outline（None = 无目录走 AI，V25-D-36）
     # 校准断言（Step 1 实测）：顶层 12 条目、首章 1-based 起始页 9、末章 end_page = 总页数
     assert len(chapters) == SAMPLE_CHAPTERS
     assert chapters[0]["start_page"] == SAMPLE_FIRST_START
@@ -92,14 +93,14 @@ def test_pdf_parser_no_text_layer_raises(tmp_path: Path) -> None:
     assert excinfo.value.code is ErrorCode.PDF_PARSE_FAILED
 
 
-def test_pdf_parser_no_toc_raises(tmp_path: Path) -> None:
-    """有文本层但无目录 → PDF_TOC_MISSING（构造：content stream 文本页 + 无 outline）。"""
+def test_pdf_parser_no_toc_returns_none(tmp_path: Path) -> None:
+    """V25-D-36：有文本层但无目录 → chapters=None（扫描器转 AI 章节规划，不再抛
+    PDF_TOC_MISSING；构造：content stream 文本页 + 无 outline）。"""
     path = tmp_path / "notoc.pdf"
     _write_text_page(path)
     assert extract_text_ok(path)  # 逆验证：构造样本确有可提取文本层
-    with pytest.raises(AppError) as excinfo:
-        parse_pdf(path)
-    assert excinfo.value.code is ErrorCode.PDF_TOC_MISSING
+    _text, chapters = parse_pdf(path)
+    assert chapters is None
 
 
 def test_pdf_parser_extract_text_ok_probes(tmp_path: Path) -> None:

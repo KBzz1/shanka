@@ -154,6 +154,7 @@ def _seed_planning_task(
         file_id=pdf.file_id,
         material_id=pdf.file_id,
         name="第一章",
+        source="MANUAL",
         start_page=chapter_start_page,
         end_page=chapter_end_page,
     )

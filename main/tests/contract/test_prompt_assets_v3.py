@@ -34,6 +34,7 @@ def test_prompt_assets_use_structured_runtime_envelopes() -> None:
     expected = {
         "planner": "<PLANNER_INPUT>",
         "planner_coarse": "<PLANNER_COARSE_INPUT>",
+        "chapter_planner": "<CHAPTER_PLANNER_INPUT>",
         "generator": "<GENERATION_SPEC>",
         "rewrite": "<REWRITE_INPUT>",
         "scoring": "<SCORING_INPUT>",
@@ -157,6 +158,43 @@ def test_manifest_has_new_entries() -> None:
     assert manifest["prompts"]["scoring"]["version"] == "v3"
     assert "planner_output" in manifest["schemas"]
     assert "scoring_output" in manifest["schemas"]
+    # V25-D-36 无目录 PDF 章节边界规划（v10 分层原理，2026-09-17）
+    assert manifest["prompts"]["chapter_planner"]["version"] == "v10"
+    assert manifest["schemas"]["chapter_planner_output"]["version"] == "v9"
+
+
+def test_chapter_planner_output_schema_contract() -> None:
+    """V25-D-36 章节边界规划输出：只含 title/start_page，结构层禁止额外字段。"""
+    schema = _schema("chapter_planner_output")
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["chapters"]
+    chapter = schema["properties"]["chapters"]["items"]
+    assert chapter["additionalProperties"] is False
+    assert set(chapter["required"]) == {"title", "start_page"}
+    assert chapter["properties"]["start_page"]["minimum"] == 1
+    jsonschema.validate({"chapters": []}, schema)
+    jsonschema.validate({"chapters": [{"title": "第 1 章 绪论", "start_page": 3}]}, schema)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"chapters": [{"title": "缺页码"}]}, schema)
+
+
+def test_chapter_planner_prompt_reports_only_in_segment_boundaries() -> None:
+    """段边界契约（V25-D-36）：只报本段内开始的边界、跨段延续不报、宁缺毋滥、页码接地。"""
+    text = _asset("prompts", "chapter_planner")
+    assert "在本段内开始" in text
+    assert "上一章的延续" in text
+    assert "宁缺毋滥" in text
+    assert "只能引用" in text  # 页码接地（防幻觉页码）
+
+
+def test_chapter_planner_prompt_v10_layered_principle() -> None:
+    """v10 分层原理契约（两书量化评测驱动）：枚举改原理、中文序号同权、条目行排除。"""
+    text = _asset("prompts", "chapter_planner")
+    assert "编号跨度" in text and "重复频次" in text  # 分层维度
+    assert "跨度最大、重复频次最低" in text  # 章节体系判定
+    assert "一/二/三" in text  # 中文序号同权
+    assert "条目" in text  # 高频编号行排除
+    assert "必须报告" in text  # 显式节头不适用宁缺毋滥
 
 
 def test_versions_extended() -> None:
@@ -164,11 +202,13 @@ def test_versions_extended() -> None:
     assert v["generator_prompt_version"] == "v7"
     assert v["planner_prompt_version"] == "v8"
     assert v["planner_coarse_prompt_version"] == "v8"
+    assert v["chapter_planner_prompt_version"] == "v10"
     assert v["rewrite_prompt_version"] == "v4"
     assert v["scoring_prompt_version"] == "v3"
     assert v["card_schema_version"] == "v1"
     assert v["planner_output_schema_version"] == "v7"
     assert v["planner_coarse_output_schema_version"] == "v7"
+    assert v["chapter_planner_output_schema_version"] == "v9"
     assert v["scoring_output_schema_version"] == "v3"
     assert v["rubric_version"] == "v3"
 

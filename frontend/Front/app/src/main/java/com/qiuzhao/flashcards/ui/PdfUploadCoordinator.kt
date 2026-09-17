@@ -19,6 +19,9 @@ sealed interface PdfUploadOperation {
     /** POST /projects/{project_id}/materials/zip — attach a ZIP note pack (V25-D-35). */
     data class AddZipMaterial(val projectId: String) : PdfUploadOperation
 
+    /** POST /projects/{project_id}/materials/html — attach an HTML document (V25-D-38). */
+    data class AddHtmlMaterial(val projectId: String) : PdfUploadOperation
+
     /** POST /projects/{project_id}/materials/{material_id}/replace — re-upload a FAILED PDF material. */
     data class ReplaceMaterial(val projectId: String, val materialId: String) : PdfUploadOperation
 }

@@ -99,12 +99,18 @@ class Chapter(Base):
 
     V2.5 多资料：章节改挂 material_id；TEXT 资料的单章节页码为 NULL；
     ZIP 资料每子文件夹一章节，页码为 chunk_seq 闭区间（V25-D-35）。
+    V25-D-36/38：source 记录章节初始来源（TOC/HEADING/AI/AUTO/FALLBACK/TEXT/ZIP/
+    MANUAL；HEADING=HTML 标题、AUTO=程序阈值单章），用户修改名称/页码不改变 source。
     """
 
     __tablename__ = "chapters"
     __table_args__ = (
         Index("ix_chapters_file_id", "file_id"),
         Index("ix_chapters_material_id", "material_id"),
+        CheckConstraint(
+            "source IN ('TOC','HEADING','AI','AUTO','FALLBACK','TEXT','ZIP','MANUAL')",
+            name="ck_chapters_source_domain",
+        ),
     )
 
     chapter_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -115,6 +121,9 @@ class Chapter(Base):
         String, ForeignKey("materials.material_id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
+    # V25-D-36：ORM 层默认仅兜底未显式声明来源的调用方（测试夹具等）；生产路径
+    # （scanner/projects service）全部显式传值，DB 迁移不设列默认（显式性优先）。
+    source: Mapped[str] = mapped_column(String, nullable=False, default="MANUAL")
     start_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
@@ -475,11 +484,51 @@ class ReviewEvent(Base):
     )
     client_event_id: Mapped[str] = mapped_column(String, nullable=False)
     rating: Mapped[str] = mapped_column(String, nullable=False)  # AGAIN/HARD/GOOD/EASY
+    origin: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # V25-D-37 评分来源 PLAN/BACKLOG/ADHOC；NULL=未分类（旧客户端过渡期）
     reviewed_at: Mapped[str] = mapped_column(String, nullable=False)
     device_timezone: Mapped[str | None] = mapped_column(
         String, nullable=True
     )  # V2.5 降级为可空审计字段，不参与权威统计（1.2）
     created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class StudySession(Base):
+    """2.23 study_sessions：学习会话薄容器（V25-D-37，契约 3.25）。
+
+    自然键 (user_id, study_date, origin, deck_key)：同日同来源同范围再次 begin 命中
+    同一行（中断续学仅限当天）；deck_key 为 deck_id 或 '*'，规避 SQLite UNIQUE 对
+    NULL 不去重。只记时长与来源，不保存卡片状态/队列/完成数。
+    """
+
+    __tablename__ = "study_sessions"
+    __table_args__ = (
+        CheckConstraint("origin IN ('PLAN','BACKLOG','ADHOC')", name="ck_study_sessions_origin"),
+        CheckConstraint(
+            "study_seconds >= 0 AND study_seconds <= 86400",
+            name="ck_study_sessions_seconds",
+        ),
+        UniqueConstraint(
+            "user_id", "study_date", "origin", "deck_key", name="uq_study_sessions_day_scope"
+        ),
+        Index("ix_study_sessions_user_date", "user_id", "study_date"),
+    )
+
+    session_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    origin: Mapped[str] = mapped_column(String, nullable=False)  # PLAN/BACKLOG/ADHOC
+    deck_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("decks.deck_id", ondelete="CASCADE"), nullable=True
+    )  # ADHOC 必填；PLAN/BACKLOG 恒 NULL
+    deck_key: Mapped[str] = mapped_column(String, nullable=False)  # deck_id 或 '*'
+    study_date: Mapped[str] = mapped_column(String, nullable=False)  # 学习时区 yyyy-MM-dd
+    study_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[str] = mapped_column(String, nullable=False)
+    last_reported_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    ended_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class IdempotencyKey(Base):
@@ -555,7 +604,7 @@ class LlmCallAttempt(Base):
         Index("ix_llm_call_attempts_task_stage_operation", "task_id", "stage", "operation_key"),
         Index("ix_llm_call_attempts_operation", "operation_id", "stage", "operation_key"),
         CheckConstraint(
-            "stage IN ('SAMPLE','PLANNING','GENERATING','SCORING','REWRITE')",
+            "stage IN ('SAMPLE','PLANNING','GENERATING','SCORING','REWRITE','CHAPTER_PLANNING')",
             name="ck_llm_call_attempts_stage_domain",
         ),
     )
@@ -574,7 +623,7 @@ class LlmCallAttempt(Base):
     )
     stage: Mapped[str] = mapped_column(
         String, nullable=False
-    )  # PLANNING/GENERATING/SCORING/REWRITE
+    )  # PLANNING/GENERATING/SCORING/REWRITE/CHAPTER_PLANNING(V25-D-36,scope=MATERIAL)
     operation_key: Mapped[str] = mapped_column(String, nullable=False)
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
     input_fingerprint: Mapped[str] = mapped_column(String, nullable=False)

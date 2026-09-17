@@ -132,6 +132,7 @@ def _chapter_snapshot(
             "chapter_id": cid,
             "material_id": by_id[cid].material_id,
             "name": by_id[cid].name,
+            "source": by_id[cid].source,  # V25-D-36 章节初始来源入快照
             "start_page": by_id[cid].start_page,
             "end_page": by_id[cid].end_page,
         }

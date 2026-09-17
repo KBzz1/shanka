@@ -154,6 +154,42 @@ def persist_zip_material_chunks(
     return ranges
 
 
+def persist_html_material_chunks(
+    session: Session,
+    *,
+    material_id: str,
+    chapters: Sequence[tuple[str, list[str]]],
+    target_chars: int,
+    now: str,
+) -> list[tuple[str, int, int]]:
+    """HTML 资料入库（V25-D-38）：逐章段落切段（跨章不合并，与 ZIP 同款切段复用——
+    章节段落以空行连接后交 split_text_into_chunks 贪心打包），chunk_seq 全材料连续
+    1..N（伪页码）；返回各章 (章节名, start_seq, end_seq) 区间，空章节不落行。
+    """
+    ranges: list[tuple[str, int, int]] = []
+    seq = 0
+    for name, paragraphs in chapters:
+        start = seq + 1
+        for piece in split_text_into_chunks("\n\n".join(paragraphs), target_chars=target_chars):
+            seq += 1
+            session.add(
+                TextChunk(
+                    chunk_id=chunk_id_for(material_id, seq, piece),
+                    file_id=None,
+                    material_id=material_id,
+                    chunk_seq=seq,
+                    page_number=seq,
+                    char_count=len(piece),
+                    content_sha256=hashlib.sha256(piece.encode("utf-8")).hexdigest(),
+                    content=piece,
+                    created_at=now,
+                )
+            )
+        if seq >= start:
+            ranges.append((name, start, seq))
+    return ranges
+
+
 def load_pages(
     session: Session,
     *,

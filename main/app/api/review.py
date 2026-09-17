@@ -62,6 +62,7 @@ def submit_review_endpoint(
             rating=payload.rating,
             client_event_id=payload.client_event_id,
             device_timezone=None,  # V2.5：请求不再携带 device_timezone（可空审计字段）
+            origin=payload.origin,  # V25-D-37：可选评分来源，缺省存 NULL=未分类
             now=_now(),
         )
         return 200, view

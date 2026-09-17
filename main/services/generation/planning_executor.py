@@ -248,6 +248,7 @@ def _freeze_chapter_snapshot(session: Session, *, task: Task, now: str) -> bool:
         if ch is None or ch.material_id != entry.get("material_id"):
             return _stale_fail(session, task=task, now=now)
         entry["name"] = ch.name
+        entry["source"] = ch.source  # V25-D-36：快照冻结同步章节来源
         entry["start_page"] = ch.start_page
         entry["end_page"] = ch.end_page
     task.selected_chapters = json.dumps(snapshot, ensure_ascii=False)
