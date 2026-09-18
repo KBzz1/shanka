@@ -47,7 +47,7 @@ object ErrorMessages {
         "TASK_NOT_RESUMABLE" to "任务无法继续",
         "TASK_IN_PROGRESS" to "资源正被任务使用；准备阶段任务可先放弃，正式生成需等待完成",
         "GENERATION_FAILED" to "生成失败，请稍后重试",
-        "DECK_NOT_FOUND" to "牌组不存在或已删除",
+        "DECK_NOT_FOUND" to "牌组不存在、已删除或不属于当前项目",
         "CARD_NOT_FOUND" to "卡片不存在或已删除",
         "CARD_DELETE_WINDOW_EXPIRED" to "撤销时间已结束",
         "CARD_REWRITE_UNAVAILABLE" to "暂时无法生成改写预览",
