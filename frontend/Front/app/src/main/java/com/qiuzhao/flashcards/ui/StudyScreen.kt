@@ -162,6 +162,25 @@ internal data class StudyQueueEntry(val cardId: String, val relearn: Boolean = f
 internal fun resetRoundQueue(reviewAll: List<FlashcardEntity>): List<StudyQueueEntry> =
     reviewAll.map { StudyQueueEntry(it.id) }
 
+/**
+ * Queue state after deleting the card shown at [entryIndex]: every entry of [cardId]
+ * (its own slot plus any pending same-session relearn revisit) is dropped and the
+ * position lands on the next card, so deletion reads as "skip to the next one".
+ * Returns null once nothing is left to study; a card absent at/behind the deleted
+ * position keeps the queue anchored (idempotent for repeated deletes).
+ */
+internal fun deletedCardQueueState(
+    queue: List<StudyQueueEntry>,
+    entryIndex: Int,
+    cardId: String,
+): Pair<List<StudyQueueEntry>, Int>? {
+    val removedBefore = queue.take(entryIndex + 1).count { it.cardId == cardId }
+    if (removedBefore == 0) return queue to entryIndex.coerceIn(0, queue.lastIndex)
+    val remaining = queue.filterNot { it.cardId == cardId }
+    if (remaining.isEmpty()) return null
+    return remaining to (entryIndex + 1 - removedBefore).coerceIn(0, remaining.lastIndex)
+}
+
 /** A card scheduled to come back after the FSRS relearning step, as (cardId, dueAtEpochMs). */
 private data class ScheduledRequeue(val cardId: String, val dueAtMs: Long)
 
@@ -230,6 +249,19 @@ internal fun StudyScreen(
     // (beyond the core target) counts on its own.
     var baseCompleted by remember(studyKey, reviewMode) { mutableIntStateOf(0) }
     var backlogSession by remember(studyKey, reviewMode) { mutableStateOf(false) }
+    // Study-screen card deletion: the confirm dialog targets the card (and, in review
+    // mode, the queue position it was opened from); successes shrink the session state,
+    // failures surface the shared "删除失败" hint.
+    var deletingCard by remember { mutableStateOf<FlashcardEntity?>(null) }
+    var deletingEntryIndex by remember { mutableIntStateOf(-1) }
+    var deleteFailed by remember { mutableStateOf(false) }
+    var deletedCardIds by remember(studyKey, reviewMode) { mutableStateOf<Set<String>>(emptySet()) }
+    LaunchedEffect(deleteFailed) {
+        if (deleteFailed) {
+            delay(1_800)
+            deleteFailed = false
+        }
+    }
     LaunchedEffect(studyKey, reviewMode, todayMode) {
         sessionQueue = null
         currentIndex = 0
@@ -384,8 +416,47 @@ internal fun StudyScreen(
         currentIndex = entryIndex + 1
     }
 
+    fun confirmDeleteCard(card: FlashcardEntity, entryIndex: Int) {
+        viewModel.deleteCard(
+            card,
+            onSuccess = {
+                deletedCardIds = deletedCardIds + card.id
+                latestRatings = latestRatings - card.id
+                scheduledRequeues = scheduledRequeues.filterNot { it.cardId == card.id }
+                if (!reviewMode) return@deleteCard
+                val current = sessionQueue ?: return@deleteCard
+                when (val next = deletedCardQueueState(current, entryIndex, card.id)) {
+                    null -> {
+                        sessionQueue = emptyList()
+                        sessionFinished = true
+                    }
+                    else -> {
+                        sessionQueue = next.first
+                        currentIndex = next.second
+                    }
+                }
+            },
+            onFailure = { deleteFailed = true },
+        )
+    }
+
+    deletingCard?.let { card ->
+        AlertDialog(
+            onDismissRequest = { deletingCard = null },
+            title = { Text("删除该卡？", fontFamily = AppFonts.MiSansSemibold, fontWeight = FontWeight.Normal) },
+            text = { AppText("删除后无法恢复。", AppTextRole.Supporting) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDeleteCard(card, deletingEntryIndex)
+                    deletingCard = null
+                }) { AppText("删除", AppTextRole.Label, color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deletingCard = null }) { AppText("取消", AppTextRole.Label) } }
+        )
+    }
     val queue = sessionQueue
     val cardsById = cards.associateBy { it.id }
+    val liveFreeCards = remember(cards, deletedCardIds) { cards.filterNot { it.id in deletedCardIds } }
     if (reviewMode && !queue.isNullOrEmpty()) {
         if (sessionFinished) {
             CompleteStudy(
@@ -463,8 +534,14 @@ internal fun StudyScreen(
                         viewModel.beginStudySession(V25StudyOrigin.ADHOC, deckId, reset = true)
                     }
                 } else {
-                    {}
+                    // 今日计划没有"全卡组复盘"语义：不传回调即不渲染重置按钮。
+                    null
                 },
+                onDeleteCard = {
+                    deletingCard = card
+                    deletingEntryIndex = safeIndex
+                },
+                deleteFailed = deleteFailed,
                 onRate = { rating ->
                     val ratedIndex = safeIndex
                     // The rating lands in the outbox first; the session-level
@@ -485,8 +562,18 @@ internal fun StudyScreen(
             return
         }
     }
-    if (!reviewMode && cards.isNotEmpty()) {
-        FreeStudy(cards = cards, theme = theme, onBack = nav::popBackStack, onUpdateCard = viewModel::updateCard)
+    if (!reviewMode && liveFreeCards.isNotEmpty()) {
+        FreeStudy(
+            cards = liveFreeCards,
+            theme = theme,
+            onBack = nav::popBackStack,
+            onUpdateCard = viewModel::updateCard,
+            onDeleteCard = { card ->
+                deletingCard = card
+                deletingEntryIndex = -1
+            },
+            deleteFailed = deleteFailed,
+        )
         return
     }
     Scaffold(topBar = { AppBar(if (reviewMode) "记忆巩固" else "自由刷题", nav::popBackStack) }) { padding ->
@@ -515,6 +602,8 @@ internal fun StudyScreen(
                     }
                 },
             )
+            !reviewMode && liveFreeCards.isEmpty() && cards.isNotEmpty() ->
+                EmptyStudy(Modifier.padding(padding), reviewMode, nav, todayMode)
             cards.isEmpty() -> EmptyStudy(Modifier.padding(padding), reviewMode, nav, todayMode)
             else -> Unit
         }
@@ -575,7 +664,9 @@ private fun ReviewStudy(
     onToggleAnswer: () -> Unit,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
-    onReset: () -> Unit = {},
+    onReset: (() -> Unit)? = null,
+    onDeleteCard: () -> Unit,
+    deleteFailed: Boolean,
     onRate: (Rating) -> Unit
 ) {
     var editingCard by remember(card.id) { mutableStateOf<FlashcardEntity?>(null) }
@@ -613,7 +704,8 @@ private fun ReviewStudy(
                     onClick = onToggleAnswer,
                     modifier = Modifier.fillMaxSize(),
                     designScale = designScale,
-                    theme = theme
+                    theme = theme,
+                    onDelete = onDeleteCard,
                 )
             }
             Spacer(Modifier.height((12 * designScale).dp))
@@ -629,6 +721,12 @@ private fun ReviewStudy(
             Spacer(Modifier.height((8 * designScale).dp))
             ReviewQuestionControls(theme, canGoPrevious, canGoNext, rememberedCount, forgottenCount, onPrevious, onNext)
         }
+        DeleteFailureHint(
+            visible = deleteFailed,
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = (16 * designScale).dp)
+        )
     }
     editingCard?.let { editableCard ->
         CardEditDialog(
@@ -818,6 +916,7 @@ private fun ReviewFlipCard(
     modifier: Modifier = Modifier,
     designScale: Float,
     theme: DeckTheme,
+    onDelete: (() -> Unit)? = null,
 ) {
     val rotation by animateFloatAsState(
         targetValue = if (showAnswer) 180f else 0f,
@@ -837,12 +936,13 @@ private fun ReviewFlipCard(
     ) {
         ReviewCardFace(
             title = "问题", content = card.front, symbol = "book_5", visible = frontAlpha,
-            tag = tag, rotation = rotation, shape = faceShape, designScale = designScale, backFace = false, theme = theme
+            tag = tag, rotation = rotation, shape = faceShape, designScale = designScale, backFace = false, theme = theme,
+            onDelete = onDelete
         )
         ReviewCardFace(
             title = "答案", content = card.back, symbol = "wb_incandescent", visible = backAlpha,
             tag = tag, rotation = rotation, shape = faceShape, designScale = designScale, backFace = true,
-            theme = theme, scrollKey = card.id
+            theme = theme, scrollKey = card.id, onDelete = onDelete
         )
     }
 }
@@ -861,6 +961,7 @@ private fun ReviewCardFace(
     theme: DeckTheme,
     questionInk: Boolean = true,
     scrollKey: Any = Unit,
+    onDelete: (() -> Unit)? = null,
 ) {
     // Figma 203:2594 big flip card: question face = ink, answer face = surface
     // (one step deeper than the Background page).
@@ -887,7 +988,34 @@ private fun ReviewCardFace(
             modifier = Modifier.fillMaxSize().padding((24 * designScale).dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                // Fixed-size leading slot keeps the tag pinned to the far corner. The
+                // button only exists on the visible face — the reverse face is an
+                // alpha-0 mirrored layer that would otherwise steal taps aimed at the
+                // shown face's opposite corner.
+                Box(Modifier.size((36 * designScale).dp), contentAlignment = Alignment.Center) {
+                    if (visible > 0.5f) {
+                        onDelete?.let { handler ->
+                            Surface(
+                                onClick = handler,
+                                color = faceContent.copy(alpha = 0.14f),
+                                contentColor = faceContent,
+                                shape = RoundedCornerShape(999.dp),
+                                modifier = Modifier.size((36 * designScale).dp),
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    MaterialSymbol(
+                                        "delete",
+                                        "删除这张卡片",
+                                        tint = LocalContentColor.current,
+                                        size = fixedSp(20 * designScale),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.weight(1f))
                 tag?.let { style ->
                     Surface(color = style.container, shape = RoundedCornerShape(999.dp)) {
                         Text(
@@ -937,12 +1065,25 @@ private fun ReviewCardFace(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FreeStudy(cards: List<FlashcardEntity>, theme: DeckTheme, onBack: () -> Unit, onUpdateCard: (FlashcardEntity) -> Unit) {
+private fun FreeStudy(
+    cards: List<FlashcardEntity>,
+    theme: DeckTheme,
+    onBack: () -> Unit,
+    onUpdateCard: (FlashcardEntity) -> Unit,
+    onDeleteCard: (FlashcardEntity) -> Unit,
+    deleteFailed: Boolean,
+) {
     var displayedCards by remember(cards) { mutableStateOf(cards) }
     var editingCard by remember { mutableStateOf<FlashcardEntity?>(null) }
     val pager = rememberPagerState(pageCount = { displayedCards.size })
     val scope = rememberCoroutineScope()
-    val designScale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(0.75f, 1f)
+    val designScale = (LocalConfiguration.current.screenWidthDp / 402f).coerceIn(.75f, 1f)
+    // A study-screen delete shrinks the browsed set; keep the pager on a live page.
+    LaunchedEffect(displayedCards) {
+        if (pager.currentPage > displayedCards.lastIndex) {
+            pager.scrollToPage(displayedCards.lastIndex.coerceAtLeast(0))
+        }
+    }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         ScreenTopInformationBar(
             title = "自由刷题", subtitle = "${pager.currentPage + 1}/${displayedCards.size}", onBack = onBack,
@@ -972,7 +1113,10 @@ private fun FreeStudy(cards: List<FlashcardEntity>, theme: DeckTheme, onBack: ()
                 modifier = Modifier.fillMaxWidth().weight(1f)
             ) { page ->
                 var flipped by remember(displayedCards[page].id) { mutableStateOf(false) }
-                FreeStudyCard(displayedCards[page], flipped, { flipped = !flipped }, designScale, theme, Modifier.fillMaxSize())
+                FreeStudyCard(
+                    displayedCards[page], flipped, { flipped = !flipped }, designScale, theme, Modifier.fillMaxSize(),
+                    onDelete = { onDeleteCard(displayedCards[page]) },
+                )
             }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = (16 * designScale).dp).height((68 * designScale).dp),
@@ -1026,6 +1170,12 @@ private fun FreeStudy(cards: List<FlashcardEntity>, theme: DeckTheme, onBack: ()
             lineHeight = fixedSp(28 * designScale),
             textAlign = TextAlign.Center
         )
+        DeleteFailureHint(
+            visible = deleteFailed,
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = (24 * designScale).dp)
+        )
     }
     editingCard?.let { card ->
         CardEditDialog(
@@ -1041,7 +1191,15 @@ private fun FreeStudy(cards: List<FlashcardEntity>, theme: DeckTheme, onBack: ()
 }
 
 @Composable
-private fun FreeStudyCard(card: FlashcardEntity, flipped: Boolean, onFlip: () -> Unit, designScale: Float, theme: DeckTheme, modifier: Modifier) {
+private fun FreeStudyCard(
+    card: FlashcardEntity,
+    flipped: Boolean,
+    onFlip: () -> Unit,
+    designScale: Float,
+    theme: DeckTheme,
+    modifier: Modifier,
+    onDelete: (() -> Unit)? = null,
+) {
     val rotation by animateFloatAsState(
         targetValue = if (flipped) 180f else 0f,
         animationSpec = AppMotion.emphasisSpring(),
@@ -1060,7 +1218,8 @@ private fun FreeStudyCard(card: FlashcardEntity, flipped: Boolean, onFlip: () ->
             designScale = designScale,
             backFace = false,
             theme = theme,
-            questionInk = false
+            questionInk = false,
+            onDelete = onDelete
         )
         ReviewCardFace(
             title = "答案",
@@ -1073,7 +1232,8 @@ private fun FreeStudyCard(card: FlashcardEntity, flipped: Boolean, onFlip: () ->
             designScale = designScale,
             backFace = true,
             theme = theme,
-            scrollKey = card.id
+            scrollKey = card.id,
+            onDelete = onDelete
         )
     }
 }

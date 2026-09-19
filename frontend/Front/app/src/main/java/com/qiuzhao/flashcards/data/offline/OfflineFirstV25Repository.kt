@@ -744,7 +744,10 @@ class OfflineFirstV25Repository(
     override suspend fun updateCard(cardId: String, front: String, back: String): V25Result<V25Card> =
         remote.updateCard(cardId, front, back)
 
-    override suspend fun deleteCard(cardId: String): V25Result<V25CardDeletionBatch> = remote.deleteCard(cardId)
+    override suspend fun deleteCard(cardId: String): V25Result<V25CardDeletionBatch> =
+        remote.deleteCard(cardId).alsoOnSuccess {
+            userId()?.let { user -> cache.applyCardDeletion(user, cardId) }
+        }
 
     override suspend fun pendingDeletionBatches(): V25Result<List<V25CardDeletionBatch>> =
         remote.pendingDeletionBatches()

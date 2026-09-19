@@ -314,6 +314,20 @@ class V25CacheStore(private val db: ShankaV25Database) {
     suspend fun readDeckCards(userId: String, deckId: String): List<V25Card> =
         cardDao.getDeckCards(userId, deckId).map { it.toDomain() }
 
+    /**
+     * Local convergence for a study-screen delete: the card leaves the cached deck
+     * queue, today plan and card rows in one transaction, mirroring what the next
+     * authoritative refresh would write (the server filters delete_batch_id rows).
+     */
+    suspend fun applyCardDeletion(userId: String, cardId: String) {
+        db.withTransaction {
+            queueDao.removeFromQueue(userId, cardId)
+            queueDao.hideFromTodayPlan(userId, cardId)
+            cardDao.deleteCardRow(userId, cardId)
+            cardDao.deleteReviewState(userId, cardId)
+        }
+    }
+
     // --- deck review queue -------------------------------------------------------------------------
 
     suspend fun replaceDeckReviewQueue(userId: String, deckId: String, queue: List<V25ReviewCard>, now: Long) {

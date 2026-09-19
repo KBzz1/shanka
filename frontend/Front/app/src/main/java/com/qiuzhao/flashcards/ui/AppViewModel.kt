@@ -2179,12 +2179,17 @@ class AppViewModel(
         }
     }
 
-    fun deleteCard(card: FlashcardEntity, onFailure: () -> Unit = {}) = viewModelScope.launch {
+    fun deleteCard(
+        card: FlashcardEntity,
+        onSuccess: () -> Unit = {},
+        onFailure: () -> Unit = {},
+    ) = viewModelScope.launch {
         when (val result = v25Repository.deleteCard(card.id)) {
             is V25Result.Success -> {
                 cardFlow(card.deckId).value = cardFlow(card.deckId).value.filterNot { it.id == card.id }
                 armDeletionUndo(result.value)
                 refreshDecks()
+                onSuccess()
             }
             is V25Result.Failure -> {
                 handleFailure("delete_card", result)

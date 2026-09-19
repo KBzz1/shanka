@@ -132,6 +132,13 @@ interface CardDao {
     @Query("DELETE FROM cards WHERE user_id = :userId AND deck_id = :deckId")
     suspend fun deleteDeckCards(userId: String, deckId: String)
 
+    /** Study-screen deletes prune the cached projection before the next deck refresh. */
+    @Query("DELETE FROM cards WHERE user_id = :userId AND card_id = :cardId")
+    suspend fun deleteCardRow(userId: String, cardId: String)
+
+    @Query("DELETE FROM review_states WHERE user_id = :userId AND card_id = :cardId")
+    suspend fun deleteReviewState(userId: String, cardId: String)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertReviewStates(states: List<ReviewStateEntity>)
 
