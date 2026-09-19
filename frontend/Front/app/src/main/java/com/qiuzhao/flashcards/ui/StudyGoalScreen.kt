@@ -115,10 +115,18 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
     val pendingDecksByProject = projects.associate { project ->
         project.id to decks.filter { it.projectId == project.id && it.cardCount == 0 }
     }
-    // V25-D-39：账号级计划——勾选跨项目累积；独立卡组（projectId=null）不在此列表，
-    // 但可经 selectedDeckIds 直接提交（今日待学入口的数据源覆盖全量 decks）。
+    // V25-D-39：账号级计划——勾选跨项目累积；独立卡组（projectId=null）以固定
+    // 哨兵分组渲染在项目列表之后，同样支持整选/散选。
+    val standaloneLearnable = decks.filter { it.projectId == null && it.cardCount > 0 }
+    val standalonePending = decks.filter { it.projectId == null && it.cardCount == 0 }
     val effectiveDeckIds = decks
-        .filter { it.cardCount > 0 && (it.projectId in wholeProjectIds || it.id in selectedDeckIds) }
+        .filter {
+            it.cardCount > 0 && (
+                it.id in selectedDeckIds ||
+                    it.projectId in wholeProjectIds ||
+                    (it.projectId == null && STANDALONE_SCOPE_ID in wholeProjectIds)
+                )
+        }
         .map { it.id }
     val validGoals = newGoal in 0..200 && reviewGoal in 0..200 && newGoal % 10 == 0 &&
         reviewGoal % 10 == 0 && newGoal + reviewGoal > 0
@@ -162,7 +170,7 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
                             }
                         }
                         PlanSectionCard("范围", "category_search") {
-                            if (projects.isEmpty()) {
+                            if (projects.isEmpty() && standaloneLearnable.isEmpty() && standalonePending.isEmpty()) {
                                 PlanSectionHint("先创建项目并导入资料")
                             } else {
                                 projects.forEach { project ->
@@ -216,6 +224,52 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
                                         },
                                     )
                                 }
+                                if (standaloneLearnable.isNotEmpty() || standalonePending.isNotEmpty()) {
+                                    // 独立卡组（不属于任何项目）：账号级计划的直选入口（V25-D-39）。
+                                    ScopeProjectCard(
+                                        projectName = "独立卡组",
+                                        decks = standaloneLearnable,
+                                        pendingDecks = standalonePending,
+                                        checked = STANDALONE_SCOPE_ID in wholeProjectIds ||
+                                            standaloneLearnable.any { it.id in selectedDeckIds },
+                                        expanded = STANDALONE_SCOPE_ID in expandedProjectIds,
+                                        onToggleProject = {
+                                            val isChecked = STANDALONE_SCOPE_ID in wholeProjectIds ||
+                                                standaloneLearnable.any { it.id in selectedDeckIds }
+                                            if (isChecked) {
+                                                wholeProjectIds -= STANDALONE_SCOPE_ID
+                                                selectedDeckIds -= standaloneLearnable.map { it.id }.toSet()
+                                            } else {
+                                                wholeProjectIds += STANDALONE_SCOPE_ID
+                                            }
+                                        },
+                                        onToggleExpand = {
+                                            if (STANDALONE_SCOPE_ID in expandedProjectIds) {
+                                                expandedProjectIds -= STANDALONE_SCOPE_ID
+                                            } else {
+                                                expandedProjectIds += STANDALONE_SCOPE_ID
+                                                val (whole, picked) = drawerOpenSelection(
+                                                    projectId = STANDALONE_SCOPE_ID,
+                                                    projectDeckIds = standaloneLearnable.map { it.id }.toSet(),
+                                                    wholeProjectIds = wholeProjectIds,
+                                                    selectedDeckIds = selectedDeckIds,
+                                                )
+                                                wholeProjectIds = whole
+                                                selectedDeckIds = picked
+                                            }
+                                        },
+                                        onToggleDeck = { deck ->
+                                            selectedDeckIds = if (deck.id in selectedDeckIds) {
+                                                selectedDeckIds - deck.id
+                                            } else {
+                                                selectedDeckIds + deck.id
+                                            }
+                                        },
+                                        deckChecked = {
+                                            it.id in selectedDeckIds || STANDALONE_SCOPE_ID in wholeProjectIds
+                                        },
+                                    )
+                                }
                             }
                         }
                         uiMessage?.let { message ->
@@ -262,6 +316,9 @@ internal fun StudyGoalScreen(viewModel: AppViewModel, nav: AppNavigator) {
         }
     }
 }
+
+/** 范围区「独立卡组」分组的固定哨兵 id（独立卡组无项目归属，V25-D-39）。 */
+internal const val STANDALONE_SCOPE_ID = "standalone-decks"
 
 /**
  * The single save gate, shared by first-time and configured users alike: the
