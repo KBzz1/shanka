@@ -98,7 +98,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/preferences` | 覆盖深度、整数难度比例、每日目标、学习时区（IANA）、当前项目 |
+| GET | `/preferences` | 覆盖深度、整数难度比例、每日目标、学习时区（IANA）、当前项目（V25-D-39 起保存计划不再改写当前项目，仅显式 PATCH 控制） |
 | PATCH | `/preferences` | 部分更新；比例、目标、IANA 时区服务端校验（`400 INVALID_PREFERENCES` / `INVALID_LEARNING_TIMEZONE`） |
 
 - 制卡页的默认生成配置来源于此；学习时区驱动今日计划与统计分桶。
@@ -120,10 +120,8 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | GET | `/projects/{project_id}/materials/{material_id}/deletion-preflight` | **资料删除确认页预检**：返回将影响的卡片数量与静默取消任务数（PRD V25-GEN-FR-02）；App 暂未接入，待资料删除确认页改版（R25-10） |
 | POST | `/projects/{project_id}/materials/{material_id}/replace` | 仅 `FAILED` 的 PDF 资料原位替换并重新解析（不影响其他资料） |
 | GET | `/projects/{project_id}/progress` | 项目进度投影（card_count / 各状态计数 / due_count 等） |
-| GET | `/projects/{project_id}/stats/weekly` | 项目周统计（App 暂未使用，联调/统计核验用） |
 | PATCH / DELETE | `/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称/起止页（TEXT 章节仅名称）；删除章节（保留卡时 chapter_id 置空进"未归属章节"） |
 | POST | `/projects/{project_id}/confirm-chapters` | 确认目录，项目进入 READY |
-| GET / PATCH | `/projects/{project_id}/study-settings` | 项目级学习设置 |
 | POST | `/projects/{project_id}/decks/{deck_id}/attach` | 将已有牌组挂到项目 |
 
 - **项目是资料集合**（V25-D-29）：可同时含 PDF 与文本资料；项目状态由全部资料聚合（`EMPTY` → `PARSING`/`AWAITING_CHAPTER_CONFIRMATION` → `READY`，全 PDF 失败 → `PARSE_FAILED`）；新增/删除任一资料都会重置章节确认。
@@ -219,9 +217,9 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/study/plan` | 当前项目今日学习计划配置；未配置时 `configured=false` |
-| PUT | `/study/plan` | 原子保存计划（`project_id` + `selected_deck_ids` + `daily_new_goal` / `daily_review_goal`，0~200 且为 10 的倍数） |
-| GET | `/study/today` | 当前项目今日计划（服务端按账号学习时区分桶、去重；到期优先 + 新卡补足）；无当前项目时 `current_project` 为 null（空态） |
+| GET | `/study/plan` | 账号级今日学习计划配置（V25-D-39）；未配置时 `configured=false` |
+| PUT | `/study/plan` | 原子保存计划（`selected_deck_ids` + `daily_new_goal` / `daily_review_goal`，0~200 且为 10 的倍数）；卡组可跨项目与独立，无需项目字段（旧客户端多发 `project_id` 服务端忽略） |
+| GET | `/study/today` | 账号今日计划（服务端按账号学习时区分桶、去重；到期优先 + 新卡补足）；未保存计划时 `plan_configured=false`（空态，无 `current_project` 字段） |
 | GET | `/study/today/backlog` | 超过巩固软目标的到期卡分页（`offset` / `limit`，唯一分页列表接口） |
 
 ### 3.9 复习（FSRS-6）

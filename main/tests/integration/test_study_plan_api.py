@@ -1,11 +1,13 @@
-"""今日学习计划 HTTP 端点测试（structure-contract 6.6；openapi /study/plan、/study/today/backlog）。
+"""账号级学习计划 HTTP 端点测试（structure-contract 6.6；openapi /study/plan、/study/today/backlog）。
 
 补齐集成缺口：GET/PUT /study/plan 与 GET /study/today/backlog 此前仅有 service 级
 覆盖（test_today_study_plan.py，HTTP /study/today 见 test_free_browse.py）；本文件走
 真实 HTTP 栈——
 - GET /study/plan 未配置空态（configured=false + 默认双目标 10/40）；
 - PUT /study/plan 幂等写（Idempotency-Key 强制）：成功翻 configured、同键重放一致、
-  目标校验（0~200 的 10 倍数且不同时为 0）与卡组归属校验（跨项目 → 404）；
+  目标校验（0~200 的 10 倍数且不同时为 0）与卡组归属校验（他人卡组 → 404）；
+- V25-D-39：卡组可跨项目与独立卡组（跨项目混选 200、独立卡组 200、旧客户端多发
+  project_id 被忽略不报错）；
 - GET /study/today/backlog 未配置空态 + 分页参数边界（limit 1~200）。
 """
 
@@ -55,7 +57,7 @@ def _project(client: TestClient, user: dict[str, str], name: str = "学习项目
     return cast(str, r.json()["project_id"])
 
 
-def _deck(client: TestClient, user: dict[str, str], project_id: str, name: str = "D") -> str:
+def _deck(client: TestClient, user: dict[str, str], project_id: str | None, name: str = "D") -> str:
     r = client.post(
         "/decks", json={"name": name, "project_id": project_id}, headers={**user, **_idem()}
     )
@@ -79,7 +81,6 @@ def test_study_plan_get_unconfigured_returns_defaults(client: TestClient) -> Non
     assert r.status_code == 200
     body = r.json()
     assert body["configured"] is False
-    assert body["current_project_id"] is None
     assert body["selected_deck_ids"] == []
     assert body["daily_new_goal"] == 10
     assert body["daily_review_goal"] == 40
@@ -94,7 +95,6 @@ def test_study_plan_put_updates_and_replays_idempotently(client: TestClient) -> 
     _card(client, headers, deck_id)
 
     payload = {
-        "project_id": project_id,
         "selected_deck_ids": [deck_id],
         "daily_new_goal": 20,
         "daily_review_goal": 40,
@@ -104,7 +104,6 @@ def test_study_plan_put_updates_and_replays_idempotently(client: TestClient) -> 
     assert r1.status_code == 200, r1.text
     body1 = r1.json()
     assert body1["configured"] is True
-    assert body1["current_project_id"] == project_id
     assert body1["selected_deck_ids"] == [deck_id]
     assert body1["daily_new_goal"] == 20
 
@@ -117,6 +116,72 @@ def test_study_plan_put_updates_and_replays_idempotently(client: TestClient) -> 
     assert persisted["selected_deck_ids"] == [deck_id]
 
 
+def test_study_plan_put_spans_projects_and_standalone_decks(client: TestClient) -> None:
+    """V25-D-39：跨项目卡组与独立卡组（project_id=null）可混选进同一份账号计划。"""
+    headers = _user(client)
+    deck_a = _deck(client, headers, _project(client, headers, name="项目A"), name="A牌组")
+    deck_b = _deck(client, headers, _project(client, headers, name="项目B"), name="B牌组")
+    standalone = _deck(client, headers, None, name="独立牌组")
+    for deck_id in (deck_a, deck_b, standalone):
+        _card(client, headers, deck_id)
+
+    r = client.put(
+        "/study/plan",
+        json={
+            "selected_deck_ids": [deck_a, deck_b, standalone],
+            "daily_new_goal": 10,
+            "daily_review_goal": 40,
+        },
+        headers={**headers, **_idem()},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["configured"] is True
+    assert set(r.json()["selected_deck_ids"]) == {deck_a, deck_b, standalone}
+
+
+def test_study_plan_put_ignores_legacy_project_id_field(client: TestClient) -> None:
+    """旧客户端兼容：PUT 多发 project_id 被忽略（pydantic extra=ignore），不 422。"""
+    headers = _user(client)
+    project_id = _project(client, headers)
+    deck_id = _deck(client, headers, project_id)
+    _card(client, headers, deck_id)
+
+    r = client.put(
+        "/study/plan",
+        json={
+            "project_id": project_id,  # 旧契约字段：服务端忽略
+            "selected_deck_ids": [deck_id],
+            "daily_new_goal": 10,
+            "daily_review_goal": 40,
+        },
+        headers={**headers, **_idem()},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["selected_deck_ids"] == [deck_id]
+
+
+def test_study_plan_put_does_not_touch_current_project(client: TestClient) -> None:
+    """保存计划不再改写 user_preferences.current_project_id（V25-D-39）。"""
+    headers = _user(client)
+    project_id = _project(client, headers)
+    deck_id = _deck(client, headers, project_id)
+    _card(client, headers, deck_id)
+
+    before = client.get("/preferences", headers=headers).json()["current_project_id"]
+    r = client.put(
+        "/study/plan",
+        json={
+            "selected_deck_ids": [deck_id],
+            "daily_new_goal": 10,
+            "daily_review_goal": 40,
+        },
+        headers={**headers, **_idem()},
+    )
+    assert r.status_code == 200, r.text
+    after = client.get("/preferences", headers=headers).json()["current_project_id"]
+    assert after == before
+
+
 def test_study_plan_put_requires_idempotency_key(client: TestClient) -> None:
     """写接口强制 Idempotency-Key：缺失 → 400 VALIDATION_ERROR。"""
     headers = _user(client)
@@ -124,7 +189,6 @@ def test_study_plan_put_requires_idempotency_key(client: TestClient) -> None:
     r = client.put(
         "/study/plan",
         json={
-            "project_id": project_id,
             "selected_deck_ids": [_deck(client, headers, project_id)],
             "daily_new_goal": 10,
             "daily_review_goal": 40,
@@ -136,12 +200,14 @@ def test_study_plan_put_requires_idempotency_key(client: TestClient) -> None:
 
 
 def test_study_plan_put_validates_goals_and_deck_ownership(client: TestClient) -> None:
-    """目标须为 0~200 的 10 倍数且不同时为 0；所选卡组必须属于该项目（跨项目 404）。"""
+    """目标须为 0~200 的 10 倍数且不同时为 0；所选卡组必须属于本人（他人卡组 404）。"""
     headers = _user(client)
     project_id = _project(client, headers)
     deck_id = _deck(client, headers, project_id)
-    other_project = _project(client, headers, name="其他项目")
-    other_deck_id = _deck(client, headers, other_project, name="其他项目牌组")
+    other_user = _user(client, username="bob")
+    stranger_deck_id = _deck(
+        client, other_user, _project(client, other_user), name="他人牌组"
+    )
 
     def _put(goal_new: int, goal_review: int, decks: list[str]) -> dict[str, Any]:
         return cast(
@@ -149,7 +215,6 @@ def test_study_plan_put_validates_goals_and_deck_ownership(client: TestClient) -
             client.put(
                 "/study/plan",
                 json={
-                    "project_id": project_id,
                     "selected_deck_ids": decks,
                     "daily_new_goal": goal_new,
                     "daily_review_goal": goal_review,
@@ -162,8 +227,8 @@ def test_study_plan_put_validates_goals_and_deck_ownership(client: TestClient) -
     assert _put(0, 0, [deck_id])["error"]["code"] == "VALIDATION_ERROR"  # 双 0
     assert _put(10, 40, [])["error"]["code"] == "VALIDATION_ERROR"  # 空卡组
     assert _put(10, 40, [str(uuid.uuid4())])["error"]["code"] == "DECK_NOT_FOUND"
-    # 归属校验：卡组属于同用户另一项目，对该项目计划而言即不可选（统一 404）
-    assert _put(10, 40, [other_deck_id])["error"]["code"] == "DECK_NOT_FOUND"
+    # 归属校验：他人卡组对本账号计划不可选（统一 404，不暴露存在性）
+    assert _put(10, 40, [stranger_deck_id])["error"]["code"] == "DECK_NOT_FOUND"
 
 
 def test_study_backlog_unconfigured_empty_and_pagination_bounds(client: TestClient) -> None:

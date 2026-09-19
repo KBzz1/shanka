@@ -40,3 +40,4 @@
 | C-05 | 单卡重写替换方式 | 原地替换（同 `card_id`），复习状态重置，新 `generation_item_id` | 单卡重写（FR-13） |
 | C-06 | 未到期评级宽容 | 评级接口允许对任意状态卡片提交，服务端按 FSRS 正常排程 | 复习（FR-15） |
 | C-07 | FSRS 其余参数 | `desired_retention=0.9`、`relearning_steps=(10m,)`、`maximum_interval=36500`，取自 FSRS-6 默认/Anki 惯例 | 复习（FR-15） |
+| C-08 | 学习计划归属（V25-D-39，2026-09-19） | 账号级一份（双目标 + 卡组集合），卡组可跨项目与独立；保存计划不改写 current_project_id；retain_decks=true 删项目后卡组留在计划 | 3.17.1/3.20/2.19-2.19.1；study-settings 与项目周统计端点退役 |

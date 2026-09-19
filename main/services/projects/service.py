@@ -36,8 +36,6 @@ from infra.db.models import (
     LlmCallAttempt,
     Material,
     PdfFile,
-    ProjectStudyDeck,
-    ProjectStudySettings,
     Task,
     TextChunk,
 )
@@ -74,11 +72,6 @@ def _validate_name(name: str) -> str:
     if not stripped or len(stripped) > 60:
         raise AppError(ErrorCode.VALIDATION_ERROR, "项目名须为去首尾空白后 1~60 字符")
     return stripped
-
-
-def _validate_daily_goal(value: int, field: str) -> None:
-    if value < 0 or value > 200 or value % 10 != 0:
-        raise AppError(ErrorCode.VALIDATION_ERROR, f"{field} 须为 0~200 的 10 倍数")
 
 
 def _owned_project(session: Session, *, user_id: str, project_id: str) -> LearningProject:
@@ -250,20 +243,6 @@ def create_project(session: Session, *, user_id: str, name: str, now: str) -> di
     )
     session.add(project)
     session.flush()
-    # A newly created project starts with an explicitly unconfigured deck-scoped plan.  Keeping
-    # the row lets today's queue distinguish a fresh project from pre-plan legacy rows that are
-    # still served by the compatibility chapter scope.
-    session.add(
-        ProjectStudySettings(
-            project_id=project.project_id,
-            selected_chapter_ids="[]",
-            include_unassigned=0,
-            daily_new_goal=10,
-            daily_review_goal=40,
-            updated_at=now,
-        )
-    )
-    session.flush()
     return project_view(session, project)
 
 
@@ -420,7 +399,7 @@ def add_html_material(
     now: str,
     settings: Settings,
 ) -> dict[str, Any]:
-    """添加 HTML 页面资料（POST /materials/html，V25-D-38）。
+    """添加 HTML 页面资料（POST /materials/html，V25-D-39）。
 
     解析已在上传段完成（html_archive.parse_html_archive，含确定性分诊）；本用例只落库：
     Material(type=HTML, READY) + 章节（HEADING 标题章 / AUTO 单章，chunk_seq 区间为
@@ -613,7 +592,6 @@ def delete_material(
             ).all():
                 session.delete(card)
             session.flush()
-        _remove_chapters_from_settings(session, project_id, chapter_ids)
     # 先删资料行（chapters/text_chunks 级联），再删 PDF 行与存储
     session.delete(material)
     session.flush()
@@ -850,9 +828,9 @@ def delete_project(
     _detach_task_history(session, project_tasks, now=now or format_utc(SystemClock().now_utc()))
     for task in project_tasks:
         session.delete(task)
-    settings = session.get(ProjectStudySettings, project_id)
-    if settings is not None:
-        session.delete(settings)
+    # V25-D-39：计划是账号级（user_study_decks），与项目无关联——retain_decks=true 时
+    # 保留卡组继续留在计划（新语义）；retain_decks=false 时卡组删除经 FK CASCADE
+    # 自动清出计划，无需在此处理。
     session.delete(project)
     session.flush()  # 先删项目行（materials.project_id 级联删资料；TEXT 随行清理）
     for pdf in project_pdfs:
@@ -977,7 +955,7 @@ def delete_project_chapter(
     delete_cards: bool,
 ) -> None:
     """删除章节（V25-GEN-FR-02）：活跃任务保护；delete_cards 决定卡去留，保留的卡
-    chapter_id 置空进入"未归属章节"；章节同步移出新卡范围；KP chapter_id 置 null。"""
+    chapter_id 置空进入"未归属章节"；KP chapter_id 置 null。"""
     _owned_project(session, user_id=user_id, project_id=project_id)  # 归属校验（404）
     chapter = session.get(Chapter, chapter_id)
     if chapter is None or not _chapter_in_project(session, project_id, chapter_id):
@@ -995,7 +973,6 @@ def delete_project_chapter(
         ).all():
             session.delete(card)
         session.flush()
-    _remove_chapter_from_settings(session, project_id, chapter_id)
     delete_chapter(
         session,
         user_id=user_id,
@@ -1023,102 +1000,6 @@ def _snapshot_has_chapter(task: Task, chapter_id: str) -> bool:
     return any(isinstance(item, dict) and item.get("chapter_id") == chapter_id for item in snapshot)
 
 
-def _remove_chapters_from_settings(
-    session: Session, project_id: str, chapter_ids: list[str]
-) -> None:
-    """多章节批量移出新卡范围（资料级删除；逐章调用单一移除实现）。"""
-    for chapter_id in chapter_ids:
-        _remove_chapter_from_settings(session, project_id, chapter_id)
-
-
-def _remove_chapter_from_settings(session: Session, project_id: str, chapter_id: str) -> None:
-    """章节移出新卡范围（3.17；PRD：删除章节将退出后续新卡范围）。"""
-    row = session.get(ProjectStudySettings, project_id)
-    if row is None:
-        return
-    try:
-        ids = json.loads(row.selected_chapter_ids)
-    except (ValueError, TypeError):
-        ids = []
-    if chapter_id in ids:
-        row.selected_chapter_ids = json.dumps(
-            [i for i in ids if i != chapter_id], ensure_ascii=False
-        )
-
-
-def get_study_settings(
-    session: Session, *, user_id: str, project_id: str, now: str
-) -> dict[str, Any]:
-    """项目学习设置（3.17）：get-or-create（默认空范围 + include_unassigned=false）。"""
-    _owned_project(session, user_id=user_id, project_id=project_id)  # 归属校验（404）
-    return _settings_view(session, _get_or_create_settings(session, project_id=project_id, now=now))
-
-
-def update_study_settings(
-    session: Session,
-    *,
-    user_id: str,
-    project_id: str,
-    payload: dict[str, Any],
-    now: str,
-) -> dict[str, Any]:
-    """部分更新（last-success-wins）：范围章节须属于本项目（404 CHAPTER_NOT_FOUND）；
-    空部分更新 = 真 no-op（不刷新 updated_at，与 preferences 同款语义）。"""
-    project = _owned_project(session, user_id=user_id, project_id=project_id)
-    row = _get_or_create_settings(session, project_id=project_id, now=now)
-    updates: dict[str, Any] = {}
-    if payload.get("selected_new_card_chapter_ids") is not None:
-        ids = payload["selected_new_card_chapter_ids"]
-        _validate_chapter_ids(session, project, ids)
-        updates["selected_chapter_ids"] = json.dumps(ids, ensure_ascii=False)
-    if payload.get("include_unassigned") is not None:
-        updates["include_unassigned"] = 1 if payload["include_unassigned"] else 0
-    selected_deck_ids = payload.get("selected_deck_ids")
-    if selected_deck_ids is not None:
-        unique_deck_ids = list(dict.fromkeys(selected_deck_ids))
-        deck_query = select(Deck).where(Deck.user_id == user_id, Deck.project_id == project_id)
-        if unique_deck_ids:
-            deck_query = deck_query.where(Deck.deck_id.in_(unique_deck_ids))
-        decks = list(session.scalars(deck_query).all())
-        if {deck.deck_id for deck in decks} != set(unique_deck_ids):
-            raise AppError(ErrorCode.DECK_NOT_FOUND, "所选卡组不存在或不属于当前项目")
-        if unique_deck_ids:
-            eligible = _count(
-                session,
-                Card,
-                Card.user_id == user_id,
-                Card.deck_id.in_(unique_deck_ids),
-                text(VISIBLE_PREDICATE_SQL),
-            )
-            if eligible == 0:
-                raise AppError(ErrorCode.VALIDATION_ERROR, "所选卡组暂无可学习卡片")
-        session.query(ProjectStudyDeck).filter(ProjectStudyDeck.project_id == project_id).delete(
-            synchronize_session=False
-        )
-        for deck_id in unique_deck_ids:
-            session.add(ProjectStudyDeck(project_id=project_id, deck_id=deck_id, created_at=now))
-        updates["daily_new_goal"] = row.daily_new_goal
-        updates["daily_review_goal"] = row.daily_review_goal
-    if payload.get("daily_new_goal") is not None:
-        _validate_daily_goal(payload["daily_new_goal"], "每日新学目标")
-        updates["daily_new_goal"] = payload["daily_new_goal"]
-    if payload.get("daily_review_goal") is not None:
-        _validate_daily_goal(payload["daily_review_goal"], "每日巩固目标")
-        updates["daily_review_goal"] = payload["daily_review_goal"]
-    if (
-        updates.get("daily_new_goal", row.daily_new_goal)
-        + updates.get("daily_review_goal", row.daily_review_goal)
-        == 0
-    ):
-        raise AppError(ErrorCode.VALIDATION_ERROR, "每日新学和巩固目标不能同时为 0")
-    if not updates:
-        return _settings_view(session, row)
-    updates["updated_at"] = now
-    for column, value in updates.items():
-        setattr(row, column, value)
-    return _settings_view(session, row)
-
-
 def _chapter_in_project(session: Session, project_id: str, chapter_id: str) -> bool:
     """章节是否属于项目任一资料（多资料语义；V25-D-29）。"""
     row = session.execute(
@@ -1127,48 +1008,3 @@ def _chapter_in_project(session: Session, project_id: str, chapter_id: str) -> b
         .where(Chapter.chapter_id == chapter_id, Material.project_id == project_id)
     ).first()
     return row is not None
-
-
-def _validate_chapter_ids(session: Session, project: LearningProject, ids: list[str]) -> None:
-    """范围章节必须属于项目任一资料（不存在/他属 → 404 CHAPTER_NOT_FOUND）。"""
-    if not ids:
-        return
-    found = {cid for cid in ids if _chapter_in_project(session, project.project_id, cid)}
-    if found != set(ids):
-        raise AppError(ErrorCode.CHAPTER_NOT_FOUND, "章节不存在或不属于该项目")
-
-
-def _get_or_create_settings(session: Session, *, project_id: str, now: str) -> ProjectStudySettings:
-    row = session.get(ProjectStudySettings, project_id)
-    if row is not None:
-        return row
-    row = ProjectStudySettings(
-        project_id=project_id,
-        selected_chapter_ids="[]",
-        include_unassigned=0,
-        updated_at=now,
-    )
-    session.add(row)
-    session.flush()
-    return row
-
-
-def _settings_view(session: Session, row: ProjectStudySettings) -> dict[str, Any]:
-    try:
-        ids = json.loads(row.selected_chapter_ids)
-    except (ValueError, TypeError):
-        ids = []
-    return {
-        "selected_new_card_chapter_ids": ids,
-        "include_unassigned": bool(row.include_unassigned),
-        "selected_deck_ids": list(
-            session.scalars(
-                select(ProjectStudyDeck.deck_id)
-                .where(ProjectStudyDeck.project_id == row.project_id)
-                .order_by(ProjectStudyDeck.created_at, ProjectStudyDeck.deck_id)
-            ).all()
-        ),
-        "daily_new_goal": int(row.daily_new_goal),
-        "daily_review_goal": int(row.daily_review_goal),
-        "updated_at": row.updated_at,
-    }

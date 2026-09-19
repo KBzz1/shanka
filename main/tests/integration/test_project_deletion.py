@@ -290,24 +290,6 @@ def _seed_preferences(db_path: Path, user_id: str, project_id: str) -> None:
     engine.dispose()
 
 
-def _seed_settings(db_path: Path, project_id: str, chapter_ids: list[str]) -> None:
-    """种子项目学习设置（章节删除时范围同步移除）。"""
-    from infra.db.models import ProjectStudySettings
-
-    factory, engine = _db(db_path)
-    with factory() as session:
-        session.add(
-            ProjectStudySettings(
-                project_id=project_id,
-                selected_chapter_ids=json.dumps(chapter_ids, ensure_ascii=False),
-                include_unassigned=1,
-                updated_at="2026-08-15T00:00:00.000Z",
-            )
-        )
-        session.commit()
-    engine.dispose()
-
-
 def _scalar(db_path: Path, sql: str, **params: object) -> object:
     from sqlalchemy import text
 
@@ -363,12 +345,11 @@ def test_delete_project_retain_decks_true_keeps_decks_cards(
     )
     assert resp.status_code == 204, resp.text
 
-    # 项目/PDF/章节/任务历史/设置全删
+    # 项目/PDF/章节/任务历史全删
     assert _scalar(db, "SELECT COUNT(*) FROM learning_projects") == 0
     assert _scalar(db, "SELECT COUNT(*) FROM pdf_files") == 0
     assert _scalar(db, "SELECT COUNT(*) FROM chapters") == 0
     assert _scalar(db, "SELECT COUNT(*) FROM tasks") == 0
-    assert _scalar(db, "SELECT COUNT(*) FROM project_study_settings") == 0
     assert not obj.exists()  # 存储对象随删除清理
     # 牌组/卡片/复习数据保留；牌组脱离项目；卡片 chapter_id 置空；偏好 current_project 置空
     assert _scalar(db, "SELECT project_id FROM decks WHERE deck_id = :d", d=deck_id) is None
@@ -404,7 +385,6 @@ def test_delete_project_retain_decks_false_removes_everything(
         "pdf_files",
         "chapters",
         "tasks",
-        "project_study_settings",
         "decks",
         "cards",
         "review_states",
@@ -690,7 +670,6 @@ def test_delete_chapter_default_keeps_cards_unassigned(client: TestClient, tmp_p
         chapter_ids=[chapter_id],
     )
     _seed_kp(db, user_id, task_id, chapter_id)
-    _seed_settings(db, str(project["project_id"]), project["chapter_ids"])
 
     resp = client.delete(
         f"/projects/{project['project_id']}/chapters/{chapter_id}",
@@ -701,9 +680,6 @@ def test_delete_chapter_default_keeps_cards_unassigned(client: TestClient, tmp_p
     assert _scalar(db, "SELECT COUNT(*) FROM cards WHERE card_id = :c", c=card_id) == 1
     assert _scalar(db, "SELECT chapter_id FROM cards WHERE card_id = :c", c=card_id) is None
     assert _scalar(db, "SELECT chapter_id FROM knowledge_points") is None
-    remaining = _scalar(db, "SELECT selected_chapter_ids FROM project_study_settings")
-    assert remaining is not None
-    assert json.loads(str(remaining)) == [project["chapter_ids"][1]]
 
 
 def test_delete_chapter_with_delete_cards_removes_cards_and_review(

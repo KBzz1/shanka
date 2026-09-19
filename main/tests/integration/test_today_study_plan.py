@@ -1,24 +1,16 @@
-"""今日学习计划（structure-contract 3.20/6.6；openapi /study/today，V2.5 新增）。
+"""今日学习计划（structure-contract 3.20/6.6；openapi /study/today，V25-D-39 账号级）。
 
 服务级用例（固定 now 注入，验证确定性语义）：
-- 主计划 = 当前项目全部已学习（state != NEW）且到期（due <= now）的可见卡，
+- 主计划 = 账号计划所选卡组内全部已学习（state != NEW）且到期（due <= now）的可见卡，
   按遗忘风险 DESC → 逾期时长 DESC → card_id 稳定排序取到每日目标；
-- 仍有余额时从项目学习范围（selected_new_card_chapter_ids + include_unassigned）中的
-  NEW 卡按选定章节顺序、position、card_id 补足；
+- 仍有余额时从同一批卡组的 NEW 卡按 deck_id、position、card_id 补足；
+- 计划卡组可跨项目与独立卡组（V25-D-39）：今日队列跨卡组聚合；
 - 学习日期/今日去重完成数按账号 IANA 学习时区分桶（UTC reviewed_at 折算，不改写事件）；
 - 统一可见谓词：STAGED 与删除批次中的卡不进计划、不计到期总数；
-- 评级幂等：同 (学习日期, card_id) 只计一次今日完成。
-
-决策记录（实现裁决，报告同步）：
-- main_plan_remaining = 本次返回 cards 列表长度——已评级卡 due 自动推到未来、
-  NEW 卡评级后离开 NEW 集，重取计划时自然不再出现，故队列长度即剩余主计划数；
-  "继续复习"积压卡（due_count > 每日目标）由下次 GET 的到期优先队列继续供给。
-- due_count = 已学习（state != NEW）且到期的可见卡数（NEW 卡不是"待复习"）。
-- 新卡章节顺序 = 学习设置保存的选定章节数组顺序（选定章节顺序，FR-09），
-  未归属分组（include_unassigned=true）排在所有选定章节之后。
+- 评级幂等：同 (学习日期, card_id) 只计一次今日完成；
+- 未保存计划（无目标行或零卡组）返回诚实空态，不隐式收录任何卡组。
 """
 
-import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -39,11 +31,12 @@ from infra.db.models import (
     LearningProject,
     Material,
     PdfFile,
-    ProjectStudySettings,
     ReviewEvent,
     ReviewState,
     User,
     UserPreferences,
+    UserStudyDeck,
+    UserStudySettings,
 )
 from infra.db.session import create_db_engine, create_session_factory, format_utc
 from services.review.service import submit_review
@@ -250,7 +243,6 @@ def _seed_preferences(
     user_id: str,
     daily_goal: int = 50,
     timezone: str = "Asia/Shanghai",
-    current_project_id: str | None = None,
 ) -> None:
     session.add(
         UserPreferences(
@@ -261,24 +253,32 @@ def _seed_preferences(
             deep_question_ratio=20,
             daily_goal=daily_goal,
             learning_timezone=timezone,
-            current_project_id=current_project_id,
+            current_project_id=None,
             updated_at=_NOW,
         )
     )
     session.flush()
 
 
-def _seed_study_settings(
-    session: Session, *, project_id: str, selected: list[str], include_unassigned: bool = False
+def _seed_user_plan(
+    session: Session,
+    *,
+    user_id: str,
+    deck_ids: list[str],
+    daily_new_goal: int = 0,
+    daily_review_goal: int = 10,
 ) -> None:
+    """账号级计划（V25-D-39）：一用户一行目标 + 计划卡组集合（可跨项目与独立卡组）。"""
     session.add(
-        ProjectStudySettings(
-            project_id=project_id,
-            selected_chapter_ids=json.dumps(selected),
-            include_unassigned=1 if include_unassigned else 0,
+        UserStudySettings(
+            user_id=user_id,
+            daily_new_goal=daily_new_goal,
+            daily_review_goal=daily_review_goal,
             updated_at=_NOW,
         )
     )
+    for did in deck_ids:
+        session.add(UserStudyDeck(user_id=user_id, deck_id=did, created_at=_NOW))
     session.flush()
 
 
@@ -407,8 +407,9 @@ def test_today_plan_due_first_ordering_by_risk_overdue_card_id(
                 card_id="00000000-0000-0000-0000-000000000007",
             ),
         }
-        _seed_preferences(
-            session, user_id=user, daily_goal=50, current_project_id=cast(str, ctx["project_id"])
+        _seed_preferences(session, user_id=user, daily_goal=50)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck], daily_new_goal=0, daily_review_goal=40
         )
         session.commit()
 
@@ -432,13 +433,142 @@ def test_today_plan_due_first_ordering_by_risk_overdue_card_id(
     assert risks[cards["f"]] == pytest.approx(risks[cards["g"]])
 
 
+# ---------- 账号级跨项目聚合（V25-D-39） ----------
+
+
+def test_today_plan_aggregates_decks_across_projects(
+    session_factory: Callable[[], Session], user: str
+) -> None:
+    """计划卡组跨项目混选：今日队列按遗忘风险全局排序聚合，不按项目分桶。"""
+    with session_factory() as session:
+        _seed_user(session, user)
+        ctx_a = _seed_project(session, user_id=user, chapters=1)
+        ctx_b = _seed_project(session, user_id=user, chapters=1)
+        deck_a = cast(list[str], ctx_a["deck_ids"])[0]
+        deck_b = cast(list[str], ctx_b["deck_ids"])[0]
+        ago = _fmt(_NOW_DT - timedelta(days=10))
+        # 项目 A 的卡风险高（S=2），项目 B 的卡风险低（S=100）：A 先出
+        risky = _seed_card(
+            session,
+            user_id=user,
+            deck_id=deck_a,
+            position=1,
+            state="REVIEW",
+            stability=2.0,
+            due=ago,
+            last_review=ago,
+            reps=5,
+        )
+        stable = _seed_card(
+            session,
+            user_id=user,
+            deck_id=deck_b,
+            position=1,
+            state="REVIEW",
+            stability=100.0,
+            due=ago,
+            last_review=ago,
+            reps=3,
+        )
+        _seed_preferences(session, user_id=user, daily_goal=50)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck_a, deck_b], daily_new_goal=0,
+            daily_review_goal=10,
+        )
+        session.commit()
+
+    with session_factory() as session:
+        plan = _plan(session, user_id=user, now=_NOW)
+    assert plan.plan_configured is True
+    assert plan.due_count == 2
+    assert _card_ids(plan) == [risky, stable]
+    assert set(plan.selected_deck_ids) == {deck_a, deck_b}
+
+
+def test_today_plan_unselected_decks_stay_out(session_factory: Callable[[], Session], user: str) -> None:
+    """计划外卡组（同项目另一卡组）不进入今日队列——范围约束不因项目归属放宽。"""
+    with session_factory() as session:
+        _seed_user(session, user)
+        ctx = _seed_project(session, user_id=user, chapters=1, deck_count=2)
+        deck_in, deck_out = cast(list[str], ctx["deck_ids"])
+        ago = _fmt(_NOW_DT - timedelta(days=5))
+        in_card = _seed_card(
+            session, user_id=user, deck_id=deck_in, position=1, state="REVIEW",
+            stability=10.0, due=ago, last_review=ago, reps=1,
+        )
+        _seed_card(
+            session, user_id=user, deck_id=deck_out, position=1, state="REVIEW",
+            stability=2.0, due=ago, last_review=ago, reps=1,
+        )
+        _seed_preferences(session, user_id=user, daily_goal=50)
+        _seed_user_plan(session, user_id=user, deck_ids=[deck_in], daily_new_goal=0,
+                        daily_review_goal=10)
+        session.commit()
+
+    with session_factory() as session:
+        plan = _plan(session, user_id=user, now=_NOW)
+    assert plan.due_count == 1
+    assert _card_ids(plan) == [in_card]
+
+
+def test_today_plan_standalone_deck_joins_account_plan(
+    session_factory: Callable[[], Session], user: str
+) -> None:
+    """独立牌组（project_id=null）被选入账号计划后进入今日队列（V25-D-39 语义翻转）。"""
+    from services.review.service import review_queue
+
+    with session_factory() as session:
+        _seed_user(session, user)
+        ctx = _seed_project(session, user_id=user, chapters=1)
+        ago = _fmt(_NOW_DT - timedelta(days=5))
+        independent_deck = _uuid()
+        session.add(
+            Deck(
+                deck_id=independent_deck,
+                user_id=user,
+                name="独立",
+                source="MANUAL",
+                project_id=None,
+                version=_NOW,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        session.flush()  # 独立牌组行先落库（unitofwork 不保证卡先于牌组插入——Task 8 同款）
+        due_card = _seed_card(
+            session,
+            user_id=user,
+            deck_id=independent_deck,
+            position=1,
+            state="REVIEW",
+            stability=10.0,
+            due=ago,
+            last_review=ago,
+            reps=1,
+        )
+        _seed_preferences(session, user_id=user, daily_goal=10)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[independent_deck], daily_new_goal=0,
+            daily_review_goal=10,
+        )
+        session.commit()
+
+    with session_factory() as session:
+        plan = _plan(session, user_id=user, now=_NOW)
+    assert _card_ids(plan) == [due_card]
+    # 独立牌组到期复习入口不受影响（6.6：独立牌组可启动自己的到期复习）
+    with session_factory() as session:
+        items = review_queue(session, user_id=user, deck_id=independent_deck, now=_NOW)
+    assert len(items) == 1
+
+
 # ---------- 超目标逾期积压 ----------
 
 
 def test_today_plan_backlog_beyond_daily_goal(
     session_factory: Callable[[], Session], user: str
 ) -> None:
-    """到期数 >= 每日目标：主计划只安排到期卡（不加入新卡），积压 = 到期总数 - 目标。"""
+    """到期数 >= 巩固目标：主计划只安排到期卡（不加入新卡），积压 = 到期总数 - 目标。"""
     with session_factory() as session:
         _seed_user(session, user)
         ctx = _seed_project(session, user_id=user, chapters=2)
@@ -456,28 +586,17 @@ def test_today_plan_backlog_beyond_daily_goal(
                 last_review=ago,
                 reps=1,
             )
-        # 范围内新卡：目标已满，不得进入计划
-        _seed_card(
-            session,
-            user_id=user,
-            deck_id=deck,
-            position=20,
-            state="NEW",
-            chapter_id=cast(list[str], ctx["chapter_ids"])[0],
-        )
-        _seed_preferences(
-            session, user_id=user, daily_goal=10, current_project_id=cast(str, ctx["project_id"])
-        )
-        _seed_study_settings(
-            session,
-            project_id=cast(str, ctx["project_id"]),
-            selected=[cast(list[str], ctx["chapter_ids"])[0]],
+        # 计划内新卡：巩固目标已满，不得进入计划
+        _seed_card(session, user_id=user, deck_id=deck, position=20, state="NEW")
+        _seed_preferences(session, user_id=user, daily_goal=10)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck], daily_new_goal=0, daily_review_goal=10
         )
         session.commit()
 
     with session_factory() as session:
         plan = _plan(session, user_id=user, now=_NOW)
-    assert plan.daily_goal == 10
+    assert plan.daily_goal == 10  # 实际核心队列目标 = 巩固 10 + 新学 0
     assert plan.due_count == 12
     assert plan.backlog_count == 2  # 到期总数超出每日目标的部分
     assert len(plan.cards) == 10  # 主计划只安排到期卡
@@ -488,7 +607,7 @@ def test_today_plan_backlog_beyond_daily_goal(
 def test_today_plan_due_less_than_goal_no_backlog(
     session_factory: Callable[[], Session], user: str
 ) -> None:
-    """到期数 < 每日目标：全部到期卡进计划，积压为 0。"""
+    """到期数 < 巩固目标：全部到期卡进计划，积压为 0。"""
     with session_factory() as session:
         _seed_user(session, user)
         ctx = _seed_project(session, user_id=user, chapters=2)
@@ -516,8 +635,9 @@ def test_today_plan_due_less_than_goal_no_backlog(
             last_review=ago,
             reps=1,
         )
-        _seed_preferences(
-            session, user_id=user, daily_goal=10, current_project_id=cast(str, ctx["project_id"])
+        _seed_preferences(session, user_id=user, daily_goal=10)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck], daily_new_goal=0, daily_review_goal=10
         )
         session.commit()
 
@@ -528,122 +648,63 @@ def test_today_plan_due_less_than_goal_no_backlog(
     assert len(plan.cards) == 2
 
 
-# ---------- 新卡补足与章节范围 ----------
+# ---------- 新卡补足（卡组顺序） ----------
 
 
-def test_today_plan_new_card_fill_by_selected_chapter_order(
+def test_today_plan_new_card_fill_by_deck_position_order(
     session_factory: Callable[[], Session], user: str
 ) -> None:
-    """余额由范围内 NEW 卡按选定章节顺序、position、card_id 补足（3.20/FR-02/FR-09）。
-
-    settings 选定顺序 [ch2, ch1]（客户端选定序）：ch2 新卡先于 ch1；未选定章节与
-    未归属（include_unassigned=false）的新卡不进入计划。
-    """
+    """余额由计划卡组 NEW 卡按 deck_id、position、card_id 稳定补足（3.20/FR-02）。"""
+    deck_a = "00000000-0000-0000-0000-00000000a001"
+    deck_b = "00000000-0000-0000-0000-00000000b001"
     with session_factory() as session:
         _seed_user(session, user)
-        ctx = _seed_project(session, user_id=user, chapters=3)
-        deck = cast(list[str], ctx["deck_ids"])[0]
-        ch1, ch2, ch3 = cast(list[str], ctx["chapter_ids"])
+        ctx = _seed_project(session, user_id=user, chapters=1)
+        project_id = cast(str, ctx["project_id"])
+        for did in (deck_a, deck_b):
+            session.add(
+                Deck(
+                    deck_id=did,
+                    user_id=user,
+                    name=f"D-{did[-1]}",
+                    source="MANUAL",
+                    project_id=project_id,
+                    version=_NOW,
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                )
+            )
+        session.flush()
         ago = _fmt(_NOW_DT - timedelta(days=3))
-        due_cards = [
-            _seed_card(
-                session,
-                user_id=user,
-                deck_id=deck,
-                position=1,
-                state="REVIEW",
-                stability=10.0,
-                due=ago,
-                last_review=ago,
-                reps=2,
-                card_id="00000000-0000-0000-0000-000000000011",
-            ),
-            _seed_card(
-                session,
-                user_id=user,
-                deck_id=deck,
-                position=2,
-                state="REVIEW",
-                stability=10.0,
-                due=ago,
-                last_review=ago,
-                reps=2,
-                card_id="00000000-0000-0000-0000-000000000012",
-            ),
-        ]
-        # 新卡：ch1 两张（position 3/4）、ch2 一张（position 5）、ch3 一张（范围外）、未归属一张
-        new_ch1_1 = _seed_card(
-            session, user_id=user, deck_id=deck, position=3, state="NEW", chapter_id=ch1
-        )
-        new_ch1_2 = _seed_card(
-            session, user_id=user, deck_id=deck, position=4, state="NEW", chapter_id=ch1
-        )
-        new_ch2 = _seed_card(
-            session, user_id=user, deck_id=deck, position=5, state="NEW", chapter_id=ch2
-        )
-        _seed_card(session, user_id=user, deck_id=deck, position=6, state="NEW", chapter_id=ch3)
-        _seed_card(session, user_id=user, deck_id=deck, position=7, state="NEW")  # 未归属
-        _seed_preferences(
-            session, user_id=user, daily_goal=10, current_project_id=cast(str, ctx["project_id"])
-        )
-        _seed_study_settings(
+        due_card = _seed_card(
             session,
-            project_id=cast(str, ctx["project_id"]),
-            selected=[ch2, ch1],
-            include_unassigned=False,
+            user_id=user,
+            deck_id=deck_a,
+            position=1,
+            state="REVIEW",
+            stability=10.0,
+            due=ago,
+            last_review=ago,
+            reps=2,
+        )
+        # 新卡：deck_a 两张（position 2/3）、deck_b 两张（position 1/2）——全局按 (deck_id, position) 排序
+        new_a1 = _seed_card(session, user_id=user, deck_id=deck_a, position=2, state="NEW")
+        new_a2 = _seed_card(session, user_id=user, deck_id=deck_a, position=3, state="NEW")
+        new_b1 = _seed_card(session, user_id=user, deck_id=deck_b, position=1, state="NEW")
+        new_b2 = _seed_card(session, user_id=user, deck_id=deck_b, position=2, state="NEW")
+        _seed_preferences(session, user_id=user, daily_goal=20)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck_b, deck_a], daily_new_goal=10, daily_review_goal=10
         )
         session.commit()
 
     with session_factory() as session:
         plan = _plan(session, user_id=user, now=_NOW)
-    assert [c.card_id for c in plan.cards] == [
-        *due_cards,
-        new_ch2,
-        new_ch1_1,
-        new_ch1_2,  # ch2 先于 ch1（选定顺序）；ch3/未归属排除
-    ]
-    assert plan.due_count == 2
+    # 新学补足跨卡组全局排序：deck_a(p2) → deck_a(p3) → deck_b(p1) → deck_b(p2)
+    assert _card_ids(plan) == [due_card, new_a1, new_a2, new_b1, new_b2]
+    assert plan.due_count == 1
     assert plan.main_plan_remaining == 5
     assert plan.backlog_count == 0
-
-
-def test_today_plan_unassigned_new_cards_only_with_include_unassigned(
-    session_factory: Callable[[], Session], user: str
-) -> None:
-    """未归属新卡（chapter_id=null）：include_unassigned=false 排除；true 时排在选定章节之后。"""
-    with session_factory() as session:
-        _seed_user(session, user)
-        ctx = _seed_project(session, user_id=user, chapters=2)
-        deck = cast(list[str], ctx["deck_ids"])[0]
-        ch1 = cast(list[str], ctx["chapter_ids"])[0]
-        new_ch1 = _seed_card(
-            session, user_id=user, deck_id=deck, position=1, state="NEW", chapter_id=ch1
-        )
-        unassigned = _seed_card(session, user_id=user, deck_id=deck, position=2, state="NEW")
-        _seed_preferences(
-            session, user_id=user, daily_goal=10, current_project_id=cast(str, ctx["project_id"])
-        )
-        _seed_study_settings(
-            session,
-            project_id=cast(str, ctx["project_id"]),
-            selected=[ch1],
-            include_unassigned=False,
-        )
-        session.commit()
-
-    with session_factory() as session:
-        plan = _plan(session, user_id=user, now=_NOW)
-    assert [c.card_id for c in plan.cards] == [new_ch1]
-
-    with session_factory() as session:
-        settings = session.get(ProjectStudySettings, cast(str, ctx["project_id"]))
-        assert settings is not None
-        settings.include_unassigned = 1
-        settings.updated_at = _NOW
-        session.commit()
-    with session_factory() as session:
-        plan = _plan(session, user_id=user, now=_NOW)
-    assert [c.card_id for c in plan.cards] == [new_ch1, unassigned]
 
 
 # ---------- IANA 时区每日重置与今日去重完成数 ----------
@@ -708,11 +769,10 @@ def test_today_plan_study_date_and_completed_reset_by_iana_timezone(
             reviewed_at="2026-08-16T01:00:00.000Z",
         )
         _seed_preferences(
-            session,
-            user_id=user,
-            daily_goal=10,
-            timezone="America/Los_Angeles",
-            current_project_id=cast(str, ctx["project_id"]),
+            session, user_id=user, daily_goal=10, timezone="America/Los_Angeles"
+        )
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck], daily_new_goal=0, daily_review_goal=10
         )
         session.commit()
 
@@ -754,8 +814,9 @@ def test_today_plan_duplicate_rating_idempotency_single_completion(
         deck = cast(list[str], ctx["deck_ids"])[0]
         card_a = _seed_card(session, user_id=user, deck_id=deck, position=1, state="NEW")
         card_b = _seed_card(session, user_id=user, deck_id=deck, position=2, state="NEW")
-        _seed_preferences(
-            session, user_id=user, daily_goal=10, current_project_id=cast(str, ctx["project_id"])
+        _seed_preferences(session, user_id=user, daily_goal=10)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck], daily_new_goal=10, daily_review_goal=10
         )
         session.commit()
 
@@ -824,7 +885,6 @@ def test_today_plan_excludes_deleted_and_staged_cards(
         _seed_user(session, user)
         ctx = _seed_project(session, user_id=user, chapters=2)
         deck = cast(list[str], ctx["deck_ids"])[0]
-        ch1 = cast(list[str], ctx["chapter_ids"])[0]
         ago = _fmt(_NOW_DT - timedelta(days=5))
         visible = _seed_card(
             session,
@@ -862,14 +922,13 @@ def test_today_plan_excludes_deleted_and_staged_cards(
             reps=1,
             publication_state="STAGED",
         )
-        # 范围内新卡：删除批次 / STAGED 的同样不可见
+        # 计划内新卡：删除批次 / STAGED 的同样不可见
         _seed_card(
             session,
             user_id=user,
             deck_id=deck,
             position=4,
             state="NEW",
-            chapter_id=ch1,
             delete_batch_id=_uuid(),
         )
         _seed_card(
@@ -878,93 +937,68 @@ def test_today_plan_excludes_deleted_and_staged_cards(
             deck_id=deck,
             position=5,
             state="NEW",
-            chapter_id=ch1,
             publication_state="STAGED",
         )
-        visible_new = _seed_card(
-            session, user_id=user, deck_id=deck, position=6, state="NEW", chapter_id=ch1
+        visible_new = _seed_card(session, user_id=user, deck_id=deck, position=6, state="NEW")
+        _seed_preferences(session, user_id=user, daily_goal=10)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck], daily_new_goal=10, daily_review_goal=10
         )
-        _seed_preferences(
-            session, user_id=user, daily_goal=10, current_project_id=cast(str, ctx["project_id"])
-        )
-        _seed_study_settings(session, project_id=cast(str, ctx["project_id"]), selected=[ch1])
         session.commit()
 
     with session_factory() as session:
         plan = _plan(session, user_id=user, now=_NOW)
     assert plan.due_count == 1  # 只有可见的已学习到期卡
-    assert [c.card_id for c in plan.cards] == [visible, visible_new]
+    assert _card_ids(plan) == [visible, visible_new]
 
 
-# ---------- 空态与独立牌组 ----------
+# ---------- 空态（V25-D-39：未保存计划） ----------
 
 
-def test_today_plan_empty_state_without_current_project(
+def test_today_plan_empty_state_without_saved_plan(
     session_factory: Callable[[], Session], user: str
 ) -> None:
-    """无当前项目：current_project=null 空态，计划为空；今日完成仍按账号全天去重。"""
+    """无账号级计划行：plan_configured=false 空态，计划为空；今日完成仍按账号全天去重。"""
+    with session_factory() as session:
+        _seed_user(session, user)
+        ctx = _seed_project(session, user_id=user, chapters=2)
+        deck = cast(list[str], ctx["deck_ids"])[0]
+        card = _seed_card(session, user_id=user, deck_id=deck, position=1, state="NEW")
+        _seed_preferences(session, user_id=user, daily_goal=10)
+        _seed_event(
+            session,
+            user_id=user,
+            card_id=card,
+            client_event_id=_uuid(),
+            reviewed_at=_NOW,
+        )
+        session.commit()
+
+    with session_factory() as session:
+        plan = _plan(session, user_id=user, now=_NOW)
+    assert plan.plan_configured is False
+    assert plan.cards == []
+    assert plan.due_count == 0
+    assert plan.main_plan_remaining == 0
+    assert plan.backlog_count == 0
+    assert plan.today_completed_count == 1  # 账号全天去重完成仍如实计数
+
+
+def test_today_plan_settings_row_without_decks_is_empty_state(
+    session_factory: Callable[[], Session], user: str
+) -> None:
+    """有目标行但零卡组（不一致防御）：同样返回诚实空态，不隐式收录任何卡组。"""
     with session_factory() as session:
         _seed_user(session, user)
         ctx = _seed_project(session, user_id=user, chapters=2)
         deck = cast(list[str], ctx["deck_ids"])[0]
         _seed_card(session, user_id=user, deck_id=deck, position=1, state="NEW")
-        _seed_preferences(session, user_id=user, daily_goal=10, current_project_id=None)
+        _seed_preferences(session, user_id=user, daily_goal=10)
+        _seed_user_plan(session, user_id=user, deck_ids=[], daily_new_goal=0,
+                        daily_review_goal=10)
         session.commit()
 
     with session_factory() as session:
         plan = _plan(session, user_id=user, now=_NOW)
-    assert plan.current_project is None
+    assert plan.plan_configured is False
     assert plan.cards == []
-    assert plan.due_count == 0
-    assert plan.main_plan_remaining == 0
-    assert plan.backlog_count == 0
-    assert plan.today_completed_count == 0
-
-
-def test_today_plan_independent_deck_excluded_from_project_plan(
-    session_factory: Callable[[], Session], user: str
-) -> None:
-    """独立牌组（project_id=null）不进入首页每日计划（V25-STUDY-FR-01）；到期卡仍可独立复习。"""
-    from services.review.service import review_queue
-
-    with session_factory() as session:
-        _seed_user(session, user)
-        ctx = _seed_project(session, user_id=user, chapters=2)
-        ago = _fmt(_NOW_DT - timedelta(days=5))
-        independent_deck = _uuid()
-        session.add(
-            Deck(
-                deck_id=independent_deck,
-                user_id=user,
-                name="独立",
-                source="MANUAL",
-                project_id=None,
-                version=_NOW,
-                created_at=_NOW,
-                updated_at=_NOW,
-            )
-        )
-        session.flush()  # 独立牌组行先落库（unitofwork 不保证卡先于牌组插入——Task 8 同款）
-        _seed_card(
-            session,
-            user_id=user,
-            deck_id=independent_deck,
-            position=1,
-            state="REVIEW",
-            stability=10.0,
-            due=ago,
-            last_review=ago,
-            reps=1,
-        )
-        _seed_preferences(
-            session, user_id=user, daily_goal=10, current_project_id=cast(str, ctx["project_id"])
-        )
-        session.commit()
-
-    with session_factory() as session:
-        plan = _plan(session, user_id=user, now=_NOW)
-    assert plan.cards == []  # 项目内无卡 → 计划为空
-    # 独立牌组到期复习不受影响（6.6：独立牌组可启动自己的到期复习）
-    with session_factory() as session:
-        items = review_queue(session, user_id=user, deck_id=independent_deck, now=_NOW)
-    assert len(items) == 1

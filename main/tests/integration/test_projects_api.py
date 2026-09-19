@@ -957,83 +957,10 @@ def test_projects_chapter_patch_unknown_404(client: TestClient, tmp_path: Path) 
     assert _error_code(resp) == "CHAPTER_NOT_FOUND"
 
 
-# ---------- 项目学习设置（章节范围） ----------
+# ---------- 项目学习设置 ----------
 
-
-def test_projects_study_settings_defaults(client: TestClient, tmp_path: Path) -> None:
-    """get-or-create 默认：空范围 + include_unassigned=false（契约 3.17）。"""
-    user = _user(client)
-    db = tmp_path / "projects_api.db"
-    project = _seed_parsed_project(db, _user_id(db))
-    resp = client.get(f"/projects/{project['project_id']}/study-settings", headers=user)
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body == {
-        "selected_new_card_chapter_ids": [],
-        "include_unassigned": False,
-        # 契约 3.17 卡组计划范围与双目标（get-or-create 默认值）
-        "selected_deck_ids": [],
-        "daily_new_goal": 10,
-        "daily_review_goal": 40,
-        "updated_at": body["updated_at"],
-    }
-    assert body["updated_at"]
-
-
-def test_projects_study_settings_patch_persists_and_cross_device(
-    client: TestClient, tmp_path: Path
-) -> None:
-    """PATCH 章节范围 → 持久化；同一账号新会话（跨设备语义）读到同一值。"""
-    user = _user(client)
-    db = tmp_path / "projects_api.db"
-    project = _seed_parsed_project(db, _user_id(db))
-    ids = [str(project["chapter_ids"][0])]
-    resp = client.patch(
-        f"/projects/{project['project_id']}/study-settings",
-        json={"selected_new_card_chapter_ids": ids, "include_unassigned": True},
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["selected_new_card_chapter_ids"] == ids
-    assert body["include_unassigned"] is True
-    # 部分更新：只改 include_unassigned → 范围保持
-    resp = client.patch(
-        f"/projects/{project['project_id']}/study-settings",
-        json={"include_unassigned": False},
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["selected_new_card_chapter_ids"] == ids
-    assert resp.json()["include_unassigned"] is False
-    # 新会话（再次登录）跨设备一致
-    resp = client.get(f"/projects/{project['project_id']}/study-settings", headers=user)
-    assert resp.json()["selected_new_card_chapter_ids"] == ids
-
-
-def test_projects_study_settings_foreign_chapter_404(client: TestClient, tmp_path: Path) -> None:
-    """范围含不属于本项目的章节 id → 404 CHAPTER_NOT_FOUND。"""
-    user = _user(client)
-    db = tmp_path / "projects_api.db"
-    project = _seed_parsed_project(db, _user_id(db))
-    resp = client.patch(
-        f"/projects/{project['project_id']}/study-settings",
-        json={"selected_new_card_chapter_ids": [str(uuid.uuid4())]},
-        headers={**user, **_idem()},
-    )
-    assert resp.status_code == 404
-    assert _error_code(resp) == "CHAPTER_NOT_FOUND"
-
-
-def test_projects_study_settings_cross_user_404(client: TestClient, tmp_path: Path) -> None:
-    _user(client)  # alice 先注册（种子依赖）
-    user_b = _user(client, "user2", "pass-2222")
-    db = tmp_path / "projects_api.db"
-    project = _seed_parsed_project(db, _user_id(db))
-    resp = client.get(f"/projects/{project['project_id']}/study-settings", headers=user_b)
-    assert resp.status_code == 404
-    assert _error_code(resp) == "PROJECT_NOT_FOUND"
-
+# GET/PATCH /projects/{id}/study-settings 已随 V25-D-39 账号级跨项目计划退役
+# （端点与 ProjectStudySettings 资源删除；计划统一走 GET/PUT /study/plan）。
 
 # ---------- 删除保护（活跃任务 / 状态） ----------
 

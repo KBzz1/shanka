@@ -1,9 +1,10 @@
 """契约守卫（V2.5 扩展）：V2.5 新增资源 ↔ openapi.yaml（守卫 1 扩展，红线 1）。
 
 锚点：UserPreferences / UserPreferencesUpdateRequest / LearningProject /
-ProjectStudySettings / ProjectStudySettingsUpdateRequest / CardDeletionBatch /
+StudyPlan / StudyPlanUpdateRequest / CardDeletionBatch /
 CardRewritePreview / TodayStudyPlan / TodayPlanCard / TaskUpdateRequest /
 ReviewEvent / ReviewEventRequest / AuthUser / AuthMeUpdateRequest。
+ProjectStudySettings 两锚点已随 V25-D-39 账号级计划退役（资源与端点删除）。
 枚举字段沿用既有口径：str 注解不校验 enum 值集，值集一致性由 domain/enums 守卫
 （test_domain_enums_guard）承载。
 """
@@ -14,14 +15,15 @@ from app.schemas.preferences import (
     UserPreferences,
     UserPreferencesUpdateRequest,
 )
-from app.schemas.project import (
-    LearningProject,
-    ProjectStudySettings,
-    ProjectStudySettingsUpdateRequest,
-)
+from app.schemas.project import LearningProject
 from app.schemas.review import ReviewEvent, ReviewEventRequest
 from app.schemas.rewrite_preview import CardRewritePreview
-from app.schemas.study_plan import TodayPlanCard, TodayStudyPlan
+from app.schemas.study_plan import (
+    StudyPlan,
+    StudyPlanUpdateRequest,
+    TodayPlanCard,
+    TodayStudyPlan,
+)
 from app.schemas.tasks import TaskUpdateRequest
 from tests.contract.support import check_schema_consistency, load_openapi, openapi_schema
 
@@ -43,12 +45,13 @@ def test_learning_project_schema_openapi_consistent() -> None:
     _consistent(LearningProject, "LearningProject")
 
 
-def test_project_study_settings_schema_openapi_consistent() -> None:
-    _consistent(ProjectStudySettings, "ProjectStudySettings")
+def test_study_plan_schema_openapi_consistent() -> None:
+    """V25-D-39：账号级计划（无项目字段）。"""
+    _consistent(StudyPlan, "StudyPlan")
 
 
-def test_project_study_settings_update_request_schema_openapi_consistent() -> None:
-    _consistent(ProjectStudySettingsUpdateRequest, "ProjectStudySettingsUpdateRequest")
+def test_study_plan_update_request_schema_openapi_consistent() -> None:
+    _consistent(StudyPlanUpdateRequest, "StudyPlanUpdateRequest")
 
 
 def test_card_deletion_batch_schema_openapi_consistent() -> None:

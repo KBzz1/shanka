@@ -23,13 +23,13 @@ users 1──N pdf_files 1──1 materials(PDF) 1──N chapters
 users 1──N learning_projects 1──N materials（资料集合权威归属;V25-D-29）
                             │        └─N chapters / text_chunks
                             │        └─PDF 资料 material_id == file_id（与 pdf_files 一对一）
-                            1──1 project_study_settings
-                            1──N project_study_decks ──N decks
                             1──N decks(project_id 可空=独立牌组)
                             1──N tasks ──N batches 1──1 knowledge_points
                                         └──N cards(source_task_id, STAGED/PUBLISHED)
 users 1──N generation_operations ──0..1 tasks
                                  └──N llm_call_attempts
+users 1──1 user_study_settings（账号级计划;V25-D-39）
+users 1──N user_study_decks ──N decks（计划可跨项目选卡;V25-D-39）
 users 1──N decks 1──N cards 1──1 review_states
 users 1──N review_events ──N cards
 users 1──N study_sessions ──0..1 decks（ADHOC 单卡组范围;V25-D-37）
@@ -83,7 +83,7 @@ users 1──N idempotency_keys（V2.2 主键重建）
 | material_id | TEXT | NOT NULL, FK → materials ON DELETE CASCADE | V25-D-29 归属资料;章节随资料删除级联清理 |
 | file_id | TEXT | NULL, FK → pdf_files ON DELETE CASCADE | PDF 资料章节 = material_id;TEXT 资料章节为 NULL |
 | name | TEXT | NOT NULL | 用户可修改 |
-| source | TEXT | NOT NULL, CHECK IN ('TOC','HEADING','AI','AUTO','FALLBACK','TEXT','ZIP','MANUAL') | V25-D-36/38 章节初始来源(HEADING=HTML 标题、AUTO=程序阈值单章,V25-D-38 域扩展);用户修改名称/页码不改变。存量行迁移按资料类型回填(PDF→TOC、TEXT→TEXT、ZIP→ZIP) |
+| source | TEXT | NOT NULL, CHECK IN ('TOC','HEADING','AI','AUTO','FALLBACK','TEXT','ZIP','MANUAL') | V25-D-36/38 章节初始来源(HEADING=HTML 标题、AUTO=程序阈值单章,V25-D-39 域扩展);用户修改名称/页码不改变。存量行迁移按资料类型回填(PDF→TOC、TEXT→TEXT、ZIP→ZIP) |
 | start_page | INTEGER | NULL | 用户可修改;TEXT 章节为 NULL(V25-D-32) |
 | end_page | INTEGER | NULL | 用户可修改;TEXT 章节为 NULL(V25-D-32) |
 
@@ -439,13 +439,13 @@ V25-D-29 起不再持有 `file_id` 唯一外键:资料归属权威 = `materials.
 
 约束:`CHECK (basic_ratio % 10 = 0 AND basic_ratio BETWEEN 0 AND 100)`、同型 CHECK × 3、`CHECK (basic_ratio + understanding_ratio + deep_question_ratio = 100)`、`CHECK (daily_goal BETWEEN 10 AND 200 AND daily_goal % 10 = 0)`。
 
-### 2.19 project_study_settings（V2.5 新增）
+### 2.19 user_study_settings（V25-D-39，由 a7c4e9f1b3d5 迁移创建）
+
+账号级学习计划设置，一用户一行；取代已删除的 project_study_settings（计划不再归属项目）。
 
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
-| project_id | TEXT | PK, FK → learning_projects ON DELETE CASCADE | 一项目一行 |
-| selected_chapter_ids | TEXT | NOT NULL DEFAULT '[]' | 新卡章节范围(JSON);空数组 = 暂无新卡范围 |
-| include_unassigned | INTEGER | NOT NULL DEFAULT 0 | 是否包含 `chapter_id = null` 的新卡(0/1) |
+| user_id | TEXT | PK, FK → users ON DELETE CASCADE | 一用户一行 |
 | daily_new_goal | INTEGER | NOT NULL DEFAULT 10 | 每日新学目标,0~200 且为 10 的倍数 |
 | daily_review_goal | INTEGER | NOT NULL DEFAULT 40 | 每日巩固目标,0~200 且为 10 的倍数 |
 | updated_at | TEXT | NOT NULL | |
@@ -454,14 +454,16 @@ V25-D-29 起不再持有 `file_id` 唯一外键:资料归属权威 = `materials.
 `CHECK (daily_review_goal BETWEEN 0 AND 200 AND daily_review_goal % 10 = 0)`、
 `CHECK (daily_new_goal + daily_review_goal > 0)`。
 
-### 2.19.1 project_study_decks（V2.5 新增）
+### 2.19.1 user_study_decks（V25-D-39，由 a7c4e9f1b3d5 迁移创建）
 
-今日学习计划选中的卡组关联表。卡组必须属于同一用户且已归属该项目；删除项目或卡组时
-关联行级联删除。计划只保存卡组 ID，不再把章节 ID JSON 当作今日计划范围。
+今日学习计划选中的卡组关联表（账号级）。卡组必须属于该用户，可跨项目与独立卡组
+（`decks.project_id` 可为 NULL）。删除用户或卡组时关联行级联删除；删除项目但保留卡组
+（retain_decks=true）时卡组转为独立卡组并**继续留在计划**，连带删除卡组
+（retain_decks=false）时经 deck 外键级联清出计划。计划只保存卡组 ID。
 
 | 列 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
-| project_id | TEXT | 复合主键, FK → learning_projects ON DELETE CASCADE | |
+| user_id | TEXT | 复合主键, FK → users ON DELETE CASCADE | |
 | deck_id | TEXT | 复合主键, FK → decks ON DELETE CASCADE | |
 | created_at | TEXT | NOT NULL | 选择进入计划的时间 |
 
@@ -545,7 +547,7 @@ V25-D-29 起不再持有 `file_id` 唯一外键:资料归属权威 = `materials.
 | 删除对象 | 级联效果 |
 | --- | --- |
 | users | auth_sessions CASCADE(本期无用户删除接口,预留);study_sessions CASCADE |
-| learning_projects | materials CASCADE(chapters/text_chunks 随资料级联);project_study_settings/project_study_decks CASCADE;user_preferences.current_project_id SET NULL;decks.project_id SET NULL;tasks.project_id SET NULL;PDF 资料连带删 pdf_files 行与存储对象,删除确认时服务端先自动 CAS 取消全部活跃任务 |
+| learning_projects | materials CASCADE(chapters/text_chunks 随资料级联);user_preferences.current_project_id SET NULL;decks.project_id SET NULL(保留卡组转独立并留在账号级计划,V25-D-39);tasks.project_id SET NULL;PDF 资料连带删 pdf_files 行与存储对象,删除确认时服务端先自动 CAS 取消全部活跃任务 |
 | materials | chapters/text_chunks CASCADE;PDF 资料级联删 pdf_files 行;cards.chapter_id 随章节删除 SET NULL 或按用户选择删除;引用该资料的活跃任务静默取消(V25-D-30) |
 | decks | cards → review_states、review_events 全部 CASCADE;tasks.deck_id SET NULL;study_sessions.deck_id CASCADE(仅硬删触发,时长聚合丢失不改写评分事实);删除确认时服务端先自动 CAS 取消全部活跃任务 |
 | pdf_files | chapters CASCADE;tasks.file_id SET NULL;项目删除确认时服务端先自动 CAS 取消全部活跃任务 |
@@ -609,8 +611,8 @@ MVP 直接基于 `review_events` 聚合(索引 `(user_id, reviewed_at DESC)` 已
 | llm_call_attempts | 3.7 Batch / 8.5 评估骨架(调用账本) |
 | learning_projects | 3.16 LearningProject(V2.5 新增) |
 | user_preferences | 3.15 UserPreferences(V2.5 新增) |
-| project_study_settings | 3.17 ProjectStudySettings(V2.5 新增) |
-| project_study_decks | 3.17.1 卡组计划选择(2.19.1;由 `f7a2b3c4d5e6` 迁移创建) |
+| user_study_settings | 3.17.1 StudyPlan 双目标(2.19;V25-D-39,由 `a7c4e9f1b3d5` 迁移创建) |
+| user_study_decks | 3.17.1 StudyPlan 卡组范围(2.19.1;V25-D-39,由 `a7c4e9f1b3d5` 迁移创建) |
 | card_deletion_batches | 3.18 CardDeletionBatch(V2.5 新增) |
 | card_rewrite_previews | 3.19 CardRewritePreview(V2.5 新增) |
 
@@ -701,3 +703,17 @@ V2.5 使用一个**新的不可逆 Alembic revision**;迁移从运行时真实 h
 - **现有表调整**:`review_events` 加 `origin TEXT NULL`(历史行保持 NULL=未分类,不回填不虚构归因)。
 - **应用层语义**:会话 begin 按自然键 upsert(同日同来源同范围续用同一行);时长 PATCH 按绝对值 `max` 合并;恢复会话后的学习队列按当前 ReviewState 现算,不依赖会话内容。
 - §1/§2/§3/§4/§6 与 ORM 同批更新(见 structure-contract v2.5 学习会话增量)。
+
+### 7.7 账号级跨项目计划落地（V25-D-39;revision `a7c4e9f1b3d5`,不可逆）
+
+今日计划从"当前项目的卡组级配置"升级为账号级,可选任意本人卡组(跨项目与独立卡组);
+`PUT /study/plan` 不再改写 `user_preferences.current_project_id`(该字段只由显式
+PATCH /preferences 控制)。迁移 `downgrade` 抛 `NotImplementedError`(账号级计划行无法
+无损还原回单项目归属,回退仅限部署备份恢复)。
+
+- **新表**:`user_study_settings`(2.19,一用户一行双目标)、`user_study_decks`(2.19.1,PK `(user_id, deck_id)` + deck_id 索引)。
+- **删除表**:`project_study_settings`(含 legacy 章节字段 selected_chapter_ids/include_unassigned,今日计划章节回退分支随之退役)、`project_study_decks`。
+- **存量回填(两层)**:优先 `user_preferences.current_project_id` 指向项目的计划行与目标;该用户无可回填源时取其 `updated_at` 最新的 project_study_settings 行所属项目。"前计划时代"用户(无任何计划行)回填后为诚实空态。
+- **语义变化**:删除项目但保留卡组(retain_decks=true)时,卡组转独立并继续留在计划;连带删除卡组时经 deck 外键级联清出计划。
+- **端点退役**:`GET/PATCH /projects/{id}/study-settings`、`GET /projects/{id}/stats/weekly`(前端从未调用)。
+- §1/§2/§3/§6 与 ORM 同批更新(见 structure-contract 3.17.1/3.20 与 PRD V25-D-39)。

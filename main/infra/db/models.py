@@ -761,38 +761,31 @@ class UserPreferences(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class ProjectStudySettings(Base):
-    """2.19 project_study_settings：项目学习设置，一项目一行。
+class UserStudySettings(Base):
+    """2.19 user_study_settings（V25-D-39）：账号级学习计划设置，一用户一行。
 
-    旧章节字段保留用于已有生成/接口数据的读取兼容；新的今日学习计划使用双目标和
-    ``project_study_decks`` 关联表，前端不再写章节范围。
+    计划卡组范围存 ``user_study_decks`` 关联表；卡组可跨项目与独立卡组。
     """
 
-    __tablename__ = "project_study_settings"
+    __tablename__ = "user_study_settings"
     __table_args__ = (
         CheckConstraint(
             "daily_new_goal BETWEEN 0 AND 200 AND daily_new_goal % 10 = 0",
-            name="ck_project_study_settings_daily_new_goal",
+            name="ck_user_study_settings_daily_new_goal",
         ),
         CheckConstraint(
             "daily_review_goal BETWEEN 0 AND 200 AND daily_review_goal % 10 = 0",
-            name="ck_project_study_settings_daily_review_goal",
+            name="ck_user_study_settings_daily_review_goal",
         ),
         CheckConstraint(
             "daily_new_goal + daily_review_goal > 0",
-            name="ck_project_study_settings_daily_goal_nonzero",
+            name="ck_user_study_settings_daily_goal_nonzero",
         ),
     )
 
-    project_id: Mapped[str] = mapped_column(
-        String, ForeignKey("learning_projects.project_id", ondelete="CASCADE"), primary_key=True
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), primary_key=True
     )
-    selected_chapter_ids: Mapped[str] = mapped_column(
-        Text, nullable=False, default="[]", server_default=text("'[]'")
-    )  # 新卡章节范围 JSON；空数组 = 暂无新卡范围
-    include_unassigned: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=0, server_default=text("0")
-    )  # 是否包含 chapter_id=null 的新卡（0/1）
     daily_new_goal: Mapped[int] = mapped_column(
         Integer, nullable=False, default=10, server_default=text("10")
     )
@@ -802,17 +795,17 @@ class ProjectStudySettings(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
-class ProjectStudyDeck(Base):
-    """今日计划纳入的卡组（一个项目可选择多个卡组）。"""
+class UserStudyDeck(Base):
+    """今日计划纳入的卡组（账号级，一个用户可选择多个、跨项目与独立卡组）。"""
 
-    __tablename__ = "project_study_decks"
+    __tablename__ = "user_study_decks"
     __table_args__ = (
-        PrimaryKeyConstraint("project_id", "deck_id", name="pk_project_study_decks"),
-        Index("ix_project_study_decks_deck_id", "deck_id"),
+        PrimaryKeyConstraint("user_id", "deck_id", name="pk_user_study_decks"),
+        Index("ix_user_study_decks_deck_id", "deck_id"),
     )
 
-    project_id: Mapped[str] = mapped_column(
-        String, ForeignKey("learning_projects.project_id", ondelete="CASCADE"), nullable=False
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
     )
     deck_id: Mapped[str] = mapped_column(
         String, ForeignKey("decks.deck_id", ondelete="CASCADE"), nullable=False

@@ -8,7 +8,6 @@ card_id 补足。
 from pydantic import BaseModel
 
 from app.schemas.cards import Card
-from app.schemas.project import LearningProject
 from app.schemas.review import ReviewState
 
 
@@ -21,10 +20,9 @@ class TodayPlanCard(Card):
 
 
 class StudyPlan(BaseModel):
-    """当前用户的可编辑今日学习计划。"""
+    """当前用户的可编辑账号级学习计划（V25-D-39：可跨项目与独立卡组）。"""
 
     configured: bool
-    current_project_id: str | None
     selected_deck_ids: list[str]
     daily_new_goal: int
     daily_review_goal: int
@@ -32,10 +30,9 @@ class StudyPlan(BaseModel):
 
 
 class StudyPlanUpdateRequest(BaseModel):
-    # The plan write contract intentionally uses the unambiguous project_id field.
-    # There are no legacy plan records/clients to preserve, so the request schema and
-    # OpenAPI remain a single, exact contract.
-    project_id: str
+    # The plan write contract is account-scoped (V25-D-39): no project field — decks may
+    # span projects and standalone decks. Legacy clients sending project_id are tolerated
+    # (pydantic ignores unknown fields) and the value is ignored.
     selected_deck_ids: list[str]
     daily_new_goal: int
     daily_review_goal: int
@@ -44,7 +41,6 @@ class StudyPlanUpdateRequest(BaseModel):
 class TodayStudyPlan(BaseModel):
     timezone: str  # 账号学习时区
     study_date: str  # 账号学习时区下的学习日期
-    current_project: LearningProject | None  # 无当前项目时返回 null（空态）
     daily_goal: int  # 旧合计字段；新客户端使用双目标字段
     today_completed_count: int  # 旧合计完成数
     due_count: int

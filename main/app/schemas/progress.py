@@ -13,20 +13,3 @@ class ProgressSummary(BaseModel):
     due_count: int
     review_event_count: int
     last_studied_at: str | None = None
-
-
-class ProjectWeeklyStats(BaseModel):
-    project_id: str
-    period_start: str
-    period_end: str
-    timezone: str
-    weekly_activity: list[int]
-    weekly_total: int
-    weekly_completed_count: int
-    weekly_new_goal: int
-    weekly_review_goal: int
-    weekly_goal: int
-    weekly_goal_progress: float | None
-    new_completed_count: int
-    review_completed_count: int
-    updated_at: str

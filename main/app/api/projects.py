@@ -25,8 +25,7 @@ from app.middleware.idempotency import (
 from app.schemas.decks import Deck
 from app.schemas.deletion import DeletionPreflight
 from app.schemas.pdfs import ChapterUpdateRequest
-from app.schemas.progress import ProgressSummary, ProjectWeeklyStats
-from app.schemas.project import ProjectStudySettingsUpdateRequest
+from app.schemas.progress import ProgressSummary
 from app.schemas.projects import (
     ProjectCreateRequest as ProjectCreateRequestAlias,
 )
@@ -38,7 +37,7 @@ from services.decks.service import attach_deck_to_project, get_deck
 from services.pdf.parser import page_count_hint
 from services.pdf.scanner import validate_upload
 from services.pdf.service import chapter_view
-from services.progress.service import project_progress, project_weekly_stats
+from services.progress.service import project_progress
 from services.projects.html_archive import parse_html_archive, validate_html_upload
 from services.projects.service import (
     add_html_material,
@@ -52,7 +51,6 @@ from services.projects.service import (
     delete_project_chapter,
     fallback_whole_book_chapters,
     get_project,
-    get_study_settings,
     list_materials,
     list_projects,
     material_deletion_preflight,
@@ -61,7 +59,6 @@ from services.projects.service import (
     reparse_material,
     replace_pdf,
     update_project_chapter,
-    update_study_settings,
 )
 from services.projects.zip_archive import parse_zip_archive, validate_zip_upload
 
@@ -149,22 +146,6 @@ def project_progress_endpoint(
         project_id=project_id,
         now=_now(),
     )
-    return JSONResponse(status_code=200, content=body)
-
-
-@router.get("/{project_id}/stats/weekly", response_model=ProjectWeeklyStats)
-def project_weekly_stats_endpoint(
-    request: Request,
-    project_id: str,
-    session: Annotated[Session, Depends(get_db_session)],
-) -> JSONResponse:
-    body = project_weekly_stats(
-        session,
-        user_id=request.state.principal.user_id,
-        project_id=project_id,
-        now=SystemClock().now_utc(),
-    )
-    session.commit()
     return JSONResponse(status_code=200, content=body)
 
 
@@ -749,55 +730,6 @@ def confirm_chapters_endpoint(
 
     def biz(session: Session) -> tuple[int, dict[str, Any]]:
         body = confirm_chapters(session, user_id=user_id, project_id=project_id, now=_now())
-        return 200, body
-
-    _replayed, status, body = execute_idempotent(
-        session,
-        user_id=user_id,
-        path=path,
-        idempotency_key=key,
-        request_body_hash=body_hash,
-        fn=biz,
-    )
-    session.commit()
-    return JSONResponse(status_code=status, content=body)
-
-
-@router.get("/{project_id}/study-settings", status_code=200)
-def get_study_settings_endpoint(
-    request: Request,
-    project_id: str,
-    session: Annotated[Session, Depends(get_db_session)],
-) -> JSONResponse:
-    now: str = _now()
-    body = get_study_settings(
-        session, user_id=request.state.principal.user_id, project_id=project_id, now=now
-    )
-    # get-or-create 是物化写：首次访问落默认行须提交（依赖 teardown 只 close 不 commit）
-    session.commit()
-    return JSONResponse(status_code=200, content=body)
-
-
-@router.patch("/{project_id}/study-settings", status_code=200)
-def patch_study_settings_endpoint(
-    request: Request,
-    project_id: str,
-    payload: ProjectStudySettingsUpdateRequest,
-    session: Annotated[Session, Depends(get_db_session)],
-) -> JSONResponse:
-    user_id: str = request.state.principal.user_id
-    key = get_idempotency_key(request)
-    path = f"/projects/{project_id}/study-settings"
-    body_hash = request_body_hash(getattr(request.state, "raw_body", b""))
-
-    def biz(session: Session) -> tuple[int, dict[str, Any]]:
-        body = update_study_settings(
-            session,
-            user_id=user_id,
-            project_id=project_id,
-            payload=payload.model_dump(exclude_unset=True),
-            now=_now(),
-        )
         return 200, body
 
     _replayed, status, body = execute_idempotent(

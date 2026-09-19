@@ -55,11 +55,12 @@ def test_alembic_upgrade_creates_all_tables(alembic_env: tuple[Config, Path]) ->
         "llm_call_attempts",
         "users",
         "auth_sessions",
-        # V2.5 新表（database-design 2.17~2.22）
+        # V2.5 新表（database-design 2.17~2.22；V25-D-39 计划两表换用户级）
         "learning_projects",
         "materials",
         "user_preferences",
-        "project_study_settings",
+        "user_study_settings",
+        "user_study_decks",
         "card_deletion_batches",
         "card_rewrite_previews",
         # V25-D-37 学习会话（database-design 2.23）
@@ -717,11 +718,14 @@ def test_v25_fresh_upgrade_creates_new_schema(alembic_env: tuple[Config, Path]) 
             "learning_projects",
             "materials",
             "user_preferences",
-            "project_study_settings",
+            "user_study_settings",
+            "user_study_decks",
             "card_deletion_batches",
             "card_rewrite_previews",
         ):
             assert t in tables
+        assert "project_study_settings" not in tables  # V25-D-39：项目级计划表已删除
+        assert "project_study_decks" not in tables
         users_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('users')"))}
         cards_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('cards')"))}
         tasks_cols = {r[1]: r for r in conn.execute(text("PRAGMA table_info('tasks')"))}

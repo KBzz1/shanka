@@ -50,12 +50,7 @@ def get_study_plan_endpoint(
     request: Request,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> JSONResponse:
-    body = get_study_plan(
-        session,
-        user_id=request.state.principal.user_id,
-        now=format_utc(SystemClock().now_utc()),
-    )
-    session.commit()
+    body = get_study_plan(session, user_id=request.state.principal.user_id)
     return JSONResponse(status_code=200, content=body)
 
 
@@ -75,7 +70,6 @@ def put_study_plan_endpoint(
         body = update_study_plan(
             session,
             user_id=user_id,
-            project_id=payload.project_id,
             selected_deck_ids=payload.selected_deck_ids,
             daily_new_goal=payload.daily_new_goal,
             daily_review_goal=payload.daily_review_goal,

@@ -129,7 +129,7 @@ IP 维度语义(离线优先地基,token bucket):`rate_limit_ip_per_second=5` �
 | `created_at` | datetime | ✓ | |
 
 规则(V25-D-36/38):文本层不可提取 → `FAILED + PDF_PARSE_FAILED`(不变);自带目录(outline)→ 按目录划分章节
-(`source=TOC`,不变);无可识别目录结构 → 确定性分诊(V25-D-38,程序优先):页文本总字符数 ≤
+(`source=TOC`,不变);无可识别目录结构 → 确定性分诊(V25-D-39,程序优先):页文本总字符数 ≤
 `single_chapter_max_chars`(默认 24000)→ 直接整本单章(`source=AUTO`,零模型、不要求已存 Key);超阈值 →
 自动以用户已保存的 API Key 调 AI 规划章节边界(分段识别起始点 + 确定性校验 + 页级区间合并,`source=AI`),
 AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规划失败(未存 Key → `API_KEY_NOT_SET`,
@@ -145,7 +145,7 @@ AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规
 | --- | --- | --- | --- |
 | `material_id` | uuid | ✓ | |
 | `project_id` | uuid | ✓ | 归属学习项目 |
-| `type` | enum | ✓ | `PDF` / `TEXT` / `ZIP` / `HTML`(V25-D-38);`LINK` 预留,本期不实现 |
+| `type` | enum | ✓ | `PDF` / `TEXT` / `ZIP` / `HTML`(V25-D-39);`LINK` 预留,本期不实现 |
 | `name` | string | ✓ | PDF/ZIP=文件名(去扩展名前的原始名);TEXT=用户可改标题,1~60 字符 |
 | `status` | enum | ✓ | PDF:`PENDING` / `PARSING` / `PARSED` / `FAILED`;TEXT/ZIP/HTML:恒 `READY`(同步解析) |
 | `error_code` | string | ✗ | 仅 PDF 解析失败码(ZIP 结构/解压失败在上传响应即时返回,不落资料行) |
@@ -172,7 +172,7 @@ AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规
 | `chapter_id` | uuid | ✓ | |
 | `material_id` | uuid | ✓ | 归属学习资料(3.2a) |
 | `name` | string | ✓ | 可修改 |
-| `source` | enum | ✓ | 章节初始来源(V25-D-36/38):`TOC`(PDF 目录)/ `HEADING`(HTML 标题,V25-D-38)/ `AI`(AI 规划,含零边界静默降级的整本单章)/ `AUTO`(程序阈值单章,V25-D-38——总字数 ≤ `single_chapter_max_chars` 或同步类型无标题结构)/ `FALLBACK`(用户显式选择整本单章继续)/ `TEXT` / `ZIP` / `MANUAL`(预留);用户修改名称/页码不改变 source |
+| `source` | enum | ✓ | 章节初始来源(V25-D-36/38):`TOC`(PDF 目录)/ `HEADING`(HTML 标题,V25-D-39)/ `AI`(AI 规划,含零边界静默降级的整本单章)/ `AUTO`(程序阈值单章,V25-D-39——总字数 ≤ `single_chapter_max_chars` 或同步类型无标题结构)/ `FALLBACK`(用户显式选择整本单章继续)/ `TEXT` / `ZIP` / `MANUAL`(预留);用户修改名称/页码不改变 source |
 | `start_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null;ZIP 章节 = chunk_seq 区间起点(可修改) |
 | `end_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null;ZIP 章节 = chunk_seq 区间终点(可修改) |
 
@@ -380,7 +380,7 @@ AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规
 | `weekly_total` | int | ✓ | 本周总复习事件数 |
 | `weekly_completed_count` | int | ✓ | V2.5 本周不同 `(账号学习日期, card_id)` 数 |
 | `week_change_rate` | float \| null | ✓ | `(本周-上周)/上周`;上周为 0 时 null(客户端显示"暂无对比") |
-| `weekly_goal` | int | ✓ | 账号看板兼容字段；项目周统计按（每日新学 + 每日巩固）× 7 派生 |
+| `weekly_goal` | int | ✓ | 账号看板兼容字段；取账号偏好 `daily_learning_goal` × 7 派生（V25-D-39 起项目周统计退役） |
 | `weekly_goal_progress` | float | ✓ | `min(weekly_completed_count / weekly_goal, 1)` |
 | `updated_at` | datetime | ✓ | 聚合快照生成时间(PRD 6.6:客户端据此判断缓存是否过期) |
 | `recall_accuracy` | float \| null | ✓ | 周期内 GOOD 事件 / 全部事件 |
@@ -435,9 +435,9 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | --- | --- | --- | --- |
 | `default_coverage_mode` | enum | ✓ | `COMPACT` / `BALANCED` / `EXTENSIVE`,默认 `BALANCED` |
 | `default_difficulty_ratio` | object | ✓ | `basic/understanding/deep_question` 为 0~100 的 10% 整数档,合计 100,允许任一档为 0;默认 `40/40/20` |
-| `daily_learning_goal` | int | ✓ | 旧账号兼容偏好；新项目计划使用 ProjectStudySettings 的每日新学/巩固双目标 |
+| `daily_learning_goal` | int | ✓ | 旧账号兼容偏好；账号级计划使用 StudyPlan(3.17.1) 的每日新学/巩固双目标 |
 | `learning_timezone` | string | ✓ | 有效 IANA 时区,账号级权威(1.2) |
-| `current_project_id` | uuid \| null | ✓ | 当前学习项目;项目删除时服务端置空 |
+| `current_project_id` | uuid \| null | ✓ | 当前学习项目;项目删除时服务端置空。V25-D-39 起保存计划不再改写该字段,仅由显式 PATCH /preferences 控制 |
 | `updated_at` | datetime | ✓ | 最后成功保存时间 |
 
 规则:比例、目标、IANA 时区服务端校验(`INVALID_PREFERENCES` / `INVALID_LEARNING_TIMEZONE`);偏好跨设备同步;主题仍为客户端本机偏好,不进入此资源。部分更新 last-success-wins。
@@ -481,30 +481,25 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 
 预检是只读建议;实际删除必须在同一写事务内重新检查。项目/牌组确认删除后服务端自动取消全部关联活跃任务（含正式生成中任务），并用租约 fencing 使迟到 worker 写入失效。
 
-### 3.17 ProjectStudySettings(项目学习设置,V2.5 新增)
+### 3.17 (已退役)ProjectStudySettings(项目学习设置)
+
+V25-D-39(2026-09-19)随账号级跨项目计划退役:资源、`GET/PATCH /projects/{id}/study-settings`
+端点与 project_study_settings/project_study_decks 两表一并删除(迁移 a7c4e9f1b3d5)。计划的
+权威定义见 3.17.1 StudyPlan;新卡章节范围语义由任务级章节选择(6.3)承接。
+
+### 3.17.1 StudyPlan(账号级学习计划配置;V25-D-39)
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `selected_new_card_chapter_ids` | uuid[] | ✓ | 只限制新卡;空数组表示暂无新卡范围 |
-| `include_unassigned` | bool | ✓ | 是否包含 `chapter_id = null` 的新卡 |
-| `selected_deck_ids` | uuid[] | ✓ | 今日计划选中的卡组范围;新卡与到期卡均受此范围约束 |
-| `daily_new_goal` | int | ✓ | 每日新学目标,0~200 且为 10 的倍数 |
-| `daily_review_goal` | int | ✓ | 每日巩固目标,0~200 且为 10 的倍数 |
-| `updated_at` | datetime | ✓ | |
-
-规则:一项目一行;今日计划使用卡组关联表保存范围,同一范围同时约束新卡与到期卡;到期卡不再跨选中卡组读取。
-
-### 3.17.1 StudyPlan(今日学习计划配置)
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `configured` | bool | ✓ | 是否已保存有效计划 |
-| `current_project_id` | uuid \| null | ✓ | 当前项目;未选择时为 null |
-| `selected_deck_ids` | uuid[] | ✓ | 至少一个当前项目卡组 |
+| `configured` | bool | ✓ | 是否已保存有效计划(有目标行且至少一个卡组) |
+| `selected_deck_ids` | uuid[] | ✓ | 计划卡组范围;本人卡组即可,可跨项目与独立卡组 |
 | `daily_new_goal` / `daily_review_goal` | int | ✓ | 0~200,10 的倍数,不可同时为 0 |
 | `updated_at` | datetime \| null | ✗ | 最近一次保存时间 |
 
-`PUT /study/plan` 一次原子替换项目、卡组范围和双目标;失败不改变原计划。
+规则:一账号一份计划(双目标 + 卡组集合),不归属任何项目;`PUT /study/plan` 一次原子替换
+卡组范围和双目标,失败不改变原计划,也不改写 `user_preferences.current_project_id`。删除
+项目但保留卡组(retain_decks=true)时卡组转独立并继续留在计划;删除卡组时经外键级联清出
+计划。
 
 ### 3.18 CardDeletionBatch(卡片删除批次,V2.5 新增)
 
@@ -537,7 +532,6 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | --- | --- | --- | --- |
 | `timezone` | string | ✓ | 账号学习时区 |
 | `study_date` | string | ✓ | 账号学习时区下的学习日期 |
-| `current_project` | LearningProject \| null | ✓ | 无当前项目时返回 null(空态) |
 | `daily_goal` | int | ✓ | 当天实际核心队列目标(新学 + 巩固);可用卡不足时按实际队列收敛 |
 | `today_completed_count` | int | ✓ | 今日去重完成数(同一 `(账号学习日期, card_id)` 只计一次) |
 | `due_count` | int | ✓ | 到期总数 |
@@ -548,7 +542,7 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 | `new_completed_count` / `review_completed_count` | int | ✗ | 今日按卡去重的双目标完成数 |
 | `new_remaining_count` / `review_remaining_count` | int | ✗ | 双目标剩余数 |
 | `core_target_count` | int | ✗ | 实际可用队列的合计目标,不足目标时按实际队列收敛 |
-| `plan_configured` | bool | ✗ | 是否已配置卡组计划 |
+| `plan_configured` | bool | ✗ | 是否已配置账号级卡组计划;未保存计划时空态返回 false(V25-D-39) |
 | `selected_deck_ids` | uuid[] | ✗ | 今日计划使用的卡组 |
 
 主计划(4.5):选中卡组中的到期可见卡最多取 `daily_review_goal` 张,再取最多 `daily_new_goal` 张 NEW 卡;巩固目标为软目标,超出部分经 `/study/today/backlog` 分页继续。到期卡按遗忘风险、逾期时长、`card_id` 排序,新卡按 `deck_id`、`position`、`card_id` 排序。遗忘风险由统一 FSRS 适配器按服务端 `now` 计算;无法计算时风险置 0。
@@ -569,23 +563,11 @@ V2.5 规则:样卡**持久化**于任务(3.4),只为比例大于 0 的难度各�
 
 项目进度接口按路径中的项目 ID 聚合该项目全部可见卡,牌组进度接口按牌组 ID 聚合;两者均不得混入其他项目或独立牌组。缺失统计在客户端显示 `—`,不得用本地估算或固定百分比。
 
-### 3.23 ProjectWeeklyStats(项目周统计,V2.5 学习闭环增量)
+### 3.23 (已退役)ProjectWeeklyStats(项目周统计)
 
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `project_id` | uuid | ✓ | 项目 ID |
-| `timezone` | string | ✓ | 账号学习时区 |
-| `period_start` / `period_end` | datetime | ✓ | 周一开始、下周一结束的 UTC 边界 |
-| `weekly_activity` | int[7] | ✓ | 周一至周日,按计划卡组范围统计评分事件 |
-| `weekly_total` | int | ✓ | 本周计划范围内评分次数 |
-| `weekly_new_goal` / `weekly_review_goal` | int | ✓ | 新学/巩固每日目标乘以 7;未配置为 0 |
-| `weekly_goal` | int | ✓ | `weekly_new_goal + weekly_review_goal`;未配置为 0 |
-| `weekly_goal_progress` | float \| null | ✓ | `weekly_completed_count / weekly_goal` 上限 1;目标为 0 时 null |
-| `weekly_completed_count` | int | ✓ | 本周不同学习日期与卡片的去重完成数 |
-| `new_completed_count` / `review_completed_count` | int | ✓ | 本周按首次事件与后续事件划分的去重卡片数 |
-| `updated_at` | datetime | ✓ | 聚合计算时间 |
-
-项目周统计只查询当前项目计划所选卡组;账号总体活动仍由 `StatsDashboard`(3.12) 提供,不受项目目标过滤。
+V25-D-39(2026-09-19)随账号级跨项目计划退役:计划不再归属项目,无"项目周目标"语义,
+`GET /projects/{id}/stats/weekly` 端点与 ProjectWeeklyStats 资源删除(前端从未调用)。用户级
+周活跃/目标进度由 StatsDashboard(3.12)承接。
 
 ### 3.24 AuthSessionResponse(会话,V2.2 新增)
 
@@ -767,7 +749,7 @@ Scheduler(
 | POST | `/v1/projects/{project_id}/materials/pdf` | multipart PDF;建立 PDF 资料并异步解析(重置章节确认) | ✓ |
 | POST | `/v1/projects/{project_id}/materials/text` | JSON `{name, content}`;≤30000 字,单章节+段落多 chunk,即时就绪(重置章节确认) | ✓ |
 | POST | `/v1/projects/{project_id}/materials/zip` | multipart ZIP 笔记包;≤20MB、≤500 个 md、正文≤30 万字,同步解析、即时就绪:一级子文件夹=章节、根级 md 收「总览」章节(重置章节确认) | ✓ |
-| POST | `/v1/projects/{project_id}/materials/html` | multipart HTML 页面(V25-D-38);≤20MB、正文≤30 万字,同步解析、即时就绪:最浅出现的标题级=章节(source=HEADING,标题间正文按章切段),无标题结构或总字数≤`single_chapter_max_chars` → 恒单章(source=AUTO);script/style 忽略,不存档原件(重置章节确认) | ✓ |
+| POST | `/v1/projects/{project_id}/materials/html` | multipart HTML 页面(V25-D-39);≤20MB、正文≤30 万字,同步解析、即时就绪:最浅出现的标题级=章节(source=HEADING,标题间正文按章切段),无标题结构或总字数≤`single_chapter_max_chars` → 恒单章(source=AUTO);script/style 忽略,不存档原件(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials` | 资料列表(各自状态;TEXT 附单章节) | - |
 | DELETE | `/v1/projects/{project_id}/materials/{material_id}?retain_cards=true\|false` | 资料级删除:静默取消引用该资料的活跃任务并 fencing;按参数保留或删除该资料产出卡片;删最后一份资料后项目转 `EMPTY`(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials/{material_id}/deletion-preflight` | 删除确认页预检(V25-GEN-FR-02):返回将影响的卡片数量与静默取消任务数;只读、无 blocker 语义(引用任务删除时静默取消) | - |
@@ -777,9 +759,7 @@ Scheduler(
 | PATCH | `/v1/projects/{project_id}/chapters/{chapter_id}` | 修改章节名称 / 起始页 / 结束页(TEXT 章节仅名称) | ✓ |
 | DELETE | `/v1/projects/{project_id}/chapters/{chapter_id}?delete_cards=false` | 活跃任务保护;保留卡时 `chapter_id` 置空 | ✓ |
 | POST | `/v1/projects/{project_id}/confirm-chapters` | 确认目录,使项目进入 READY | ✓ |
-| GET/PATCH | `/v1/projects/{project_id}/study-settings` | 新卡章节范围与未归属分组(3.17) | PATCH ✓ |
 | GET | `/v1/projects/{project_id}/progress` | 项目真实进度投影(3.22) | - |
-| GET | `/v1/projects/{project_id}/stats/weekly` | 当前项目周统计(按计划卡组范围) | - |
 | POST | `/v1/projects/{project_id}/decks/{deck_id}/attach` | 将本用户独立牌组归入项目 | ✓ |
 
 上传限制继续适用:≤ 100MB、≤ 1000 页;文件魔数 + 扩展名 + MIME 三重检查,不合规 → `400 PDF_UPLOAD_INVALID`。
@@ -847,9 +827,9 @@ zip 损坏或 md 非 UTF-8 → `422 ZIP_EXTRACT_FAILED`。条目名按 UTF-8 fla
 
 | 方法 | 路径 | 说明 | 幂等 |
 | --- | --- | --- | --- |
-| GET | `/v1/study/today` | 当前项目今日计划(服务端账号时区、去重;3.20) | - |
-| GET | `/v1/study/plan` | 读取当前项目、计划卡组与新学/巩固双目标 | - |
-| PUT | `/v1/study/plan` | 原子保存计划配置;目标为 0~200 的 10 倍数且不可同时为 0 | ✓ |
+| GET | `/v1/study/today` | 账号今日计划(计划卡组可跨项目;服务端账号时区、去重;3.20) | - |
+| GET | `/v1/study/plan` | 读取账号级计划卡组与新学/巩固双目标(3.17.1) | - |
+| PUT | `/v1/study/plan` | 原子保存账号级计划(卡组可跨项目与独立);目标为 0~200 的 10 倍数且不可同时为 0 | ✓ |
 | GET | `/v1/study/today/backlog?offset=&limit=` | 读取超过巩固软目标的到期卡 | - |
 | POST | `/v1/study/sessions` | 开启/续用当日学习会话 `{ origin, deck_id? }`;同日同来源同范围返回同一行并继承累计时长(3.25,V25-D-37) | ✓ |
 | PATCH | `/v1/study/sessions/{session_id}` | 上报会话时长 `{ study_seconds, ended? }`;绝对值 max 合并,天然幂等 | ✓ |
@@ -921,8 +901,8 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `ZIP_UPLOAD_INVALID` | 400 | V25-D-35 ZIP 笔记包非 zip / 超限(20MB / 500 文件 / 30 万字) |
 | | `ZIP_STRUCTURE_INVALID` | 400 | V25-D-35 结构不符:散落根级文件、多个顶层条目或无有效 md 正文 |
 | | `ZIP_EXTRACT_FAILED` | 422 | V25-D-35 zip 损坏或 md 非 UTF-8 编码 |
-| | `HTML_UPLOAD_INVALID` | 400 | V25-D-38 HTML 非 .html/.htm / 超限(20MB / 30 万字) / 非文本 html |
-| | `HTML_EXTRACT_FAILED` | 422 | V25-D-38 HTML 正文抽取失败(非 UTF-8 编码或解析异常) |
+| | `HTML_UPLOAD_INVALID` | 400 | V25-D-39 HTML 非 .html/.htm / 超限(20MB / 30 万字) / 非文本 html |
+| | `HTML_EXTRACT_FAILED` | 422 | V25-D-39 HTML 正文抽取失败(非 UTF-8 编码或解析异常) |
 | | `PDF_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性) |
 | | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本用户(统一 404) |
 | | `PROJECT_NOT_FOUND` | 404 | V2.5 项目不存在或跨用户 |
@@ -937,7 +917,7 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `SAMPLE_STALE` | 409 | V2.5 配置变化后仍尝试确认旧样卡 |
 | | `TASK_IN_PROGRESS` | 409 | 兼容保留:资源被非终态任务引用(旧 `/pdfs` 委托路径);项目域使用 `PROJECT_HAS_ACTIVE_TASK` |
 | | `GENERATION_FAILED` | 500 | 系统级生成失败(任务 FAILED);批次级失败不产生错误响应 |
-| 牌组/卡片 | `DECK_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性) |
+| 牌组/卡片 | `DECK_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性);`PUT /study/plan` 所选卡组不属于本账号时同码(V25-D-39 起不再校验项目归属) |
 | | `CARD_NOT_FOUND` | 404 | |
 | | `GENERATION_ITEM_CONFLICT` | 409 | `generation_item_id` 已对应其他卡 |
 | | `IMPORT_PARSE_ERROR` | 422 | 导入内容非法(逐行错误随响应返回;客户端预览阶段已拦截为主) |
@@ -1054,3 +1034,4 @@ duration histogram 桶（分位数证据的正确性前提，桶集合在指标�
 | 1.6 IP 维度令牌桶语义（持续 5 req/s + 突发 10） | offline-foundation-v1（IP 限流突发容忍 + 离线补传幂等） | 修改(离线优先地基工作包契约同步；HTTP schema 无变化，openapi 不动) |
 | 8.3 指标桶边界与 path 归一化 / 8.6 服务端延迟基线 | V25-REL-FR-05/06（数据基线与性能门槛，方案由 Architecture 定义） | 新增(测试地基工作包契约同步；G4 证据出口) |
 | 3.25 StudySession / 3.11 ReviewEvent.origin / 3.12 时长字段 / 6.6 会话接口 | V25-D-37、V25-STUDY-FR-11/AC-05、V25-STATS-FR-07/AC-04 | 新增(学习会话与评分来源工作包契约同步) |
+| 3.17.1 StudyPlan(账号级) / 3.20 TodayStudyPlan / 2.19-2.19.1 user_study_* / 6.6 计划接口 / 3.17+3.23 退役 | V25-D-39、V25-STUDY-FR-03/AC-01 | 破坏性修订(跨项目计划工作包契约同步) |

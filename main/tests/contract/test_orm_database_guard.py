@@ -76,17 +76,21 @@ def test_orm_idempotency_pk_order_matches_design() -> None:
 
 def test_v25_new_tables_present() -> None:
     """V2.5 新表：learning_projects / materials（V25-D-29 多资料）/ user_preferences /
-    project_study_settings / card_deletion_batches / card_rewrite_previews
-    （database-design 2.17~2.22）。"""
+    user_study_settings / user_study_decks（V25-D-39 账号级计划）/
+    card_deletion_batches / card_rewrite_previews（database-design 2.17~2.22）。"""
     for table in (
         "learning_projects",
         "materials",
         "user_preferences",
-        "project_study_settings",
+        "user_study_settings",
+        "user_study_decks",
         "card_deletion_batches",
         "card_rewrite_previews",
     ):
         assert table in ORM_TABLES
+    # V25-D-39：项目级计划两表已删除
+    assert "project_study_settings" not in ORM_TABLES
+    assert "project_study_decks" not in ORM_TABLES
 
 
 def test_v25_materials_columns_and_text_chunks_key() -> None:
@@ -119,7 +123,8 @@ def test_v25_materials_columns_and_text_chunks_key() -> None:
 def test_v25_new_table_fks() -> None:
     """新表外键（database-design 2.17~2.22）：
     materials.project_id FK CASCADE（V25-D-29 资料集合权威归属）；user_preferences.user_id
-    PK FK → users；project_study_settings.project_id PK FK CASCADE；删除批次/重写预览
+    PK FK → users；user_study_settings.user_id PK FK CASCADE → users、user_study_decks
+    (user_id, deck_id) 复合 PK、deck_id FK CASCADE → decks（V25-D-39）；删除批次/重写预览
     user_id FK → users、重写预览 card_id FK → cards CASCADE。"""
     materials = ORM_TABLES["materials"]
     project_fk = [c for c in materials.c.project_id.foreign_keys]
@@ -133,9 +138,16 @@ def test_v25_new_table_fks() -> None:
         c.column.table.name == "users"
         for c in ORM_TABLES["user_preferences"].c.user_id.foreign_keys
     )
-    pss_fk = [c for c in ORM_TABLES["project_study_settings"].c.project_id.foreign_keys]
-    assert len(pss_fk) == 1 and pss_fk[0].column.table.name == "learning_projects"
-    assert pss_fk[0].ondelete == "CASCADE"
+    uss = ORM_TABLES["user_study_settings"]
+    assert uss.c.user_id.primary_key
+    uss_fk = [c for c in uss.c.user_id.foreign_keys]
+    assert len(uss_fk) == 1 and uss_fk[0].column.table.name == "users"
+    assert uss_fk[0].ondelete == "CASCADE"
+    usd = ORM_TABLES["user_study_decks"]
+    assert [c.name for c in usd.primary_key.columns] == ["user_id", "deck_id"]
+    usd_deck_fk = [c for c in usd.c.deck_id.foreign_keys]
+    assert len(usd_deck_fk) == 1 and usd_deck_fk[0].column.table.name == "decks"
+    assert usd_deck_fk[0].ondelete == "CASCADE"
     assert ORM_TABLES["card_rewrite_previews"].c.card_id.foreign_keys
     assert ORM_TABLES["card_deletion_batches"].c.user_id.foreign_keys
 
