@@ -30,3 +30,20 @@
 - 方法论：ground truth = 书自带目录（`parse_pdf` outline 章节）；剔目录只喂页文本给生产章节规划链路，对比 AI 边界 vs 目录边界。指标：边界 precision/recall/F1（±1 页容差、一对一贪心）、章节区间 IoU（均值/中位/≥0.5 覆盖率）、匹配对标题 bigram Dice、退化标记（0 边界整本降级）与确定性校验丢弃计数。
 - 三步流水线：`build_payloads.py`（零 API，产出 GT/页文本/与生产逐字节一致的分段消息；无 outline 但结构肉眼可见的书走 `--ground-truth` 手工标注路径，样例 `fixtures/interview-qa-flashcards*`）→ `run_live.py`（读仓库根 `.env` 的 `DEEPSEEK_API_KEY` 真实调用，回复留档 `replies/`，中断可续）→ `make_report.py`（零 API 重算：生产 `validate_boundaries`/`merge_boundaries` + `metrics.py` 指标，写 `report.md`/`metrics.json`，可反复重算不重复付费；run/ 多书时须 `--book`）。
 - `metrics.py --selftest` 跑内置手算用例；`run/` git-ignored（正文切块与回复留档可由脚本 + 原 PDF 重建）；与 `planning_ablation/` 同规：报告为结论证据、绝对值指示性（页粒度 GT、单书样本）。
+
+问答直通评测工作区：`qa_direct_eval/`（V25-D-43 QA_DIRECT 制卡模式的质量量化与验收，2026-09-25）。
+
+- 评分维度重新设计：该模式承诺"资料已形成问答，AI 不命题、不改答案、仅做格式与卡面
+  字段适配"，故盲评 rubric v1（`rubric.md`）围绕忠实度四维——Q1 题干保真 / Q2 答案
+  保真 / Q3 自包含可复习 / Q4 卡面字段适配——与 EXTRACT 模式生产 rubric v3（命题质量
+  导向）不通用；rubric 演进规则同生产资产：新版本 + 留痕，已发布版本禁原地改。
+- 方法论复用既有两件套：B5 式生产 HTTP 链真实验收（`run_acceptance.py`：专用账号 →
+  `.env` Key → 空项目 → 题库 markdown 资料上传 → QA_DIRECT 任务全链 → 导出卡片）+
+  外部双裁判盲评协议（`build_judge_payloads.py` 构建自包含盲评载荷：rubric 原文 +
+  题库原文 + 待评卡片，不含生产评分，防锚定）。
+- 确定性指标零 API（`make_report.py`，GT 映射复用生产 `normalize_question` 同一把尺）：
+  召回率 / 自创率 / 重复卡 / 判断题分派正确率 + 客观门禁 G1-G5（对标 B5 只含客观可判定
+  项）；裁判分数、门禁与历次 run 见 `leaderboard.md`（榜单，参考值按校准纪律复核修订）。
+- fixture（`fixtures/qa_bank.md` + `ground_truth.json`）：24 项题库（20 问答 + 4 判断），
+  埋点覆盖题号变体（`1.` / `第 7 题：` / `（10）`）、重复题（q16≡q05，验合并去重）、
+  判断题布尔+解析、代码块答案；`run/` git-ignored（载荷含题库正文，脚本可重建）。

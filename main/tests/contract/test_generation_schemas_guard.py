@@ -88,3 +88,14 @@ def test_generation_config_requires_coverage_mode() -> None:
         )
     # V2.5 改名后旧字段不可访问（字段不存在，访问即 AttributeError）
     assert not hasattr(config, "quantity_tendency")
+
+
+def test_generation_config_source_mode_v25_d43() -> None:
+    """V25-D-43：source_mode 缺省 EXTRACT（旧载荷兼容），QA_DIRECT 合法，域外值拒绝。"""
+    ratio = DifficultyRatio(basic=40, understanding=40, deep_question=20)
+    legacy = GenerationConfig(coverage_mode="BALANCED", difficulty_ratio=ratio)
+    assert legacy.source_mode == "EXTRACT"
+    qa = GenerationConfig(coverage_mode="BALANCED", difficulty_ratio=ratio, source_mode="QA_DIRECT")
+    assert qa.source_mode == "QA_DIRECT"
+    with pytest.raises(pydantic.ValidationError):
+        GenerationConfig(coverage_mode="BALANCED", difficulty_ratio=ratio, source_mode="SUMMARY")

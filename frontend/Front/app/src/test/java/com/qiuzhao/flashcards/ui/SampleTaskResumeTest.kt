@@ -48,6 +48,18 @@ class SampleTaskResumeTest {
     }
 
     @Test
+    fun `qa direct launch does not reuse an extract task (V25-D-43)`() {
+        val draft = task(V25TaskStatus.DRAFT)
+        val qaConfig = config.copy(sourceMode = com.qiuzhao.flashcards.domain.v25.V25SourceMode.QA_DIRECT)
+
+        // EXTRACT 任务与 QA_DIRECT 配置互不复用/重试——模式是任务身份的一部分。
+        assertNull(reusableSampleTask(draft, "project-1", null, chapterIds, qaConfig))
+        assertNull(retryableSampleTask(task(V25TaskStatus.FAILED), "project-1", null, chapterIds, qaConfig))
+        val qaTask = draft.copy(generationConfig = qaConfig)
+        assertEquals(qaTask, reusableSampleTask(qaTask, "project-1", null, chapterIds, qaConfig))
+    }
+
+    @Test
     fun `explicit deck selection must match the unfinished task`() {
         val task = task(V25TaskStatus.SAMPLE_GENERATING)
 

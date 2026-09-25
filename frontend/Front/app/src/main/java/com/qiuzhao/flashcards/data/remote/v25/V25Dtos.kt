@@ -20,6 +20,7 @@ import com.qiuzhao.flashcards.domain.v25.V25DeletionTaskBlocker
 import com.qiuzhao.flashcards.domain.v25.V25Difficulty
 import com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio
 import com.qiuzhao.flashcards.domain.v25.V25GenerationConfig
+import com.qiuzhao.flashcards.domain.v25.V25SourceMode
 import com.qiuzhao.flashcards.domain.v25.V25GenerationTask
 import com.qiuzhao.flashcards.domain.v25.V25ImportResult
 import com.qiuzhao.flashcards.domain.v25.V25ImportStatus
@@ -96,6 +97,8 @@ internal data class GenerationConfigDto(
     @SerialName("coverage_mode") val coverageMode: String,
     @SerialName("difficulty_ratio") val difficultyRatio: DifficultyRatioDto,
     @SerialName("custom_requirements") val customRequirements: String? = null,
+    /** V25-D-43 source mode; pre-V25-D-43 servers omit it (defaults to EXTRACT). */
+    @SerialName("source_mode") val sourceMode: String = "EXTRACT",
 )
 
 @Serializable
@@ -387,6 +390,11 @@ internal data class DashboardDto(
     @SerialName("weekly_completed_count") val weeklyCompletedCount: Int,
     @SerialName("weekly_goal") val weeklyGoal: Int,
     @SerialName("streak_days") val streakDays: Int,
+    // V25-D-42 streak flames (revive consumables absorbed on missed days). Defaults keep
+    // pre-V25-D-42 servers parseable — 0 flames never blocks the streak projection.
+    @SerialName("streak_flames_available") val streakFlamesAvailable: Int = 0,
+    @SerialName("streak_flames_used") val streakFlamesUsed: Int = 0,
+    @SerialName("max_streak_days") val maxStreakDays: Int = 0,
     @SerialName("mastered_card_count") val masteredCardCount: Int,
     @SerialName("updated_at") val updatedAt: String,
     @SerialName("has_data") val hasData: Boolean,
@@ -500,6 +508,11 @@ internal data class GenerationConfigRequest(
     @SerialName("coverage_mode") val coverageMode: String,
     @SerialName("difficulty_ratio") val difficultyRatio: DifficultyRatioDto,
     @SerialName("custom_requirements") val customRequirements: String? = null,
+    /**
+     * V25-D-43 source mode. Sent only for QA_DIRECT — EXTRACT stays implicit so requests to a
+     * pre-V25-D-43 server (and its config fingerprint) are byte-identical to the old client.
+     */
+    @SerialName("source_mode") val sourceMode: String? = null,
 )
 
 @Serializable
@@ -595,6 +608,8 @@ internal fun GenerationConfigDto.toDomain(): V25GenerationConfig = V25Generation
     coverageMode = enumValueOf<V25CoverageMode>(coverageMode),
     difficultyRatio = difficultyRatio.toDomain(),
     customRequirements = customRequirements.orEmpty(),
+    sourceMode = runCatching { enumValueOf<V25SourceMode>(sourceMode) }
+        .getOrDefault(V25SourceMode.EXTRACT),
 )
 
 internal fun ChapterDto.toDomain(): V25Chapter = V25Chapter(
@@ -861,6 +876,9 @@ internal fun DashboardDto.toDomain(): V25StatsDashboard {
         firstAttemptAccuracy = firstAnswerAccuracy?.toFloat(),
         retentionRate = retentionRate?.toFloat(),
         streakDays = streakDays,
+        streakFlamesAvailable = streakFlamesAvailable,
+        streakFlamesUsed = streakFlamesUsed,
+        maxStreakDays = maxStreakDays,
         masteredCards = masteredCardCount,
         // The dashboard wire carries no per-scope progress summaries (V25-STATS-FR-05 is not
         // part of the StatsDashboard resource yet); keep the honest empty list instead of
@@ -936,6 +954,7 @@ internal fun V25GenerationConfig.toWire(): GenerationConfigRequest = GenerationC
     coverageMode = coverageMode.name,
     difficultyRatio = difficultyRatio.toWire(),
     customRequirements = customRequirements.takeIf { it.isNotBlank() },
+    sourceMode = sourceMode.takeIf { it != V25SourceMode.EXTRACT }?.name,
 )
 
 internal fun V25PreferencesPatch.toWire(): PreferencesPatchRequest = PreferencesPatchRequest(

@@ -289,6 +289,13 @@ class ProjectCreationCoordinatorTest {
         idempotencyKey: String?,
     ): V25Result<V25Material> = throw NotImplementedError()
 
+    override suspend fun addProjectMaterialMarkdown(
+        projectId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = throw NotImplementedError()
+
     override suspend fun addProjectMaterialZip(
             projectId: String,
             fileName: String,

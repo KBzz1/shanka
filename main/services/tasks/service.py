@@ -185,10 +185,25 @@ def _budget_guard(
 ) -> None:
     """预算硬上限（spec §10；V25-D-25 密度制口径）：按所选章节文本规模估算的区间上限
     超过任务单元硬顶 → 拒绝创建。文本不可得（异常）时回落旧口径 估算，由规划期组数
-    上限兜底。"""
+    上限兜底。
+
+    V25-D-43：QA_DIRECT 按题库密度（qa_pairs_per_10k_chars）估算问答对数——资料
+    问答对即单元，宁可创建期明确拒绝也不在提取后静默截断用户题库。
+    """
     if settings is None:
         injected = session.info.get("settings")
         settings = injected if isinstance(injected, Settings) else Settings()
+    if config.source_mode == "QA_DIRECT":
+        if chapter_chars > 0:
+            estimated = int(chapter_chars / 10_000 * settings.qa_pairs_per_10k_chars)
+        else:
+            estimated = chapter_count * 20  # 文本不可得时的保守回落（每章 20 对）
+        if estimated > settings.max_generation_units_per_task:
+            raise AppError(
+                ErrorCode.VALIDATION_ERROR,
+                "问答直通任务的问答对预算超出上限（按所选章节内容规模估算）；请减少章节范围",
+            )
+        return
     if chapter_chars > 0:
         estimated = estimate_task_units(chapter_chars, config.coverage_mode)
     else:

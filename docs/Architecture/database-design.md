@@ -506,12 +506,12 @@ V25-D-29 起不再持有 `file_id` 唯一外键:资料归属权威 = `materials.
 | --- | --- | --- | --- |
 | material_id | TEXT | PK | PDF 资料 = `pdf_files.file_id`;TEXT/ZIP 资料服务端生成 |
 | project_id | TEXT | NOT NULL, FK → learning_projects ON DELETE CASCADE | 资料归属权威;项目删除级联清理资料 |
-| type | TEXT | NOT NULL | `PDF / TEXT / ZIP`(LINK 预留);ZIP=md 笔记包(V25-D-35) |
-| name | TEXT | NOT NULL | PDF/ZIP=文件名;TEXT=用户可改标题(1~60 字符) |
-| status | TEXT | NULL | PDF 行恒 NULL(权威在 `pdf_files.status`);TEXT/ZIP 行恒 `READY`(同步解析) |
-| error_code | TEXT | NULL | 仅 PDF 解析失败码(ZIP 失败即时 400/422,不落行) |
-| size_bytes | INTEGER | NULL | PDF/ZIP 上传字节数 |
-| char_count | INTEGER | NULL | TEXT:1~30000;ZIP:md 正文总字符(≤300000) |
+| type | TEXT | NOT NULL | `PDF / TEXT / ZIP / HTML / MARKDOWN`(LINK 预留);ZIP=md 笔记包(V25-D-35);HTML=网页文档(V25-D-38);MARKDOWN=单文件 md 笔记(V25-D-40) |
+| name | TEXT | NOT NULL | PDF/ZIP/HTML/MARKDOWN=文件名;TEXT=用户可改标题(1~60 字符) |
+| status | TEXT | NULL | PDF 行恒 NULL(权威在 `pdf_files.status`);TEXT/ZIP/HTML/MARKDOWN 行恒 `READY`(同步解析) |
+| error_code | TEXT | NULL | 仅 PDF 解析失败码(ZIP/HTML/MARKDOWN 失败即时 400/422,不落行) |
+| size_bytes | INTEGER | NULL | PDF/ZIP/HTML/MARKDOWN 上传字节数 |
+| char_count | INTEGER | NULL | TEXT:1~30000;ZIP/HTML/MARKDOWN:正文总字符(≤300000) |
 | created_at | TEXT | NOT NULL | |
 
 索引:`(project_id, created_at)`(资料列表与状态聚合)。

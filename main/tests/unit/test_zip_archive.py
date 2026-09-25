@@ -141,6 +141,41 @@ def test_decode_name_gbk_recovery() -> None:
     assert _decode_name(info_utf8) == "V/1.图与执行模型.md"
 
 
+def test_parse_flat_root_mds_each_becomes_chapter() -> None:
+    """V25-D-41：主文件夹下无子文件夹、只有一堆 md → 每个 md 独立成章（去 .md，自然排序）。"""
+    data = _zip_bytes(
+        {
+            "Notes/10.冲刺.md": "第十章。",
+            "Notes/2.进阶.md": "第二章。",
+            "Notes/1.开始.md": "第一章。",
+            "Notes/notes.png": "ignored",
+        }
+    )
+    archive = parse_zip_archive(data, settings=_settings())
+    assert [c.name for c in archive.chapters] == ["1.开始", "2.进阶", "10.冲刺"]
+    assert all(len(c.files) == 1 for c in archive.chapters)
+    assert archive.chapters[0].files[0] == ("1.开始.md", "第一章。")
+
+
+def test_parse_single_root_md_named_by_file() -> None:
+    """V25-D-41：无子文件夹的单个根级 md 同样以文件名成章（不再合并「总览」）。"""
+    archive = parse_zip_archive(_zip_bytes({"Vocab/core.md": "核心词表。"}), settings=_settings())
+    assert [c.name for c in archive.chapters] == ["core"]
+
+
+def test_parse_md_bare_subfolders_do_not_block_flat_chapters() -> None:
+    """整树无 md 的子文件夹不构成章节，也不阻止根级 md 独立成章（以含 md 的结构判定）。"""
+    data = _zip_bytes(
+        {
+            "V/a.md": "正文一。",
+            "V/b.md": "正文二。",
+            "V/2.附件/cover.png": "无 md 的子文件夹",
+        }
+    )
+    archive = parse_zip_archive(data, settings=_settings())
+    assert [c.name for c in archive.chapters] == ["a", "b"]
+
+
 def test_parse_skips_empty_md_and_empty_chapter() -> None:
     """空 md 跳过；整树无 md 的子文件夹不生成章节。"""
     data = _zip_bytes(

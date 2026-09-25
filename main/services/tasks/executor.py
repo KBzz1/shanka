@@ -57,6 +57,7 @@ from infra.llm.deepseek import DeepSeekClient, LlmChatClient
 from services.generation.batches import plan_batches, process_next_batch
 from services.generation.ledger import mark_stale_unknown
 from services.generation.planning_executor import claim_planning_task, run_planning
+from services.generation.qa_planning_executor import run_qa_planning
 from services.generation.samples import config_fingerprint, sample_cards_llm
 from services.generation.scoring import enter_scoring_stage, run_scoring_stage
 from services.projects.versioning import bump_project_version
@@ -512,6 +513,15 @@ def _recover_expired_task_leases(session: Session, *, now: str, settings: Settin
     return recover_expired_leases(session, now=now, stale_before=stale_before)
 
 
+def _is_qa_direct(task: Task) -> bool:
+    """V25-D-43：任务配置 source_mode == QA_DIRECT（配置损坏按 EXTRACT 既有语义处理）。"""
+    try:
+        config = json.loads(task.generation_config)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(config, dict) and config.get("source_mode") == "QA_DIRECT"
+
+
 def process_active_tasks(
     session: Session,
     *,
@@ -575,7 +585,11 @@ def process_active_tasks(
                     else DeepSeekClient(settings, api_key=api_key)
                 )
                 try:
-                    run_planning(session, claimed, settings=settings, client=client)
+                    if _is_qa_direct(claimed):
+                        # V25-D-43 问答直通：规划阶段切换为资料问答对提取（结构-contract 3.5）
+                        run_qa_planning(session, claimed, settings=settings, client=client)
+                    else:
+                        run_planning(session, claimed, settings=settings, client=client)
                 finally:
                     client.close()
         except AppError as exc:

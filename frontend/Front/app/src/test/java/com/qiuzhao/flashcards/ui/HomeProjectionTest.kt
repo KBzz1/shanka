@@ -6,8 +6,9 @@ import org.junit.Test
 
 /**
  * Locks the home page's honesty projections on the JVM: the greeting carries the real account
- * nickname, the streak track is a bounded projection of the server streak (never an invented
- * per-day history), and a missing dashboard shows a dash instead of a fabricated zero.
+ * nickname, the streak number is the server value, the flame track is a bounded projection of
+ * the server flame count (V25-D-42 revive consumables, never an invented per-day history), and
+ * a missing dashboard shows a dash instead of a fabricated zero.
  */
 class HomeProjectionTest {
 
@@ -26,12 +27,12 @@ class HomeProjectionTest {
     }
 
     @Test
-    fun `the five flame slots project the real streak without inventing history`() {
+    fun `the five flame slots project the available flames without inventing history`() {
         assertEquals(0, streakTrackFillCount(null))
         assertEquals(0, streakTrackFillCount(0))
         assertEquals(1, streakTrackFillCount(1))
         assertEquals(5, streakTrackFillCount(5))
-        assertEquals(5, streakTrackFillCount(30))
+        assertEquals(5, streakTrackFillCount(7))
         assertEquals(0, streakTrackFillCount(-3))
     }
 

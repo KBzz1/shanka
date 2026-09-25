@@ -8,6 +8,9 @@ V2.5 口径（Task 11 实现）：
 - 周目标 = daily_learning_goal × 7（服务端派生；不再接受客户端 timezone/weekly_goal）。
 - 首次答对率：每卡历史首个事件为 GOOD 的比例（契约字面无周期限定，累计口径）。
 - 已掌握：C-03（REVIEW 且 stability>=21）去重卡数（全量）。
+- 连胜/火苗（V25-D-42）：纯推导无第二套状态——火苗每 2 个连续计数日攒 1 个（上限 5），
+  已结束的空缺日自动消耗 1 个火苗跳过（不计天数），火苗耗尽连胜截断重开；今天无事件
+  视为"待打"不断卡（早晨不清零）；火苗须在空缺日之前挣得才可消耗（先攒后用）。
 - 统计源 = review_events（评级事件）：自由刷题不写事件不计统计；事件按卡片当前可见性
   （统一可见谓词 domain/card.py）过滤——STAGED/删除批次卡的事件不进入任何口径
   （删除批次最终清理级联删事件，撤销窗口内也不保留幽灵计数）。
@@ -31,6 +34,44 @@ from infra.db.session import format_utc
 from services.preferences.service import get_preferences, learning_date
 
 _WEEKDAYS = 7
+
+# V25-D-42 火苗规则（structure-contract 3.12）：每 2 个连续计数日攒 1 个火苗，上限 5。
+_STREAK_FLAME_EVERY_DAYS = 2
+_STREAK_FLAME_CAP = 5
+
+
+def _streak_and_flames(learning_days: set[str], today: date) -> tuple[int, int, int, int]:
+    """连胜/火苗/历史最长连胜的前向单遍推导（V25-D-42；纯函数，无第二套状态）。
+
+    扫描最早事件日 → 今天：事件日记入当前 run；已结束的空缺日若 run 内还有可用火苗
+    则消耗 1 个跳过（空缺日不计天数），否则 run 截断重开（火苗不结转）；今天无事件
+    视为"待打"——既不计数也不截断（早晨不清零）。返回
+    (streak_days, streak_flames_available, streak_flames_used, max_streak_days)。
+    """
+    streak = flames_available = flames_used = max_streak = 0
+    if not learning_days:
+        return streak, flames_available, flames_used, max_streak
+    counted = 0
+    absorbed = 0
+    cursor = min(date.fromisoformat(day) for day in learning_days)
+    while cursor <= today:
+        if cursor.isoformat() in learning_days:
+            counted += 1
+        elif cursor == today:
+            pass  # 今天未复习：待打，不断卡不耗火苗
+        elif min(counted // _STREAK_FLAME_EVERY_DAYS, _STREAK_FLAME_CAP) > absorbed:
+            absorbed += 1  # 消耗 1 个火苗跳过空缺日
+        else:
+            max_streak = max(max_streak, counted)
+            counted = 0
+            absorbed = 0
+        cursor += timedelta(days=1)
+    max_streak = max(max_streak, counted)
+    streak = counted
+    flames_available = max(
+        min(counted // _STREAK_FLAME_EVERY_DAYS, _STREAK_FLAME_CAP) - absorbed, 0
+    )
+    return streak, flames_available, absorbed, max_streak
 
 
 def _account_tz(timezone_name: str) -> ZoneInfo:
@@ -146,12 +187,9 @@ def dashboard(session: Session, *, user_id: str, now: datetime) -> dict[str, obj
         else None
     )
 
-    # 连续学习天数（截至账号学习时区当天；只计可见卡事件日）
+    # 连胜/火苗（V25-D-42；截至账号学习时区当天，只计可见卡事件日，断卡由火苗吸收）
     today = date.fromisoformat(learning_date(format_utc(now), timezone))
-    streak = 0
-    while today.isoformat() in learning_days:
-        streak += 1
-        today -= timedelta(days=1)
+    streak, flames_available, flames_used, max_streak = _streak_and_flames(learning_days, today)
 
     # 已掌握（C-03；只含可见卡——统一可见谓词 3.9）
     mastered = (
@@ -197,6 +235,9 @@ def dashboard(session: Session, *, user_id: str, now: datetime) -> dict[str, obj
         "first_answer_accuracy": first_answer,
         "retention_rate": retention,
         "streak_days": streak,
+        "streak_flames_available": flames_available,
+        "streak_flames_used": flames_used,
+        "max_streak_days": max_streak,
         "mastered_card_count": mastered,
         "weekly_study_seconds": sum(daily_study_seconds),
         "daily_study_seconds": daily_study_seconds,

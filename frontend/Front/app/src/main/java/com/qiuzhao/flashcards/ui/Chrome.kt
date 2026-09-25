@@ -188,7 +188,7 @@ fun FlashcardsApp(viewModel: AppViewModel) {
     }
 
     val typedEntryProvider = entryProvider {
-        entry<AppRoute.Home> { HomeScreen(decks, projects, account?.nickname, todayPlan, dashboard?.streakDays, navigator) }
+        entry<AppRoute.Home> { HomeScreen(decks, projects, account?.nickname, todayPlan, dashboard?.streakDays, dashboard?.streakFlamesAvailable, navigator) }
         entry<AppRoute.StudyGoal> { StudyGoalScreen(viewModel, navigator) }
         entry<AppRoute.Project> { ProjectScreen(projects, decks, projectSearchQuery, viewModel, navigator) }
         entry<AppRoute.ProjectCreate> { ProjectCreateScreen(viewModel, navigator) }
@@ -245,6 +245,10 @@ fun FlashcardsApp(viewModel: AppViewModel) {
         entry<AppRoute.SmartCardChapter> { route ->
             val project = projects.firstOrNull { it.id == route.projectId }
             if (project == null) LoadingScreen() else SmartCardChapterScreen(project, navigator, viewModel)
+        }
+        entry<AppRoute.QaCardChapter> { route ->
+            val project = projects.firstOrNull { it.id == route.projectId }
+            if (project == null) LoadingScreen() else QaCardChapterScreen(project, navigator, viewModel)
         }
         entry<AppRoute.SmartCardSampleWait> { route ->
             val project = projects.firstOrNull { it.id == route.projectId }

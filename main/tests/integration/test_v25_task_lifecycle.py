@@ -933,11 +933,13 @@ def test_active_task_statuses_converged_to_non_terminals() -> None:
 
 
 def test_generation_config_has_no_card_count_estimate() -> None:
-    """API 配置不含任何卡数估算字段（PRD：样卡界面不展示预计总卡数）。"""
+    """API 配置不含任何卡数估算字段（PRD：样卡界面不展示预计总卡数）；
+    source_mode 为 V25-D-43 问答直通开关（缺省 EXTRACT），非数量语义。"""
     from app.schemas.samples import GenerationConfig as ConfigSchema
 
     assert set(ConfigSchema.model_fields) == {
         "coverage_mode",
         "difficulty_ratio",
         "custom_requirements",
+        "source_mode",
     }

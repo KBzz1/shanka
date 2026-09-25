@@ -22,6 +22,11 @@ sealed interface AppRoute : NavKey {
     @Serializable data class DeckGeneration(val projectId: String) : AppRoute
     /** Figma 836:5895 / 839:6220: pick the chapters parsed out of the files. */
     @Serializable data class SmartCardChapter(val projectId: String) : AppRoute
+    /**
+     * V25-D-43 问答直通：材料已含问题和答案时的制卡入口（非基础路由，从选资料/选章节页
+     * 右上角进入）。章节选择后走 source_mode=QA_DIRECT 的同款任务链（样卡→生成→评审）。
+     */
+    @Serializable data class QaCardChapter(val projectId: String) : AppRoute
     /** Figma 849:6541: sample-card wait — no bottom buttons; auto-advances on samples. */
     @Serializable data class SmartCardSampleWait(val projectId: String) : AppRoute
     /** Figma 835:5784: preview the generated sample cards before committing. */

@@ -1,10 +1,12 @@
 """services.projects.zip_archive：ZIP 笔记包解析（V25-D-35，纯函数、无 DB 依赖）。
 
-结构契约（主文件夹 → 章节文件夹 → md 正文，宽容边界）：
+结构契约（主文件夹 → 章节，宽容边界）：
 - zip 顶层忽略垃圾条目（``__MACOSX``/``.DS_Store``/``Thumbs.db``/``.obsidian``、
   macOS ``._*`` AppleDouble）后必须恰好一个主文件夹，否则 ``ZIP_STRUCTURE_INVALID``；
 - 主文件夹的一级子文件夹 = 章节，文件夹内 md 递归收集（相对路径自然排序）；
-- 主文件夹下直接放置的 md 收进固定「总览」章节，排在所有章节最前；
+- 有含 md 的子文件夹时，主文件夹下直接放置的 md 收进固定「总览」章节，排在所有
+  章节最前；主文件夹下没有任何含 md 的子文件夹时，每个根级 md 独立成章
+  （章名 = 文件名去 ``.md`` 扩展，自然排序，V25-D-41）；
 - 非 md 文件静默忽略；空 md 跳过；整树无 md 的子文件夹不生成章节；
   全包无有效正文 → ``ZIP_STRUCTURE_INVALID``。
 
@@ -169,8 +171,13 @@ def _collect(
         else:
             folders.setdefault(segments[0], []).append((rel, content))
     chapters: list[ZipChapter] = []
-    if overview:
+    if overview and folders:
+        # 混合结构（V25-D-35 原语义）：根级 md 合收「总览」章，排在所有子文件夹章节之前
         chapters.append(ZipChapter(name="总览", files=sorted(overview, key=_file_key)))
+    elif overview:
+        # 主文件夹下无任何含 md 的子文件夹：每个根级 md 独立成章（V25-D-41）
+        for rel, content in sorted(overview, key=_file_key):
+            chapters.append(ZipChapter(name=_md_stem(rel), files=[(rel, content)]))
     for name in sorted(folders, key=_natural_key):
         chapters.append(ZipChapter(name=name, files=sorted(folders[name], key=_file_key)))
     return chapters
@@ -178,3 +185,8 @@ def _collect(
 
 def _file_key(item: tuple[str, str]) -> tuple[str | int, ...]:
     return _natural_key(item[0])
+
+
+def _md_stem(rel: str) -> str:
+    """根级 md 独立成章时的章名：文件名去 ``.md`` 扩展（其余原样保留）。"""
+    return rel[: -len(".md")] if rel.lower().endswith(".md") else rel

@@ -52,6 +52,7 @@ internal fun HomeScreen(
     nickname: String?,
     todayPlan: TodayPlanUiState,
     streakDays: Int?,
+    streakFlames: Int?,
     nav: ScreenNavigator,
 ) {
     val activeDeck = decks.firstOrNull { it.dueCount > 0 } ?: decks.firstOrNull()
@@ -73,7 +74,7 @@ internal fun HomeScreen(
                     contentPadding = PaddingValues(bottom = (RootNavigationScrollTail * compactScale).dp),
                     verticalArrangement = Arrangement.spacedBy((16 * compactScale).dp)
                 ) {
-                    item { StreakCard(compactScale, streakDays) }
+                    item { StreakCard(compactScale, streakDays, streakFlames) }
                     item { HomeSectionHeading(homeGreeting(nickname), compactScale) }
                     item {
                         TodayPlanCard(
@@ -114,11 +115,12 @@ internal fun HomeScreen(
 internal fun homeGreeting(nickname: String?): String = "${nickname?.takeIf { it.isNotBlank() } ?: "同学"}，快来学习"
 
 /**
- * The streak card's five flame slots project the server streak onto a fixed
- * 5-slot track (Figma 895:5089). It is a progress projection of the real
- * streak — no per-day history is invented to fill the track.
+ * The streak card's five flame slots project the available streak flames onto a fixed
+ * 5-slot track (Figma 895:5089). V25-D-42: flames are revive consumables (each absorbs one
+ * fully-missed day) derived server-side — the big number stays the streak itself while the
+ * track shows what can still absorb a miss; no per-day history is invented to fill the track.
  */
-internal fun streakTrackFillCount(streakDays: Int?): Int = streakDays?.coerceIn(0, 5) ?: 0
+internal fun streakTrackFillCount(flamesAvailable: Int?): Int = flamesAvailable?.coerceIn(0, 5) ?: 0
 
 /** A not-yet-loaded dashboard shows a dash, never a fabricated zero. */
 internal fun streakNumberText(streakDays: Int?): String = streakDays?.toString() ?: "—"
@@ -146,7 +148,7 @@ private fun HomeSectionHeading(text: String, compactScale: Float) {
  * is replaced by this exact rendering.
  */
 @Composable
-internal fun StreakCard(compactScale: Float, streakDays: Int?) {
+internal fun StreakCard(compactScale: Float, streakDays: Int?, streakFlames: Int?) {
     val clockSize = 239f * compactScale
     val clockX = 192f * compactScale
     val clockY = -29f * compactScale
@@ -206,7 +208,7 @@ internal fun StreakCard(compactScale: Float, streakDays: Int?) {
                     .padding((8 * compactScale).dp),
                 horizontalArrangement = Arrangement.spacedBy((8 * compactScale).dp)
             ) {
-                val filled = streakTrackFillCount(streakDays)
+                val filled = streakTrackFillCount(streakFlames)
                 for (slot in 0 until 5) {
                     val active = slot < filled
                     Box(

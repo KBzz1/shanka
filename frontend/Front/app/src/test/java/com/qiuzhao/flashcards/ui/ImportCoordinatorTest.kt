@@ -232,6 +232,13 @@ class ImportCoordinatorTest {
         idempotencyKey: String?,
     ): V25Result<com.qiuzhao.flashcards.domain.v25.V25Material> = throw NotImplementedError()
 
+    override suspend fun addProjectMaterialMarkdown(
+        projectId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String?,
+    ): V25Result<com.qiuzhao.flashcards.domain.v25.V25Material> = throw NotImplementedError()
+
     override suspend fun addProjectMaterialZip(projectId: String, fileName: String, content: InputStream, idempotencyKey: String?): V25Result<com.qiuzhao.flashcards.domain.v25.V25Material> = throw NotImplementedError()
         override suspend fun addProjectMaterialText(projectId: String, name: String, content: String, idempotencyKey: String?): V25Result<com.qiuzhao.flashcards.domain.v25.V25Material> = throw NotImplementedError()
         override suspend fun listProjectMaterials(projectId: String): V25Result<List<com.qiuzhao.flashcards.domain.v25.V25Material>> = throw NotImplementedError()

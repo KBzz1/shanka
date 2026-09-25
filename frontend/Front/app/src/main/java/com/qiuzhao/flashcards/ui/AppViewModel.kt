@@ -46,6 +46,7 @@ import com.qiuzhao.flashcards.domain.v25.V25ProgressSummary
 import com.qiuzhao.flashcards.domain.v25.V25Rating
 import com.qiuzhao.flashcards.domain.v25.V25Result
 import com.qiuzhao.flashcards.domain.v25.V25SampleCard
+import com.qiuzhao.flashcards.domain.v25.V25SourceMode
 import com.qiuzhao.flashcards.domain.v25.V25StatsDashboard
 import com.qiuzhao.flashcards.domain.v25.V25PlanCard
 import com.qiuzhao.flashcards.domain.v25.V25StudyOrigin
@@ -151,7 +152,7 @@ data class AccountBootstrap(val loaded: Boolean = false, val account: LocalAccou
  * then every staged material uploads through the materials endpoints). Server-backed materials
  * carry their real ids and statuses so the management screens render the contract states.
  */
-internal enum class ProjectDraftMaterialType { FILE, TEXT, ZIP, HTML }
+internal enum class ProjectDraftMaterialType { FILE, TEXT, ZIP, HTML, MARKDOWN }
 
 internal data class ProjectDraftMaterial(
     val id: String,
@@ -210,6 +211,10 @@ data class DashboardUiState(
     val firstAttemptAccuracy: Float? = null,
     val retentionRate: Float? = null,
     val streakDays: Int = 0,
+    /** V25-D-42 火苗（断卡复活消耗品）与历史最长连胜（服务端推导投影）。 */
+    val streakFlamesAvailable: Int = 0,
+    val streakFlamesUsed: Int = 0,
+    val maxStreakDays: Int = 0,
     val masteredCards: Int = 0,
     /** V25-D-37 server-aggregated study duration (0 = no session data yet, an honest empty). */
     val weeklyStudySeconds: Int = 0,
@@ -875,8 +880,10 @@ class AppViewModel(
         val draftType = when (extension) {
             "pdf" -> ProjectDraftMaterialType.FILE
             "zip" -> ProjectDraftMaterialType.ZIP
+            "html", "htm" -> ProjectDraftMaterialType.HTML
+            "md", "markdown" -> ProjectDraftMaterialType.MARKDOWN
             else -> {
-                _uiMessage.value = "仅支持 PDF / ZIP 文件"
+                _uiMessage.value = "仅支持 PDF / ZIP / HTML / Markdown 文件"
                 return
             }
         }
@@ -1028,8 +1035,9 @@ class AppViewModel(
                 "pdf" -> ProjectDraftMaterialType.FILE
                 "zip" -> ProjectDraftMaterialType.ZIP
                 "html", "htm" -> ProjectDraftMaterialType.HTML
+                "md", "markdown" -> ProjectDraftMaterialType.MARKDOWN
                 else -> {
-                    _uiMessage.value = "仅支持 PDF / ZIP / HTML 文件"
+                    _uiMessage.value = "仅支持 PDF / ZIP / HTML / Markdown 文件"
                     continue
                 }
             }
@@ -1114,6 +1122,7 @@ class AppViewModel(
                     ProjectDraftMaterialType.TEXT -> commitStagedImportText(projectId, material)
                     ProjectDraftMaterialType.ZIP -> commitStagedZip(projectId, material)
                     ProjectDraftMaterialType.HTML -> commitStagedHtml(projectId, material)
+                    ProjectDraftMaterialType.MARKDOWN -> commitStagedMarkdown(projectId, material)
                 }
                 if (outcome is V25Result.Failure) {
                     if (outcome.code != ImportCoordinator.IN_FLIGHT_CODE) {
@@ -1185,6 +1194,7 @@ class AppViewModel(
                     ProjectDraftMaterialType.TEXT -> commitStagedImportText(projectId, material)
                     ProjectDraftMaterialType.ZIP -> commitStagedZip(projectId, material)
                     ProjectDraftMaterialType.HTML -> commitStagedHtml(projectId, material)
+                    ProjectDraftMaterialType.MARKDOWN -> commitStagedMarkdown(projectId, material)
                 }
                 if (outcome is V25Result.Failure) {
                     if (outcome.code != ImportCoordinator.IN_FLIGHT_CODE) handleFailure("commit_material", outcome, surface = false)
@@ -1244,9 +1254,9 @@ class AppViewModel(
     }
 
     /**
-     * One staged ZIP note pack → POST materials/zip (V25-D-35). Synchronous server-side
-     * parsing: a structural rejection lands here as a 4xx failure on the draft card —
-     * retry means picking the file again, never a server replace.
+     * One staged HTML document → POST materials/html (V25-D-38). Synchronous server-side
+     * parsing: a rejection lands here as a 4xx failure on the draft card — retry means
+     * picking the file again, never a server replace.
      */
     private suspend fun commitStagedHtml(projectId: String, material: ProjectDraftMaterial): V25Result<*> {
         val uri = material.uri
@@ -1262,6 +1272,36 @@ class AppViewModel(
         return try {
             input.use { content ->
                 v25Repository.addProjectMaterialHtml(projectId, fileName, content, attempt.idempotencyKey)
+            }.also { result ->
+                if (result is V25Result.Success) pdfUploadCoordinator.commit() else pdfUploadCoordinator.fail()
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            pdfUploadCoordinator.fail()
+            V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, failure.message)
+        }
+    }
+
+    /**
+     * One staged standalone Markdown file → POST materials/markdown (V25-D-40). Synchronous
+     * server-side parsing: a rejection lands here as a 4xx failure on the draft card — retry
+     * means picking the file again, never a server replace.
+     */
+    private suspend fun commitStagedMarkdown(projectId: String, material: ProjectDraftMaterial): V25Result<*> {
+        val uri = material.uri
+            ?: return V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, "无法读取所选 Markdown 文件")
+        val fileName = contentResolver.displayName(uri)
+        val attempt = pdfUploadCoordinator.begin(PdfUploadOperation.AddMarkdownMaterial(projectId), uri.toString(), fileName)
+            ?: return V25Result.Failure(ImportCoordinator.IN_FLIGHT_CODE, null, null)
+        val input = contentResolver.openInputStream(uri)
+        if (input == null) {
+            pdfUploadCoordinator.fail()
+            return V25Result.Failure(V25ErrorCodes.INVALID_RESPONSE, null, "无法读取所选 Markdown 文件")
+        }
+        return try {
+            input.use { content ->
+                v25Repository.addProjectMaterialMarkdown(projectId, fileName, content, attempt.idempotencyKey)
             }.also { result ->
                 if (result is V25Result.Success) pdfUploadCoordinator.commit() else pdfUploadCoordinator.fail()
             }
@@ -1332,6 +1372,13 @@ class AppViewModel(
                 }
                 ProjectDraftMaterialType.HTML -> material.uri?.let { uri ->
                     MaterialUpload.Html(
+                        draftId = material.id,
+                        materialName = material.title,
+                        openStream = { contentResolver.openInputStream(uri) },
+                    )
+                }
+                ProjectDraftMaterialType.MARKDOWN -> material.uri?.let { uri ->
+                    MaterialUpload.Markdown(
                         draftId = material.id,
                         materialName = material.title,
                         openStream = { contentResolver.openInputStream(uri) },
@@ -1637,6 +1684,7 @@ class AppViewModel(
         config: PdfGenerationConfig,
         onReady: () -> Unit,
         onFailure: (String?) -> Unit = {},
+        sourceMode: V25SourceMode = V25SourceMode.EXTRACT,
     ) = viewModelScope.launch {
         val currentProject = activePdfProject.value ?: run {
             onFailure("PDF_NOT_READY")
@@ -1666,7 +1714,12 @@ class AppViewModel(
                 return@launch
             }
         }
-        val generationConfig = V25GenerationConfig(coverageMode(config.quantity), difficultyRatio(config), config.requirement.trim())
+        val generationConfig = V25GenerationConfig(
+            coverageMode(config.quantity),
+            difficultyRatio(config),
+            config.requirement.trim(),
+            sourceMode = sourceMode,
+        )
         // Reuse decisions read the full server task once (the projection deliberately carries no
         // sample/chapter payloads); server truth beats any in-memory snapshot.
         val candidate = pdfTaskId.value?.let { id ->
@@ -1715,6 +1768,7 @@ class AppViewModel(
             is V25Result.Success -> created.value
         }
         bindPdfTask(task.taskId)
+        _boundTaskSourceMode.value = sourceMode
 
         // The deck (and possibly the task) now exist server-side: re-project the deck list
         // so 项目-卡组 shows the new tile no matter how the sample request ends.
@@ -1830,6 +1884,7 @@ class AppViewModel(
                 }
             }
             bindPdfTask(task.taskId)
+            _boundTaskSourceMode.value = task.generationConfig.sourceMode
             task.projectId?.let { activePdfProjectId.value = it }
             when (task.status) {
                 V25TaskStatus.SAMPLE_GENERATING,
@@ -1852,6 +1907,7 @@ class AppViewModel(
                 is V25Result.Success -> {
                     val task = result.value
                     bindPdfTask(task.taskId)
+                    _boundTaskSourceMode.value = task.generationConfig.sourceMode
                     task.projectId?.let { activePdfProjectId.value = it }
                     onReady()
                 }
@@ -1916,6 +1972,7 @@ class AppViewModel(
         when (val full = v25Repository.getTask(taskId)) {
             is V25Result.Success -> {
                 _pdfSamples.value = full.value.sampleCards.map { CardDraft(it.front, it.back) }
+                _boundTaskSourceMode.value = full.value.generationConfig.sourceMode
                 onLoaded()
             }
             is V25Result.Failure -> handleFailure("get_task", full)
@@ -2253,6 +2310,9 @@ class AppViewModel(
             firstAttemptAccuracy = value.firstAttemptAccuracy,
             retentionRate = value.retentionRate,
             streakDays = value.streakDays,
+            streakFlamesAvailable = value.streakFlamesAvailable,
+            streakFlamesUsed = value.streakFlamesUsed,
+            maxStreakDays = value.maxStreakDays,
             masteredCards = value.masteredCards,
             weeklyStudySeconds = value.weeklyStudySeconds,
             dailyStudySeconds = value.dailyStudySeconds,
@@ -2385,7 +2445,16 @@ class AppViewModel(
     private fun bindPdfTask(taskId: String) {
         pdfTaskId.value = taskId
         _pdfSamples.value = emptyList()
+        _boundTaskSourceMode.value = V25SourceMode.EXTRACT
     }
+
+    /**
+     * V25-D-43：当前绑定任务的来源模式（EXTRACT / QA_DIRECT）。轻量 Room 任务投影不携带
+     * generation_config，预览页等界面据此切换文案；beginPdfSamples 按发起模式先行写入，
+     * loadPdfSamples 读全量任务时以服务端真值覆盖（覆盖恢复/续用的任务）。
+     */
+    private val _boundTaskSourceMode = MutableStateFlow(V25SourceMode.EXTRACT)
+    internal val boundTaskSourceMode: StateFlow<V25SourceMode> = _boundTaskSourceMode.asStateFlow()
 
     private fun handleFailure(operation: String, result: V25Result.Failure, surface: Boolean = true) {
         if (result.isAuthFailure) {
@@ -2412,6 +2481,7 @@ class AppViewModel(
         type = when (type) {
             V25MaterialType.PDF, V25MaterialType.ZIP -> ProjectDraftMaterialType.FILE
             V25MaterialType.HTML -> ProjectDraftMaterialType.HTML
+            V25MaterialType.MARKDOWN -> ProjectDraftMaterialType.MARKDOWN
             V25MaterialType.TEXT -> ProjectDraftMaterialType.TEXT
         },
         title = name,
@@ -2419,6 +2489,7 @@ class AppViewModel(
             V25MaterialType.PDF -> name.substringAfterLast('.', "").lowercase().ifBlank { "pdf" }
             V25MaterialType.ZIP -> name.substringAfterLast('.', "").lowercase().ifBlank { "zip" }
             V25MaterialType.HTML -> name.substringAfterLast('.', "").lowercase().ifBlank { "html" }
+            V25MaterialType.MARKDOWN -> name.substringAfterLast('.', "").lowercase().ifBlank { "md" }
             V25MaterialType.TEXT -> null
         },
         importedAt = createdAt,

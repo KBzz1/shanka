@@ -472,7 +472,10 @@ def test_today_plan_aggregates_decks_across_projects(
         )
         _seed_preferences(session, user_id=user, daily_goal=50)
         _seed_user_plan(
-            session, user_id=user, deck_ids=[deck_a, deck_b], daily_new_goal=0,
+            session,
+            user_id=user,
+            deck_ids=[deck_a, deck_b],
+            daily_new_goal=0,
             daily_review_goal=10,
         )
         session.commit()
@@ -485,7 +488,9 @@ def test_today_plan_aggregates_decks_across_projects(
     assert set(plan.selected_deck_ids) == {deck_a, deck_b}
 
 
-def test_today_plan_unselected_decks_stay_out(session_factory: Callable[[], Session], user: str) -> None:
+def test_today_plan_unselected_decks_stay_out(
+    session_factory: Callable[[], Session], user: str
+) -> None:
     """计划外卡组（同项目另一卡组）不进入今日队列——范围约束不因项目归属放宽。"""
     with session_factory() as session:
         _seed_user(session, user)
@@ -493,16 +498,31 @@ def test_today_plan_unselected_decks_stay_out(session_factory: Callable[[], Sess
         deck_in, deck_out = cast(list[str], ctx["deck_ids"])
         ago = _fmt(_NOW_DT - timedelta(days=5))
         in_card = _seed_card(
-            session, user_id=user, deck_id=deck_in, position=1, state="REVIEW",
-            stability=10.0, due=ago, last_review=ago, reps=1,
+            session,
+            user_id=user,
+            deck_id=deck_in,
+            position=1,
+            state="REVIEW",
+            stability=10.0,
+            due=ago,
+            last_review=ago,
+            reps=1,
         )
         _seed_card(
-            session, user_id=user, deck_id=deck_out, position=1, state="REVIEW",
-            stability=2.0, due=ago, last_review=ago, reps=1,
+            session,
+            user_id=user,
+            deck_id=deck_out,
+            position=1,
+            state="REVIEW",
+            stability=2.0,
+            due=ago,
+            last_review=ago,
+            reps=1,
         )
         _seed_preferences(session, user_id=user, daily_goal=50)
-        _seed_user_plan(session, user_id=user, deck_ids=[deck_in], daily_new_goal=0,
-                        daily_review_goal=10)
+        _seed_user_plan(
+            session, user_id=user, deck_ids=[deck_in], daily_new_goal=0, daily_review_goal=10
+        )
         session.commit()
 
     with session_factory() as session:
@@ -519,7 +539,7 @@ def test_today_plan_standalone_deck_joins_account_plan(
 
     with session_factory() as session:
         _seed_user(session, user)
-        ctx = _seed_project(session, user_id=user, chapters=1)
+        _seed_project(session, user_id=user, chapters=1)
         ago = _fmt(_NOW_DT - timedelta(days=5))
         independent_deck = _uuid()
         session.add(
@@ -548,7 +568,10 @@ def test_today_plan_standalone_deck_joins_account_plan(
         )
         _seed_preferences(session, user_id=user, daily_goal=10)
         _seed_user_plan(
-            session, user_id=user, deck_ids=[independent_deck], daily_new_goal=0,
+            session,
+            user_id=user,
+            deck_ids=[independent_deck],
+            daily_new_goal=0,
             daily_review_goal=10,
         )
         session.commit()
@@ -694,7 +717,11 @@ def test_today_plan_new_card_fill_by_deck_position_order(
         new_b2 = _seed_card(session, user_id=user, deck_id=deck_b, position=2, state="NEW")
         _seed_preferences(session, user_id=user, daily_goal=20)
         _seed_user_plan(
-            session, user_id=user, deck_ids=[deck_b, deck_a], daily_new_goal=10, daily_review_goal=10
+            session,
+            user_id=user,
+            deck_ids=[deck_b, deck_a],
+            daily_new_goal=10,
+            daily_review_goal=10,
         )
         session.commit()
 
@@ -768,9 +795,7 @@ def test_today_plan_study_date_and_completed_reset_by_iana_timezone(
             client_event_id=_uuid(),
             reviewed_at="2026-08-16T01:00:00.000Z",
         )
-        _seed_preferences(
-            session, user_id=user, daily_goal=10, timezone="America/Los_Angeles"
-        )
+        _seed_preferences(session, user_id=user, daily_goal=10, timezone="America/Los_Angeles")
         _seed_user_plan(
             session, user_id=user, deck_ids=[deck], daily_new_goal=0, daily_review_goal=10
         )
@@ -994,8 +1019,7 @@ def test_today_plan_settings_row_without_decks_is_empty_state(
         deck = cast(list[str], ctx["deck_ids"])[0]
         _seed_card(session, user_id=user, deck_id=deck, position=1, state="NEW")
         _seed_preferences(session, user_id=user, daily_goal=10)
-        _seed_user_plan(session, user_id=user, deck_ids=[], daily_new_goal=0,
-                        daily_review_goal=10)
+        _seed_user_plan(session, user_id=user, deck_ids=[], daily_new_goal=0, daily_review_goal=10)
         session.commit()
 
     with session_factory() as session:

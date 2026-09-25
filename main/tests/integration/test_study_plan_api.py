@@ -205,9 +205,7 @@ def test_study_plan_put_validates_goals_and_deck_ownership(client: TestClient) -
     project_id = _project(client, headers)
     deck_id = _deck(client, headers, project_id)
     other_user = _user(client, username="bob")
-    stranger_deck_id = _deck(
-        client, other_user, _project(client, other_user), name="他人牌组"
-    )
+    stranger_deck_id = _deck(client, other_user, _project(client, other_user), name="他人牌组")
 
     def _put(goal_new: int, goal_review: int, decks: list[str]) -> dict[str, Any]:
         return cast(

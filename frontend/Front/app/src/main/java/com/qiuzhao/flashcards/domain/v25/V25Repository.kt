@@ -112,6 +112,18 @@ interface V25Repository {
         idempotencyKey: String? = null,
     ): V25Result<V25Material>
 
+    /**
+     * POST /projects/{project_id}/materials/markdown (V25-D-40) — attach a standalone Markdown
+     * file; synchronous parse, ATX headings become chapters (small/unstructured → single AUTO
+     * chapter).
+     */
+    suspend fun addProjectMaterialMarkdown(
+        projectId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String? = null,
+    ): V25Result<V25Material>
+
     /** POST /projects/{project_id}/materials/text — attach pasted text (≤30000 characters); READY immediately. */
     suspend fun addProjectMaterialText(
         projectId: String,

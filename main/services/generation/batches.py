@@ -155,6 +155,15 @@ def _claim_next_batch(session: Session, *, task_id: str) -> Batch | None:
         # 被其他 worker 抢占 → 取下一条（continue 循环）
 
 
+def _task_source_mode(task: Task) -> str:
+    """V25-D-43：任务 source_mode（配置损坏按 EXTRACT 既有语义处理）。"""
+    try:
+        config = json.loads(task.generation_config)
+    except (ValueError, TypeError):
+        return "EXTRACT"
+    return config.get("source_mode", "EXTRACT") if isinstance(config, dict) else "EXTRACT"
+
+
 def process_next_batch(session: Session, *, task_id: str, client: LlmChatClient) -> int:
     """处理下一个可执行批次（1 批 = 1 生成单元，每次 = 账本一次尝试）。返回处理批次数（0 = 无）。
 
@@ -223,6 +232,12 @@ def process_next_batch(session: Session, *, task_id: str, client: LlmChatClient)
         session.flush()
         return 1
     versions = asset_versions()
+    qa_direct = _task_source_mode(task) == "QA_DIRECT"
+    generator_prompt_version = (
+        versions["generator_qa_prompt_version"]
+        if qa_direct
+        else versions["generator_prompt_version"]
+    )
     pages = _load_unit_pages(session, unit=unit, max_chars=max_input_chars)
     if not pages:
         # 单元无可用来源页（来源不足的极端情形）：按安全弃权直接 SKIPPED，不发调用
@@ -246,7 +261,7 @@ def process_next_batch(session: Session, *, task_id: str, client: LlmChatClient)
         session.flush()
         return 1
     operation_key = f"generating:{batch.batch_id}"
-    fingerprint = _input_fingerprint(unit, pages, versions)
+    fingerprint = _input_fingerprint(unit, pages, versions, generator_prompt_version)
     budget = 1 + retry_limit
     if (
         attempt_count(
@@ -292,8 +307,8 @@ def process_next_batch(session: Session, *, task_id: str, client: LlmChatClient)
         input_fingerprint=fingerprint,
         attempt_no=attempt_no,
         model=model,
-        prompt_name="generator",
-        prompt_version=versions["generator_prompt_version"],
+        prompt_name="generator-qa" if qa_direct else "generator",
+        prompt_version=generator_prompt_version,
         schema_name="generator_output",
         schema_version=versions["schema_version"],
         now=now,
@@ -420,7 +435,7 @@ def process_next_batch(session: Session, *, task_id: str, client: LlmChatClient)
             duration_ms=result["duration_ms"],
             now=now,
         )
-        _project_batch_usage(batch, result, versions)
+        _project_batch_usage(batch, result, versions, generator_prompt_version)
         batch.retry_count = attempt_no - 1  # 本次尝试成功（弃权）→ 失败次数投影
         _skip_batch(batch, task=task, now=now, unit=unit)
         logger.info(
@@ -479,7 +494,7 @@ def process_next_batch(session: Session, *, task_id: str, client: LlmChatClient)
         duration_ms=result["duration_ms"],
         now=now,
     )
-    _project_batch_usage(batch, result, versions)
+    _project_batch_usage(batch, result, versions, generator_prompt_version)
     batch.retry_count = attempt_no - 1  # 兼容投影：失败尝试数（本次成功不计）
     batch.status = "SUCCEEDED"
     batch.generated_item_ids = json.dumps([inserted.generation_item_id])
@@ -548,9 +563,16 @@ def _finish_batch(batch: Batch, task: Task, now: str) -> None:
     batch.ended_at = now
 
 
-def _project_batch_usage(batch: Batch, result: dict[str, Any], versions: dict[str, str]) -> None:
+def _project_batch_usage(
+    batch: Batch,
+    result: dict[str, Any],
+    versions: dict[str, str],
+    generator_prompt_version: str,
+) -> None:
     """Batch 兼容投影（spec §7）：token/版本列由同一次调用结果同步写入（账本为权威，
-    不构成第二套预算）。schema_version = 生成调用实际使用的 generator-output schema v2。"""
+    不构成第二套预算）。schema_version = 生成调用实际使用的 generator-output schema v3；
+    prompt_version = 实际使用的 generator 资产版本（V25-D-43：QA_DIRECT 任务为
+    generator-qa 版本）。"""
     usage = result["usage"]
     batch.cache_hit_tokens = usage.get("prompt_cache_hit_tokens")
     batch.cache_miss_tokens = usage.get("prompt_cache_miss_tokens")
@@ -558,14 +580,14 @@ def _project_batch_usage(batch: Batch, result: dict[str, Any], versions: dict[st
     batch.model = result.get("model")
     batch.http_status = result.get("http_status")
     batch.duration_ms = result.get("duration_ms")
-    batch.prompt_version = versions["generator_prompt_version"]
+    batch.prompt_version = generator_prompt_version
     batch.schema_version = versions["schema_version"]
 
 
 def _build_generator_prompts(
     task: Task, unit: KnowledgePoint, pages: Sequence[TextChunk]
 ) -> tuple[str, str]:
-    """Generator 双消息组装（spec §5.7 Generator 行）：稳定 system（generator v6 +
+    """Generator 双消息组装（spec §5.7 Generator 行）：稳定 system（generator 资产 +
     generator-output schema 原文）+ 动态 user 三区块信封。
 
     三区块（V25-D-27）：`<GENERATION_SPEC>` 机器规范块（Planner 锚定的难度/卡型/
@@ -574,9 +596,15 @@ def _build_generator_prompts(
     safe_json_dumps（ensure_ascii=False, sort_keys=True, separators=(",",":") +
     信封边界字符转义）；原文/自定义要求按不可信数据处理；关联元数据
     （generation_unit_id/chunk_id）不进入模型输入。
+
+    V25-D-43 QA_DIRECT：system 换 generator-qa 资产；spec 携带资料原问题（QUESTION）
+    或原陈述（TRUE_FALSE）——答案不在 spec 中，由模型在 SOURCE_MATERIAL（问答对所在
+    来源页）中定位照录。
     """
+    qa_direct = _task_source_mode(task) == "QA_DIRECT"
+    generator_asset = "generator_qa" if qa_direct else "generator"
     system_prompt = (
-        f"{load_asset('prompts', 'generator')}\n\n<GENERATOR_OUTPUT_SCHEMA>\n"
+        f"{load_asset('prompts', generator_asset)}\n\n<GENERATOR_OUTPUT_SCHEMA>\n"
         f"{load_asset('schemas', 'generator_output')}\n</GENERATOR_OUTPUT_SCHEMA>"
     )
     try:
@@ -584,12 +612,25 @@ def _build_generator_prompts(
     except (ValueError, TypeError):
         config = None
     custom_requirements = config.get("custom_requirements") if isinstance(config, dict) else None
-    spec = {
-        "learning_objective": unit.topic,
-        "target_difficulty": unit.target_difficulty,
-        "card_type": unit.card_type,
-        "coverage_tier": unit.coverage_tier,
-    }
+    spec: dict[str, Any]
+    if qa_direct:
+        spec = {
+            "source_mode": "QA_DIRECT",
+            "card_type": unit.card_type,
+            "target_difficulty": unit.target_difficulty,
+            "coverage_tier": None,
+        }
+        if unit.card_type == "TRUE_FALSE":
+            spec["statement"] = unit.topic
+        else:
+            spec["question"] = unit.topic
+    else:
+        spec = {
+            "learning_objective": unit.topic,
+            "target_difficulty": unit.target_difficulty,
+            "card_type": unit.card_type,
+            "coverage_tier": unit.coverage_tier,
+        }
     source_material = [{"page_number": p.page_number, "content": p.content} for p in pages]
     user_prompt = (
         f"<GENERATION_SPEC>{safe_json_dumps(spec)}</GENERATION_SPEC>\n"
@@ -622,16 +663,20 @@ def _load_unit_pages(session: Session, *, unit: KnowledgePoint, max_chars: int) 
 
 
 def _input_fingerprint(
-    unit: KnowledgePoint, pages: Sequence[TextChunk], versions: dict[str, str]
+    unit: KnowledgePoint,
+    pages: Sequence[TextChunk],
+    versions: dict[str, str],
+    generator_prompt_version: str,
 ) -> str:
-    """生成输入指纹（spec §9）：单元学习目标/锚定 + 有序页 ID 与 content_sha256 + 资产版本。
+    """生成输入指纹（spec §9）：单元学习目标/锚定 + 有序页 ID 与 content_sha256 + 资产版本
+    （V25-D-43：prompt 版本为实际使用的 generator 资产版本——EXTRACT 值不变，指纹兼容）。
     完整原文与完整 Prompt 不进入指纹载荷或账本（红线 4）。"""
     payload = {
         "learning_objective": unit.topic,
         "target_difficulty": unit.target_difficulty,
         "card_type": unit.card_type,
         "pages": [{"chunk_id": p.chunk_id, "content_sha256": p.content_sha256} for p in pages],
-        "generator_prompt_version": versions["generator_prompt_version"],
+        "generator_prompt_version": generator_prompt_version,
         "generator_output_schema_version": versions["schema_version"],
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

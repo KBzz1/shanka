@@ -84,6 +84,12 @@ def test_coverage_mode_matches_openapi() -> None:
     assert set(enums.CoverageMode) == _openapi_enum("CoverageMode")
 
 
+def test_source_mode_matches_openapi() -> None:
+    """V25-D-43：source_mode = EXTRACT（既有语义）/ QA_DIRECT（问答直通）。"""
+    assert set(enums.SourceMode) == {"EXTRACT", "QA_DIRECT"}
+    assert set(enums.SourceMode) == _openapi_enum("SourceMode")
+
+
 def test_publication_state_staged_published() -> None:
     """契约 3.9：publication_state = STAGED / PUBLISHED；历史卡均迁为 PUBLISHED。"""
     assert set(enums.PublicationState) == {"STAGED", "PUBLISHED"}

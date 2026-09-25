@@ -350,6 +350,131 @@ class ShankaV25MigrationTest {
         migrated.close()
     }
 
+    @Test
+    fun test_migration_v9_to_v10_adds_flame_columns_and_preserves_facts() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val dbFile = File(context.cacheDir, "migration-v9-v10-${System.nanoTime()}.db")
+
+        // A v9 database carrying one dashboard snapshot in its pre-V25-D-42 shape (no flame
+        // columns): MIGRATIONS(9→10) must add them without touching the streak fact, and the
+        // old snapshot reads back with the honest 0-flame defaults until the next refresh.
+        createV9Database(dbFile)
+        insertV9DashboardFact(dbFile)
+
+        val migrated = ShankaV25Database.buildOnFile(context, dbFile.absolutePath)
+        val cache = V25CacheStore(migrated)
+        val dashboard = cache.readDashboard("u-1")
+        assertEquals("the pre-existing streak survives the migration", 6, dashboard?.streakDays)
+        assertEquals(0, dashboard?.streakFlamesAvailable)
+        assertEquals(0, dashboard?.streakFlamesUsed)
+        assertEquals(0, dashboard?.maxStreakDays)
+        migrated.close()
+    }
+
+    /**
+     * The v9 schema as exported by `app/schemas/.../9.json` — every table in its final shape
+     * except `dashboard_snapshot`, which predates the V25-D-42 flame columns.
+     */
+    private fun createV9Database(dbFile: File) {
+        val db = FrameworkSQLiteOpenHelperFactory().create(
+            androidx.sqlite.db.SupportSQLiteOpenHelper.Configuration.builder(
+                ApplicationProvider.getApplicationContext(),
+            )
+                .name(dbFile.absolutePath)
+                .callback(NoOpCallback(9))
+                .build(),
+        ).writableDatabase
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `projects` (`user_id` TEXT NOT NULL, `project_id` TEXT NOT NULL, `name` TEXT NOT NULL, `status` TEXT NOT NULL, `chapter_count` INTEGER NOT NULL, `deck_count` INTEGER NOT NULL, `task_count` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `version` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `project_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `project_materials` (`user_id` TEXT NOT NULL, `material_id` TEXT NOT NULL, `project_id` TEXT NOT NULL, `type` TEXT NOT NULL, `name` TEXT NOT NULL, `status` TEXT NOT NULL, `error_code` TEXT, `size_bytes` INTEGER, `char_count` INTEGER, `created_at` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `material_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `project_chapters` (`user_id` TEXT NOT NULL, `chapter_id` TEXT NOT NULL, `project_id` TEXT NOT NULL, `material_id` TEXT NOT NULL, `name` TEXT NOT NULL, `source` TEXT NOT NULL DEFAULT 'TOC', `start_page` INTEGER, `end_page` INTEGER, `position` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `chapter_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `generation_tasks` (`user_id` TEXT NOT NULL, `task_id` TEXT NOT NULL, `project_id` TEXT, `deck_id` TEXT, `retry_of_task_id` TEXT, `status` TEXT NOT NULL, `internal_stage` TEXT, `generated_card_count` INTEGER NOT NULL, `error_code` TEXT, `failure_stage` TEXT, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `task_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `decks` (`user_id` TEXT NOT NULL, `deck_id` TEXT NOT NULL, `name` TEXT NOT NULL, `project_id` TEXT, `card_count` INTEGER NOT NULL, `due_count` INTEGER NOT NULL, `mastered_card_count` INTEGER NOT NULL, `review_count` INTEGER NOT NULL, `mastery_ratio` REAL, `not_started_count` INTEGER NOT NULL, `learning_count` INTEGER NOT NULL, `relearning_count` INTEGER NOT NULL, `consolidating_count` INTEGER NOT NULL, `mastered_count` INTEGER NOT NULL, `review_event_count` INTEGER NOT NULL, `last_studied_at` INTEGER, PRIMARY KEY(`user_id`, `deck_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `cards` (`user_id` TEXT NOT NULL, `card_id` TEXT NOT NULL, `deck_id` TEXT NOT NULL, `front` TEXT NOT NULL, `back` TEXT NOT NULL, `card_type` TEXT NOT NULL, `position` INTEGER NOT NULL, `target_difficulty` TEXT, `chapter_id` TEXT, `source_task_id` TEXT, `publication_state` TEXT, `version` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `card_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `review_states` (`user_id` TEXT NOT NULL, `card_id` TEXT NOT NULL, `state` TEXT NOT NULL, `due` INTEGER, `synced_at` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `card_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `review_queue` (`user_id` TEXT NOT NULL, `deck_id` TEXT NOT NULL, `position` INTEGER NOT NULL, `card_id` TEXT NOT NULL, PRIMARY KEY(`user_id`, `deck_id`, `position`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `study_plan` (`user_id` TEXT NOT NULL, `configured` INTEGER NOT NULL, `selected_deck_ids` TEXT NOT NULL, `daily_new_goal` INTEGER NOT NULL, `daily_review_goal` INTEGER NOT NULL, `updated_at` INTEGER, PRIMARY KEY(`user_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `today_plan` (`user_id` TEXT NOT NULL, `study_date` TEXT NOT NULL, `timezone` TEXT NOT NULL, `daily_goal` INTEGER NOT NULL, `today_completed_count` INTEGER NOT NULL, `due_count` INTEGER NOT NULL, `main_plan_remaining` INTEGER NOT NULL, `backlog_count` INTEGER NOT NULL, `daily_new_goal` INTEGER NOT NULL, `daily_review_goal` INTEGER NOT NULL, `new_completed_count` INTEGER NOT NULL, `review_completed_count` INTEGER NOT NULL, `new_remaining_count` INTEGER NOT NULL, `review_remaining_count` INTEGER NOT NULL, `core_target_count` INTEGER NOT NULL, `plan_configured` INTEGER NOT NULL, `selected_deck_ids` TEXT NOT NULL, PRIMARY KEY(`user_id`, `study_date`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `today_plan_cards` (`user_id` TEXT NOT NULL, `study_date` TEXT NOT NULL, `position` INTEGER NOT NULL, `card_id` TEXT NOT NULL, `plan_kind` TEXT, `is_new` INTEGER NOT NULL, `hidden` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `study_date`, `position`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `project_progress` (`user_id` TEXT NOT NULL, `project_id` TEXT NOT NULL, `card_count` INTEGER NOT NULL, `not_started_count` INTEGER NOT NULL, `learning_count` INTEGER NOT NULL, `relearning_count` INTEGER NOT NULL, `consolidating_count` INTEGER NOT NULL, `mastered_count` INTEGER NOT NULL, `due_count` INTEGER NOT NULL, `review_event_count` INTEGER NOT NULL, `last_studied_at` INTEGER, PRIMARY KEY(`user_id`, `project_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `dashboard_snapshot` (`user_id` TEXT NOT NULL, `has_data` INTEGER NOT NULL, `week_start_date` TEXT NOT NULL, `weekly_activity` TEXT NOT NULL, `weekly_total` INTEGER NOT NULL, `weekly_change_rate` REAL, `weekly_goal` INTEGER NOT NULL, `weekly_completed_count` INTEGER NOT NULL, `weekly_goal_progress` REAL, `recall_accuracy` REAL, `first_answer_accuracy` REAL, `retention_rate` REAL, `streak_days` INTEGER NOT NULL, `mastered_card_count` INTEGER NOT NULL, `weekly_study_seconds` INTEGER NOT NULL, `daily_study_seconds` TEXT NOT NULL, `plan_study_seconds` INTEGER NOT NULL, `backlog_study_seconds` INTEGER NOT NULL, `adhoc_study_seconds` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`user_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `cache_metadata` (`user_id` TEXT NOT NULL, `resource_key` TEXT NOT NULL, `server_version` TEXT, `server_updated_at` INTEGER, `fetched_at` INTEGER NOT NULL, `schema_version` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `resource_key`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `review_outbox` (`user_id` TEXT NOT NULL, `client_event_id` TEXT NOT NULL, `card_id` TEXT NOT NULL, `rating` TEXT NOT NULL, `origin` TEXT, `idempotency_key` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `status` TEXT NOT NULL, `attempt_count` INTEGER NOT NULL, `next_attempt_at` INTEGER NOT NULL, `last_error_code` TEXT, PRIMARY KEY(`user_id`, `client_event_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `deletion_outbox` (`user_id` TEXT NOT NULL, `operation_id` TEXT NOT NULL, `kind` TEXT NOT NULL, `project_id` TEXT NOT NULL, `material_id` TEXT, `retain` INTEGER NOT NULL, `idempotency_key` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `status` TEXT NOT NULL, `attempt_count` INTEGER NOT NULL, `next_attempt_at` INTEGER NOT NULL, `last_error_code` TEXT, PRIMARY KEY(`user_id`, `operation_id`))",
+        )
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `deck_daily_activity` (`user_id` TEXT NOT NULL, `deck_id` TEXT NOT NULL, `study_date` TEXT NOT NULL, `reviewed_count` INTEGER NOT NULL, `study_seconds` INTEGER NOT NULL, `updated_at_epoch_ms` INTEGER NOT NULL, PRIMARY KEY(`user_id`, `deck_id`, `study_date`))",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_project_materials_user_id_project_id` " +
+                "ON `project_materials` (`user_id`, `project_id`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_generation_tasks_user_id_project_id` " +
+                "ON `generation_tasks` (`user_id`, `project_id`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_review_outbox_user_id_idempotency_key` " +
+                "ON `review_outbox` (`user_id`, `idempotency_key`)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_deletion_outbox_user_id_idempotency_key` " +
+                "ON `deletion_outbox` (`user_id`, `idempotency_key`)",
+        )
+        db.close()
+    }
+
+    /** One dashboard snapshot in its v9 (pre-V25-D-42) shape: no flame columns. */
+    private fun insertV9DashboardFact(dbFile: File) {
+        val db = FrameworkSQLiteOpenHelperFactory().create(
+            androidx.sqlite.db.SupportSQLiteOpenHelper.Configuration.builder(
+                ApplicationProvider.getApplicationContext(),
+            )
+                .name(dbFile.absolutePath)
+                .callback(NoOpCallback(9))
+                .build(),
+        ).writableDatabase
+        db.execSQL(
+            "INSERT INTO dashboard_snapshot (user_id, has_data, week_start_date, weekly_activity, " +
+                "weekly_total, weekly_change_rate, weekly_goal, weekly_completed_count, " +
+                "weekly_goal_progress, recall_accuracy, first_answer_accuracy, retention_rate, " +
+                "streak_days, mastered_card_count, weekly_study_seconds, daily_study_seconds, " +
+                "plan_study_seconds, backlog_study_seconds, adhoc_study_seconds, updated_at) VALUES " +
+                "('u-1', 1, '2026-09-21', '[1,1,1,1,1,1,0]', 6, NULL, 350, 6, NULL, NULL, NULL, NULL, 6, 0, 0, '[]', 0, 0, 0, 1)",
+        )
+        db.close()
+    }
+
     /** The v7 schema is the v6 projection plus `project_chapters.source` (V25-D-36). */
     private fun createV7Database(dbFile: File) {
         createV6Database(dbFile)

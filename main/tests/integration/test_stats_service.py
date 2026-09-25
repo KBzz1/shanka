@@ -244,6 +244,46 @@ def test_stats_dashboard_streak_days(session_factory: Callable[[], Session]) -> 
     assert result["streak_days"] == 3
 
 
+def test_stats_dashboard_streak_flame_fields(session_factory: Callable[[], Session]) -> None:
+    """V25-D-42 火苗字段：6 天 3 火苗断 1 天 → 连胜续到 7、火苗消耗 1 个。"""
+    user = _uuid()
+    # 8/02–8/07 连续 6 天（3 火苗）；8/08 断卡；今天 8/09 已复卡
+    events = [
+        (f"e{i}", "GOOD", f"2026-08-{day:02d}T01:00:00.000Z")
+        for i, day in enumerate(range(2, 8), start=1)
+    ]
+    events.append(("e7", "GOOD", "2026-08-09T01:00:00.000Z"))
+    with session_factory() as session:
+        _seed_events(session, user_id=user, events=events)
+        session.commit()
+    with session_factory() as session:
+        result = dashboard(session, user_id=user, now=datetime(2026, 8, 9, 10, 0, 0, tzinfo=UTC))
+    assert result["streak_days"] == 7
+    assert result["streak_flames_available"] == 2
+    assert result["streak_flames_used"] == 1
+    assert result["max_streak_days"] == 7
+
+
+def test_stats_dashboard_streak_today_pending_keeps_streak(
+    session_factory: Callable[[], Session],
+) -> None:
+    """V25-D-42 当天尚未复习：今天视为"待打"，连胜与火苗不清零（早晨不清零）。"""
+    user = _uuid()
+    # 8/05–8/10 连续 6 天；今天 8/11 尚无事件
+    events = [
+        (f"e{i}", "GOOD", f"2026-08-{day:02d}T01:00:00.000Z")
+        for i, day in enumerate(range(5, 11), start=1)
+    ]
+    with session_factory() as session:
+        _seed_events(session, user_id=user, events=events)
+        session.commit()
+    with session_factory() as session:
+        result = dashboard(session, user_id=user, now=_now())
+    assert result["streak_days"] == 6
+    assert result["streak_flames_available"] == 3
+    assert result["streak_flames_used"] == 0
+
+
 def test_stats_dashboard_mastered_count(session_factory: Callable[[], Session]) -> None:
     """已掌握卡片：C-03（REVIEW 且 stability>=21）去重计数；无周事件但已掌握>0 → has_data True。"""
     user = _uuid()

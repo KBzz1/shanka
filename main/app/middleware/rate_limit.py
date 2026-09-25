@@ -163,7 +163,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # （1.6 pdf 维度 10 次/时/user 沿用）；V25-D-35 起 ZIP 上传共享同一文件材料桶。
         if method == "POST" and (
             path in ("/pdfs", "/v1/pdfs")
-            or path.endswith(("/materials/pdf", "/materials/zip", "/materials/html"))
+            or path.endswith(
+                ("/materials/pdf", "/materials/zip", "/materials/html", "/materials/markdown")
+            )
         ):
             return "pdf"
         if method in ("POST", "PUT", "PATCH", "DELETE"):

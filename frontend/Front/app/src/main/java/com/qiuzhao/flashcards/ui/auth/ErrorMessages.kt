@@ -32,6 +32,8 @@ object ErrorMessages {
         "ZIP_EXTRACT_FAILED" to "ZIP 损坏或包含非 UTF-8 的 md 文件",
         "HTML_UPLOAD_INVALID" to "HTML 文件不符合要求（≤20MB、正文≤30 万字）",
         "HTML_EXTRACT_FAILED" to "HTML 解析失败，请确认文件为 UTF-8 编码",
+        "MARKDOWN_UPLOAD_INVALID" to "Markdown 文件不符合要求（≤20MB、正文≤30 万字、需有正文）",
+        "MARKDOWN_EXTRACT_FAILED" to "Markdown 解析失败，请确认文件为 UTF-8 编码",
         "CHAPTER_NOT_FOUND" to "章节不存在或已删除",
         "PROJECT_NOT_FOUND" to "项目不存在或已删除",
         "MATERIAL_NOT_FOUND" to "资料不存在或已删除",

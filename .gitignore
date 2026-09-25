@@ -37,8 +37,11 @@ __pycache__/
 /.codex/
 # ZCode 会话/临时文件
 /.zcode/
+/.zcodeignore
 # 仓库根运行时日志（与 main/data/ 同类产物）
 /data/
 # 两阶段规划消融实验原始输出（子代理产物，含样书正文切块；harness 可重建，结论见 report.md）
 /scripts/planning_ablation/run/
 /scripts/chapter_planning_eval/run/
+# 问答直通评测原始输出（题库正文内联的裁判载荷与运行产物；脚本+fixtures 可重建）
+/scripts/qa_direct_eval/run/

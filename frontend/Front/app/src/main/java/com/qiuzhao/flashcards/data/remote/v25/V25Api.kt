@@ -129,6 +129,15 @@ internal interface V25Api {
         @Part file: MultipartBody.Part,
     ): MaterialDto
 
+    @Headers("X-Shanka-Op: ${ShankaOps.ADD_MATERIAL_MARKDOWN}")
+    @Multipart
+    @POST("projects/{project_id}/materials/markdown")
+    suspend fun addProjectMaterialMarkdown(
+        @Path("project_id") projectId: String,
+        @Header("Idempotency-Key") idempotencyKey: String,
+        @Part file: MultipartBody.Part,
+    ): MaterialDto
+
     @Headers("X-Shanka-Op: ${ShankaOps.ADD_MATERIAL_TEXT}")
     @POST("projects/{project_id}/materials/text")
     suspend fun addProjectMaterialText(

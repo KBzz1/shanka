@@ -54,6 +54,7 @@ from services.pdf.text_chunks import (
     persist_zip_material_chunks,
 )
 from services.projects.html_archive import HtmlChapter
+from services.projects.markdown_doc import MarkdownChapter
 from services.projects.versioning import bump_project_version
 from services.projects.zip_archive import ZipArchive
 
@@ -123,15 +124,15 @@ def _derive_status(
         return "EMPTY"
     if any(status in ("PENDING", "PARSING") for status in pdf_statuses):
         return "PARSING"
-    # 可用章节来源：任一 PARSED PDF 或任一 TEXT/ZIP/HTML 资料（同步解析即时出章节，
-    # V25-D-35/38）
+    # 可用章节来源：任一 PARSED PDF 或任一 TEXT/ZIP/HTML/MARKDOWN 资料（同步解析即时
+    # 出章节，V25-D-35/38/40）
     has_source = (
         "PARSED" in pdf_statuses
         or _count(
             session,
             Material,
             Material.project_id == project.project_id,
-            Material.type.in_(("TEXT", "ZIP", "HTML")),
+            Material.type.in_(("TEXT", "ZIP", "HTML", "MARKDOWN")),
         )
         > 0
     )
@@ -169,8 +170,8 @@ def material_view(session: Session, material: Material) -> dict[str, Any]:
         ).first()
         if row is not None:
             chapter = chapter_view(row)
-    # TEXT/ZIP/HTML 同步就绪（状态列恒 READY）；PDF 行状态取自 pdf_files（单一权威）
-    status = material.status if material_type in ("TEXT", "ZIP", "HTML") else pdf_status
+    # TEXT/ZIP/HTML/MARKDOWN 同步就绪（状态列恒 READY）；PDF 行状态取自 pdf_files（单一权威）
+    status = material.status if material_type in ("TEXT", "ZIP", "HTML", "MARKDOWN") else pdf_status
     return {
         "material_id": material.material_id,
         "project_id": material.project_id,
@@ -411,6 +412,63 @@ def add_html_material(
         material_id=_uuid4(),
         project_id=project.project_id,
         type="HTML",
+        name=filename,
+        status="READY",
+        size_bytes=size_bytes,
+        char_count=total_chars,
+        created_at=now,
+    )
+    session.add(material)
+    session.flush()
+    ranges = persist_html_material_chunks(
+        session,
+        material_id=material.material_id,
+        chapters=[(ch.name, ch.paragraphs) for ch in chapters],
+        target_chars=settings.text_chunk_target_chars,
+        now=now,
+    )
+    for name, start_seq, end_seq in ranges:
+        session.add(
+            Chapter(
+                chapter_id=_uuid4(),
+                file_id=None,
+                material_id=material.material_id,
+                name=name,
+                source=source,
+                start_page=start_seq,
+                end_page=end_seq,
+            )
+        )
+    _reset_chapter_confirmation(project, now=now)
+    session.flush()
+    return material_view(session, material)
+
+
+def add_markdown_material(
+    session: Session,
+    *,
+    user_id: str,
+    project_id: str,
+    filename: str,
+    size_bytes: int,
+    chapters: list[MarkdownChapter],
+    total_chars: int,
+    now: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    """添加 Markdown 单文件资料（POST /materials/markdown，V25-D-40）。
+
+    解析已在上传段完成（markdown_doc.parse_markdown_document，含确定性分诊）；本用例
+    只落库：Material(type=MARKDOWN, READY) + 章节（HEADING 标题章 / AUTO 单章，
+    chunk_seq 区间为伪页码，复用章节→load_pages 映射——切段复用 HTML 的段落章节
+    持久化，两者章节形状同为 (名称, 段落列表)）。即时就绪、不存档文件本体。
+    """
+    project = _owned_project(session, user_id=user_id, project_id=project_id)
+    source = "HEADING" if len(chapters) > 1 else "AUTO"
+    material = Material(
+        material_id=_uuid4(),
+        project_id=project.project_id,
+        type="MARKDOWN",
         name=filename,
         status="READY",
         size_bytes=size_bytes,

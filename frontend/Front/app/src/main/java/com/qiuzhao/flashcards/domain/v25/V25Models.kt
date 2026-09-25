@@ -45,9 +45,9 @@ enum class V25CardType { QUESTION, TRUE_FALSE }
 enum class V25ProjectStatus { EMPTY, PARSING, PARSE_FAILED, AWAITING_CHAPTER_CONFIRMATION, READY }
 
 /** Learning material kind (structure-contract 3.2a); LINK is reserved and not implemented. */
-enum class V25MaterialType { PDF, TEXT, ZIP, HTML }
+enum class V25MaterialType { PDF, TEXT, ZIP, HTML, MARKDOWN }
 
-/** Material lifecycle: PDF uses PENDING/PARSING/PARSED/FAILED; TEXT/ZIP is always READY. */
+/** Material lifecycle: PDF uses PENDING/PARSING/PARSED/FAILED; other types are always READY. */
 enum class V25MaterialStatus { PENDING, PARSING, PARSED, FAILED, READY }
 
 /**
@@ -293,11 +293,17 @@ data class V25StudyPlanUpdate(
 
 // --- generation tasks (Architecture 3.4–3.5) ---------------------------------------------------
 
+/** V25-D-43 card-source mode: EXTRACT mines knowledge and writes questions; QA_DIRECT keeps
+ *  the material's own question/answer pairs verbatim (format normalization only). */
+enum class V25SourceMode { EXTRACT, QA_DIRECT }
+
 /** Per-task generation configuration; `custom_requirements` is free text, never a full prompt. */
 data class V25GenerationConfig(
     val coverageMode: V25CoverageMode,
     val difficultyRatio: V25DifficultyRatio,
     val customRequirements: String = "",
+    /** V25-D-43; defaults to EXTRACT so pre-V25-D-43 payloads map unchanged. */
+    val sourceMode: V25SourceMode = V25SourceMode.EXTRACT,
 )
 
 /** A persisted sample card; one per enabled difficulty tier, 1–3 total (V25-GEN-FR-05). */
@@ -609,6 +615,14 @@ data class V25StatsDashboard(
     val planStudySeconds: Int = 0,
     val backlogStudySeconds: Int = 0,
     val adhocStudySeconds: Int = 0,
+    /**
+     * V25-D-42 streak flames: revive consumables earned per 2 consecutive counted days (cap 5);
+     * a fully-missed day auto-consumes one instead of resetting the streak. Derived server-side
+     * from review events — defaults keep pre-V25-D-42 payloads an honest "no flames yet".
+     */
+    val streakFlamesAvailable: Int = 0,
+    val streakFlamesUsed: Int = 0,
+    val maxStreakDays: Int = 0,
 )
 
 /**

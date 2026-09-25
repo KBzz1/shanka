@@ -36,6 +36,8 @@ class ErrorCode(StrEnum):
     ZIP_EXTRACT_FAILED = "ZIP_EXTRACT_FAILED"  # zip 损坏或 md 严格 UTF-8 解码失败
     HTML_UPLOAD_INVALID = "HTML_UPLOAD_INVALID"  # V25-D-38 非 html / 超限 / 无正文
     HTML_EXTRACT_FAILED = "HTML_EXTRACT_FAILED"  # V25-D-38 非 UTF-8 或解析异常
+    MARKDOWN_UPLOAD_INVALID = "MARKDOWN_UPLOAD_INVALID"  # V25-D-40 非 md / 超限 / 无正文
+    MARKDOWN_EXTRACT_FAILED = "MARKDOWN_EXTRACT_FAILED"  # V25-D-40 非 UTF-8 编码
     PDF_NOT_FOUND = "PDF_NOT_FOUND"
     CHAPTER_NOT_FOUND = "CHAPTER_NOT_FOUND"
     PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"  # V2.5 项目不存在或跨用户（统一 404）
@@ -87,6 +89,8 @@ ERROR_HTTP_STATUS: dict[ErrorCode, int] = {
     ErrorCode.ZIP_EXTRACT_FAILED: 422,
     ErrorCode.HTML_UPLOAD_INVALID: 400,
     ErrorCode.HTML_EXTRACT_FAILED: 422,
+    ErrorCode.MARKDOWN_UPLOAD_INVALID: 400,
+    ErrorCode.MARKDOWN_EXTRACT_FAILED: 422,
     ErrorCode.PDF_NOT_FOUND: 404,
     ErrorCode.CHAPTER_NOT_FOUND: 404,
     ErrorCode.PROJECT_NOT_FOUND: 404,
@@ -136,6 +140,8 @@ LOCALIZATION_KEYS: frozenset[str] = frozenset(
         "error.zip_extract_failed",
         "error.html_upload_invalid",
         "error.html_extract_failed",
+        "error.markdown_upload_invalid",
+        "error.markdown_extract_failed",
         "error.pdf_not_found",
         "error.chapter_not_found",
         "error.project_not_found",

@@ -374,7 +374,9 @@ private fun DashboardUiState?.percent(value: Float?): String = value?.let { "${(
 
 @Composable
 private fun DataStreakCards(designScale: Float, dashboard: DashboardUiState?, totalReviewCount: Int) {
-    val longestStreak = dashboard?.streakDays
+    // V25-D-42: maxStreakDays is the server-derived true historical best (flame-absorbed runs
+    // included) — the former reading of the current streak mislabeled a running streak as the max.
+    val longestStreak = dashboard?.maxStreakDays?.takeIf { it > 0 } ?: dashboard?.streakDays
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy((16 * designScale).dp)) {
         StatisticsMetricCard(
             modifier = Modifier.weight(1f),

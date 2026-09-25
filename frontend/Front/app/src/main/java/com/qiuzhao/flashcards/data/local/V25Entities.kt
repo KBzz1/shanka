@@ -226,6 +226,10 @@ data class DashboardEntity(
     @ColumnInfo(name = "first_answer_accuracy") val firstAttemptAccuracy: Double?,
     @ColumnInfo(name = "retention_rate") val retentionRate: Double?,
     @ColumnInfo(name = "streak_days") val streakDays: Int,
+    /** V25-D-42 streak flames (revive consumables) and the true historical max streak. */
+    @ColumnInfo(name = "streak_flames_available") val streakFlamesAvailable: Int,
+    @ColumnInfo(name = "streak_flames_used") val streakFlamesUsed: Int,
+    @ColumnInfo(name = "max_streak_days") val maxStreakDays: Int,
     @ColumnInfo(name = "mastered_card_count") val masteredCards: Int,
     /** V25-D-37 study-duration projection (server study_sessions aggregation). */
     @ColumnInfo(name = "weekly_study_seconds") val weeklyStudySeconds: Int,

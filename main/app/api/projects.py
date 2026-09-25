@@ -39,8 +39,10 @@ from services.pdf.scanner import validate_upload
 from services.pdf.service import chapter_view
 from services.progress.service import project_progress
 from services.projects.html_archive import parse_html_archive, validate_html_upload
+from services.projects.markdown_doc import parse_markdown_document, validate_markdown_upload
 from services.projects.service import (
     add_html_material,
+    add_markdown_material,
     add_pdf_material,
     add_text_material,
     add_zip_material,
@@ -353,6 +355,60 @@ async def add_html_material_endpoint(
             user_id=user_id,
             project_id=project_id,
             filename=file.filename or "upload.html",
+            size_bytes=len(data),
+            chapters=chapters,
+            total_chars=total_chars,
+            now=_now(),
+            settings=settings,
+        )
+        session.flush()
+        return 201, body
+
+    _replayed, status, body = execute_idempotent(
+        session,
+        user_id=user_id,
+        path=path,
+        idempotency_key=key,
+        request_body_hash=body_hash,
+        fn=biz,
+    )
+    session.commit()
+    return JSONResponse(status_code=status, content=body)
+
+
+@router.post("/{project_id}/materials/markdown", status_code=201)
+async def add_markdown_material_endpoint(
+    request: Request,
+    project_id: str,
+    file: Annotated[UploadFile, File()],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> JSONResponse:
+    """添加 Markdown 单文件资料（V25-D-40）：同步解析、即时就绪，程序优先零模型。
+
+    最浅出现的 ATX 标题级 = 章节（source=HEADING）；无标题结构或总字数 ≤ 阈值 → 恒单章
+    （source=AUTO）；frontmatter/围栏代码块保留为正文但不参与标题识别。校验与解析在
+    幂等外（同 HTML 定式），biz 只做 DB 写入。
+    """
+    settings: Settings = request.app.state.settings
+    user_id: str = request.state.principal.user_id
+    key = get_idempotency_key(request)
+    path = f"/projects/{project_id}/materials/markdown"
+    data = await file.read()
+    validate_markdown_upload(
+        filename=file.filename or "",
+        content_type=file.content_type or "",
+        size_bytes=len(data),
+        settings=settings,
+    )
+    chapters, total_chars = parse_markdown_document(data, settings=settings)
+    body_hash = request_body_hash(data)
+
+    def biz(session: Session) -> tuple[int, dict[str, Any]]:
+        body = add_markdown_material(
+            session,
+            user_id=user_id,
+            project_id=project_id,
+            filename=file.filename or "upload.md",
             size_bytes=len(data),
             chapters=chapters,
             total_chars=total_chars,

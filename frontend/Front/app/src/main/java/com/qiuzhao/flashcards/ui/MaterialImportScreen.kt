@@ -118,7 +118,11 @@ internal fun MaterialImportScreen(
             item {
                 ImportAddPanel(
                     theme = theme, scale = scale,
-                    onChooseFile = { filePicker.launch(arrayOf("application/pdf", "application/zip", "text/html")) },
+                    onChooseFile = {
+                        filePicker.launch(
+                            arrayOf("application/pdf", "application/zip", "text/html", "text/markdown", "text/plain")
+                        )
+                    },
                     onEnterText = {
                         // 不预创建空草稿：materialId 传 null，编辑器保存有效内容时
                         // upsertMaterialImportText 才把文本资料入列——直接退出不留下

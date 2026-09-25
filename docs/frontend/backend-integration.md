@@ -115,6 +115,8 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | GET | `/projects/{project_id}/deletion-preflight` | 删除预检（只读诊断，不是资源锁） |
 | POST | `/projects/{project_id}/materials/pdf` | 添加 PDF 资料（multipart 字段 `file`，≤100MB、≤1000 页；异步解析；重置章节确认） |
 | POST | `/projects/{project_id}/materials/text` | 添加粘贴文本资料（`{name, content}`，≤30000 字；单章节即时就绪） |
+| POST | `/projects/{project_id}/materials/markdown` | 添加 Markdown 单文件资料（multipart 字段 `file`，`.md`/`.markdown`、≤20MB、正文≤30 万字、UTF-8；同步解析即时就绪：最浅出现的 ATX 标题级=章节，小文件或无标题恒单章；错误码 `MARKDOWN_UPLOAD_INVALID` 400 / `MARKDOWN_EXTRACT_FAILED` 422） |
+| POST | `/projects/{project_id}/materials/zip` | 添加 ZIP 笔记包（multipart 字段 `file`，≤20MB、≤500 个 md、正文≤30 万字；同步解析即时就绪：一级子文件夹=章节、根级 md 收「总览」章；主文件夹下无含 md 的子文件夹时每个根级 md 独立成章，章名=文件名去 `.md`（V25-D-41）；错误码 `ZIP_UPLOAD_INVALID` 400 / `ZIP_STRUCTURE_INVALID` 400 / `ZIP_EXTRACT_FAILED` 422） |
 | GET | `/projects/{project_id}/materials` | 资料列表（各自状态；TEXT 附单章节） |
 | DELETE | `/projects/{project_id}/materials/{material_id}?retain_cards=` | 资料级删除：引用任务服务端静默取消；`retain_cards` 选择保留或一并删除该资料产出卡片 |
 | GET | `/projects/{project_id}/materials/{material_id}/deletion-preflight` | **资料删除确认页预检**：返回将影响的卡片数量与静默取消任务数（PRD V25-GEN-FR-02）；App 暂未接入，待资料删除确认页改版（R25-10） |
@@ -179,6 +181,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 - `coverage_mode`：`COMPACT`（精简）/ `BALANCED`（均衡）/ `EXTENSIVE`（充分覆盖）——语义覆盖范围，不承诺数量。
 - `difficulty_ratio`：三个键必填、10% 整数档、**允许 0 但不可全 0**（全 0 创建/修改时即拒绝）；难度枚举为 `BASIC`（基础记忆）/ `UNDERSTANDING`（理解分析）/ `DEEP_QUESTION`（深度提问）。
 - 配置**不继承**：新任务由服务端从账号偏好取默认，任务内修改只影响本任务；改配置后样卡失效需重新生成。
+- **`source_mode`（V25-D-43，可选，缺省 `EXTRACT`）**：`QA_DIRECT` = 问答直通——资料已含问题和答案（题库/问答集）时使用。任务链路与状态机完全不变（样卡→生成→评审），AI 不重新命题、不改答案：规划阶段只提取资料已有问答对（每对 = 一个生成单元），生成阶段仅做格式规范化（QA 模式样卡为单张，难度/覆盖配置弱化为归档参考）。模式参与任务复用判定与配置指纹：EXTRACT 请求**不发送**该字段（旧服务端与旧指纹完全兼容）。预算按题库密度估算（问答对过多会创建期拒绝，提示减少章节）。
 
 ### 3.6 牌组、卡片与删除撤销
 
@@ -239,6 +242,7 @@ Android App ──HTTPS──▶ shanka.kbzz1.top（Cloudflare 边缘，TLS）
 | GET | `/stats/dashboard` | 当前自然周看板（周一起始；**服务端按账号学习时区分桶**，周目标=每日目标×7；无客户端参数） |
 
 - 分母为 0 的比率一律返回 `null`（不是 0%）；`has_data=false` 时展示空态。
+- **连胜与火苗（V25-D-42）**：`streak_days` 为截至当天连续有复习事件的自然日数（空缺日由火苗吸收则不断卡、不计天数；当天尚未复习视为"待打"不清零）。火苗是复活消耗品：每 2 个连续计数日攒 1 个、上限 5，断卡空缺日自动消耗 1 个（`streak_flames_available` = 可用数、`streak_flames_used` = 已消耗数）；`max_streak_days` 为历史最长连胜（含火苗吸收口径）。旧服务端无这三个新字段，客户端按 0 兜底显示。
 
 ### 3.11 质量观测（联调/核验用，App 无需实现）
 

@@ -606,6 +606,36 @@ class V25SerializationTest {
     }
 
     @Test
+    fun `qa direct source mode maps to the wire and back (V25-D-43)`() {
+        // EXTRACT 保持旧请求形状：source_mode 不发送（旧服务端兼容 + 服务端配置指纹不变）
+        val extract = com.qiuzhao.flashcards.domain.v25.V25GenerationConfig(
+            coverageMode = V25CoverageMode.BALANCED,
+            difficultyRatio = com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio(40, 40, 20),
+        ).toWire()
+        assertNull(extract.sourceMode)
+        assertFalse(
+            json.encodeToString(GenerationConfigRequest.serializer(), extract).contains("source_mode"),
+        )
+
+        val qa = com.qiuzhao.flashcards.domain.v25.V25GenerationConfig(
+            coverageMode = V25CoverageMode.BALANCED,
+            difficultyRatio = com.qiuzhao.flashcards.domain.v25.V25DifficultyRatio(40, 40, 20),
+            sourceMode = com.qiuzhao.flashcards.domain.v25.V25SourceMode.QA_DIRECT,
+        ).toWire()
+        assertEquals("QA_DIRECT", qa.sourceMode)
+
+        // 响应侧：旧服务端载荷（无 source_mode）解析为 EXTRACT；QA 载荷解析为 QA_DIRECT
+        val legacy = decode<GenerationConfigDto>(
+            """{"coverage_mode":"BALANCED","difficulty_ratio":{"basic":40,"understanding":40,"deep_question":20}}""",
+        )
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25SourceMode.EXTRACT, legacy.toDomain().sourceMode)
+        val qaPayload = decode<GenerationConfigDto>(
+            """{"coverage_mode":"BALANCED","difficulty_ratio":{"basic":40,"understanding":40,"deep_question":20},"source_mode":"QA_DIRECT"}""",
+        )
+        assertEquals(com.qiuzhao.flashcards.domain.v25.V25SourceMode.QA_DIRECT, qaPayload.toDomain().sourceMode)
+    }
+
+    @Test
     fun `browse filter values map to the lowercase wire parameter values`() {
         // The wire contract locks `order`/`mastery` to lowercase values; the filter enums
         // carry exactly those names and the Retrofit @Query mapping forwards them verbatim.

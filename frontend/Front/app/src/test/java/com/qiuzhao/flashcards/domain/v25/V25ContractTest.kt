@@ -50,9 +50,12 @@ class V25ContractTest {
     @Test
     fun `material enums carry the exact V2-5 values`() {
         // structure-contract 3.2a: LINK is reserved and not modelled; PDF uses the parse
-        // lifecycle while TEXT/ZIP are always READY (ZIP note pack, V25-D-35); HTML = 网页链接
-        // 资料类型（并行工作包 V25Repository.addProjectMaterialHtml）。
-        assertEquals(listOf("PDF", "TEXT", "ZIP", "HTML"), V25MaterialType.entries.map { it.name })
+        // lifecycle while the other types are always READY (ZIP note pack, V25-D-35); HTML =
+        // 网页文档（V25-D-38）；MARKDOWN = 单文件 md 笔记（V25-D-40）。
+        assertEquals(
+            listOf("PDF", "TEXT", "ZIP", "HTML", "MARKDOWN"),
+            V25MaterialType.entries.map { it.name },
+        )
         assertEquals(
             listOf("PENDING", "PARSING", "PARSED", "FAILED", "READY"),
             V25MaterialStatus.entries.map { it.name },
@@ -555,6 +558,13 @@ private class StubV25Repository : V25Repository {
     )
 
     override suspend fun addProjectMaterialHtml(
+        projectId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = throw NotImplementedError()
+
+    override suspend fun addProjectMaterialMarkdown(
         projectId: String,
         fileName: String,
         content: InputStream,

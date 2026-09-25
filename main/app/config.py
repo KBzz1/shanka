@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     cards_per_10k_compact: float = 6.0
     cards_per_10k_balanced: float = 12.0
     cards_per_10k_extensive: float = 20.0
+    # V25-D-43 问答直通预算密度：每 1 万字估算问答对数（题库远密于教材；用于创建期
+    # 预算守卫，超 max_generation_units_per_task 明确拒绝而非静默截断用户题库）
+    qa_pairs_per_10k_chars: float = 40.0
     # 评分（§8 分层抽样）：组批受卡片数与输入字符双限，调用数超限按确定性抽样缩减
     max_scoring_calls_per_task: int = 60
     scoring_max_cards_per_call: int = 12
@@ -112,6 +115,9 @@ class Settings(BaseSettings):
     # HTML 资料限制（V25-D-38；可运维调整）：与 ZIP 同款量级
     html_max_size_bytes: int = 20 * 1024 * 1024
     html_max_total_chars: int = 300_000
+    # Markdown 单文件资料限制（V25-D-40；可运维调整）：与 HTML 同款量级
+    markdown_max_size_bytes: int = 20 * 1024 * 1024
+    markdown_max_total_chars: int = 300_000
     # 输出上限（§5.7 JSON 截断防线 / §10：可运维调整，不是制卡字数规则；
     # Scoring 每次仍按 item 数计算更小的实际值 min(上限, 256 + 128 × items)）
     planner_max_output_tokens: int = 2048

@@ -30,6 +30,9 @@ class StatsDashboard(BaseModel):
     first_answer_accuracy: float | None
     retention_rate: float | None
     streak_days: int
+    streak_flames_available: int  # V25-D-42 可用火苗（消耗品；每 2 个连续计数日攒 1 个，上限 5）
+    streak_flames_used: int  # V25-D-42 当前连胜已消耗火苗数（已吸收的空缺日数）
+    max_streak_days: int  # V25-D-42 历史最长连胜（含火苗吸收口径）
     mastered_card_count: int
     weekly_study_seconds: int  # V25-D-37 本周学习会话累计秒数（按学习日对齐周窗口）
     daily_study_seconds: list[int]  # 周一~周日每日学习秒数（与会话学习日同口径）

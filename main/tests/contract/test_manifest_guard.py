@@ -21,11 +21,14 @@ def test_manifest_asset_versions_and_paths_valid() -> None:
         ("prompts", "generator"),
         ("prompts", "rewrite"),
         ("prompts", "scoring"),
+        ("prompts", "qa_planner"),
+        ("prompts", "generator_qa"),
         ("schemas", "card"),
         ("schemas", "generator_output"),
         ("schemas", "planner_output"),
         ("schemas", "planner_coarse_output"),
         ("schemas", "scoring_output"),
+        ("schemas", "qa_planner_output"),
         ("rubrics", "main"),
     ]
     for section, name in assets:
@@ -64,3 +67,18 @@ def test_rewrite_prompt_asset_registered() -> None:
     text = load_asset("prompts", "rewrite")
     assert "重写" in text or "rewrite" in text  # 资产内容含重写指令
     assert "JSON Schema" in text  # 输出格式契约
+
+
+def test_qa_assets_registered_and_versioned() -> None:
+    """V25-D-43：问答直通资产（qa-planner/generator-qa prompt + 输出 schema）注册且可读。"""
+    from infra.llm.prompts import asset_versions, load_asset
+
+    planner = load_asset("prompts", "qa_planner")
+    assert "问答对" in planner and "不改答案" in planner  # 提取语义：忠实资料问答
+    generator_qa = load_asset("prompts", "generator_qa")
+    assert "格式规范化" in generator_qa and "不写新题" in generator_qa  # 整理语义：仅排版
+    load_asset("schemas", "qa_planner_output")  # 输出 schema 可读
+    versions = asset_versions()
+    assert versions["qa_planner_prompt_version"] == "v1"
+    assert versions["generator_qa_prompt_version"] == "v1"
+    assert versions["qa_planner_output_schema_version"] == "v1"

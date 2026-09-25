@@ -227,3 +227,28 @@
   （0.377+0.952 vs 0.512+0）与产品价值（全弃不可用 → 可用、用户可在确认环节删除多切章节）
   支持采纳 v10。样书 precision 的根治方向是架构层确定性分层（正则抽标题行候选 + 代码按
   跨度/频次分层，模型仅确认），已列为后续工作包候选，不在本提示词版本内。
+
+## 2026-09-25（V25-D-43 问答直通模式新增 qa 资产）
+
+- **依据**：PRD V25-D-43——资料本身已含问题和答案（题库/问答集）时，既有 EXTRACT 链路
+  （挖知识点→命题）会丢弃资料已定稿的问答。新增任务配置 `source_mode=QA_DIRECT`，规划
+  阶段切换为问答对提取，生成阶段切换为忠实整理，评分/rubric 照常复用。
+- **新增 prompts/v1/qa-planner.md**（manifest prompts.qa_planner v1）：题库整理员角色，
+  逐对盘点资料已有问答并输出**清单**——题干/陈述保持原义原句，只做提取级清理（题号
+  前缀/排版噪音），不命题、不改答案、不合并拆分、不判定对错；判断题（陈述+对/错）输出
+  TRUE_FALSE 形态，其余一律 QUESTION；**输出经济硬约束：不回抄答案/解析/对错判定**（制卡
+  阶段按出处回原文照录；回抄答案会在长题库时把输出 token 上限撑爆导致 JSON 截断——本条
+  为同日真实验收发现输出超限后的 v1 定稿形态）；无问答内容时如实为空。
+- **新增 prompts/v1/generator-qa.md**（manifest prompts.generator_qa v1）：题库排版员
+  角色，把单个问答对整理成卡面结构——仅格式规范化（字段适配、噪音清理、按来源页恢复
+  完整排版），禁止改写/润色/纠错/重新命题；SPEC 携带资料原问题/原陈述（提取级清理后），答案在
+  SOURCE_MATERIAL 中定位照录（判断题的对/错标记与解析同样在来源页定位）、定位不唯一即
+  弃权；含 `sample: true` 样卡直取条款（从材料开头取第一个完整问答对预览）。
+- **新增 schemas/v1/qa-planner-output.schema.json**（manifest schemas.qa_planner_output v1）：
+  `{qa_pairs:[...]}` 清单式双形态 oneOf——QUESTION（question）与 TRUE_FALSE（statement），
+  均带 source_chunk_ids（1~8 块），**均不含答案字段**（输出经济，见上）；校验器对模型
+  仍回抄的 answer/answer_boolean/explanation 键做防御性剥除。
+- 既有资产版本全部不变（planner/planner_coarse v8、generator v7、rewrite v4、scoring v3、
+  chapter_planner v10、card v1、planner_output/planner_coarse_output v7、
+  chapter_planner_output v9、generator_output/scoring_output v3、rubric v3）；EXTRACT 链路
+  零改动。生成输出继续复用 generator_output v3（输出形状与既有解析/投影链一致）。

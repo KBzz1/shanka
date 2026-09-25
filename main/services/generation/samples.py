@@ -87,9 +87,16 @@ def sample_cards_llm(
         raise ValueError("章节无文本内容")
     visible = _cap_pages(pages, settings.generator_max_input_chars)
     ratio = config.difficulty_ratio
-    enabled = [
-        difficulty for difficulty in _ENABLED_DIFFICULTIES if getattr(ratio, difficulty.lower()) > 0
-    ]
+    qa_direct = config.source_mode == "QA_DIRECT"
+    if qa_direct:
+        # V25-D-43：问答直通难度为归档参考——样卡单张（BASIC 标注）即可预览问答整理效果
+        enabled = ["BASIC"]
+    else:
+        enabled = [
+            difficulty
+            for difficulty in _ENABLED_DIFFICULTIES
+            if getattr(ratio, difficulty.lower()) > 0
+        ]
     card_schema = load_card_schema()
     cards: list[dict[str, object]] = []
     # sample_cards_llm 也被低层纯函数测试直接调用，只有已经存在于 DB 的任务才启用
@@ -101,13 +108,14 @@ def sample_cards_llm(
         system_prompt, user_prompt = _build_prompts(
             config, chapter_name=chapter_name, difficulty=difficulty, pages=visible
         )
-        operation_key = f"sample:{difficulty}"
+        operation_key = f"sample:{difficulty}" if not qa_direct else "sample:qa"
         fingerprint = _sample_input_fingerprint(
             task,
             config=config,
             difficulty=difficulty,
             pages=pages,
             versions=versions,
+            qa_direct=qa_direct,
         )
         if ledger_enabled:
             cached = find_success_result(
@@ -152,8 +160,12 @@ def sample_cards_llm(
                     input_fingerprint=fingerprint,
                     attempt_no=used + 1,
                     model=settings.deepseek_model,
-                    prompt_name="generator-sample",
-                    prompt_version=versions["generator_prompt_version"],
+                    prompt_name="generator-qa" if qa_direct else "generator-sample",
+                    prompt_version=(
+                        versions["generator_qa_prompt_version"]
+                        if qa_direct
+                        else versions["generator_prompt_version"]
+                    ),
                     schema_name="generator_output",
                     schema_version=versions["schema_version"],
                     now=task.updated_at,
@@ -242,8 +254,12 @@ def _sample_input_fingerprint(
     difficulty: str,
     pages: Sequence[TextChunk],
     versions: dict[str, str],
+    qa_direct: bool = False,
 ) -> str:
-    """样卡账本指纹：只含锚定/页摘要/资产版本，不含原文或完整 Prompt。"""
+    """样卡账本指纹：只含锚定/页摘要/资产版本，不含原文或完整 Prompt。
+
+    V25-D-43：QA_DIRECT 用 generator-qa 资产版本（EXTRACT 保持既有键值，指纹兼容）。
+    """
     payload = {
         "task_id": task.task_id,
         "difficulty": difficulty,
@@ -251,7 +267,11 @@ def _sample_input_fingerprint(
         "pages": [
             {"chunk_id": page.chunk_id, "content_sha256": page.content_sha256} for page in pages
         ],
-        "generator_prompt_version": versions["generator_prompt_version"],
+        "generator_prompt_version": (
+            versions["generator_qa_prompt_version"]
+            if qa_direct
+            else versions["generator_prompt_version"]
+        ),
         "generator_output_schema_version": versions["schema_version"],
     }
     return hashlib.sha256(
@@ -287,17 +307,31 @@ def _build_prompts(
     <USER_REQUIREMENTS> 用户偏好；safe_json_dumps 确定性序列化 + 信封边界转义）。
     样卡 learning_objective 取章节名（样卡为预览性质——真实知识点由规划阶段产出）；
     coverage_tier 为 null（样卡阶段无规划层级）。
+
+    V25-D-43 QA_DIRECT：system 换 generator-qa 资产；spec 携带 `sample: true`（样卡直取
+    条款：从材料开头取第一个完整问答对整理成卡），不带 learning_objective。
     """
+    qa_direct = config.source_mode == "QA_DIRECT"
+    generator_asset = "generator_qa" if qa_direct else "generator"
     system_prompt = (
-        f"{load_asset('prompts', 'generator')}\n\n<GENERATOR_OUTPUT_SCHEMA>\n"
+        f"{load_asset('prompts', generator_asset)}\n\n<GENERATOR_OUTPUT_SCHEMA>\n"
         f"{load_asset('schemas', 'generator_output')}\n</GENERATOR_OUTPUT_SCHEMA>"
     )
-    spec = {
-        "learning_objective": chapter_name,
-        "target_difficulty": difficulty,
-        "card_type": "QUESTION",  # V2.5 契约 3.6：三档均 QUESTION（判断题另行引入）
-        "coverage_tier": None,
-    }
+    if qa_direct:
+        spec: dict[str, object] = {
+            "source_mode": "QA_DIRECT",
+            "sample": True,
+            "target_difficulty": difficulty,
+            "card_type": "QUESTION",
+            "coverage_tier": None,
+        }
+    else:
+        spec = {
+            "learning_objective": chapter_name,
+            "target_difficulty": difficulty,
+            "card_type": "QUESTION",  # V2.5 契约 3.6：三档均 QUESTION（判断题另行引入）
+            "coverage_tier": None,
+        }
     user_prompt = (
         f"<GENERATION_SPEC>{safe_json_dumps(spec)}</GENERATION_SPEC>\n"
         f"<SOURCE_MATERIAL>{safe_json_dumps(pages)}</SOURCE_MATERIAL>\n"
@@ -331,7 +365,12 @@ def config_fingerprint(config: GenerationConfig | dict[str, object]) -> str:
     输入为 GenerationConfig（任务创建/更新路径）或 model_dump dict（worker 读取
     已持久化 JSON 后构造/重放）；规范化序列化（sort_keys + 紧凑分隔符）保证
     dict 与模型两条路径同值。
+
+    V25-D-43：source_mode == "EXTRACT"（缺省）不进入载荷——部署前持久化的
+    sample_config_hash 对既有在途任务保持有效；QA_DIRECT 任务的指纹天然不同。
     """
-    data = config.model_dump() if isinstance(config, GenerationConfig) else config
+    data = config.model_dump() if isinstance(config, GenerationConfig) else dict(config)
+    if data.get("source_mode", "EXTRACT") == "EXTRACT":
+        data.pop("source_mode", None)
     raw = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

@@ -54,6 +54,17 @@ class CoverageMode(StrEnum):
     EXTENSIVE = "EXTENSIVE"
 
 
+class SourceMode(StrEnum):
+    """制卡来源模式（structure-contract 3.5；V25-D-43）。
+
+    EXTRACT=既有语义（AI 从资料挖知识点并命题）；QA_DIRECT=问答直通（资料已含
+    问答，规划阶段只提取既有问答对，生成阶段仅做格式规范化，不重新命题）。
+    """
+
+    EXTRACT = "EXTRACT"
+    QA_DIRECT = "QA_DIRECT"
+
+
 class Difficulty(StrEnum):
     """难度（structure-contract 3.5/3.6；V2.5 改名：原 APPLICATION → DEEP_QUESTION）。"""
 

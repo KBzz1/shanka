@@ -105,7 +105,12 @@ internal fun DeckGenerationScreen(
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
         ScreenTopInformationBar(
             title = "添加卡片组", subtitle = null, onBack = nav::goBack,
-            backContainer = theme.cardPanel, titleColor = theme.text
+            backContainer = theme.cardPanel, titleColor = theme.text,
+            // V25-D-43：资料已含问答时的直通入口（右上角）。
+            onTrailingAction = { nav.navigate(AppRoute.QaCardChapter(project.id)) },
+            trailingActionSymbol = "quiz",
+            trailingActionDescription = "问答直通",
+            trailingActionContainer = theme.cardPanel,
         )
         LazyColumn(
             modifier = Modifier.fillMaxSize().statusBarsPadding()

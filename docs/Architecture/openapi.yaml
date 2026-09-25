@@ -551,7 +551,7 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: ZIP 笔记包(魔数+扩展名+MIME 校验);顶层须恰好一个主文件夹,一级子文件夹=章节,md=正文,结构不符 400 ZIP_STRUCTURE_INVALID
+                  description: ZIP 笔记包(魔数+扩展名+MIME 校验);顶层须恰好一个主文件夹,一级子文件夹=章节,md=正文;主文件夹下无含 md 的子文件夹时每个根级 md 独立成章(去 .md 扩展,V25-D-41);结构不符 400 ZIP_STRUCTURE_INVALID
       responses:
         '201':
           description: 资料已添加并就绪(子文件夹章节经项目 chapters 聚合返回)
@@ -606,6 +606,45 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /projects/{project_id}/materials/markdown:
+    post:
+      tags: [projects]
+      summary: "V25-D-40 添加 Markdown 单文件资料(同步解析、即时就绪):最浅出现的 ATX 标题级=章节(source=HEADING),无标题结构或总字数≤阈值恒单章(source=AUTO);≤20MB、正文≤30 万字"
+      operationId: addProjectMaterialMarkdown
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: .md/.markdown 文档(UTF-8);YAML frontmatter 与围栏代码块保留为正文但不参与标题识别
+      responses:
+        '201':
+          description: 资料已就绪(READY)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Material'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+          description: MARKDOWN_EXTRACT_FAILED(非 UTF-8 编码)
         '429':
           $ref: '#/components/responses/RateLimited'
 
@@ -2197,6 +2236,10 @@ components:
       type: string
       enum: [COMPACT, BALANCED, EXTENSIVE]
       description: V2.5 覆盖深度(原 quantity_tendency):语义覆盖范围,不承诺数量
+    SourceMode:
+      type: string
+      enum: [EXTRACT, QA_DIRECT]
+      description: V25-D-43 制卡来源模式:EXTRACT=AI 从资料挖知识点并命题(既有语义);QA_DIRECT=问答直通(资料已含问答,规划只提取既有问答对,生成仅做格式规范化,不重新命题;缺省 EXTRACT)
     Difficulty:
       type: string
       enum: [BASIC, UNDERSTANDING, DEEP_QUESTION]
@@ -2309,7 +2352,7 @@ components:
     ChapterSource:
       type: string
       enum: [TOC, HEADING, AI, AUTO, FALLBACK, TEXT, ZIP, MANUAL]
-      description: 章节初始来源(V25-D-36/38);HEADING=HTML 标题,AUTO=程序阈值单章;用户修改名称/页码不改变 source
+      description: 章节初始来源(V25-D-36/38/40);HEADING=HTML/Markdown 标题,AUTO=程序阈值单章;用户修改名称/页码不改变 source
 
     ChapterUpdateRequest:
       type: object
@@ -2353,13 +2396,13 @@ components:
 
     MaterialType:
       type: string
-      enum: [PDF, TEXT, ZIP, HTML]
-      description: LINK 为预留类型,本期不实现;ZIP=md 笔记包(V25-D-35);HTML=网页文档(V25-D-38)
+      enum: [PDF, TEXT, ZIP, HTML, MARKDOWN]
+      description: LINK 为预留类型,本期不实现;ZIP=md 笔记包(V25-D-35);HTML=网页文档(V25-D-38);MARKDOWN=单文件 md 笔记(V25-D-40)
 
     MaterialStatus:
       type: string
       enum: [PENDING, PARSING, PARSED, FAILED, READY]
-      description: PDF 使用 PENDING/PARSING/PARSED/FAILED;TEXT/ZIP 恒为 READY
+      description: PDF 使用 PENDING/PARSING/PARSED/FAILED;TEXT/ZIP/HTML/MARKDOWN 恒为 READY
 
     Material:
       type: object
@@ -2444,6 +2487,8 @@ components:
           $ref: '#/components/schemas/DifficultyRatio'
         custom_requirements:
           type: [string, 'null']
+        source_mode:
+          $ref: '#/components/schemas/SourceMode'
 
     TaskCursor:
       type: object
@@ -3081,6 +3126,9 @@ components:
         - first_answer_accuracy
         - retention_rate
         - streak_days
+        - streak_flames_available
+        - streak_flames_used
+        - max_streak_days
         - mastered_card_count
         - weekly_study_seconds
         - daily_study_seconds
@@ -3141,7 +3189,16 @@ components:
           description: 非首次事件中 GOOD 数 / 非首次事件数,分母为 0 时 null
         streak_days:
           type: integer
-          description: 截至用户本地当天连续有复习事件的自然日数;按账号学习时区分桶(V2.5 起无请求级 timezone 参数)
+          description: 截至账号学习时区当天连续有复习事件的自然日数(按学习时区分桶);已结束的空缺日由火苗吸收则不断卡、不计天数(V25-D-42)
+        streak_flames_available:
+          type: integer
+          description: 可用火苗数;每 2 个连续计数日攒 1 个,上限 5,断卡日自动消耗 1 个(V25-D-42)
+        streak_flames_used:
+          type: integer
+          description: 当前连胜已消耗的火苗数(已吸收的空缺日数,V25-D-42)
+        max_streak_days:
+          type: integer
+          description: 历史最长连胜天数(含火苗吸收口径,V25-D-42)
         mastered_card_count:
           type: integer
           description: 掌握卡片数(state=REVIEW 且 stability>=21 天)

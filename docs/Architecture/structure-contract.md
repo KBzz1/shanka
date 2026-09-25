@@ -80,7 +80,7 @@
 | 登录(邮箱分桶) | 按规范化邮箱(默认阈值运维可调) | `POST /auth/login`(防单账号分布式猜测) |
 | `PUT /api-key` | 10 次/时/user | Key 校验(校验 oracle) |
 | `POST /tasks/{task_id}/samples` | 20 次/时/user | 样卡生成(消耗模型配额) |
-| PDF 上传 | 10 次/时/user | `POST /projects/{project_id}/materials/pdf`、`POST /projects/{project_id}/materials/zip`(共享文件材料桶,V25-D-35) |
+| PDF 上传 | 10 次/时/user | `POST /projects/{project_id}/materials/pdf`、`POST /projects/{project_id}/materials/zip`、`POST /projects/{project_id}/materials/html`、`POST /projects/{project_id}/materials/markdown`(共享文件材料桶,V25-D-35/38/40) |
 
 超限返回 `429 RATE_LIMITED` + `Retry-After` 响应头;阈值可运维调整,客户端不得硬编码。
 
@@ -145,12 +145,12 @@ AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规
 | --- | --- | --- | --- |
 | `material_id` | uuid | ✓ | |
 | `project_id` | uuid | ✓ | 归属学习项目 |
-| `type` | enum | ✓ | `PDF` / `TEXT` / `ZIP` / `HTML`(V25-D-39);`LINK` 预留,本期不实现 |
+| `type` | enum | ✓ | `PDF` / `TEXT` / `ZIP` / `HTML`(V25-D-39) / `MARKDOWN`(V25-D-40);`LINK` 预留,本期不实现 |
 | `name` | string | ✓ | PDF/ZIP=文件名(去扩展名前的原始名);TEXT=用户可改标题,1~60 字符 |
-| `status` | enum | ✓ | PDF:`PENDING` / `PARSING` / `PARSED` / `FAILED`;TEXT/ZIP/HTML:恒 `READY`(同步解析) |
+| `status` | enum | ✓ | PDF:`PENDING` / `PARSING` / `PARSED` / `FAILED`;TEXT/ZIP/HTML/MARKDOWN:恒 `READY`(同步解析) |
 | `error_code` | string | ✗ | 仅 PDF 解析失败码(ZIP 结构/解压失败在上传响应即时返回,不落资料行) |
-| `size_bytes` | int | ✗ | PDF/ZIP 上传字节数 |
-| `char_count` | int | ✗ | TEXT:≤ 30000;ZIP:md 正文总字符(≤ 300000) |
+| `size_bytes` | int | ✗ | PDF/ZIP/HTML/MARKDOWN 上传字节数 |
+| `char_count` | int | ✗ | TEXT:≤ 30000;ZIP/HTML/MARKDOWN:正文总字符(≤ 300000) |
 | `chapter` | Chapter | ✗ | 仅 TEXT:资料自带的单一章节(ZIP 多章节经项目 chapters 聚合) |
 | `created_at` | datetime | ✓ | |
 
@@ -172,7 +172,7 @@ AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规
 | `chapter_id` | uuid | ✓ | |
 | `material_id` | uuid | ✓ | 归属学习资料(3.2a) |
 | `name` | string | ✓ | 可修改 |
-| `source` | enum | ✓ | 章节初始来源(V25-D-36/38):`TOC`(PDF 目录)/ `HEADING`(HTML 标题,V25-D-39)/ `AI`(AI 规划,含零边界静默降级的整本单章)/ `AUTO`(程序阈值单章,V25-D-39——总字数 ≤ `single_chapter_max_chars` 或同步类型无标题结构)/ `FALLBACK`(用户显式选择整本单章继续)/ `TEXT` / `ZIP` / `MANUAL`(预留);用户修改名称/页码不改变 source |
+| `source` | enum | ✓ | 章节初始来源(V25-D-36/38/40):`TOC`(PDF 目录)/ `HEADING`(HTML/Markdown 标题,V25-D-39/40)/ `AI`(AI 规划,含零边界静默降级的整本单章)/ `AUTO`(程序阈值单章,V25-D-39——总字数 ≤ `single_chapter_max_chars` 或同步类型无标题结构)/ `FALLBACK`(用户显式选择整本单章继续)/ `TEXT` / `ZIP` / `MANUAL`(预留);用户修改名称/页码不改变 source |
 | `start_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null;ZIP 章节 = chunk_seq 区间起点(可修改) |
 | `end_page` | int | ✗ | PDF 章节可修改;TEXT 章节为 null;ZIP 章节 = chunk_seq 区间终点(可修改) |
 
@@ -219,7 +219,8 @@ AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规
 {
   "coverage_mode": "BALANCED",
   "difficulty_ratio": { "basic": 40, "understanding": 40, "deep_question": 20 },
-  "custom_requirements": ""
+  "custom_requirements": "",
+  "source_mode": "EXTRACT"
 }
 ```
 
@@ -228,6 +229,7 @@ AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规
 | `coverage_mode` | enum | ✓ | `COMPACT`(精简) / `BALANCED`(均衡) / `EXTENSIVE`(充分覆盖);表达知识覆盖深度,不显示、不承诺卡片数量。数量采用目标密度制(V25-D-26):服务端按章节字符规模(每 1 万字 ≈ 6/12/20 张)推导**主题数量目标区间**下发粗规划。规划两阶段(V2.5.2):粗规划整章一次调用产出规划主题清单并在区间内取舍;精规划按主题分批展开为生成单元,单元难度分布受难度比例推导的区间约束(低于下限合法、超上限确定性截断)。区间上限与 `max_generation_units_per_task` 为代码护栏 |
 | `difficulty_ratio` | object | ✓ | `basic / understanding / deep_question` 为 0~100 的 10% 整数档,合计 100,允许任一档为 0;比例为 0 的难度不生成单元和样卡 |
 | `custom_requirements` | string | ✗ | 仅当前任务生效 |
+| `source_mode` | enum | ✗ | `EXTRACT`(缺省,既有语义:AI 从资料挖知识点并命题) / `QA_DIRECT`(V25-D-43 问答直通:资料已含问答)。`QA_DIRECT` 下任务链路与状态机完全不变(样卡→生成→评审发布),仅内部三阶段语义切换:规划=按 chunk 提取资料既有问答对(qa_planner 资产,operation_key 前缀 `planning:qa:`),每对映射为一个生成单元(topic=原问题、卡型 QUESTION/TRUE_FALSE、难度归档不强制配额);生成=generator-qa 提示词整理成卡(仅格式规范化,禁止重新命题/改答案);评分照常。配置进 config_fingerprint,变更失效既有样卡 |
 
 难度枚举:`BASIC`(基础记忆) / `UNDERSTANDING`(理解分析) / `DEEP_QUESTION`(开放深问,原 APPLICATION 改名,PRD 5.6~5.7)。`DEEP_QUESTION` 只允许 `QUESTION` 卡型,背面为参考思路,不提供唯一标准答案;判断题只属于前两档(组合规则见 3.6)。
 规则(V2.5):覆盖深度与整数比例默认值按账号跨设备保存于 `UserPreferences`(3.15),创建任务时服务端落默认值快照;配置变更会失效既有样卡(见 4.1)。
@@ -386,7 +388,10 @@ AI 全程成功但零有效边界时静默降级整本单章(`source=AI`);AI 规
 | `recall_accuracy` | float \| null | ✓ | 周期内 GOOD 事件 / 全部事件 |
 | `first_answer_accuracy` | float \| null | ✓ | 首次评级为 GOOD 的卡数 / 首次复习卡数 |
 | `retention_rate` | float \| null | ✓ | 非首次事件中 GOOD 数 / 非首次事件数 |
-| `streak_days` | int | ✓ | 截至账号学习时区当天连续有复习事件的自然日数(按学习时区分桶) |
+| `streak_days` | int | ✓ | 截至账号学习时区当天连续有复习事件的自然日数(按学习时区分桶);已结束的空缺日由火苗吸收则不断卡、不计天数(V25-D-42) |
+| `streak_flames_available` | int | ✓ | 可用火苗数(V25-D-42):每 2 个连续计数日攒 1 个,上限 5;断卡空缺日自动消耗 1 个,火苗耗尽连胜截断重开;今天无事件视为"待打"不断卡(早晨不清零);火苗须在空缺日之前挣得才可消耗(先攒后用) |
+| `streak_flames_used` | int | ✓ | 当前连胜已消耗的火苗数(=已吸收的空缺日数,V25-D-42) |
+| `max_streak_days` | int | ✓ | 历史最长连胜天数(含火苗吸收口径,V25-D-42);连胜/火苗均为 review_events 纯推导,不建第二套状态 |
 | `mastered_card_count` | int | ✓ | 掌握卡片数(见 5.3) |
 | `weekly_study_seconds` | int | ✓ | 本周学习会话累计秒数(按学习日对齐周窗口,V25-D-37) |
 | `daily_study_seconds` | int[7] | ✓ | 周一~周日每日学习秒数(与会话学习日同口径) |
@@ -748,8 +753,9 @@ Scheduler(
 | DELETE | `/v1/projects/{project_id}?retain_decks=true\|false` | 二次确认后自动取消全部关联活跃任务(含 GENERATING)并删除;仅保留或删除卡组两种选择 | ✓ |
 | POST | `/v1/projects/{project_id}/materials/pdf` | multipart PDF;建立 PDF 资料并异步解析(重置章节确认) | ✓ |
 | POST | `/v1/projects/{project_id}/materials/text` | JSON `{name, content}`;≤30000 字,单章节+段落多 chunk,即时就绪(重置章节确认) | ✓ |
-| POST | `/v1/projects/{project_id}/materials/zip` | multipart ZIP 笔记包;≤20MB、≤500 个 md、正文≤30 万字,同步解析、即时就绪:一级子文件夹=章节、根级 md 收「总览」章节(重置章节确认) | ✓ |
+| POST | `/v1/projects/{project_id}/materials/zip` | multipart ZIP 笔记包;≤20MB、≤500 个 md、正文≤30 万字,同步解析、即时就绪:一级子文件夹=章节、根级 md 收「总览」章节;主文件夹下无任何含 md 的子文件夹时每个根级 md 独立成章(章名=文件名去 .md,V25-D-41)(重置章节确认) | ✓ |
 | POST | `/v1/projects/{project_id}/materials/html` | multipart HTML 页面(V25-D-39);≤20MB、正文≤30 万字,同步解析、即时就绪:最浅出现的标题级=章节(source=HEADING,标题间正文按章切段),无标题结构或总字数≤`single_chapter_max_chars` → 恒单章(source=AUTO);script/style 忽略,不存档原件(重置章节确认) | ✓ |
+| POST | `/v1/projects/{project_id}/materials/markdown` | multipart Markdown 单文件(V25-D-40);≤20MB、正文≤30 万字,同步解析、即时就绪:最浅出现的 ATX 标题级=章节(source=HEADING,标题间正文按空行段落切段;围栏代码块内 `#` 不计),无标题结构或总字数≤`single_chapter_max_chars` → 恒单章(source=AUTO);YAML frontmatter 丢弃,不存档原件(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials` | 资料列表(各自状态;TEXT 附单章节) | - |
 | DELETE | `/v1/projects/{project_id}/materials/{material_id}?retain_cards=true\|false` | 资料级删除:静默取消引用该资料的活跃任务并 fencing;按参数保留或删除该资料产出卡片;删最后一份资料后项目转 `EMPTY`(重置章节确认) | ✓ |
 | GET | `/v1/projects/{project_id}/materials/{material_id}/deletion-preflight` | 删除确认页预检(V25-GEN-FR-02):返回将影响的卡片数量与静默取消任务数;只读、无 blocker 语义(引用任务删除时静默取消) | - |
@@ -903,6 +909,8 @@ register/login(防网络重放静默创建多条会话)。受保护接口 401(`A
 | | `ZIP_EXTRACT_FAILED` | 422 | V25-D-35 zip 损坏或 md 非 UTF-8 编码 |
 | | `HTML_UPLOAD_INVALID` | 400 | V25-D-39 HTML 非 .html/.htm / 超限(20MB / 30 万字) / 非文本 html |
 | | `HTML_EXTRACT_FAILED` | 422 | V25-D-39 HTML 正文抽取失败(非 UTF-8 编码或解析异常) |
+| | `MARKDOWN_UPLOAD_INVALID` | 400 | V25-D-40 Markdown 非 .md/.markdown / 超限(20MB / 30 万字) / 无正文 |
+| | `MARKDOWN_EXTRACT_FAILED` | 422 | V25-D-40 Markdown 非 UTF-8 编码 |
 | | `PDF_NOT_FOUND` | 404 | 不存在或非本用户(统一 404,不暴露存在性) |
 | | `CHAPTER_NOT_FOUND` | 404 | 章节不存在或非本文件/本用户(统一 404) |
 | | `PROJECT_NOT_FOUND` | 404 | V2.5 项目不存在或跨用户 |

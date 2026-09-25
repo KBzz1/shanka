@@ -49,6 +49,7 @@ import com.qiuzhao.flashcards.domain.v25.V25InternalStage
 import com.qiuzhao.flashcards.domain.v25.V25MaterialStatus
 import com.qiuzhao.flashcards.domain.v25.V25MaterialType
 import com.qiuzhao.flashcards.domain.v25.V25ProjectStatus
+import com.qiuzhao.flashcards.domain.v25.V25SourceMode
 import com.qiuzhao.flashcards.domain.v25.V25TaskStatus
 import com.qiuzhao.flashcards.ui.auth.ErrorMessages
 import com.qiuzhao.flashcards.ui.navigation.AppRoute
@@ -267,7 +268,12 @@ internal fun SmartCardChapterScreen(project: ProjectSummary, nav: ScreenNavigato
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
         ScreenTopInformationBar(
             title = "智能制卡", subtitle = null, onBack = nav::goBack,
-            backContainer = theme.cardPanel, titleColor = theme.text
+            backContainer = theme.cardPanel, titleColor = theme.text,
+            // V25-D-43：资料已含问答时的直通入口（右上角）。
+            onTrailingAction = { nav.navigate(AppRoute.QaCardChapter(project.id)) },
+            trailingActionSymbol = "quiz",
+            trailingActionDescription = "问答直通",
+            trailingActionContainer = theme.cardPanel,
         )
         LazyColumn(
             modifier = Modifier.fillMaxSize().statusBarsPadding()
@@ -443,7 +449,7 @@ internal fun SmartCardChapterScreen(project: ProjectSummary, nav: ScreenNavigato
     }
 }
 
-private data class SmartChapter(val id: String, val title: String, val pages: String, val aiPlanned: Boolean = false)
+internal data class SmartChapter(val id: String, val title: String, val pages: String, val aiPlanned: Boolean = false)
 
 /**
  * Figma 222:4713 部分 row. Unselected lifts to the family Background with a
@@ -451,7 +457,7 @@ private data class SmartChapter(val id: String, val title: String, val pages: St
  * check tile. 只能被选与未选（交接文档 决策⑥）— no edit, no delete.
  */
 @Composable
-private fun SmartChapterCard(
+internal fun SmartChapterCard(
     chapter: SmartChapter,
     selected: Boolean,
     theme: DeckTheme,
@@ -517,6 +523,9 @@ internal fun SmartCardPreviewScreen(project: ProjectSummary, nav: ScreenNavigato
     // 开始按钮只认任务投影里的「样卡已确认」状态：内存里的样卡可能来自上一个
     // 任务（bindPdfTask 已清槽，但恢复路径仍可能短暂滞后），状态未到就不可开始。
     val sampleConfirmed = task?.status == V25TaskStatus.AWAITING_SAMPLE_CONFIRMATION
+    // V25-D-43：问答直通任务的样卡来自资料已有问答（仅格式规范化），提示语相应切换。
+    val boundSourceMode by viewModel.boundTaskSourceMode.collectAsState()
+    val qaDirect = boundSourceMode == V25SourceMode.QA_DIRECT
     Box(Modifier.fillMaxSize().background(AppColors.BaseBackground)) {
         ScreenTopInformationBar(
             title = "卡片预览", subtitle = null, onBack = nav::goBack,
@@ -531,7 +540,11 @@ internal fun SmartCardPreviewScreen(project: ProjectSummary, nav: ScreenNavigato
         ) {
             item {
                 CardHint(
-                    if (samples.isEmpty()) "服务端尚未返回样卡，请返回重新生成。" else "点击卡片可以查看答案。",
+                    when {
+                        samples.isEmpty() -> "服务端尚未返回样卡，请返回重新生成。"
+                        qaDirect -> "以下样卡整理自资料里已有的问答，AI 未改写内容。点击卡片可以查看答案。"
+                        else -> "点击卡片可以查看答案。"
+                    },
                     designScale = scale,
                 )
             }

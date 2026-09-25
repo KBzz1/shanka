@@ -8,7 +8,7 @@ V2.5：DifficultyRatio 三档为 0~100 的 10% 整数档、合计 100、允许�
 
 from pydantic import BaseModel, model_validator
 
-from domain.enums import CoverageMode
+from domain.enums import CoverageMode, SourceMode
 
 
 class DifficultyRatio(BaseModel):
@@ -37,16 +37,20 @@ class GenerationConfig(BaseModel):
     """任务生成配置（openapi GenerationConfig；structure-contract 3.5）。
 
     V2.5：quantity_tendency 改名 coverage_mode（COMPACT/BALANCED/EXTENSIVE）。
+    V25-D-43：source_mode 增问答直通（QA_DIRECT），缺省 EXTRACT 保持既有语义。
     """
 
     coverage_mode: str  # COMPACT/BALANCED/EXTENSIVE（域校验见下方 validator）
     difficulty_ratio: DifficultyRatio
     custom_requirements: str | None = None
+    source_mode: str = "EXTRACT"  # EXTRACT/QA_DIRECT（V25-D-43；域校验见下方 validator）
 
     @model_validator(mode="after")
     def _check_coverage_mode(self) -> "GenerationConfig":
         if self.coverage_mode not in {mode.value for mode in CoverageMode}:
             raise ValueError("非法 coverage_mode")
+        if self.source_mode not in {mode.value for mode in SourceMode}:
+            raise ValueError("非法 source_mode")
         return self
 
 

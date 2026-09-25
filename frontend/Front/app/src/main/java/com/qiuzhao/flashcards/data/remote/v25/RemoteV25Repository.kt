@@ -157,6 +157,15 @@ class RemoteV25Repository internal constructor(
         uploadApi.addProjectMaterialHtml(projectId, idempotencyKey ?: newKey(), htmlPart(fileName, content)).toDomain()
     }
 
+    override suspend fun addProjectMaterialMarkdown(
+        projectId: String,
+        fileName: String,
+        content: InputStream,
+        idempotencyKey: String?,
+    ): V25Result<V25Material> = wire {
+        uploadApi.addProjectMaterialMarkdown(projectId, idempotencyKey ?: newKey(), markdownPart(fileName, content)).toDomain()
+    }
+
     override suspend fun addProjectMaterialText(
         projectId: String,
         name: String,
@@ -558,5 +567,15 @@ internal fun htmlPart(fileName: String, content: InputStream): MultipartBody.Par
         "file",
         fileName,
         bytes.toRequestBody("text/html".toMediaType()),
+    )
+}
+
+/** Frames the standalone Markdown part (V25-D-40); same Content-Disposition safety as [pdfPart]. */
+internal fun markdownPart(fileName: String, content: InputStream): MultipartBody.Part {
+    val bytes = content.use { it.readBytes() }
+    return MultipartBody.Part.createFormData(
+        "file",
+        fileName,
+        bytes.toRequestBody("text/markdown".toMediaType()),
     )
 }

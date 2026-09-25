@@ -53,7 +53,7 @@ abstract class ShankaV25Database : RoomDatabase() {
 
     companion object {
         const val NAME = "shanka-v25.db"
-        const val VERSION = 9
+        const val VERSION = 10
 
         /** Projection schema version written into cache metadata rows. */
         const val CACHE_SCHEMA_VERSION = 3
@@ -257,6 +257,25 @@ abstract class ShankaV25Database : RoomDatabase() {
                     )
                     db.execSQL("DROP TABLE `today_plan`")
                     db.execSQL("ALTER TABLE `today_plan_v9` RENAME TO `today_plan`")
+                }
+            },
+            // v9 → v10 (streak flames, contract V25-D-42): `dashboard_snapshot` gains the flame
+            // columns and the true historical max streak. Server-derived projections — 0 until
+            // the next dashboard refresh rewrites them from the V25-D-42 payload.
+            object : Migration(9, 10) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        "ALTER TABLE `dashboard_snapshot` ADD COLUMN `streak_flames_available` " +
+                            "INTEGER NOT NULL DEFAULT 0",
+                    )
+                    db.execSQL(
+                        "ALTER TABLE `dashboard_snapshot` ADD COLUMN `streak_flames_used` " +
+                            "INTEGER NOT NULL DEFAULT 0",
+                    )
+                    db.execSQL(
+                        "ALTER TABLE `dashboard_snapshot` ADD COLUMN `max_streak_days` " +
+                            "INTEGER NOT NULL DEFAULT 0",
+                    )
                 }
             },
         )

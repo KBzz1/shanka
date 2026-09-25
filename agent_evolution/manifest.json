@@ -23,6 +23,14 @@
     "chapter_planner": {
       "version": "v10",
       "path": "prompts/v10/chapter-planner.md"
+    },
+    "qa_planner": {
+      "version": "v1",
+      "path": "prompts/v1/qa-planner.md"
+    },
+    "generator_qa": {
+      "version": "v1",
+      "path": "prompts/v1/generator-qa.md"
     }
   },
   "schemas": {
@@ -49,6 +57,10 @@
     "chapter_planner_output": {
       "version": "v9",
       "path": "schemas/v9/chapter-plan-output.schema.json"
+    },
+    "qa_planner_output": {
+      "version": "v1",
+      "path": "schemas/v1/qa-planner-output.schema.json"
     }
   },
   "rubrics": {
